@@ -7,6 +7,7 @@ mod dynamics;
 mod input;
 mod integrator;
 mod parameters;
+mod propulsion;
 mod simulation;
 mod snapshot;
 mod state;
@@ -26,6 +27,13 @@ pub use dynamics::{BodyWrench, RigidBodyDerivative, evaluate_derivative};
 pub use input::PilotInput;
 pub use integrator::Rk4Integrator;
 pub use parameters::{ParameterError, RigidBodyParams};
+pub use propulsion::{
+    BatteryConfig, BatteryConfigError, ElectricPropulsionConfig, ElectricalDriveOutput,
+    MIN_SHAFT_SPEED_RAD_S, MotorConfig, MotorConfigError, PROPULSION_BISECTION_ITERATIONS,
+    PropellerCoefficientError, PropellerCoefficientTable, PropellerCoefficients, PropellerConfig,
+    PropellerConfigError, PropellerSample, PropellerSpinDirection, PropulsionOutput,
+    evaluate_electric_propulsion, evaluate_electrical_drive, solve_quasi_static_shaft_speed,
+};
 pub use simulation::{
     DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ, Simulation, SimulationConfig, SimulationConfigError,
     SimulationError,

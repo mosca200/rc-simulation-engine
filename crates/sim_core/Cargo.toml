@@ -28,5 +28,9 @@ harness = false
 name = "controls_s5a"
 harness = false
 
+[[bench]]
+name = "propulsion_s5b"
+harness = false
+
 [lints]
 workspace = true
