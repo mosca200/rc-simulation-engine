@@ -1,0 +1,19 @@
+[package]
+name = "replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sim_core = { path = "../sim_core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+sim_math = { path = "../sim_math" }
+
+[lints]
+workspace = true

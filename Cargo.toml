@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sim_math",
+    "crates/sim_core",
+    "crates/telemetry",
+    "crates/replay",
+    "crates/app",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98"
+
+[workspace.dependencies]
+blake3 = "1.8"
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+nalgebra = { version = "0.34", features = ["serde-serialize"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
