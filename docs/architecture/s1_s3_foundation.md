@@ -12,7 +12,7 @@ Snapshots use post-step semantics: after integration the step index is increment
 
 ## Numerical method
 
-Rigid-body derivative evaluation is separate from the dedicated RK4 integrator and from `Simulation`. RK4 stages form raw quaternion increments, normalize each intermediate orientation once when constructing a valid stage state, and normalize the final orientation once. No artificial damping or stabilization is used.
+Rigid-body derivative evaluation is separate from the dedicated RK4 integrator and from `Simulation`. The integrator accepts a monomorphized `FnMut(&RigidBodyState) -> RigidBodyDerivative` and evaluates it independently at all four stage states; the current constant-wrench rigid-body path is a convenience wrapper around that primitive. RK4 stages form raw quaternion increments, normalize each intermediate orientation once when constructing a valid stage state, and normalize the final orientation once. No artificial damping or stabilization is used.
 
 ## Replay
 

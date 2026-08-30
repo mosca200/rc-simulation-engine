@@ -104,7 +104,7 @@ impl Simulation {
     /// Advances exactly one fixed physics step and returns the resulting post-step snapshot.
     #[must_use]
     pub fn step(&mut self, _input: &PilotInput) -> SimSnapshot {
-        self.state = Rk4Integrator::step(
+        self.state = Rk4Integrator::step_with_constant_wrench(
             &self.state,
             &self.body_params,
             &BodyWrench::zero(),

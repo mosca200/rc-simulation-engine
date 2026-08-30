@@ -8,25 +8,37 @@ use sim_math::{Orientation, Quaternion, Vec3};
 pub struct Rk4Integrator;
 
 impl Rk4Integrator {
+    /// Advances one step while re-evaluating the derivative from each RK4 stage state.
     #[must_use]
-    pub fn step(
+    pub fn step<F>(state: &RigidBodyState, dt_s: f64, mut evaluate_stage: F) -> RigidBodyState
+    where
+        F: FnMut(&RigidBodyState) -> RigidBodyDerivative,
+    {
+        debug_assert!(dt_s.is_finite() && dt_s > 0.0);
+
+        let k1 = evaluate_stage(state);
+        let stage2 = offset_state(state, &k1, 0.5 * dt_s);
+        let k2 = evaluate_stage(&stage2);
+        let stage3 = offset_state(state, &k2, 0.5 * dt_s);
+        let k3 = evaluate_stage(&stage3);
+        let stage4 = offset_state(state, &k3, dt_s);
+        let k4 = evaluate_stage(&stage4);
+
+        weighted_update(state, [&k1, &k2, &k3, &k4], dt_s)
+    }
+
+    /// Convenience path for the current rigid body under a wrench constant over one step.
+    #[must_use]
+    pub fn step_with_constant_wrench(
         state: &RigidBodyState,
         params: &RigidBodyParams,
         wrench: &BodyWrench,
         gravity_world_mps2: &Vec3,
         dt_s: f64,
     ) -> RigidBodyState {
-        debug_assert!(dt_s.is_finite() && dt_s > 0.0);
-
-        let k1 = evaluate_derivative(state, params, wrench, gravity_world_mps2);
-        let stage2 = offset_state(state, &k1, 0.5 * dt_s);
-        let k2 = evaluate_derivative(&stage2, params, wrench, gravity_world_mps2);
-        let stage3 = offset_state(state, &k2, 0.5 * dt_s);
-        let k3 = evaluate_derivative(&stage3, params, wrench, gravity_world_mps2);
-        let stage4 = offset_state(state, &k3, dt_s);
-        let k4 = evaluate_derivative(&stage4, params, wrench, gravity_world_mps2);
-
-        weighted_update(state, [&k1, &k2, &k3, &k4], dt_s)
+        Self::step(state, dt_s, |stage_state| {
+            evaluate_derivative(stage_state, params, wrench, gravity_world_mps2)
+        })
     }
 }
 

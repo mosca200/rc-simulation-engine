@@ -40,7 +40,7 @@ fn benchmarks(criterion: &mut Criterion) {
     });
     criterion.bench_function("B2/rk4_step", |bencher| {
         bencher.iter(|| {
-            black_box(Rk4Integrator::step(
+            black_box(Rk4Integrator::step_with_constant_wrench(
                 black_box(&initial_state),
                 black_box(&body_params),
                 black_box(&wrench),
