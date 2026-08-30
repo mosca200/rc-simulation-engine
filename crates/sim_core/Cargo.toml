@@ -20,5 +20,9 @@ criterion.workspace = true
 name = "foundation"
 harness = false
 
+[[bench]]
+name = "aero_s4"
+harness = false
+
 [lints]
 workspace = true

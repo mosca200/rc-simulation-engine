@@ -1,0 +1,330 @@
+use crate::{BodyWrench, RigidBodyState};
+use sim_math::{Orientation, Vec3, world_to_body};
+use thiserror::Error;
+
+/// Below this quasi-2D section speed, aerodynamic directions are treated as singular.
+pub const MIN_SECTION_AIRSPEED_MPS: f64 = 1.0e-9;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolarSample {
+    pub alpha_rad: f64,
+    pub cl: f64,
+    pub cd: f64,
+    pub cm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolarCoefficients {
+    pub cl: f64,
+    pub cd: f64,
+    pub cm: f64,
+}
+
+impl From<PolarSample> for PolarCoefficients {
+    fn from(sample: PolarSample) -> Self {
+        Self {
+            cl: sample.cl,
+            cd: sample.cd,
+            cm: sample.cm,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolarTable {
+    samples: Vec<PolarSample>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PolarError {
+    #[error("polar table requires at least two samples")]
+    TooFewSamples,
+    #[error("polar sample {index} contains a non-finite value")]
+    NonFiniteSample { index: usize },
+    #[error("polar alpha must be strictly increasing at sample {index}")]
+    NonIncreasingAlpha { index: usize },
+    #[error("polar drag coefficient must be non-negative at sample {index}")]
+    NegativeDragCoefficient { index: usize },
+}
+
+impl PolarTable {
+    pub fn new(samples: Vec<PolarSample>) -> Result<Self, PolarError> {
+        if samples.len() < 2 {
+            return Err(PolarError::TooFewSamples);
+        }
+        for (index, sample) in samples.iter().enumerate() {
+            if ![sample.alpha_rad, sample.cl, sample.cd, sample.cm]
+                .into_iter()
+                .all(f64::is_finite)
+            {
+                return Err(PolarError::NonFiniteSample { index });
+            }
+            if sample.cd < 0.0 {
+                return Err(PolarError::NegativeDragCoefficient { index });
+            }
+            if index > 0 && sample.alpha_rad <= samples[index - 1].alpha_rad {
+                return Err(PolarError::NonIncreasingAlpha { index });
+            }
+        }
+        Ok(Self { samples })
+    }
+
+    /// Piecewise-linear interpolation with exact endpoint preservation and endpoint clamping.
+    #[must_use]
+    pub fn sample_clamped(&self, alpha_rad: f64) -> PolarCoefficients {
+        debug_assert!(alpha_rad.is_finite());
+        let first = self.samples[0];
+        if alpha_rad <= first.alpha_rad {
+            return first.into();
+        }
+        let last = self.samples[self.samples.len() - 1];
+        if alpha_rad >= last.alpha_rad {
+            return last.into();
+        }
+
+        let mut lower = 0;
+        let mut upper = self.samples.len() - 1;
+        while upper - lower > 1 {
+            let middle = lower + (upper - lower) / 2;
+            if alpha_rad < self.samples[middle].alpha_rad {
+                upper = middle;
+            } else {
+                lower = middle;
+            }
+        }
+
+        let lower_sample = self.samples[lower];
+        if alpha_rad == lower_sample.alpha_rad {
+            return lower_sample.into();
+        }
+        let upper_sample = self.samples[upper];
+        if alpha_rad == upper_sample.alpha_rad {
+            return upper_sample.into();
+        }
+        let fraction = (alpha_rad - lower_sample.alpha_rad)
+            / (upper_sample.alpha_rad - lower_sample.alpha_rad);
+        PolarCoefficients {
+            cl: lower_sample.cl + fraction * (upper_sample.cl - lower_sample.cl),
+            cd: lower_sample.cd + fraction * (upper_sample.cd - lower_sample.cd),
+            cm: lower_sample.cm + fraction * (upper_sample.cm - lower_sample.cm),
+        }
+    }
+
+    #[must_use]
+    pub fn samples(&self) -> &[PolarSample] {
+        &self.samples
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AeroElement {
+    position_body_m: Vec3,
+    orientation_body_from_element: Orientation,
+    area_m2: f64,
+    chord_m: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum AeroElementError {
+    #[error("aerodynamic-element position must be finite")]
+    NonFinitePosition,
+    #[error("aerodynamic-element orientation must be finite and unit length")]
+    InvalidOrientation,
+    #[error("aerodynamic-element area must be finite and greater than zero")]
+    InvalidArea,
+    #[error("aerodynamic-element chord must be finite and greater than zero")]
+    InvalidChord,
+}
+
+impl AeroElement {
+    pub fn new(
+        position_body_m: Vec3,
+        orientation_body_from_element: Orientation,
+        area_m2: f64,
+        chord_m: f64,
+    ) -> Result<Self, AeroElementError> {
+        if !position_body_m.iter().all(|value| value.is_finite()) {
+            return Err(AeroElementError::NonFinitePosition);
+        }
+        let quaternion = orientation_body_from_element.quaternion();
+        if ![quaternion.w, quaternion.i, quaternion.j, quaternion.k]
+            .into_iter()
+            .all(f64::is_finite)
+            || (quaternion.norm_squared() - 1.0).abs() > 1.0e-12
+        {
+            return Err(AeroElementError::InvalidOrientation);
+        }
+        if !area_m2.is_finite() || area_m2 <= 0.0 {
+            return Err(AeroElementError::InvalidArea);
+        }
+        if !chord_m.is_finite() || chord_m <= 0.0 {
+            return Err(AeroElementError::InvalidChord);
+        }
+        Ok(Self {
+            position_body_m,
+            orientation_body_from_element,
+            area_m2,
+            chord_m,
+        })
+    }
+
+    #[must_use]
+    pub const fn position_body_m(&self) -> &Vec3 {
+        &self.position_body_m
+    }
+
+    #[must_use]
+    pub const fn orientation_body_from_element(&self) -> &Orientation {
+        &self.orientation_body_from_element
+    }
+
+    #[must_use]
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
+    #[must_use]
+    pub const fn chord_m(&self) -> f64 {
+        self.chord_m
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AeroEnvironment {
+    air_density_kg_m3: f64,
+    wind_velocity_world_mps: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum AeroEnvironmentError {
+    #[error("air density must be finite and non-negative")]
+    InvalidAirDensity,
+    #[error("world-frame wind velocity must be finite")]
+    NonFiniteWind,
+}
+
+impl AeroEnvironment {
+    pub fn new(
+        air_density_kg_m3: f64,
+        wind_velocity_world_mps: Vec3,
+    ) -> Result<Self, AeroEnvironmentError> {
+        if !air_density_kg_m3.is_finite() || air_density_kg_m3 < 0.0 {
+            return Err(AeroEnvironmentError::InvalidAirDensity);
+        }
+        if !wind_velocity_world_mps
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(AeroEnvironmentError::NonFiniteWind);
+        }
+        Ok(Self {
+            air_density_kg_m3,
+            wind_velocity_world_mps,
+        })
+    }
+
+    #[must_use]
+    pub const fn air_density_kg_m3(&self) -> f64 {
+        self.air_density_kg_m3
+    }
+
+    #[must_use]
+    pub const fn wind_velocity_world_mps(&self) -> &Vec3 {
+        &self.wind_velocity_world_mps
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AeroElementOutput {
+    /// Velocity of the element through the air, expressed in the element frame.
+    pub air_relative_velocity_element_mps: Vec3,
+    pub section_airspeed_mps: f64,
+    pub alpha_rad: f64,
+    pub beta_rad: f64,
+    pub dynamic_pressure_pa: f64,
+    pub coefficients: PolarCoefficients,
+    pub force_element_n: Vec3,
+    pub wrench_body: BodyWrench,
+}
+
+/// Evaluates one immutable quasi-2D aerodynamic element without allocation.
+#[must_use]
+pub fn evaluate_aero_element(
+    state: &RigidBodyState,
+    element: &AeroElement,
+    environment: &AeroEnvironment,
+    polar: &PolarTable,
+) -> AeroElementOutput {
+    debug_assert!(state.validate().is_ok());
+
+    let air_relative_velocity_world_mps =
+        state.linear_velocity_world_mps - environment.wind_velocity_world_mps;
+    let air_relative_velocity_body_at_cg_mps = world_to_body(
+        &state.orientation_world_from_body,
+        &air_relative_velocity_world_mps,
+    );
+    let rotational_velocity_body_mps = state
+        .angular_velocity_body_radps
+        .cross(&element.position_body_m);
+    let air_relative_velocity_body_at_element_mps =
+        air_relative_velocity_body_at_cg_mps + rotational_velocity_body_mps;
+    let air_relative_velocity_element_mps = element
+        .orientation_body_from_element
+        .inverse_transform_vector(&air_relative_velocity_body_at_element_mps);
+
+    let u_mps = air_relative_velocity_element_mps.x;
+    let spanwise_mps = air_relative_velocity_element_mps.y;
+    let w_mps = air_relative_velocity_element_mps.z;
+    let section_speed_squared_mps2 = u_mps.mul_add(u_mps, w_mps * w_mps);
+    let section_airspeed_mps = section_speed_squared_mps2.sqrt();
+    let beta_rad = spanwise_mps.atan2(section_airspeed_mps);
+
+    if section_airspeed_mps < MIN_SECTION_AIRSPEED_MPS {
+        return AeroElementOutput {
+            air_relative_velocity_element_mps,
+            section_airspeed_mps,
+            alpha_rad: 0.0,
+            beta_rad,
+            dynamic_pressure_pa: 0.0,
+            coefficients: polar.sample_clamped(0.0),
+            force_element_n: Vec3::zeros(),
+            wrench_body: BodyWrench::zero(),
+        };
+    }
+
+    let alpha_rad = w_mps.atan2(u_mps);
+    let coefficients = polar.sample_clamped(alpha_rad);
+    let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3 * section_speed_squared_mps2;
+    let velocity_hat_section = Vec3::new(
+        u_mps / section_airspeed_mps,
+        0.0,
+        w_mps / section_airspeed_mps,
+    );
+    let drag_direction_element = -velocity_hat_section;
+    let lift_direction_element = Vec3::y().cross(&velocity_hat_section);
+    let lift_n = dynamic_pressure_pa * element.area_m2 * coefficients.cl;
+    let drag_n = dynamic_pressure_pa * element.area_m2 * coefficients.cd;
+    let force_element_n = lift_direction_element * lift_n + drag_direction_element * drag_n;
+    let force_body_n = element
+        .orientation_body_from_element
+        .transform_vector(&force_element_n);
+    let intrinsic_pitch_moment_element_nm =
+        dynamic_pressure_pa * element.area_m2 * element.chord_m * coefficients.cm;
+    let intrinsic_moment_body_nm = element
+        .orientation_body_from_element
+        .transform_vector(&Vec3::new(0.0, intrinsic_pitch_moment_element_nm, 0.0));
+    let mut wrench_body = BodyWrench::zero();
+    wrench_body.add_force_at_body_point(force_body_n, element.position_body_m);
+    wrench_body.add_moment_body(intrinsic_moment_body_nm);
+
+    AeroElementOutput {
+        air_relative_velocity_element_mps,
+        section_airspeed_mps,
+        alpha_rad,
+        beta_rad,
+        dynamic_pressure_pa,
+        coefficients,
+        force_element_n,
+        wrench_body,
+    }
+}

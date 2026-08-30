@@ -16,6 +16,17 @@ impl BodyWrench {
             moment_body_nm: Vec3::zeros(),
         }
     }
+
+    /// Accumulates a body-frame force and its moment about the body origin/CG.
+    pub fn add_force_at_body_point(&mut self, force_body_n: Vec3, point_body_m: Vec3) {
+        self.force_body_n += force_body_n;
+        self.moment_body_nm += point_body_m.cross(&force_body_n);
+    }
+
+    /// Accumulates an intrinsic body-frame moment.
+    pub fn add_moment_body(&mut self, moment_body_nm: Vec3) {
+        self.moment_body_nm += moment_body_nm;
+    }
 }
 
 impl Default for BodyWrench {
