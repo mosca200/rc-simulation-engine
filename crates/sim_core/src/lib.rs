@@ -2,6 +2,7 @@
 //! Deterministic, headless rigid-body simulation core.
 
 mod aero;
+mod controls;
 mod dynamics;
 mod input;
 mod integrator;
@@ -14,6 +15,12 @@ pub use aero::{
     AeroElement, AeroElementError, AeroElementOutput, AeroEnvironment, AeroEnvironmentError,
     MIN_SECTION_AIRSPEED_MPS, PolarCoefficients, PolarError, PolarSample, PolarTable,
     evaluate_aero_element,
+};
+pub use controls::{
+    AxisResponseConfig, ControlActuatorConfig, ControlActuatorState, ControlConfigError,
+    ControlResponseConfig, ControlSurfacePositions, ControlSystemConfig, ControlSystemState,
+    ControlTargets, ServoConfig, ServoState, ShapedPilotCommand, advance_controls, advance_servo,
+    mix_conventional, shape_pilot_input,
 };
 pub use dynamics::{BodyWrench, RigidBodyDerivative, evaluate_derivative};
 pub use input::PilotInput;

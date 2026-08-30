@@ -1,12 +1,16 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 /// Normalized radio input before rates, expo, mixing, or servo dynamics.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// Positive commands follow the FRD body axes: roll is right-wing-down, pitch
+/// is nose-up, and yaw is nose-right. Throttle is zero at idle and one at full
+/// command.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PilotInput {
-    pub roll: f64,
-    pub pitch: f64,
-    pub yaw: f64,
-    pub throttle: f64,
+    roll: f64,
+    pitch: f64,
+    yaw: f64,
+    throttle: f64,
 }
 
 impl PilotInput {
@@ -32,11 +36,60 @@ impl PilotInput {
     }
 
     #[must_use]
+    pub const fn roll(&self) -> f64 {
+        self.roll
+    }
+
+    #[must_use]
+    pub const fn pitch(&self) -> f64 {
+        self.pitch
+    }
+
+    #[must_use]
+    pub const fn yaw(&self) -> f64 {
+        self.yaw
+    }
+
+    #[must_use]
+    pub const fn throttle(&self) -> f64 {
+        self.throttle
+    }
+
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         (-1.0..=1.0).contains(&self.roll)
             && (-1.0..=1.0).contains(&self.pitch)
             && (-1.0..=1.0).contains(&self.yaw)
             && (0.0..=1.0).contains(&self.throttle)
+    }
+}
+
+#[derive(Deserialize)]
+struct SerializedPilotInput {
+    roll: f64,
+    pitch: f64,
+    yaw: f64,
+    throttle: f64,
+}
+
+impl<'de> Deserialize<'de> for PilotInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = SerializedPilotInput::deserialize(deserializer)?;
+        let input = Self {
+            roll: input.roll,
+            pitch: input.pitch,
+            yaw: input.yaw,
+            throttle: input.throttle,
+        };
+        if !input.is_valid() {
+            return Err(D::Error::custom(
+                "pilot input must be finite with roll/pitch/yaw in [-1, 1] and throttle in [0, 1]",
+            ));
+        }
+        Ok(input)
     }
 }
 
@@ -60,14 +113,10 @@ mod tests {
 
     #[test]
     fn clamps_at_construction_boundary() {
-        assert_eq!(
-            PilotInput::new(-2.0, 2.0, f64::NAN, 3.0),
-            PilotInput {
-                roll: -1.0,
-                pitch: 1.0,
-                yaw: 0.0,
-                throttle: 1.0,
-            }
-        );
+        let input = PilotInput::new(-2.0, 2.0, f64::NAN, 3.0);
+        assert_eq!(input.roll(), -1.0);
+        assert_eq!(input.pitch(), 1.0);
+        assert_eq!(input.yaw(), 0.0);
+        assert_eq!(input.throttle(), 1.0);
     }
 }

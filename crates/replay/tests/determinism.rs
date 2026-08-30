@@ -51,6 +51,47 @@ fn t11_json_roundtrip_replays_identical_snapshot_hashes() {
 }
 
 #[test]
+fn replay_deserialization_rejects_invalid_pilot_input_instead_of_clamping() {
+    let (mut recording, _, _) = fingerprint_recording();
+    recording.frames.push(replay::ReplayFrame {
+        step_index: 0,
+        pilot_input: PilotInput::neutral(),
+    });
+    let valid_json = recording.to_json_pretty().unwrap();
+    for (field, invalid_value) in [
+        ("roll", "1.01"),
+        ("pitch", "-1.01"),
+        ("throttle", "1.01"),
+        ("yaw", "1e400"),
+        ("roll", "NaN"),
+    ] {
+        let original = format!(r#""{field}": 0.0"#);
+        let replacement = format!(r#""{field}": {invalid_value}"#);
+        let json = valid_json.replacen(&original, &replacement, 1);
+        assert_ne!(json, valid_json, "missing replay field {field}");
+        assert!(
+            replay::ReplayRecording::from_json(&json).is_err(),
+            "accepted {field}={invalid_value}"
+        );
+    }
+}
+
+#[test]
+fn valid_pilot_input_json_roundtrip_preserves_bits_and_field_names() {
+    let expected = PilotInput::new(-0.75, 0.125, -0.0, 0.625);
+    let json = serde_json::to_string(&expected).unwrap();
+    assert!(json.contains(r#""roll""#));
+    assert!(json.contains(r#""pitch""#));
+    assert!(json.contains(r#""yaw""#));
+    assert!(json.contains(r#""throttle""#));
+    let actual: PilotInput = serde_json::from_str(&json).unwrap();
+    assert_eq!(actual.roll().to_bits(), expected.roll().to_bits());
+    assert_eq!(actual.pitch().to_bits(), expected.pitch().to_bits());
+    assert_eq!(actual.yaw().to_bits(), expected.yaw().to_bits());
+    assert_eq!(actual.throttle().to_bits(), expected.throttle().to_bits());
+}
+
+#[test]
 fn replay_rejects_different_mass_before_playback() {
     let (recording, config, initial_state) = fingerprint_recording();
     let different_mass =
