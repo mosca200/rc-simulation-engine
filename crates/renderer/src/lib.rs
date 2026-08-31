@@ -15,6 +15,7 @@ pub use glb::{GlbLoadError, load_glb_mesh};
 pub use gpu::{RendererError, SKY_CLEAR_COLOR, SurfaceError, WgpuRenderer};
 pub use math::{Mat4, ProjectionError, matrix_to_wgsl_columns, webgpu_perspective};
 pub use mesh::{
-    AircraftMesh, LineMesh, MeshError, Vertex, aircraft_mesh, ground_plane, reference_grid_and_axes,
+    AircraftMesh, LineMesh, MeshError, Vertex, aircraft_mesh, ground_plane, ground_plane_at,
+    reference_grid_and_axes, reference_grid_and_axes_at,
 };
 pub use pose::{RenderDataError, RenderFrame, RenderPose, world_ned_pose_to_render};

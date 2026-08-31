@@ -4,12 +4,12 @@ use crate::{
     webgpu_perspective,
 };
 
-const VERTICAL_FOV_RAD: f32 = std::f32::consts::PI / 3.0;
+const VERTICAL_FOV_RAD: f32 = 55.0_f32.to_radians();
 const NEAR_PLANE_M: f32 = 0.05;
-const FAR_PLANE_M: f32 = 2_000.0;
-const DISTANCE_BEHIND_M: f32 = 6.0;
-const HEIGHT_ABOVE_M: f32 = 2.5;
-const LOOK_AHEAD_M: f32 = 2.0;
+const FAR_PLANE_M: f32 = 5_000.0;
+const DISTANCE_BEHIND_M: f32 = 3.5;
+const HEIGHT_ABOVE_M: f32 = 1.25;
+const LOOK_AHEAD_M: f32 = 1.5;
 
 /// Stable world-up chase camera driven only by a render pose.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,8 +39,9 @@ impl ChaseCamera {
     pub fn eye_and_target(&self, aircraft_pose: &RenderPose) -> ([f32; 3], [f32; 3]) {
         let position = aircraft_pose.translation_render_m();
         let forward = aircraft_pose.transform_direction([0.0, 0.0, -1.0]);
+        let horizontal_forward = normalized_horizontal_forward(forward);
         let eye = add3(
-            sub3(position, scale3(forward, DISTANCE_BEHIND_M)),
+            sub3(position, scale3(horizontal_forward, DISTANCE_BEHIND_M)),
             [0.0, HEIGHT_ABOVE_M, 0.0],
         );
         let target = add3(position, scale3(forward, LOOK_AHEAD_M));
@@ -62,6 +63,19 @@ impl ChaseCamera {
     }
 }
 
+fn normalized_horizontal_forward(forward: [f32; 3]) -> [f32; 3] {
+    let horizontal_norm = forward[0].hypot(forward[2]);
+    if horizontal_norm <= 1.0e-4 {
+        [0.0, 0.0, -1.0]
+    } else {
+        [
+            forward[0] / horizontal_norm,
+            0.0,
+            forward[2] / horizontal_norm,
+        ]
+    }
+}
+
 fn valid_aspect_ratio(width: u32, height: u32) -> Option<f32> {
     (width > 0 && height > 0).then(|| width as f32 / height as f32)
 }
@@ -79,8 +93,8 @@ mod tests {
     fn identity_camera_is_behind_and_targets_ahead() {
         let camera = ChaseCamera::new(1_600, 900);
         let (eye, target) = camera.eye_and_target(&pose([1.0, 0.0, 0.0, 0.0]));
-        assert_eq!(eye, [0.0, 2.5, 6.0]);
-        assert_eq!(target, [0.0, 0.0, -2.0]);
+        assert_eq!(eye, [0.0, 1.25, 3.5]);
+        assert_eq!(target, [0.0, 0.0, -1.5]);
         assert!(
             camera
                 .view_projection(&pose([1.0, 0.0, 0.0, 0.0]))
@@ -95,7 +109,25 @@ mod tests {
         let (eye, target) = camera.eye_and_target(&inclined_pose);
         assert_ne!(eye, target);
         assert!(eye.into_iter().chain(target).all(f32::is_finite));
-        assert!(camera.view_projection(&inclined_pose).is_finite());
+        let first = camera.view_projection(&inclined_pose);
+        let second = camera.view_projection(&inclined_pose);
+        assert!(first.is_finite());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn vertical_attitude_uses_a_stable_finite_heading_fallback() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let vertical_pose = pose([
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+            -std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ]);
+        let (eye, target) = camera.eye_and_target(&vertical_pose);
+        assert_ne!(eye, target);
+        assert!(eye.into_iter().chain(target).all(f32::is_finite));
+        assert!(camera.view_projection(&vertical_pose).is_finite());
     }
 
     #[test]

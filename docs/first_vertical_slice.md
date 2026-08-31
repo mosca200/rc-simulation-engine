@@ -83,6 +83,16 @@ The graphical viewer is deliberately outside the headless acceptance path:
 cargo run -p rcsim-app --release -- render --model models/acro_electric_01/model.json
 ```
 
+Render mode defaults to 30 m altitude and 18 m/s airspeed. Manual-evaluation initial conditions can
+be selected without changing the model or canonical replay:
+
+```powershell
+cargo run -p rcsim-app --release -- render --model models/acro_electric_01/model.json --altitude-m 45 --airspeed-mps 20
+```
+
+Keyboard controls are printed once at startup: `A/D` roll, `W/S` pitch, `Q/E` yaw, `R/F` throttle,
+and Escape exit.
+
 Manual verification still requires a real observation of the aircraft GLB, ground, sky, camera,
 pose interpolation, and a basic user flight session. A physical controller must be exercised
 separately, including the Radiomaster TX16S if that device is part of the acceptance target. Merely

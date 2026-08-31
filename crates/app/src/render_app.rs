@@ -4,7 +4,7 @@ use crate::render_snapshot::{
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
 };
-use model::{ModelLoadError, load_aircraft_model};
+use model::{AircraftModelFingerprint, ModelLoadError, load_aircraft_model};
 use platform::{
     GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
     KeyboardKey,
@@ -38,6 +38,10 @@ use winit::{
 
 const DEFAULT_MODEL_PATH: &str = "models/acro_electric_01/model.json";
 const DEFAULT_THROTTLE: f64 = 0.55;
+const DEFAULT_ALTITUDE_M: f64 = 30.0;
+const DEFAULT_AIRSPEED_MPS: f64 = 18.0;
+const MAXIMUM_ALTITUDE_M: f64 = 10_000.0;
+const MAXIMUM_AIRSPEED_MPS: f64 = 200.0;
 const PHYSICS_DT: Duration = Duration::from_millis(2);
 const MAXIMUM_FRAME_DELTA: Duration = Duration::from_millis(250);
 const MAXIMUM_PHYSICS_STEPS_PER_FRAME: u32 = 16;
@@ -46,6 +50,8 @@ const MAXIMUM_PHYSICS_STEPS_PER_FRAME: u32 = 16;
 pub struct RenderOptions {
     model_path: PathBuf,
     throttle: f64,
+    altitude_m: f64,
+    airspeed_mps: f64,
     replay_output_path: Option<PathBuf>,
 }
 
@@ -54,6 +60,8 @@ impl RenderOptions {
         let mut options = Self {
             model_path: PathBuf::from(DEFAULT_MODEL_PATH),
             throttle: DEFAULT_THROTTLE,
+            altitude_m: DEFAULT_ALTITUDE_M,
+            airspeed_mps: DEFAULT_AIRSPEED_MPS,
             replay_output_path: None,
         };
         while let Some(argument) = arguments.next() {
@@ -74,6 +82,34 @@ impl RenderOptions {
                         .map_err(|_| RenderAppError::InvalidThrottle(value.clone()))?;
                     if !options.throttle.is_finite() || !(0.0..=1.0).contains(&options.throttle) {
                         return Err(RenderAppError::InvalidThrottle(value));
+                    }
+                }
+                "--altitude-m" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--altitude-m"))?;
+                    options.altitude_m = value
+                        .parse::<f64>()
+                        .map_err(|_| RenderAppError::InvalidAltitude(value.clone()))?;
+                    if !options.altitude_m.is_finite()
+                        || options.altitude_m <= 0.0
+                        || options.altitude_m > MAXIMUM_ALTITUDE_M
+                    {
+                        return Err(RenderAppError::InvalidAltitude(value));
+                    }
+                }
+                "--airspeed-mps" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--airspeed-mps"))?;
+                    options.airspeed_mps = value
+                        .parse::<f64>()
+                        .map_err(|_| RenderAppError::InvalidAirspeed(value.clone()))?;
+                    if !options.airspeed_mps.is_finite()
+                        || options.airspeed_mps <= 0.0
+                        || options.airspeed_mps > MAXIMUM_AIRSPEED_MPS
+                    {
+                        return Err(RenderAppError::InvalidAirspeed(value));
                     }
                 }
                 "--record-replay" => {
@@ -99,6 +135,10 @@ pub enum RenderAppError {
     MissingArgumentValue(&'static str),
     #[error("invalid render throttle `{0}`; expected a finite value inside [0, 1]")]
     InvalidThrottle(String),
+    #[error("invalid render altitude `{0}`; expected a finite value inside (0, 10000] metres")]
+    InvalidAltitude(String),
+    #[error("invalid render airspeed `{0}`; expected a finite value inside (0, 200] metres/second")]
+    InvalidAirspeed(String),
     #[error("unknown render argument: {0}")]
     UnknownArgument(String),
     #[error("failed to load render model from {path}: {source}")]
@@ -179,6 +219,7 @@ struct RenderApplication {
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
+    ground_below_render_origin_m: f32,
     render_snapshots: AircraftRenderSnapshotBuffer,
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
@@ -189,6 +230,9 @@ struct RenderApplication {
 
 impl RenderApplication {
     fn new(options: RenderOptions) -> Result<Self, RenderAppError> {
+        let altitude_m = options.altitude_m;
+        let airspeed_mps = options.airspeed_mps;
+        let initial_throttle = options.throttle;
         let model_path = options.model_path;
         let model =
             load_aircraft_model(&model_path).map_err(|source| RenderAppError::ModelLoad {
@@ -199,13 +243,11 @@ impl RenderApplication {
             &model_path,
             model.presentation().map(|value| value.glb_path()),
         )?;
-        let initial_state = RigidBodyState {
-            position_world_m: Vec3::new(0.0, 0.0, -100.0),
-            linear_velocity_world_mps: Vec3::new(18.0, 0.0, 0.0),
-            orientation_world_from_body: Orientation::identity(),
-            angular_velocity_body_radps: Vec3::zeros(),
-        };
+        let model_id = model.model_id().to_owned();
+        let model_fingerprint = model.physics_fingerprint();
+        let initial_state = render_initial_state(altitude_m, airspeed_mps);
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
+        let ground_below_render_origin_m = altitude_m as f32;
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
@@ -213,7 +255,7 @@ impl RenderApplication {
         let simulation = AircraftSimulation::new(model, config, initial_state)?;
         let input_state = InputState::new(
             InputMapping::default(),
-            KeyboardInputState::new(options.throttle)?,
+            KeyboardInputState::new(initial_throttle)?,
         );
         let input_backend = GilrsInputBackend::new()?;
         let replay_recorder = options
@@ -226,6 +268,13 @@ impl RenderApplication {
             MAXIMUM_FRAME_DELTA,
             MAXIMUM_PHYSICS_STEPS_PER_FRAME,
         )?;
+        print_manual_flight_startup(
+            &model_id,
+            &model_fingerprint,
+            altitude_m,
+            airspeed_mps,
+            initial_throttle,
+        );
         Ok(Self {
             simulation,
             aircraft_mesh,
@@ -234,6 +283,7 @@ impl RenderApplication {
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
+            ground_below_render_origin_m,
             render_snapshots,
             fixed_step,
             last_frame_time: None,
@@ -355,7 +405,7 @@ impl ApplicationHandler for RenderApplication {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("RC Simulation Engine — P1 GLB Presentation")
+            .with_title("RC Simulation Engine — Manual Flight Viewer")
             .with_inner_size(LogicalSize::new(1_280.0, 720.0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -364,17 +414,20 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
-        let renderer =
-            match pollster::block_on(WgpuRenderer::new(Arc::clone(&window), &self.aircraft_mesh)) {
-                Ok(renderer) => renderer,
-                Err(error) => {
-                    self.fail(
-                        event_loop,
-                        RenderRuntimeError::RendererInitialization(error),
-                    );
-                    return;
-                }
-            };
+        let renderer = match pollster::block_on(WgpuRenderer::new(
+            Arc::clone(&window),
+            &self.aircraft_mesh,
+            self.ground_below_render_origin_m,
+        )) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.fail(
+                    event_loop,
+                    RenderRuntimeError::RendererInitialization(error),
+                );
+                return;
+            }
+        };
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());
@@ -472,6 +525,41 @@ fn resolve_aircraft_mesh(
     load_glb_mesh(&path).map_err(|source| RenderAppError::PresentationAsset { path, source })
 }
 
+fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {
+    RigidBodyState {
+        position_world_m: Vec3::new(0.0, 0.0, -altitude_m),
+        linear_velocity_world_mps: Vec3::new(airspeed_mps, 0.0, 0.0),
+        orientation_world_from_body: Orientation::identity(),
+        angular_velocity_body_radps: Vec3::zeros(),
+    }
+}
+
+fn print_manual_flight_startup(
+    model_id: &str,
+    fingerprint: &AircraftModelFingerprint,
+    altitude_m: f64,
+    airspeed_mps: f64,
+    throttle: f64,
+) {
+    println!("Manual flight controls:");
+    println!("A/D = roll");
+    println!("W/S = pitch");
+    println!("Q/E = yaw");
+    println!("R/F = throttle");
+    println!("ESC = exit");
+    println!();
+    println!("model ID: {model_id}");
+    print!("physics fingerprint: ");
+    for byte in fingerprint.as_bytes() {
+        print!("{byte:02x}");
+    }
+    println!();
+    println!("physics rate: {DEFAULT_PHYSICS_HZ} Hz");
+    println!("initial altitude: {altitude_m:.3} m");
+    println!("initial airspeed: {airspeed_mps:.3} m/s");
+    println!("initial throttle: {throttle:.3}");
+}
+
 fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
     match physical_key {
         PhysicalKey::Code(KeyCode::KeyA) => Some(KeyboardKey::RollLeft),
@@ -509,6 +597,55 @@ mod tests {
                 Err(RenderAppError::InvalidThrottle(_))
             ));
         }
+    }
+
+    #[test]
+    fn altitude_and_airspeed_options_parse_with_manual_flight_defaults_and_overrides() {
+        let defaults = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(defaults.altitude_m, 30.0);
+        assert_eq!(defaults.airspeed_mps, 18.0);
+
+        let options = RenderOptions::parse(
+            [
+                "--altitude-m",
+                "45.5",
+                "--airspeed-mps",
+                "22.25",
+                "--throttle",
+                "0.6",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(options.altitude_m, 45.5);
+        assert_eq!(options.airspeed_mps, 22.25);
+        assert_eq!(options.throttle, 0.6);
+    }
+
+    #[test]
+    fn altitude_and_airspeed_options_reject_nonfinite_nonpositive_and_excessive_values() {
+        for value in ["0", "-1", "NaN", "inf", "10000.1", "not-a-number"] {
+            assert!(matches!(
+                RenderOptions::parse(["--altitude-m".to_owned(), value.to_owned()].into_iter()),
+                Err(RenderAppError::InvalidAltitude(_))
+            ));
+        }
+        for value in ["0", "-1", "NaN", "inf", "200.1", "not-a-number"] {
+            assert!(matches!(
+                RenderOptions::parse(["--airspeed-mps".to_owned(), value.to_owned()].into_iter()),
+                Err(RenderAppError::InvalidAirspeed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn render_initial_conditions_apply_positive_altitude_as_negative_ned_z() {
+        let state = render_initial_state(45.5, 22.25);
+        assert_eq!(state.position_world_m, Vec3::new(0.0, 0.0, -45.5));
+        assert_eq!(state.linear_velocity_world_mps, Vec3::new(22.25, 0.0, 0.0));
+        assert_eq!(state.orientation_world_from_body, Orientation::identity());
+        assert_eq!(state.angular_velocity_body_radps, Vec3::zeros());
     }
 
     #[test]

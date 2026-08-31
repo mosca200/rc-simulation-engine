@@ -1,6 +1,6 @@
 use crate::{
-    AircraftMesh, ChaseCamera, Mat4, RenderFrame, Vertex, ground_plane, matrix_to_wgsl_columns,
-    reference_grid_and_axes,
+    AircraftMesh, ChaseCamera, Mat4, RenderFrame, Vertex, ground_plane_at, matrix_to_wgsl_columns,
+    reference_grid_and_axes_at,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -18,7 +18,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const GPU_ERROR_NONE: u8 = 0;
 const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
 const GPU_ERROR_OTHER: u8 = 2;
-pub const SKY_CLEAR_COLOR: [f64; 4] = [0.36, 0.62, 0.88, 1.0];
+pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -32,6 +32,8 @@ pub enum RendererError {
     SurfaceWithoutFormats,
     #[error("the surface reports no supported alpha modes")]
     SurfaceWithoutAlphaModes,
+    #[error("ground distance below the render origin must be finite and positive")]
+    InvalidGroundReference,
 }
 
 /// Presentation failures normalized from wgpu 30's `CurrentSurfaceTexture` API.
@@ -99,7 +101,14 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    pub async fn new(window: Arc<Window>, aircraft: &AircraftMesh) -> Result<Self, RendererError> {
+    pub async fn new(
+        window: Arc<Window>,
+        aircraft: &AircraftMesh,
+        ground_below_render_origin_m: f32,
+    ) -> Result<Self, RendererError> {
+        if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
+            return Err(RendererError::InvalidGroundReference);
+        }
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -218,7 +227,7 @@ impl WgpuRenderer {
             contents: bytemuck::cast_slice(aircraft.indices()),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let ground = ground_plane();
+        let ground = ground_plane_at(-ground_below_render_origin_m - 0.04);
         let ground_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("render-only ground vertices"),
             contents: bytemuck::cast_slice(ground.vertices()),
@@ -229,7 +238,7 @@ impl WgpuRenderer {
             contents: bytemuck::cast_slice(ground.indices()),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let references = reference_grid_and_axes();
+        let references = reference_grid_and_axes_at(-ground_below_render_origin_m);
         let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("reference grid and axes vertices"),
             contents: bytemuck::cast_slice(references.vertices()),

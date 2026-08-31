@@ -140,66 +140,98 @@ pub fn aircraft_mesh() -> AircraftMesh {
     AircraftMesh { vertices, indices }
 }
 
-/// Flat render-only local ground, kept below the debug grid to avoid z-fighting.
+const DEFAULT_GROUND_Y_RENDER_M: f32 = -30.04;
+const DEFAULT_GRID_Y_RENDER_M: f32 = -30.0;
+
+/// Flat render-only local ground at the default manual-flight altitude.
 #[must_use]
 pub fn ground_plane() -> AircraftMesh {
+    ground_plane_at(DEFAULT_GROUND_Y_RENDER_M)
+}
+
+/// Flat render-only local ground at a caller-selected render-world height.
+#[must_use]
+pub fn ground_plane_at(ground_y_render_m: f32) -> AircraftMesh {
+    debug_assert!(ground_y_render_m.is_finite());
     let vertices = vec![
         Vertex {
-            position: [-500.0, -10.04, -500.0],
-            color: [0.20, 0.34, 0.16],
+            position: [-2_000.0, ground_y_render_m, -2_000.0],
+            color: [0.12, 0.30, 0.10],
         },
         Vertex {
-            position: [500.0, -10.04, -500.0],
-            color: [0.20, 0.34, 0.16],
+            position: [2_000.0, ground_y_render_m, -2_000.0],
+            color: [0.12, 0.30, 0.10],
         },
         Vertex {
-            position: [500.0, -10.04, 500.0],
-            color: [0.24, 0.39, 0.18],
+            position: [2_000.0, ground_y_render_m, 2_000.0],
+            color: [0.18, 0.38, 0.14],
         },
         Vertex {
-            position: [-500.0, -10.04, 500.0],
-            color: [0.24, 0.39, 0.18],
+            position: [-2_000.0, ground_y_render_m, 2_000.0],
+            color: [0.18, 0.38, 0.14],
         },
     ];
     AircraftMesh::new(vertices, vec![0, 2, 1, 0, 3, 2]).expect("static ground mesh is valid")
 }
 
-/// Static grid on render XZ plus the East/Up/South positive axes.
+/// Static grid at the default manual-flight altitude reference.
 #[must_use]
 pub fn reference_grid_and_axes() -> LineMesh {
-    const EXTENT_M: i32 = 250;
-    const SPACING_M: usize = 10;
-    const GRID_Y_M: f32 = -10.0;
-    let mut vertices = Vec::with_capacity(220);
+    reference_grid_and_axes_at(DEFAULT_GRID_Y_RENDER_M)
+}
+
+/// Static grid on render XZ plus East/Up/South axes at a selected ground height.
+#[must_use]
+pub fn reference_grid_and_axes_at(grid_y_render_m: f32) -> LineMesh {
+    const EXTENT_M: i32 = 1_000;
+    const SPACING_M: usize = 25;
+    debug_assert!(grid_y_render_m.is_finite());
+    let mut vertices = Vec::with_capacity(340);
     for coordinate in (-EXTENT_M..=EXTENT_M).step_by(SPACING_M) {
         let coordinate = coordinate as f32;
-        let is_major = (coordinate as i32) % 50 == 0;
+        let is_major = (coordinate as i32) % 100 == 0;
         let color = if is_major {
-            [0.42, 0.45, 0.49]
+            [0.78, 0.80, 0.68]
         } else {
-            [0.22, 0.25, 0.29]
+            [0.36, 0.44, 0.31]
         };
         vertices.push(Vertex {
-            position: [-EXTENT_M as f32, GRID_Y_M, coordinate],
+            position: [-EXTENT_M as f32, grid_y_render_m, coordinate],
             color,
         });
         vertices.push(Vertex {
-            position: [EXTENT_M as f32, GRID_Y_M, coordinate],
+            position: [EXTENT_M as f32, grid_y_render_m, coordinate],
             color,
         });
         vertices.push(Vertex {
-            position: [coordinate, GRID_Y_M, -EXTENT_M as f32],
+            position: [coordinate, grid_y_render_m, -EXTENT_M as f32],
             color,
         });
         vertices.push(Vertex {
-            position: [coordinate, GRID_Y_M, EXTENT_M as f32],
+            position: [coordinate, grid_y_render_m, EXTENT_M as f32],
             color,
         });
     }
 
-    add_line(&mut vertices, [0.0; 3], [50.0, 0.0, 0.0], [1.0, 0.08, 0.08]);
-    add_line(&mut vertices, [0.0; 3], [0.0, 50.0, 0.0], [0.08, 1.0, 0.08]);
-    add_line(&mut vertices, [0.0; 3], [0.0, 0.0, 50.0], [0.08, 0.20, 1.0]);
+    let origin = [0.0, grid_y_render_m, 0.0];
+    add_line(
+        &mut vertices,
+        origin,
+        [100.0, grid_y_render_m, 0.0],
+        [1.0, 0.08, 0.08],
+    );
+    add_line(
+        &mut vertices,
+        origin,
+        [0.0, grid_y_render_m + 100.0, 0.0],
+        [0.08, 1.0, 0.08],
+    );
+    add_line(
+        &mut vertices,
+        origin,
+        [0.0, grid_y_render_m, 100.0],
+        [0.08, 0.20, 1.0],
+    );
     LineMesh { vertices }
 }
 
@@ -321,17 +353,35 @@ mod tests {
         assert!(
             mesh.vertices()
                 .iter()
-                .any(|vertex| vertex.position == [50.0, 0.0, 0.0])
+                .any(|vertex| vertex.position == [100.0, -30.0, 0.0])
         );
         assert!(
             mesh.vertices()
                 .iter()
-                .any(|vertex| vertex.position == [0.0, 50.0, 0.0])
+                .any(|vertex| vertex.position == [0.0, 70.0, 0.0])
         );
         assert!(
             mesh.vertices()
                 .iter()
-                .any(|vertex| vertex.position == [0.0, 0.0, 50.0])
+                .any(|vertex| vertex.position == [0.0, -30.0, 100.0])
+        );
+    }
+
+    #[test]
+    fn runtime_ground_and_grid_follow_the_selected_reference_height() {
+        let ground = ground_plane_at(-75.04);
+        assert!(
+            ground
+                .vertices()
+                .iter()
+                .all(|vertex| vertex.position[1] == -75.04)
+        );
+        let references = reference_grid_and_axes_at(-75.0);
+        assert!(
+            references
+                .vertices()
+                .iter()
+                .any(|vertex| vertex.position == [0.0, -75.0, 0.0])
         );
     }
 
@@ -343,7 +393,7 @@ mod tests {
         assert!(
             mesh.vertices()
                 .iter()
-                .all(|vertex| vertex.position[1] < -10.0)
+                .all(|vertex| vertex.position[1] < -30.0)
         );
         assert!(
             mesh.indices()

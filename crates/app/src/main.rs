@@ -334,7 +334,9 @@ fn print_usage() {
     println!(
         "  rcsim-app benchmark aircraft [--model PATH] [--warmup-steps N] [--steps N] [--physics-hz HZ]"
     );
-    println!("  rcsim-app render [--model PATH] [--throttle VALUE] [--record-replay PATH]");
+    println!(
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--record-replay PATH]"
+    );
     println!("  rcsim-app input list");
     println!(
         "  rcsim-app replay record --model PATH --output PATH --steps N [--roll V] [--pitch V] [--yaw V] [--throttle V]"

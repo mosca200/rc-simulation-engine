@@ -36,10 +36,16 @@ NED/FRD-to-render transform remains the single world/body boundary.
 
 ## Minimal outdoor scene
 
-The renderer clears each frame to a stable sky-blue color. A flat 1 km square green ground plane is
-drawn ten metres below the initial aircraft render origin. It is render-only: there is no collision,
-terrain, ground handling, or change to physics. The existing reference grid is 4 cm above the plane
-to avoid z-fighting, and the debug axes remain available.
+The renderer clears each frame to a stable high-contrast sky-blue color. A flat 4 km square green
+ground plane is drawn at the reference-ground height implied by the render-mode initial altitude.
+It is render-only: there is no collision, terrain, ground handling, or change to physics. A 25 m
+grid with brighter 100 m major lines is 4 cm above the plane to avoid z-fighting. Ground-anchored
+East/Up/South axes provide additional altitude, heading, pitch, and bank references.
+
+The world-up chase camera is presentation-only and consumes `RenderPose`. M1A uses RC-scale framing:
+3.5 m behind, 1.25 m above, 1.5 m look-ahead, and a 55-degree vertical field of view. The camera
+tracks horizontal heading for a stable chase distance while the target retains aircraft pitch. A
+deterministic fallback handles a vertical attitude without generating a degenerate transform.
 
 ## Simulation-to-render snapshots
 
@@ -109,5 +115,18 @@ physics state.
   gate.
 - There is no in-render telemetry overlay or replay timeline UI.
 - Camera controls and presentation settings remain intentionally minimal.
+
+## M1A manual-flight launch
+
+Render mode defaults to 30 m above the reference ground and 18 m/s. These values affect only the
+new render-mode simulation instance; they do not change the aircraft model, fingerprint, canonical
+replay, or headless defaults. They can be overridden with validated finite positive values:
+
+```powershell
+cargo run -p rcsim-app --release -- render --altitude-m 45 --airspeed-mps 20 --throttle 0.55
+```
+
+Startup prints the model identity, physics fingerprint/rate, initial conditions, and the keyboard
+mapping once. `A/D` controls roll, `W/S` pitch, `Q/E` yaw, `R/F` throttle, and Escape exits.
 
 These gaps are visible follow-up work. P1 does not implement Phase 2 functionality.
