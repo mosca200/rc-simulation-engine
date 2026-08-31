@@ -1,5 +1,7 @@
 use aircraft::{AircraftSimulation, AircraftSimulationConfig, AircraftSnapshot};
 use model::{AircraftModel, load_aircraft_model};
+#[cfg(not(target_os = "windows"))]
+use replay::AircraftReplayRecorder;
 use replay::{AircraftReplayPlayer, AircraftReplayRecording};
 use serde_json::{Value, json};
 use sim_core::{AeroEnvironment, PilotInput, RigidBodyState};
@@ -308,6 +310,20 @@ fn wall_clock_is_excluded_from_deterministic_summary() {
 fn committed_replay_produces_repeatable_two_thousand_frame_telemetry() {
     let replay = load_committed_replay();
     assert_eq!(replay.frames().len(), DATASET_STEPS);
+
+    #[cfg(not(target_os = "windows"))]
+    let replay = {
+        let mut simulation = replay.reconstruct_simulation(load_model()).unwrap();
+        let mut recorder =
+            AircraftReplayRecorder::with_capacity(&simulation, replay.frames().len()).unwrap();
+        for frame in replay.frames() {
+            recorder
+                .record(&mut simulation, frame.step_index(), frame.pilot_input())
+                .unwrap();
+        }
+        recorder.finish()
+    };
+
     let first = capture_replay(&replay).unwrap();
     let second = capture_replay(&replay).unwrap();
     assert_eq!(first, second);
