@@ -6,14 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aircraft = { path = "../aircraft" }
 blake3.workspace = true
+model = { path = "../model" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sim_core = { path = "../sim_core" }
-thiserror.workspace = true
-
-[dev-dependencies]
 sim_math = { path = "../sim_math" }
+thiserror.workspace = true
 
 [lints]
 workspace = true

@@ -1,6 +1,14 @@
 #![forbid(unsafe_code)]
 //! Small deterministic telemetry boundary. Performance diagnostics stay separate.
 
+mod aircraft;
+
+pub use aircraft::{
+    AIRCRAFT_TELEMETRY_SCHEMA_VERSION, AircraftTelemetryFrame, AircraftTelemetryRecorder,
+    AircraftTelemetryRecording, DeterministicTelemetrySummary, ScalarRange, ScalarStatistics,
+    TelemetryCaptureError, TelemetryFinalState, TelemetrySummary,
+};
+
 use sim_core::{PilotInput, SimSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,15 +1,21 @@
 use aircraft::{AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError};
 use model::{ModelLoadError, load_aircraft_model};
+use platform::{
+    GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
+    KeyboardKey,
+};
 use renderer::{
     FixedStepAccumulator, FixedStepAccumulatorError, RenderDataError, RenderFrame, RendererError,
     SurfaceError, WgpuRenderer, world_ned_pose_to_render,
 };
+use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
     AeroEnvironment, AeroEnvironmentError, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyState,
     SimulationConfigError,
 };
 use sim_math::{Orientation, Vec3};
 use std::{
+    io,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -21,7 +27,7 @@ use winit::{
     dpi::LogicalSize,
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -35,6 +41,7 @@ const MAXIMUM_PHYSICS_STEPS_PER_FRAME: u32 = 16;
 pub struct RenderOptions {
     model_path: PathBuf,
     throttle: f64,
+    replay_output_path: Option<PathBuf>,
 }
 
 impl RenderOptions {
@@ -42,6 +49,7 @@ impl RenderOptions {
         let mut options = Self {
             model_path: PathBuf::from(DEFAULT_MODEL_PATH),
             throttle: DEFAULT_THROTTLE,
+            replay_output_path: None,
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -62,6 +70,12 @@ impl RenderOptions {
                     if !options.throttle.is_finite() || !(0.0..=1.0).contains(&options.throttle) {
                         return Err(RenderAppError::InvalidThrottle(value));
                     }
+                }
+                "--record-replay" => {
+                    options.replay_output_path =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            RenderAppError::MissingArgumentValue("--record-replay"),
+                        )?));
                 }
                 "--help" | "-h" => {
                     super::print_usage();
@@ -96,6 +110,10 @@ pub enum RenderAppError {
     SimulationConfig(#[from] SimulationConfigError),
     #[error("failed to configure render fixed-step scheduling: {0}")]
     FixedStep(#[from] FixedStepAccumulatorError),
+    #[error("failed to initialize render input: {0}")]
+    Input(#[from] InputError),
+    #[error("failed to initialize live aircraft replay recording: {0}")]
+    Replay(#[from] AircraftReplayError),
     #[error("failed to create the winit event loop: {0}")]
     EventLoopCreation(#[source] winit::error::EventLoopError),
     #[error("winit event loop failed: {0}")]
@@ -112,6 +130,16 @@ pub enum RenderRuntimeError {
     RendererInitialization(#[source] RendererError),
     #[error("failed to convert the committed physics pose for rendering: {0}")]
     RenderPose(#[from] RenderDataError),
+    #[error("failed to sample normalized pilot input: {0}")]
+    Input(#[from] InputError),
+    #[error("failed to record live aircraft replay: {0}")]
+    Replay(#[from] AircraftReplayError),
+    #[error("failed to write live aircraft replay to {path}: {source}")]
+    ReplayWrite {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("GPU ran out of memory")]
     OutOfMemory,
     #[error("unexpected GPU validation or internal error")]
@@ -128,12 +156,16 @@ pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
     if let Some(error) = application.runtime_error.take() {
         return Err(error.into());
     }
+    application.save_recording()?;
     Ok(())
 }
 
 struct RenderApplication {
     simulation: AircraftSimulation,
-    input: PilotInput,
+    input_state: InputState,
+    input_backend: GilrsInputBackend,
+    replay_recorder: Option<AircraftReplayRecorder>,
+    replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
@@ -160,6 +192,16 @@ impl RenderApplication {
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
         let config = AircraftSimulationConfig::from_physics_hz(DEFAULT_PHYSICS_HZ, environment)?;
         let simulation = AircraftSimulation::new(model, config, initial_state)?;
+        let input_state = InputState::new(
+            InputMapping::default(),
+            KeyboardInputState::new(options.throttle)?,
+        );
+        let input_backend = GilrsInputBackend::new()?;
+        let replay_recorder = options
+            .replay_output_path
+            .as_ref()
+            .map(|_| AircraftReplayRecorder::new(&simulation))
+            .transpose()?;
         let fixed_step = FixedStepAccumulator::new(
             PHYSICS_DT,
             MAXIMUM_FRAME_DELTA,
@@ -167,7 +209,10 @@ impl RenderApplication {
         )?;
         Ok(Self {
             simulation,
-            input: PilotInput::new(0.0, 0.0, 0.0, options.throttle),
+            input_state,
+            input_backend,
+            replay_recorder,
+            replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
             fixed_step,
             last_frame_time: None,
@@ -182,6 +227,29 @@ impl RenderApplication {
         event_loop.exit();
     }
 
+    fn finish_and_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.save_recording() {
+            self.runtime_error = Some(error);
+        }
+        event_loop.exit();
+    }
+
+    fn save_recording(&mut self) -> Result<(), RenderRuntimeError> {
+        let Some(recorder) = self.replay_recorder.take() else {
+            return Ok(());
+        };
+        let recording = recorder.finish();
+        let json = recording.to_json_pretty()?;
+        let path = self
+            .replay_output_path
+            .as_ref()
+            .expect("a recorder is created only when a replay output path exists");
+        std::fs::write(path, json).map_err(|source| RenderRuntimeError::ReplayWrite {
+            path: path.clone(),
+            source,
+        })
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let frame_delta = self
@@ -191,8 +259,22 @@ impl RenderApplication {
                 now.saturating_duration_since(previous)
             });
         let step_plan = self.fixed_step.advance(frame_delta);
+        self.input_state
+            .set_controller_axes(self.input_backend.poll_axes());
         for _ in 0..step_plan.physics_steps() {
-            let _ = self.simulation.step(&self.input);
+            let input = match self.input_state.sample(PHYSICS_DT.as_secs_f64()) {
+                Ok(input) => input,
+                Err(error) => {
+                    self.fail(event_loop, error.into());
+                    return;
+                }
+            };
+            if let Err(error) =
+                advance_aircraft(&mut self.simulation, &mut self.replay_recorder, input)
+            {
+                self.fail(event_loop, error.into());
+                return;
+            }
         }
         if step_plan.dropped_time_s() > 0.0 {
             warn!(
@@ -288,12 +370,18 @@ impl ApplicationHandler for RenderApplication {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.finish_and_exit(event_loop),
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && matches!(event.logical_key, Key::Named(NamedKey::Escape)) =>
             {
-                event_loop.exit();
+                self.finish_and_exit(event_loop);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(key) = keyboard_key(event.physical_key) {
+                    self.input_state
+                        .set_key(key, event.state == ElementState::Pressed);
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -316,6 +404,42 @@ impl ApplicationHandler for RenderApplication {
         self.window = None;
         self.last_frame_time = None;
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.runtime_error.is_none()
+            && let Err(error) = self.save_recording()
+        {
+            self.runtime_error = Some(error);
+        }
+    }
+}
+
+fn advance_aircraft(
+    simulation: &mut AircraftSimulation,
+    recorder: &mut Option<AircraftReplayRecorder>,
+    input: PilotInput,
+) -> Result<(), AircraftReplayError> {
+    let step_index = simulation.step_index();
+    if let Some(recorder) = recorder {
+        let _ = recorder.record(simulation, step_index, input)?;
+    } else {
+        let _ = simulation.step(&input);
+    }
+    Ok(())
+}
+
+fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
+    match physical_key {
+        PhysicalKey::Code(KeyCode::KeyA) => Some(KeyboardKey::RollLeft),
+        PhysicalKey::Code(KeyCode::KeyD) => Some(KeyboardKey::RollRight),
+        PhysicalKey::Code(KeyCode::KeyW) => Some(KeyboardKey::PitchUp),
+        PhysicalKey::Code(KeyCode::KeyS) => Some(KeyboardKey::PitchDown),
+        PhysicalKey::Code(KeyCode::KeyQ) => Some(KeyboardKey::YawLeft),
+        PhysicalKey::Code(KeyCode::KeyE) => Some(KeyboardKey::YawRight),
+        PhysicalKey::Code(KeyCode::KeyR) => Some(KeyboardKey::ThrottleIncrease),
+        PhysicalKey::Code(KeyCode::KeyF) => Some(KeyboardKey::ThrottleDecrease),
+        _ => None,
+    }
 }
 
 fn rigid_state_to_render_pose(
@@ -337,6 +461,7 @@ fn vector_to_array(vector: Vec3) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use replay::{AircraftReplayPlayer, AircraftReplayRecording};
 
     #[test]
     fn throttle_parser_accepts_bounds_and_rejects_invalid_values() {
@@ -364,5 +489,47 @@ mod tests {
         };
         let pose = rigid_state_to_render_pose(&state, [100.0, 200.0, 300.0]).unwrap();
         assert_eq!(pose.translation_render_m(), [2.0, -3.0, -1.0]);
+    }
+
+    #[test]
+    fn live_recording_uses_exact_sampled_input_and_s8a_step_semantics() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        let config = AircraftSimulationConfig::from_physics_hz(
+            DEFAULT_PHYSICS_HZ,
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap();
+        let initial_state = RigidBodyState {
+            position_world_m: Vec3::new(0.0, 0.0, -100.0),
+            linear_velocity_world_mps: Vec3::new(18.0, 0.0, 0.0),
+            orientation_world_from_body: Orientation::identity(),
+            angular_velocity_body_radps: Vec3::zeros(),
+        };
+        let mut simulation = AircraftSimulation::new(model, config, initial_state).unwrap();
+        let mut recorder = Some(AircraftReplayRecorder::new(&simulation).unwrap());
+        let mut input_state = InputState::default();
+        input_state.set_key(KeyboardKey::PitchUp, true);
+        input_state.set_key(KeyboardKey::ThrottleIncrease, true);
+        let mut applied = Vec::new();
+        for _ in 0..3 {
+            let input = input_state.sample(0.002).unwrap();
+            applied.push(input);
+            advance_aircraft(&mut simulation, &mut recorder, input).unwrap();
+        }
+        let recording = recorder.take().unwrap().finish();
+        for (step_index, (frame, expected_input)) in
+            recording.frames().iter().zip(applied).enumerate()
+        {
+            assert_eq!(frame.step_index(), step_index as u64);
+            assert_eq!(frame.pilot_input(), expected_input);
+        }
+        let json = recording.to_json_pretty().unwrap();
+        let decoded = AircraftReplayRecording::from_json(&json).unwrap();
+        let model = load_aircraft_model(model_path).unwrap();
+        let mut replayed = decoded.reconstruct_simulation(model).unwrap();
+        let player = AircraftReplayPlayer::new(&decoded, &replayed).unwrap();
+        assert_eq!(player.verify_all(&mut replayed).unwrap(), 3);
     }
 }

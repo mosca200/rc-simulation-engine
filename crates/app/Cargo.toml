@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 aircraft = { path = "../aircraft" }
 model = { path = "../model" }
+platform = { path = "../platform" }
 pollster.workspace = true
 renderer = { path = "../renderer" }
 replay = { path = "../replay" }

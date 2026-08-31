@@ -1,6 +1,14 @@
 #![forbid(unsafe_code)]
 //! Versioned, input-based deterministic replay recording and playback.
 
+mod aircraft;
+
+pub use aircraft::{
+    AIRCRAFT_REPLAY_SCHEMA_VERSION, AircraftModelPhysicsFingerprint, AircraftReplayError,
+    AircraftReplayFrame, AircraftReplayPlayer, AircraftReplayRecorder, AircraftReplayRecording,
+    AircraftReplaySimulationConfig, AircraftSnapshotHash,
+};
+
 use serde::{Deserialize, Serialize};
 use sim_core::{PilotInput, RigidBodyState, Simulation, SimulationConfig};
 use thiserror::Error;

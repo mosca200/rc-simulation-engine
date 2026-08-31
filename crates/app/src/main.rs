@@ -1,11 +1,17 @@
 #![forbid(unsafe_code)]
 
+mod input_app;
 mod render_app;
+mod replay_app;
+mod telemetry_app;
+mod validation_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
+use input_app::run_input_list;
 use model::{AircraftModelFingerprint, load_aircraft_model};
 use render_app::{RenderOptions, run_render};
 use replay::ReplayRecorder;
+use replay_app::{ReplayOptions, run_replay};
 use sim_core::{
     AeroEnvironment, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyParams, RigidBodyState, Simulation,
     SimulationConfig,
@@ -13,8 +19,10 @@ use sim_core::{
 use sim_math::{Mat3, Orientation, Vec3};
 use std::{env, error::Error, path::PathBuf, time::Instant};
 use telemetry::{PerformanceDiagnostics, TelemetryFrame};
+use telemetry_app::{TelemetryOptions, run_telemetry};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use validation_app::{ValidationOptions, run_validation};
 
 fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
@@ -26,8 +34,28 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut arguments = env::args().skip(1);
     match arguments.next() {
+        Some(command) if command == "input" => match arguments.next().as_deref() {
+            Some("list") if arguments.next().is_none() => {
+                run_input_list()?;
+                Ok(())
+            }
+            Some(input_command) => Err(format!("unknown input command: {input_command}").into()),
+            None => Err("missing input command; expected `list`".into()),
+        },
+        Some(command) if command == "replay" => {
+            run_replay(ReplayOptions::parse(arguments)?)?;
+            Ok(())
+        }
+        Some(command) if command == "telemetry" => {
+            run_telemetry(TelemetryOptions::parse(arguments)?)?;
+            Ok(())
+        }
         Some(command) if command == "render" => {
             run_render(RenderOptions::parse(arguments)?)?;
+            Ok(())
+        }
+        Some(command) if command == "validate" => {
+            run_validation(ValidationOptions::parse(arguments)?)?;
             Ok(())
         }
         Some(command) if command == "aircraft" => run_aircraft(AircraftOptions::parse(arguments)?),
@@ -277,7 +305,18 @@ fn print_usage() {
     println!("Usage:");
     println!("  rcsim-app [--steps N] [--physics-hz HZ]");
     println!("  rcsim-app aircraft [--model PATH] [--steps N] [--physics-hz HZ]");
-    println!("  rcsim-app render [--model PATH] [--throttle VALUE]");
+    println!("  rcsim-app render [--model PATH] [--throttle VALUE] [--record-replay PATH]");
+    println!("  rcsim-app input list");
+    println!(
+        "  rcsim-app replay record --model PATH --output PATH --steps N [--roll V] [--pitch V] [--yaw V] [--throttle V]"
+    );
+    println!("  rcsim-app replay verify --model PATH --input PATH");
+    println!(
+        "  rcsim-app telemetry run --model PATH --output PATH --steps N [--physics-hz HZ] [--roll V] [--pitch V] [--yaw V] [--throttle V]"
+    );
+    println!("  rcsim-app telemetry from-replay --model PATH --replay PATH --output PATH");
+    println!("  rcsim-app telemetry analyze --input PATH");
+    println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
 }
 
 fn parse_value<T>(flag: &str, value: Option<String>) -> Result<T, String>

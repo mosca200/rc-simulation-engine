@@ -6,7 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aircraft = { path = "../aircraft" }
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sim_core = { path = "../sim_core" }
+sim_math = { path = "../sim_math" }
+thiserror.workspace = true
+
+[dev-dependencies]
+model = { path = "../model" }
+replay = { path = "../replay" }
 
 [lints]
 workspace = true
