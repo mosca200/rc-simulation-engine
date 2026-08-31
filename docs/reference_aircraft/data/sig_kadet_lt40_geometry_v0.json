@@ -41,6 +41,11 @@
       "url": "https://cdn.shopify.com/s/files/1/2281/6393/files/sigrc67kadetlt40.pdf?1161818709039042179="
     },
     {
+      "id": "sig-lt40-kit-parts",
+      "kind": "manufacturer_documentation",
+      "url": "https://sigmfg.com/products/sig-kadet-lt-40-parts"
+    },
+    {
       "id": "sig-lt40-egv-arf-product",
       "kind": "manufacturer_documentation",
       "url": "https://sigmfg.com/collections/sig-arfs-almost-ready-to-fly/products/sig-kadet-lt-40-egv-arf?variant=45138130441"
@@ -510,20 +515,132 @@
     },
     "horizontal_tail_root_le_x_aft_wing_le_m": {
       "value_m": null,
-      "quality": "unknown"
+      "quality": "unknown",
+      "reason": "The original-kit fuselage views contain explicit longitudinal breaks between the wing and tail, and neither the manufacturer manual nor the replacement-parts listing supplies a dimension that bridges them. The EGV manual supplies alignment procedures but no absolute wing-to-tail dimension.",
+      "source_refs": [
+        "sig-lt40-build-manual",
+        "sig-lt40-kit-parts",
+        "sig-lt40-egv-arf-manual",
+        "lt40-community-plan-sheet-1-scan"
+      ],
+      "variant_applicability": "unresolved for original kit and EGV",
+      "closure_requirement": "An unbroken dimensioned factory drawing, deterministic dimensions for the factory-cut fuselage side, or a direct measurement from wing root LE to horizontal-tail root LE."
     },
     "vertical_tail_root_le_x_aft_wing_le_m": {
       "value_m": null,
-      "quality": "unknown"
+      "quality": "unknown",
+      "reason": "The fin is built and installed from local plan geometry, but no manufacturer dimension locates its root leading edge relative to the wing datum across the fuselage-view breaks.",
+      "source_refs": [
+        "sig-lt40-build-manual",
+        "sig-lt40-egv-arf-manual",
+        "lt40-community-plan-sheet-1-scan"
+      ],
+      "variant_applicability": "unresolved for original kit and EGV",
+      "closure_requirement": "An unbroken dimensioned factory drawing or a direct measurement from wing root LE to the defined fin-root leading-edge datum."
     },
     "wing_to_horizontal_tail_quarter_chord_arm_m": {
       "value_m": null,
-      "quality": "unknown"
+      "quality": "unknown",
+      "reason": "The local original-kit quarter-chord offset is known, but the horizontal-tail root leading-edge station is not.",
+      "source_refs": [
+        "lt40-community-plan-sheet-1-scan",
+        "lt40-community-plan-sheet-2-scan"
+      ],
+      "variant_applicability": "original-kit symbolic relation only; EGV local-geometry equality unproven"
     },
     "wing_to_vertical_tail_quarter_chord_arm_m": {
       "value_m": null,
-      "quality": "unknown"
+      "quality": "unknown",
+      "reason": "The local original-kit quarter-chord offset is known, but the vertical-tail root leading-edge station is not.",
+      "source_refs": [
+        "lt40-community-plan-sheet-1-scan",
+        "lt40-community-plan-sheet-2-scan"
+      ],
+      "variant_applicability": "original-kit symbolic relation only; EGV local-geometry equality unproven"
     }
+  },
+  "longitudinal_geometry_closure": {
+    "status": "blocked_by_missing_absolute_station",
+    "quality": "unknown",
+    "documentary_datum": "wing root leading edge, x_aft_m = 0",
+    "deterministic_relations": [
+      {
+        "relation": "horizontal_tail_quarter_chord_x_aft_m = horizontal_tail_root_le_x_aft_wing_le_m + 0.098255 m",
+        "offset_m": 0.098255,
+        "offset_uncertainty_m": 0.003,
+        "quality": "derived",
+        "source_refs": [
+          "lt40-community-plan-sheet-2-scan"
+        ],
+        "variant_applicability": "original kit only"
+      },
+      {
+        "relation": "vertical_tail_quarter_chord_x_aft_m = vertical_tail_root_le_x_aft_wing_le_m + 0.129016 m",
+        "offset_m": 0.129016,
+        "offset_uncertainty_m": 0.004,
+        "quality": "derived",
+        "source_refs": [
+          "lt40-community-plan-sheet-1-scan"
+        ],
+        "variant_applicability": "original kit only"
+      },
+      {
+        "relation": "horizontal_tail_arm_m = horizontal_tail_root_le_x_aft_wing_le_m + 0.016295 m",
+        "offset_m": 0.016295,
+        "offset_uncertainty_m": 0.0036,
+        "quality": "derived",
+        "source_refs": [
+          "lt40-community-plan-sheet-2-scan"
+        ],
+        "variant_applicability": "original kit only"
+      },
+      {
+        "relation": "vertical_tail_arm_m = vertical_tail_root_le_x_aft_wing_le_m + 0.047056 m",
+        "offset_m": 0.047056,
+        "offset_uncertainty_m": 0.0045,
+        "quality": "derived",
+        "source_refs": [
+          "lt40-community-plan-sheet-1-scan",
+          "lt40-community-plan-sheet-2-scan"
+        ],
+        "variant_applicability": "original kit only"
+      }
+    ],
+    "rejected_as_non_deterministic": [
+      "26-5/8 in outer pushrod-tube stock length",
+      "38 in inner pushrod-tube stock length",
+      "former sequence and tabbed fuselage assembly without inter-former dimensions",
+      "equal diagonal alignment checks between wing, stabilizer, and fuselage",
+      "57 in overall aircraft length"
+    ],
+    "minimum_physical_closure": [
+      "wing root LE to horizontal-tail root LE",
+      "wing root LE to defined fin-root LE datum",
+      "EGV horizontal-tail and vertical-tail local geometry or direct quarter-chord stations"
+    ],
+    "runtime_authority": false
+  },
+  "cross_variant_assessment": {
+    "classification_vocabulary": [
+      "CONFIRMED_IDENTICAL",
+      "CONSISTENT_BUT_NOT_PROVEN",
+      "DIFFERENT",
+      "UNKNOWN"
+    ],
+    "span": "CONFIRMED_IDENTICAL",
+    "wing_area": "CONFIRMED_IDENTICAL",
+    "overall_length": "CONFIRMED_IDENTICAL",
+    "published_cg_range": "CONFIRMED_IDENTICAL",
+    "published_control_travel": "CONFIRMED_IDENTICAL",
+    "airfoil": "UNKNOWN",
+    "wing_mounting_concept": "DIFFERENT",
+    "tail_layout": "CONSISTENT_BUT_NOT_PROVEN",
+    "visible_planform_geometry": "CONSISTENT_BUT_NOT_PROVEN",
+    "stabilizer_rudder_elevator_layout": "CONSISTENT_BUT_NOT_PROVEN",
+    "fuselage_proportions": "CONSISTENT_BUT_NOT_PROVEN",
+    "manufacturer_design_continuity_statement": "CONSISTENT_BUT_NOT_PROVEN",
+    "quality": "unknown",
+    "note": "SIG calls the EGV the latest ARF rendition and the manual calls it an ARF version with a proven aerodynamic design. Those statements support family continuity, not equality of local stations or planform coordinates. EGV uses a two-piece tube-joined, nylon-bolted wing; the original kit uses a rubber-band-retained wing."
   },
   "control_travel_geometry": {
     "aileron": {
@@ -550,12 +667,22 @@
     "original_kit": {
       "down_deg": 6.0,
       "right_deg": 6.0,
-      "quality": "manufacturer_spec"
+      "quality": "manufacturer_spec",
+      "source_refs": [
+        "sig-lt40-kit-product"
+      ],
+      "evidence_note": "The current SIG product page publishes 6 deg down and 6 deg right. The kit build manual separately instructs the builder to aim for zero side thrust when locating the engine on F1, with slight right thrust acceptable. This documentary conflict is not used to infer EGV geometry."
     },
     "egv": {
       "down_deg": null,
       "right_deg": null,
-      "quality": "unknown"
+      "quality": "unknown",
+      "source_refs": [
+        "sig-lt40-egv-arf-manual"
+      ],
+      "reason": "The EGV manual defines a 4-3/8 in motor-box-back to thrust-washer distance, requires the adjustable firewall to be square in the motor box, and provides scribed thrust-line centering marks. It does not publish the motor-box installation angle or down/right thrust angles relative to an aircraft datum.",
+      "variant_applicability": "EGV only",
+      "closure_requirement": "Manufacturer angular specification or direct side- and top-view measurement of the installed shaft axis relative to documented wing/fuselage datums."
     }
   },
   "consistency_checks": {
