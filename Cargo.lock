@@ -12,6 +12,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aircraft"
+version = "0.1.0"
+dependencies = [
+ "allocation-counter",
+ "criterion",
+ "model",
+ "sim_core",
+ "sim_math",
+ "thiserror",
+]
+
+[[package]]
 name = "allocation-counter"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -385,6 +397,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "model"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "serde",
+ "serde_json",
+ "sim_core",
+ "sim_math",
+ "thiserror",
+]
+
+[[package]]
 name = "nalgebra"
 version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -540,6 +565,8 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 name = "rcsim-app"
 version = "0.1.0"
 dependencies = [
+ "aircraft",
+ "model",
  "replay",
  "sim_core",
  "sim_math",

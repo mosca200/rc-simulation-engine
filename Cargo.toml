@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/sim_math",
     "crates/sim_core",
+    "crates/model",
+    "crates/aircraft",
     "crates/telemetry",
     "crates/replay",
     "crates/app",
