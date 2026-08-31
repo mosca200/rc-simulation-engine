@@ -8,6 +8,8 @@ assembly. The eight-element discretization and four control-surface bindings are
 small engineering placeholders. They are not measured or calibrated flight-test data and must not be used to infer
 real-aircraft performance or safety margins. Physical calibration belongs to S10.
 
-`model.json` intentionally contains a relative presentation reference to `aircraft.glb`. S6.1 keeps
-that string as non-physical metadata and does not require the referenced file to exist. No GLB asset
-is supplied at this stage.
+`model.json` contains a relative presentation reference to `aircraft.glb`. The checked-in asset is a
+low-poly **presentation placeholder**, not final artwork. It makes the fuselage, main wing,
+horizontal stabilizer, vertical stabilizer, and orange nose direction visible. Its local render
+coordinates are `+X` right, `+Y` up, and `-Z` forward/nose. Regenerate it deterministically from the
+repository root with `powershell -File tools/generate_placeholder_aircraft_glb.ps1`.

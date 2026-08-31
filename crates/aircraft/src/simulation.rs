@@ -1146,6 +1146,29 @@ mod tests {
     }
 
     #[test]
+    fn acro_electric_01_complete_step_allocates_nothing_after_initialization() {
+        let model = AircraftModelLoader::from_json_str(include_str!(
+            "../../../models/acro_electric_01/model.json"
+        ))
+        .unwrap();
+        let mut simulation = AircraftSimulation::new(
+            model,
+            config(0.002, 1.225, Vec3::new(0.0, 0.0, 9.80665)),
+            state_with_velocity(Vec3::new(18.0, 0.0, 0.0)),
+        )
+        .unwrap();
+        let input = PilotInput::new(0.0, 0.0, 0.0, 0.55);
+        std::hint::black_box(simulation.step(&input));
+
+        let allocation_info = allocation_counter::measure(|| {
+            for _ in 0..100 {
+                std::hint::black_box(simulation.step(std::hint::black_box(&input)));
+            }
+        });
+        assert_eq!(allocation_info.count_total, 0, "{allocation_info:?}");
+    }
+
+    #[test]
     fn huge_finite_gain_that_can_overflow_is_rejected_at_initialization() {
         let elements = [identity_element("surface", [0.0, 0.0, 0.0], 0.2)];
         let bindings = [String::from(

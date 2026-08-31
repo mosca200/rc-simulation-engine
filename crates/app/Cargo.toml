@@ -12,6 +12,8 @@ platform = { path = "../platform" }
 pollster.workspace = true
 renderer = { path = "../renderer" }
 replay = { path = "../replay" }
+serde.workspace = true
+serde_json.workspace = true
 sim_core = { path = "../sim_core" }
 sim_math = { path = "../sim_math" }
 telemetry = { path = "../telemetry" }

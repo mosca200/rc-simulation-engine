@@ -1,12 +1,17 @@
-use aircraft::{AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError};
+use crate::render_snapshot::{
+    AircraftRenderSnapshot, AircraftRenderSnapshotBuffer, interpolation_alpha,
+};
+use aircraft::{
+    AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
+};
 use model::{ModelLoadError, load_aircraft_model};
 use platform::{
     GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
     KeyboardKey,
 };
 use renderer::{
-    FixedStepAccumulator, FixedStepAccumulatorError, RenderDataError, RenderFrame, RendererError,
-    SurfaceError, WgpuRenderer, world_ned_pose_to_render,
+    AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbLoadError, RenderDataError,
+    RenderFrame, RendererError, SurfaceError, WgpuRenderer, aircraft_mesh, load_glb_mesh,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -16,7 +21,7 @@ use sim_core::{
 use sim_math::{Orientation, Vec3};
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -102,6 +107,12 @@ pub enum RenderAppError {
         #[source]
         source: ModelLoadError,
     },
+    #[error("failed to load declared presentation asset {path}: {source}")]
+    PresentationAsset {
+        path: PathBuf,
+        #[source]
+        source: GlbLoadError,
+    },
     #[error("failed to initialize AircraftSimulation for render mode: {0}")]
     AircraftSimulation(#[from] AircraftSimulationError),
     #[error("failed to configure the render atmosphere: {0}")]
@@ -162,11 +173,13 @@ pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
 
 struct RenderApplication {
     simulation: AircraftSimulation,
+    aircraft_mesh: AircraftMesh,
     input_state: InputState,
     input_backend: GilrsInputBackend,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
+    render_snapshots: AircraftRenderSnapshotBuffer,
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
     window: Option<Arc<Window>>,
@@ -179,9 +192,13 @@ impl RenderApplication {
         let model_path = options.model_path;
         let model =
             load_aircraft_model(&model_path).map_err(|source| RenderAppError::ModelLoad {
-                path: model_path,
+                path: model_path.clone(),
                 source,
             })?;
+        let aircraft_mesh = resolve_aircraft_mesh(
+            &model_path,
+            model.presentation().map(|value| value.glb_path()),
+        )?;
         let initial_state = RigidBodyState {
             position_world_m: Vec3::new(0.0, 0.0, -100.0),
             linear_velocity_world_mps: Vec3::new(18.0, 0.0, 0.0),
@@ -189,6 +206,8 @@ impl RenderApplication {
             angular_velocity_body_radps: Vec3::zeros(),
         };
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
+        let render_snapshots =
+            AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
         let config = AircraftSimulationConfig::from_physics_hz(DEFAULT_PHYSICS_HZ, environment)?;
         let simulation = AircraftSimulation::new(model, config, initial_state)?;
@@ -209,11 +228,13 @@ impl RenderApplication {
         )?;
         Ok(Self {
             simulation,
+            aircraft_mesh,
             input_state,
             input_backend,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
+            render_snapshots,
             fixed_step,
             last_frame_time: None,
             window: None,
@@ -269,12 +290,16 @@ impl RenderApplication {
                     return;
                 }
             };
-            if let Err(error) =
-                advance_aircraft(&mut self.simulation, &mut self.replay_recorder, input)
-            {
-                self.fail(event_loop, error.into());
-                return;
-            }
+            let snapshot =
+                match advance_aircraft(&mut self.simulation, &mut self.replay_recorder, input) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.fail(event_loop, error.into());
+                        return;
+                    }
+                };
+            self.render_snapshots
+                .push(AircraftRenderSnapshot::post_step(&snapshot));
         }
         if step_plan.dropped_time_s() > 0.0 {
             warn!(
@@ -283,10 +308,11 @@ impl RenderApplication {
             );
         }
 
-        let pose = match rigid_state_to_render_pose(
-            self.simulation.state().rigid_body(),
-            self.render_origin_world_ned_m,
-        ) {
+        let alpha = interpolation_alpha(step_plan.remainder(), self.fixed_step.physics_dt());
+        let pose = match self
+            .render_snapshots
+            .interpolated_pose(alpha, self.render_origin_world_ned_m)
+        {
             Ok(pose) => pose,
             Err(error) => {
                 self.fail(event_loop, error.into());
@@ -329,7 +355,7 @@ impl ApplicationHandler for RenderApplication {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("RC Simulation Engine — S7 Minimal Renderer")
+            .with_title("RC Simulation Engine — P1 GLB Presentation")
             .with_inner_size(LogicalSize::new(1_280.0, 720.0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -338,16 +364,17 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
-        let renderer = match pollster::block_on(WgpuRenderer::new(Arc::clone(&window))) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                self.fail(
-                    event_loop,
-                    RenderRuntimeError::RendererInitialization(error),
-                );
-                return;
-            }
-        };
+        let renderer =
+            match pollster::block_on(WgpuRenderer::new(Arc::clone(&window), &self.aircraft_mesh)) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    self.fail(
+                        event_loop,
+                        RenderRuntimeError::RendererInitialization(error),
+                    );
+                    return;
+                }
+            };
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());
@@ -418,14 +445,31 @@ fn advance_aircraft(
     simulation: &mut AircraftSimulation,
     recorder: &mut Option<AircraftReplayRecorder>,
     input: PilotInput,
-) -> Result<(), AircraftReplayError> {
+) -> Result<AircraftSnapshot, AircraftReplayError> {
     let step_index = simulation.step_index();
     if let Some(recorder) = recorder {
-        let _ = recorder.record(simulation, step_index, input)?;
+        recorder.record(simulation, step_index, input)
     } else {
-        let _ = simulation.step(&input);
+        Ok(simulation.step(&input))
     }
-    Ok(())
+}
+
+fn resolve_presentation_path(model_path: &Path, glb_path: &str) -> PathBuf {
+    model_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(glb_path)
+}
+
+fn resolve_aircraft_mesh(
+    model_path: &Path,
+    glb_path: Option<&str>,
+) -> Result<AircraftMesh, RenderAppError> {
+    let Some(glb_path) = glb_path else {
+        return Ok(aircraft_mesh());
+    };
+    let path = resolve_presentation_path(model_path, glb_path);
+    load_glb_mesh(&path).map_err(|source| RenderAppError::PresentationAsset { path, source })
 }
 
 fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
@@ -440,18 +484,6 @@ fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
         PhysicalKey::Code(KeyCode::KeyF) => Some(KeyboardKey::ThrottleDecrease),
         _ => None,
     }
-}
-
-fn rigid_state_to_render_pose(
-    state: &RigidBodyState,
-    render_origin_world_ned_m: [f64; 3],
-) -> Result<renderer::RenderPose, RenderDataError> {
-    let quaternion = state.orientation_world_from_body.quaternion();
-    world_ned_pose_to_render(
-        vector_to_array(state.position_world_m),
-        [quaternion.w, quaternion.i, quaternion.j, quaternion.k],
-        render_origin_world_ned_m,
-    )
 }
 
 fn vector_to_array(vector: Vec3) -> [f64; 3] {
@@ -480,15 +512,64 @@ mod tests {
     }
 
     #[test]
-    fn rigid_body_adapter_preserves_raw_pose_semantics() {
+    fn initial_render_snapshot_adapter_preserves_raw_pose_semantics() {
         let state = RigidBodyState {
             position_world_m: Vec3::new(101.0, 202.0, 303.0),
             linear_velocity_world_mps: Vec3::zeros(),
             orientation_world_from_body: Orientation::identity(),
             angular_velocity_body_radps: Vec3::zeros(),
         };
-        let pose = rigid_state_to_render_pose(&state, [100.0, 200.0, 300.0]).unwrap();
+        let buffer = AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&state));
+        let pose = buffer
+            .interpolated_pose(0.0, [100.0, 200.0, 300.0])
+            .unwrap();
         assert_eq!(pose.translation_render_m(), [2.0, -3.0, -1.0]);
+    }
+
+    #[test]
+    fn presentation_path_is_resolved_relative_to_model_directory() {
+        let model_path = Path::new("models/acro_electric_01/model.json");
+        assert_eq!(
+            resolve_presentation_path(model_path, "aircraft.glb"),
+            PathBuf::from("models/acro_electric_01/aircraft.glb")
+        );
+    }
+
+    #[test]
+    fn declared_valid_missing_and_invalid_assets_have_explicit_outcomes() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let valid = resolve_aircraft_mesh(&model_path, Some("aircraft.glb")).unwrap();
+        assert!(!valid.vertices().is_empty());
+        assert!(matches!(
+            resolve_aircraft_mesh(&model_path, Some("missing.glb")),
+            Err(RenderAppError::PresentationAsset { .. })
+        ));
+        assert!(matches!(
+            resolve_aircraft_mesh(&model_path, Some("README.md")),
+            Err(RenderAppError::PresentationAsset { .. })
+        ));
+    }
+
+    #[test]
+    fn absent_presentation_metadata_uses_procedural_fallback() {
+        let mesh = resolve_aircraft_mesh(Path::new("model.json"), None).unwrap();
+        assert!(!mesh.vertices().is_empty());
+        assert!(!mesh.indices().is_empty());
+    }
+
+    #[test]
+    fn presentation_asset_does_not_change_acro_physics_fingerprint() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        let before = model.physics_fingerprint();
+        let _mesh = resolve_aircraft_mesh(
+            &model_path,
+            model.presentation().map(|value| value.glb_path()),
+        )
+        .unwrap();
+        assert_eq!(model.physics_fingerprint(), before);
     }
 
     #[test]

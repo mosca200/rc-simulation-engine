@@ -1,5 +1,5 @@
 use crate::{
-    ChaseCamera, Mat4, RenderFrame, Vertex, aircraft_mesh, matrix_to_wgsl_columns,
+    AircraftMesh, ChaseCamera, Mat4, RenderFrame, Vertex, ground_plane, matrix_to_wgsl_columns,
     reference_grid_and_axes,
 };
 use bytemuck::{Pod, Zeroable};
@@ -18,6 +18,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const GPU_ERROR_NONE: u8 = 0;
 const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
 const GPU_ERROR_OTHER: u8 = 2;
+pub const SKY_CLEAR_COLOR: [f64; 4] = [0.36, 0.62, 0.88, 1.0];
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -82,6 +83,9 @@ pub struct WgpuRenderer {
     aircraft_vertex_buffer: wgpu::Buffer,
     aircraft_index_buffer: wgpu::Buffer,
     aircraft_index_count: u32,
+    ground_vertex_buffer: wgpu::Buffer,
+    ground_index_buffer: wgpu::Buffer,
+    ground_index_count: u32,
     line_vertex_buffer: wgpu::Buffer,
     line_vertex_count: u32,
     camera_buffer: wgpu::Buffer,
@@ -95,7 +99,7 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    pub async fn new(window: Arc<Window>) -> Result<Self, RendererError> {
+    pub async fn new(window: Arc<Window>, aircraft: &AircraftMesh) -> Result<Self, RendererError> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -204,15 +208,25 @@ impl WgpuRenderer {
             },
         );
 
-        let aircraft = aircraft_mesh();
         let aircraft_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("procedural aircraft vertices"),
+            label: Some("aircraft presentation vertices"),
             contents: bytemuck::cast_slice(aircraft.vertices()),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let aircraft_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("procedural aircraft indices"),
+            label: Some("aircraft presentation indices"),
             contents: bytemuck::cast_slice(aircraft.indices()),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let ground = ground_plane();
+        let ground_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("render-only ground vertices"),
+            contents: bytemuck::cast_slice(ground.vertices()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ground_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("render-only ground indices"),
+            contents: bytemuck::cast_slice(ground.indices()),
             usage: wgpu::BufferUsages::INDEX,
         });
         let references = reference_grid_and_axes();
@@ -268,6 +282,9 @@ impl WgpuRenderer {
             aircraft_vertex_buffer,
             aircraft_index_buffer,
             aircraft_index_count: aircraft.indices().len() as u32,
+            ground_vertex_buffer,
+            ground_index_buffer,
+            ground_index_count: ground.indices().len() as u32,
             line_vertex_buffer,
             line_vertex_count: references.vertices().len() as u32,
             camera_buffer,
@@ -345,10 +362,10 @@ impl WgpuRenderer {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.36,
-                        g: 0.62,
-                        b: 0.88,
-                        a: 1.0,
+                        r: SKY_CLEAR_COLOR[0],
+                        g: SKY_CLEAR_COLOR[1],
+                        b: SKY_CLEAR_COLOR[2],
+                        a: SKY_CLEAR_COLOR[3],
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -371,6 +388,15 @@ impl WgpuRenderer {
             });
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
+            render_pass.set_pipeline(&self.triangle_pipeline);
+            render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.ground_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(
+                self.ground_index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            render_pass.draw_indexed(0..self.ground_index_count, 0, 0..1);
+
             render_pass.set_pipeline(&self.line_pipeline);
             render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
@@ -381,7 +407,7 @@ impl WgpuRenderer {
             render_pass.set_vertex_buffer(0, self.aircraft_vertex_buffer.slice(..));
             render_pass.set_index_buffer(
                 self.aircraft_index_buffer.slice(..),
-                wgpu::IndexFormat::Uint16,
+                wgpu::IndexFormat::Uint32,
             );
             render_pass.draw_indexed(0..self.aircraft_index_count, 0, 0..1);
         }

@@ -10,19 +10,56 @@ pub struct Vertex {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AircraftMesh {
     vertices: Vec<Vertex>,
-    indices: Vec<u16>,
+    indices: Vec<u32>,
 }
 
 impl AircraftMesh {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Result<Self, MeshError> {
+        if vertices.is_empty() {
+            return Err(MeshError::EmptyVertices);
+        }
+        if indices.is_empty() || !indices.len().is_multiple_of(3) {
+            return Err(MeshError::InvalidTriangleIndices);
+        }
+        if !vertices.iter().all(|vertex| {
+            vertex
+                .position
+                .into_iter()
+                .chain(vertex.color)
+                .all(f32::is_finite)
+        }) {
+            return Err(MeshError::NonFiniteVertex);
+        }
+        if indices
+            .iter()
+            .any(|&index| index as usize >= vertices.len())
+        {
+            return Err(MeshError::IndexOutOfBounds);
+        }
+        Ok(Self { vertices, indices })
+    }
+
     #[must_use]
     pub fn vertices(&self) -> &[Vertex] {
         &self.vertices
     }
 
     #[must_use]
-    pub fn indices(&self) -> &[u16] {
+    pub fn indices(&self) -> &[u32] {
         &self.indices
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MeshError {
+    #[error("render mesh has no vertices")]
+    EmptyVertices,
+    #[error("render mesh indices must contain one or more complete triangles")]
+    InvalidTriangleIndices,
+    #[error("render mesh contains a non-finite vertex component")]
+    NonFiniteVertex,
+    #[error("render mesh contains an out-of-range vertex index")]
+    IndexOutOfBounds,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +140,30 @@ pub fn aircraft_mesh() -> AircraftMesh {
     AircraftMesh { vertices, indices }
 }
 
+/// Flat render-only local ground, kept below the debug grid to avoid z-fighting.
+#[must_use]
+pub fn ground_plane() -> AircraftMesh {
+    let vertices = vec![
+        Vertex {
+            position: [-500.0, -10.04, -500.0],
+            color: [0.20, 0.34, 0.16],
+        },
+        Vertex {
+            position: [500.0, -10.04, -500.0],
+            color: [0.20, 0.34, 0.16],
+        },
+        Vertex {
+            position: [500.0, -10.04, 500.0],
+            color: [0.24, 0.39, 0.18],
+        },
+        Vertex {
+            position: [-500.0, -10.04, 500.0],
+            color: [0.24, 0.39, 0.18],
+        },
+    ];
+    AircraftMesh::new(vertices, vec![0, 2, 1, 0, 3, 2]).expect("static ground mesh is valid")
+}
+
 /// Static grid on render XZ plus the East/Up/South positive axes.
 #[must_use]
 pub fn reference_grid_and_axes() -> LineMesh {
@@ -155,7 +216,7 @@ fn add_line(vertices: &mut Vec<Vertex>, start: [f32; 3], end: [f32; 3], color: [
 
 fn add_box(
     vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u16>,
+    indices: &mut Vec<u32>,
     minimum: [f32; 3],
     maximum: [f32; 3],
     color: [f32; 3],
@@ -181,8 +242,8 @@ fn add_box(
         [4, 0, 1, 5],
     ];
     for face in faces {
-        debug_assert!(vertices.len() <= usize::from(u16::MAX) - 4);
-        let base_index = vertices.len() as u16;
+        debug_assert!(vertices.len() <= u32::MAX as usize - 4);
+        let base_index = vertices.len() as u32;
         vertices.extend(face.map(|corner_index| Vertex {
             position: corners[corner_index],
             color,
@@ -241,7 +302,7 @@ mod tests {
         assert!(
             mesh.indices()
                 .iter()
-                .all(|index| usize::from(*index) < mesh.vertices().len())
+                .all(|index| (*index as usize) < mesh.vertices().len())
         );
     }
 
@@ -271,6 +332,23 @@ mod tests {
             mesh.vertices()
                 .iter()
                 .any(|vertex| vertex.position == [0.0, 0.0, 50.0])
+        );
+    }
+
+    #[test]
+    fn ground_is_a_valid_render_only_plane_below_the_grid() {
+        let mesh = ground_plane();
+        assert_eq!(mesh.vertices().len(), 4);
+        assert_eq!(mesh.indices().len(), 6);
+        assert!(
+            mesh.vertices()
+                .iter()
+                .all(|vertex| vertex.position[1] < -10.0)
+        );
+        assert!(
+            mesh.indices()
+                .iter()
+                .all(|index| (*index as usize) < mesh.vertices().len())
         );
     }
 }

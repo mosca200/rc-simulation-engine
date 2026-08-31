@@ -1,12 +1,17 @@
 #![forbid(unsafe_code)]
 
+mod benchmark_app;
+mod first_slice_app;
 mod input_app;
 mod render_app;
+mod render_snapshot;
 mod replay_app;
 mod telemetry_app;
 mod validation_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
+use benchmark_app::{AircraftBenchmarkOptions, run_aircraft_benchmark};
+use first_slice_app::{FirstSliceOptions, run_first_slice_validation};
 use input_app::run_input_list;
 use model::{AircraftModelFingerprint, load_aircraft_model};
 use render_app::{RenderOptions, run_render};
@@ -42,6 +47,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(input_command) => Err(format!("unknown input command: {input_command}").into()),
             None => Err("missing input command; expected `list`".into()),
         },
+        Some(command) if command == "benchmark" => match arguments.next().as_deref() {
+            Some("aircraft") => {
+                run_aircraft_benchmark(AircraftBenchmarkOptions::parse(arguments)?)?;
+                Ok(())
+            }
+            Some(benchmark_command) => {
+                Err(format!("unknown benchmark command: {benchmark_command}").into())
+            }
+            None => Err("missing benchmark command; expected `aircraft`".into()),
+        },
         Some(command) if command == "replay" => {
             run_replay(ReplayOptions::parse(arguments)?)?;
             Ok(())
@@ -54,10 +69,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_render(RenderOptions::parse(arguments)?)?;
             Ok(())
         }
-        Some(command) if command == "validate" => {
-            run_validation(ValidationOptions::parse(arguments)?)?;
-            Ok(())
-        }
+        Some(command) if command == "validate" => match arguments.next().as_deref() {
+            Some("first-slice") => {
+                run_first_slice_validation(FirstSliceOptions::parse(arguments)?)?;
+                Ok(())
+            }
+            Some(validation_target) => {
+                run_validation(ValidationOptions::parse(
+                    std::iter::once(validation_target.to_owned()).chain(arguments),
+                )?)?;
+                Ok(())
+            }
+            None => Err(
+                "missing validation target; expected `acro-electric-01` or `first-slice`".into(),
+            ),
+        },
         Some(command) if command == "aircraft" => run_aircraft(AircraftOptions::parse(arguments)?),
         Some(first_argument) => run_foundation(Options::parse(
             std::iter::once(first_argument).chain(arguments),
@@ -305,6 +331,9 @@ fn print_usage() {
     println!("Usage:");
     println!("  rcsim-app [--steps N] [--physics-hz HZ]");
     println!("  rcsim-app aircraft [--model PATH] [--steps N] [--physics-hz HZ]");
+    println!(
+        "  rcsim-app benchmark aircraft [--model PATH] [--warmup-steps N] [--steps N] [--physics-hz HZ]"
+    );
     println!("  rcsim-app render [--model PATH] [--throttle VALUE] [--record-replay PATH]");
     println!("  rcsim-app input list");
     println!(
@@ -317,6 +346,7 @@ fn print_usage() {
     println!("  rcsim-app telemetry from-replay --model PATH --replay PATH --output PATH");
     println!("  rcsim-app telemetry analyze --input PATH");
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
+    println!("  rcsim-app validate first-slice --output-dir PATH");
 }
 
 fn parse_value<T>(flag: &str, value: Option<String>) -> Result<T, String>

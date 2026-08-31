@@ -174,6 +174,37 @@ struct ManoeuvreCapture {
     metrics: ManoeuvreMetrics,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValidationSuiteEvidence {
+    pub(crate) suite_version: u32,
+    pub(crate) manoeuvre_count: usize,
+    pub(crate) replay_verified: bool,
+    pub(crate) telemetry_valid: bool,
+}
+
+pub(crate) fn validate_model_in_memory(
+    model: &AircraftModel,
+) -> Result<ValidationSuiteEvidence, ValidationAppError> {
+    for spec in MANOEUVRES {
+        let capture = capture_manoeuvre(model, spec)?;
+        if capture.replay.frames().len() != spec.steps as usize
+            || capture.telemetry.frames().len() != spec.steps as usize
+        {
+            return Err(ValidationAppError::ReplayStepCount {
+                expected: spec.steps,
+                actual: capture.replay.frames().len() as u64,
+            });
+        }
+        let _ = capture.telemetry.summary()?;
+    }
+    Ok(ValidationSuiteEvidence {
+        suite_version: VALIDATION_SUITE_VERSION,
+        manoeuvre_count: MANOEUVRES.len(),
+        replay_verified: true,
+        telemetry_valid: true,
+    })
+}
+
 pub fn run_validation(options: ValidationOptions) -> Result<(), ValidationAppError> {
     let model_path = PathBuf::from(MODEL_PATH);
     let model =

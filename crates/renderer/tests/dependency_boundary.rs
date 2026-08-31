@@ -10,7 +10,15 @@ fn renderer_manifest_has_no_physics_model_or_aircraft_dependencies() {
         .map(|(_, remainder)| remainder.split("\n[").next().unwrap_or(remainder))
         .unwrap_or("");
 
-    for forbidden_dependency in ["sim_core", "sim_math", "model", "aircraft"] {
+    for forbidden_dependency in [
+        "sim_core",
+        "sim_math",
+        "model",
+        "aircraft",
+        "replay",
+        "telemetry",
+        "platform",
+    ] {
         assert!(
             !dependency_section.lines().any(|line| {
                 line.trim_start()
