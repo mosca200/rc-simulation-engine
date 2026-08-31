@@ -8,7 +8,7 @@
 - OS: Microsoft Windows NT 10.0.26200.0
 - Build profile: Cargo bench / optimized Criterion profile
 - Verification command: `cargo bench`
-- Aircraft fixture: Acro Electric 01 schema v1, 8 aerodynamic elements, 4 controlled elements, electric propulsion present
+- Aircraft fixture: Acro Electric 01 schema v2 (`synthetic_test`), 8 aerodynamic elements, 4 controlled elements, electric propulsion present
 
 | Benchmark | 95% confidence interval | Point estimate | Approximate throughput | 2 ms budget |
 | --- | ---: | ---: | ---: | ---: |

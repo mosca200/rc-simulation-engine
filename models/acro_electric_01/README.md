@@ -1,12 +1,13 @@
 # Acro Electric 01
 
-This model is an **initial engineering placeholder / not yet flight-calibrated**.
+This model is explicitly classified as `synthetic_test`. It exists to exercise the simulator and
+support deterministic regression tests. It is **not a validated reproduction of a real aircraft**
+and must not be used as evidence that the simulator is realistic.
 
-Its values are physically plausible and internally consistent, but they exist only to exercise
-aircraft-model schema v1, strict loading, reference resolution, fingerprinting, and S6.1 aircraft
-assembly. The eight-element discretization and four control-surface bindings are deliberately
-small engineering placeholders. They are not measured or calibrated flight-test data and must not be used to infer
-real-aircraft performance or safety margins. Physical calibration belongs to S10.
+Its values exist only to exercise strict model loading, reference resolution, fingerprinting, and
+aircraft assembly. The eight-element discretization, aerodynamic polars, and four control-surface
+bindings are intentionally simplified synthetic data. They are not measured or calibrated
+flight-test data and must not be used to infer real-aircraft performance or safety margins.
 
 `model.json` contains a relative presentation reference to `aircraft.glb`. The checked-in asset is a
 low-poly **presentation placeholder**, not final artwork. It makes the fuselage, main wing,

@@ -1,7 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "model_id": "acro-electric-01",
   "display_name": "Acro Electric 01",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
   "rigid_body": {
     "mass_kg": 2.3,
     "inertia_body_kg_m2": [

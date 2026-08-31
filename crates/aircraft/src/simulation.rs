@@ -1099,7 +1099,7 @@ mod tests {
             "../../../models/acro_electric_01/model.json"
         ))
         .unwrap();
-        assert_eq!(model.schema_version(), 1);
+        assert_eq!(model.schema_version(), 2);
         assert!(model.control_surface_bindings().len() >= 4);
         assert!(model.propulsion().is_some());
         let initial = state_with_velocity(Vec3::new(22.0, 0.0, 0.0));

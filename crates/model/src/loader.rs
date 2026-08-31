@@ -1,11 +1,25 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V2,
+    reference::{
+        AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
+        ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
+        ReferenceAircraftMetadata, ReferenceCgLocation, ReferenceControlSurfaceTravel,
+        ReferenceParameterEvidence, ReferencePhysicalSpecification, ReferenceScalar,
+    },
     runtime::{
         AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroElement,
         RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
     },
     v0::{AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0, ServoFileV0},
     v1::{AircraftModelFileV1, ControlActuatorFileV1, ControlSurfaceBindingFileV1},
+    v2::{
+        AircraftClassificationFileV2, AircraftModelFileV2, CgReferenceKindFileV2,
+        ParameterQualityFileV2, ProvenanceConfidenceFileV2, ProvenanceSourceFileV2,
+        ProvenanceSourceTypeFileV2, ReferenceAircraftFileV2, ReferenceCgLocationFileV2,
+        ReferenceParameterEvidenceFileV2, ReferencePhysicalSpecificationFileV2,
+        ReferenceScalarFileV2,
+    },
 };
 use serde::Deserialize;
 use sim_core::{
@@ -139,6 +153,48 @@ pub enum ModelLoadError {
         "invalid presentation GLB path {path:?}: expected a nonempty relative path without '..'"
     )]
     InvalidPresentationAssetPath { path: String },
+    #[error("synthetic_test model must not contain reference_aircraft metadata")]
+    UnexpectedReferenceAircraftMetadata,
+    #[error("reference_aircraft model requires a reference_aircraft metadata object")]
+    MissingReferenceAircraftMetadata,
+    #[error("invalid optional text at {field}: expected nonempty text when present")]
+    InvalidReferenceText { field: String },
+    #[error("invalid stable reference ID {value:?}; expected nonempty [a-z0-9_-]+")]
+    InvalidReferenceId { value: String },
+    #[error("invalid reference physical value at {field}: {value:?}; {requirement}")]
+    InvalidReferencePhysicalValue {
+        field: &'static str,
+        value: f64,
+        requirement: &'static str,
+    },
+    #[error("invalid reference CG position: all coordinates must be finite")]
+    InvalidReferenceCgPosition,
+    #[error("CG reference kind {kind:?} requires a nonempty description")]
+    InvalidReferenceCgDefinition { kind: CgReferenceKindFileV2 },
+    #[error("reference parameter {parameter} references unknown provenance source {source_id:?}")]
+    UnresolvedProvenanceReference {
+        parameter: String,
+        source_id: String,
+    },
+    #[error(
+        "reference parameter {parameter} contains duplicate provenance source reference {source_id:?}"
+    )]
+    DuplicateProvenanceReference {
+        parameter: String,
+        source_id: String,
+    },
+    #[error(
+        "reference control travel at index {index} references unknown control-surface binding {binding_id:?}"
+    )]
+    UnresolvedReferenceControlSurfaceBinding { index: usize, binding_id: String },
+    #[error(
+        "reference control travel at index {duplicate_index} duplicates binding {binding_id:?} first declared at index {first_index}"
+    )]
+    DuplicateReferenceControlSurfaceBinding {
+        binding_id: String,
+        first_index: usize,
+        duplicate_index: usize,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -161,6 +217,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V1);
                 resolve_v1(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V2) => {
+                let file: AircraftModelFileV2 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V2);
+                resolve_v2(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -197,6 +259,13 @@ fn resolve_v0(file: AircraftModelFileV0) -> Result<AircraftModel, ModelLoadError
 }
 
 fn resolve_v1(file: AircraftModelFileV1) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v1_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V1)
+}
+
+fn resolve_v1_fields(
+    file: AircraftModelFileV1,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
     let AircraftModelFileV1 {
         schema_version,
         model_id,
@@ -218,9 +287,56 @@ fn resolve_v1(file: AircraftModelFileV1) -> Result<AircraftModel, ModelLoadError
         propulsion,
         presentation,
     };
-    let model = resolve_common(common_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V1)?;
+    let model = resolve_common(common_file, runtime_schema_version)?;
     let bindings = resolve_control_surface_bindings(&model, control_surface_bindings)?;
     Ok(model.with_control_surface_bindings(bindings))
+}
+
+fn resolve_v2(file: AircraftModelFileV2) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV2 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    } = file;
+    let v1_file = AircraftModelFileV1 {
+        schema_version,
+        model_id,
+        display_name,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v1_fields(v1_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V2)?;
+    let classification = match classification {
+        AircraftClassificationFileV2::SyntheticTest => AircraftClassification::SyntheticTest,
+        AircraftClassificationFileV2::ReferenceAircraft => {
+            AircraftClassification::ReferenceAircraft
+        }
+    };
+    let reference_aircraft = match (classification, reference_aircraft) {
+        (AircraftClassification::SyntheticTest, None) => None,
+        (AircraftClassification::SyntheticTest, Some(_)) => {
+            return Err(ModelLoadError::UnexpectedReferenceAircraftMetadata);
+        }
+        (AircraftClassification::ReferenceAircraft, None) => {
+            return Err(ModelLoadError::MissingReferenceAircraftMetadata);
+        }
+        (AircraftClassification::ReferenceAircraft, Some(file)) => {
+            Some(resolve_reference_aircraft(&model, file)?)
+        }
+    };
+    Ok(model.with_reference_framework(classification, reference_aircraft))
 }
 
 fn resolve_common(
@@ -453,6 +569,327 @@ fn resolve_control_surface_bindings(
         ));
     }
     Ok(bindings)
+}
+
+fn resolve_reference_aircraft(
+    model: &AircraftModel,
+    file: ReferenceAircraftFileV2,
+) -> Result<ReferenceAircraftMetadata, ModelLoadError> {
+    let identity_file = file.identity;
+    let manufacturer =
+        validate_optional_reference_text("identity.manufacturer", identity_file.manufacturer)?;
+    let aircraft_name =
+        validate_optional_reference_text("identity.aircraft_name", identity_file.aircraft_name)?;
+    let variant = validate_optional_reference_text("identity.variant", identity_file.variant)?;
+    let stable_reference_id = identity_file
+        .stable_reference_id
+        .map(|value| {
+            if is_valid_stable_id(&value) {
+                Ok(value)
+            } else {
+                Err(ModelLoadError::InvalidReferenceId { value })
+            }
+        })
+        .transpose()?;
+    let notes = validate_optional_reference_text("identity.notes", identity_file.notes)?;
+    let identity = ReferenceAircraftIdentity {
+        manufacturer,
+        aircraft_name,
+        variant,
+        stable_reference_id,
+        notes,
+    };
+
+    let mut provenance_sources = Vec::with_capacity(file.provenance_sources.len());
+    for (index, source) in file.provenance_sources.into_iter().enumerate() {
+        validate_unique_id(
+            "provenance source",
+            index,
+            &source.id,
+            provenance_sources.iter().map(ProvenanceSource::id),
+        )?;
+        provenance_sources.push(resolve_provenance_source(index, source)?);
+    }
+
+    let physical_specification = resolve_reference_physical_specification(
+        model,
+        file.physical_specification,
+        &provenance_sources,
+    )?;
+    Ok(ReferenceAircraftMetadata {
+        identity,
+        physical_specification,
+        provenance_sources,
+    })
+}
+
+fn resolve_provenance_source(
+    index: usize,
+    file: ProvenanceSourceFileV2,
+) -> Result<ProvenanceSource, ModelLoadError> {
+    let prefix = format!("provenance_sources[{index}]");
+    Ok(ProvenanceSource {
+        id: file.id,
+        source_type: match file.source_type {
+            ProvenanceSourceTypeFileV2::ManufacturerDocumentation => {
+                ProvenanceSourceType::ManufacturerDocumentation
+            }
+            ProvenanceSourceTypeFileV2::Measured => ProvenanceSourceType::Measured,
+            ProvenanceSourceTypeFileV2::PublishedResearch => {
+                ProvenanceSourceType::PublishedResearch
+            }
+            ProvenanceSourceTypeFileV2::AirfoilDatabase => ProvenanceSourceType::AirfoilDatabase,
+            ProvenanceSourceTypeFileV2::NumericalAnalysis => {
+                ProvenanceSourceType::NumericalAnalysis
+            }
+            ProvenanceSourceTypeFileV2::Derived => ProvenanceSourceType::Derived,
+            ProvenanceSourceTypeFileV2::Estimated => ProvenanceSourceType::Estimated,
+        },
+        title: validate_optional_reference_text(&format!("{prefix}.title"), file.title)?,
+        url: validate_optional_reference_text(&format!("{prefix}.url"), file.url)?,
+        bibliographic_reference: validate_optional_reference_text(
+            &format!("{prefix}.bibliographic_reference"),
+            file.bibliographic_reference,
+        )?,
+        notes: validate_optional_reference_text(&format!("{prefix}.notes"), file.notes)?,
+        publication_date: validate_optional_reference_text(
+            &format!("{prefix}.publication_date"),
+            file.publication_date,
+        )?,
+        retrieval_date: validate_optional_reference_text(
+            &format!("{prefix}.retrieval_date"),
+            file.retrieval_date,
+        )?,
+        confidence: file.confidence.map(|confidence| match confidence {
+            ProvenanceConfidenceFileV2::Low => ProvenanceConfidence::Low,
+            ProvenanceConfidenceFileV2::Medium => ProvenanceConfidence::Medium,
+            ProvenanceConfidenceFileV2::High => ProvenanceConfidence::High,
+        }),
+    })
+}
+
+fn resolve_reference_physical_specification(
+    model: &AircraftModel,
+    file: ReferencePhysicalSpecificationFileV2,
+    sources: &[ProvenanceSource],
+) -> Result<ReferencePhysicalSpecification, ModelLoadError> {
+    let positive = |field, value| resolve_reference_scalar(field, value, sources, true);
+    let finite = |field, value| resolve_reference_scalar(field, value, sources, false);
+
+    let mass = file
+        .mass
+        .map(|evidence| {
+            resolve_reference_evidence("physical_specification.mass", evidence, sources)
+        })
+        .transpose()?;
+    let cg_location = file
+        .cg_location
+        .map(|cg| resolve_reference_cg(cg, sources))
+        .transpose()?;
+
+    let mut control_surface_travel_limits =
+        Vec::with_capacity(file.control_surface_travel_limits.len());
+    for (index, travel) in file.control_surface_travel_limits.into_iter().enumerate() {
+        let binding_index = model
+            .control_surface_bindings()
+            .iter()
+            .position(|binding| binding.id() == travel.control_surface_binding_id)
+            .ok_or_else(
+                || ModelLoadError::UnresolvedReferenceControlSurfaceBinding {
+                    index,
+                    binding_id: travel.control_surface_binding_id.clone(),
+                },
+            )?;
+        if let Some(first_index) = control_surface_travel_limits.iter().position(
+            |existing: &ReferenceControlSurfaceTravel| existing.binding_index == binding_index,
+        ) {
+            return Err(ModelLoadError::DuplicateReferenceControlSurfaceBinding {
+                binding_id: travel.control_surface_binding_id,
+                first_index,
+                duplicate_index: index,
+            });
+        }
+        let evidence = resolve_reference_evidence(
+            &format!("physical_specification.control_surface_travel_limits[{index}]"),
+            ReferenceParameterEvidenceFileV2 {
+                status: travel.status,
+                source_ids: travel.source_ids,
+            },
+            sources,
+        )?;
+        control_surface_travel_limits.push(ReferenceControlSurfaceTravel {
+            binding_index,
+            evidence,
+        });
+    }
+
+    Ok(ReferencePhysicalSpecification {
+        wingspan_m: positive("physical_specification.wingspan_m", file.wingspan_m)?,
+        reference_wing_area_m2: positive(
+            "physical_specification.reference_wing_area_m2",
+            file.reference_wing_area_m2,
+        )?,
+        aircraft_length_m: positive(
+            "physical_specification.aircraft_length_m",
+            file.aircraft_length_m,
+        )?,
+        mass,
+        cg_location,
+        aerodynamic_reference_chord_m: positive(
+            "physical_specification.aerodynamic_reference_chord_m",
+            file.aerodynamic_reference_chord_m,
+        )?,
+        wing_incidence_rad: finite(
+            "physical_specification.wing_incidence_rad",
+            file.wing_incidence_rad,
+        )?,
+        horizontal_tail_incidence_rad: finite(
+            "physical_specification.horizontal_tail_incidence_rad",
+            file.horizontal_tail_incidence_rad,
+        )?,
+        wing_dihedral_rad: finite(
+            "physical_specification.wing_dihedral_rad",
+            file.wing_dihedral_rad,
+        )?,
+        control_surface_travel_limits,
+    })
+}
+
+fn resolve_reference_scalar(
+    field: &'static str,
+    file: Option<ReferenceScalarFileV2>,
+    sources: &[ProvenanceSource],
+    must_be_positive: bool,
+) -> Result<Option<ReferenceScalar>, ModelLoadError> {
+    file.map(|file| {
+        if !file.value.is_finite() || (must_be_positive && file.value <= 0.0) {
+            return Err(ModelLoadError::InvalidReferencePhysicalValue {
+                field,
+                value: file.value,
+                requirement: if must_be_positive {
+                    "expected a finite value greater than zero"
+                } else {
+                    "expected a finite value"
+                },
+            });
+        }
+        let evidence = resolve_reference_evidence(
+            field,
+            ReferenceParameterEvidenceFileV2 {
+                status: file.status,
+                source_ids: file.source_ids,
+            },
+            sources,
+        )?;
+        Ok(ReferenceScalar {
+            value: file.value,
+            evidence,
+        })
+    })
+    .transpose()
+}
+
+fn resolve_reference_cg(
+    file: ReferenceCgLocationFileV2,
+    sources: &[ProvenanceSource],
+) -> Result<ReferenceCgLocation, ModelLoadError> {
+    if !file
+        .position_m_from_reference
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(ModelLoadError::InvalidReferenceCgPosition);
+    }
+    let reference_kind = match file.reference.kind {
+        CgReferenceKindFileV2::BodyFrameOriginFrd => CgReferenceKind::BodyFrameOriginFrd,
+        CgReferenceKindFileV2::WingRootLeadingEdge => CgReferenceKind::WingRootLeadingEdge,
+        CgReferenceKindFileV2::MeanAerodynamicChordLeadingEdge => {
+            CgReferenceKind::MeanAerodynamicChordLeadingEdge
+        }
+        CgReferenceKindFileV2::ManufacturerDatum => CgReferenceKind::ManufacturerDatum,
+        CgReferenceKindFileV2::Other => CgReferenceKind::Other,
+    };
+    let description = validate_optional_reference_text(
+        "physical_specification.cg_location.reference.description",
+        file.reference.description,
+    )?;
+    if matches!(
+        file.reference.kind,
+        CgReferenceKindFileV2::ManufacturerDatum | CgReferenceKindFileV2::Other
+    ) && description.is_none()
+    {
+        return Err(ModelLoadError::InvalidReferenceCgDefinition {
+            kind: file.reference.kind,
+        });
+    }
+    let evidence = resolve_reference_evidence(
+        "physical_specification.cg_location",
+        ReferenceParameterEvidenceFileV2 {
+            status: file.status,
+            source_ids: file.source_ids,
+        },
+        sources,
+    )?;
+    Ok(ReferenceCgLocation {
+        position_m_from_reference: file.position_m_from_reference,
+        reference_kind,
+        reference_description: description,
+        evidence,
+    })
+}
+
+fn resolve_reference_evidence(
+    parameter: &str,
+    file: ReferenceParameterEvidenceFileV2,
+    sources: &[ProvenanceSource],
+) -> Result<ReferenceParameterEvidence, ModelLoadError> {
+    let mut source_indices = Vec::with_capacity(file.source_ids.len());
+    for (index, source_id) in file.source_ids.into_iter().enumerate() {
+        if !is_valid_stable_id(&source_id) {
+            return Err(ModelLoadError::InvalidStableId {
+                kind: "provenance source reference",
+                index,
+                value: source_id,
+            });
+        }
+        let source_index = sources
+            .iter()
+            .position(|source| source.id() == source_id)
+            .ok_or_else(|| ModelLoadError::UnresolvedProvenanceReference {
+                parameter: parameter.to_owned(),
+                source_id: source_id.clone(),
+            })?;
+        if source_indices.contains(&source_index) {
+            return Err(ModelLoadError::DuplicateProvenanceReference {
+                parameter: parameter.to_owned(),
+                source_id,
+            });
+        }
+        source_indices.push(source_index);
+    }
+    Ok(ReferenceParameterEvidence {
+        quality: match file.status {
+            ParameterQualityFileV2::Measured => ParameterQuality::Measured,
+            ParameterQualityFileV2::ManufacturerSpec => ParameterQuality::ManufacturerSpec,
+            ParameterQualityFileV2::Published => ParameterQuality::Published,
+            ParameterQualityFileV2::Derived => ParameterQuality::Derived,
+            ParameterQualityFileV2::Estimated => ParameterQuality::Estimated,
+            ParameterQualityFileV2::Unknown => ParameterQuality::Unknown,
+        },
+        source_indices,
+    })
+}
+
+fn validate_optional_reference_text(
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<String>, ModelLoadError> {
+    if value.as_ref().is_some_and(|text| text.trim().is_empty()) {
+        return Err(ModelLoadError::InvalidReferenceText {
+            field: field.to_owned(),
+        });
+    }
+    Ok(value)
 }
 
 fn axis(

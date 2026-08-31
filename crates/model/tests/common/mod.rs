@@ -152,6 +152,108 @@ pub fn valid_v1_model_value() -> Value {
     value
 }
 
+pub fn valid_v2_reference_model_value() -> Value {
+    let mut value = valid_v1_model_value();
+    value["schema_version"] = json!(2);
+    value
+        .as_object_mut()
+        .expect("model root object")
+        .insert("classification".to_owned(), json!("reference_aircraft"));
+    value.as_object_mut().expect("model root object").insert(
+        "reference_aircraft".to_owned(),
+        json!({
+            "identity": {
+                "manufacturer": "Fixture Manufacturer",
+                "aircraft_name": "Reference Fixture",
+                "variant": "test-only",
+                "stable_reference_id": "reference-fixture-01",
+                "notes": "Unit-test data, not a real aircraft"
+            },
+            "physical_specification": {
+                "wingspan_m": {
+                    "value": 1.8,
+                    "status": "manufacturer_spec",
+                    "source_ids": ["manufacturer-sheet"]
+                },
+                "reference_wing_area_m2": {
+                    "value": 0.52,
+                    "status": "derived",
+                    "source_ids": ["calculation-note"]
+                },
+                "aircraft_length_m": null,
+                "mass": {
+                    "status": "measured",
+                    "source_ids": ["scale-measurement"]
+                },
+                "cg_location": {
+                    "position_m_from_reference": [0.12, 0.0, 0.0],
+                    "reference": {
+                        "kind": "wing_root_leading_edge",
+                        "description": null
+                    },
+                    "status": "measured",
+                    "source_ids": ["scale-measurement"]
+                },
+                "aerodynamic_reference_chord_m": null,
+                "wing_incidence_rad": {
+                    "value": 0.02,
+                    "status": "published",
+                    "source_ids": ["manufacturer-sheet"]
+                },
+                "horizontal_tail_incidence_rad": null,
+                "wing_dihedral_rad": {
+                    "value": 0.06,
+                    "status": "estimated",
+                    "source_ids": []
+                },
+                "control_surface_travel_limits": [
+                    {
+                        "control_surface_binding_id": "aileron-first",
+                        "status": "manufacturer_spec",
+                        "source_ids": ["manufacturer-sheet"]
+                    }
+                ]
+            },
+            "provenance_sources": [
+                {
+                    "id": "manufacturer-sheet",
+                    "source_type": "manufacturer_documentation",
+                    "title": "Fixture specification sheet",
+                    "url": "https://example.invalid/fixture",
+                    "bibliographic_reference": null,
+                    "notes": null,
+                    "publication_date": "2024-01-02",
+                    "retrieval_date": "2026-01-03",
+                    "confidence": "high"
+                },
+                {
+                    "id": "scale-measurement",
+                    "source_type": "measured",
+                    "title": "Test measurement",
+                    "url": null,
+                    "bibliographic_reference": null,
+                    "notes": "Test-only measurement",
+                    "publication_date": null,
+                    "retrieval_date": null,
+                    "confidence": "medium"
+                },
+                {
+                    "id": "calculation-note",
+                    "source_type": "derived",
+                    "title": null,
+                    "url": null,
+                    "bibliographic_reference": "Fixture calculation A",
+                    "notes": null,
+                    "publication_date": null,
+                    "retrieval_date": null,
+                    "confidence": "low"
+                }
+            ]
+        }),
+    );
+    value
+}
+
 pub fn load_value(value: &Value) -> Result<AircraftModel, ModelLoadError> {
     let json = serde_json::to_string(value).expect("test model serializes");
     AircraftModelLoader::from_json_str(&json)

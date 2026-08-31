@@ -1,7 +1,7 @@
 mod common;
 
 use common::{load_value, valid_model_value};
-use model::{ModelLoadError, load_aircraft_model};
+use model::{AircraftClassification, ModelLoadError, load_aircraft_model};
 use sim_core::PropellerSpinDirection;
 use sim_math::Vec3;
 use std::path::Path;
@@ -17,6 +17,11 @@ fn parsed_runtime_model_exactly_matches_declared_semantics() {
     assert_eq!(model.schema_version(), 0);
     assert_eq!(model.model_id(), "test-aircraft_01");
     assert_eq!(model.display_name(), "Test Aircraft");
+    assert_eq!(
+        model.classification(),
+        AircraftClassification::SyntheticTest
+    );
+    assert!(model.reference_aircraft().is_none());
 
     let rigid_body = model.rigid_body();
     assert_f64_bits(rigid_body.mass_kg(), 2.5);
@@ -154,7 +159,12 @@ fn acro_electric_01_repository_model_smoke_test() {
     let first = load_aircraft_model(&path).expect("repository Acro Electric 01 must remain valid");
     let second = load_aircraft_model(&path).expect("second deterministic model load");
 
-    assert_eq!(first.schema_version(), 1);
+    assert_eq!(first.schema_version(), 2);
+    assert_eq!(
+        first.classification(),
+        AircraftClassification::SyntheticTest
+    );
+    assert!(first.reference_aircraft().is_none());
     assert!(!first.aero_polars().is_empty());
     assert_eq!(first.aero_elements().len(), 8);
     assert_eq!(first.control_surface_bindings().len(), 4);

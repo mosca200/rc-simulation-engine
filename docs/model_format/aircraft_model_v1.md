@@ -5,9 +5,9 @@ preserves every physical and presentation field, unit, frame convention, and val
 [aircraft model v0](aircraft_model_v0.md). The only schema addition is the required root array
 `control_surface_bindings`.
 
-The loader supports v0 and v1 explicitly. A v0 document is never reinterpreted as v1: it loads with
-an empty runtime binding list and retains the S6 v0 physics-fingerprint byte stream. Versions other
-than 0 and 1 are rejected, with no implicit migration.
+The loader supports v0, v1, and v2 explicitly. A v0 document is never reinterpreted as v1: it loads
+with an empty runtime binding list and retains the S6 v0 physics-fingerprint byte stream. V1 is
+likewise not implicitly migrated to [v2](aircraft_model_v2.md).
 
 ## Difference from v0
 

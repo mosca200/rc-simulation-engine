@@ -104,9 +104,9 @@ This complete example omits the optional propulsion and presentation sections:
 | `presentation` | object or `null` | no | Non-physical presentation metadata. |
 
 The loader determines `schema_version` before interpreting the remainder of the object. Version
-zero selects this exact contract and is never reinterpreted as v1. The current loader also supports
-the separate schema-v1 contract; any other version produces `UnsupportedSchemaVersion`. There is no
-implicit migration.
+zero selects this exact contract and is never reinterpreted as a later version. The current loader
+also supports the separate schema-v1 and schema-v2 contracts; any other version produces
+`UnsupportedSchemaVersion`. There is no implicit migration.
 
 All v0 objects use strict unknown-field rejection. Misspelled, unknown, missing required, and
 wrongly typed fields are errors. Duplicate object keys are structural errors rather than

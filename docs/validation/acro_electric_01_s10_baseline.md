@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Model ID | `acro-electric-01` | MEASURED from repository model |
 | Display name | `Acro Electric 01` | MEASURED from repository model |
-| Model schema | `1` | MEASURED from repository model |
+| Model schema | `2` | MEASURED from repository model; M2.1 classifies it as `synthetic_test` without changing physics |
 | Physics fingerprint | `dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed` | DERIVED by `AircraftModel::physics_fingerprint()` |
 | Model source | `models/acro_electric_01/model.json` | Repository source |
 | Calibration status | Initial engineering placeholder; not flight-calibrated | Repository `README.md` |

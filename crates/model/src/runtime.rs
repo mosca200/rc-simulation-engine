@@ -1,4 +1,7 @@
-use crate::{AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1};
+use crate::{
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AircraftClassification, ReferenceAircraftMetadata,
+};
 use sim_core::{
     AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
     PropellerCoefficientTable, PropellerSpinDirection, RigidBodyParams,
@@ -10,6 +13,8 @@ pub struct AircraftModel {
     schema_version: u32,
     model_id: String,
     display_name: String,
+    classification: AircraftClassification,
+    reference_aircraft: Option<ReferenceAircraftMetadata>,
     rigid_body: RigidBodyParams,
     aero_polars: Vec<RuntimePolar>,
     aero_elements: Vec<RuntimeAeroElement>,
@@ -37,6 +42,8 @@ impl AircraftModel {
             schema_version,
             model_id,
             display_name,
+            classification: AircraftClassification::SyntheticTest,
+            reference_aircraft: None,
             rigid_body,
             aero_polars,
             aero_elements,
@@ -45,6 +52,16 @@ impl AircraftModel {
             propulsion,
             presentation,
         }
+    }
+
+    pub(crate) fn with_reference_framework(
+        mut self,
+        classification: AircraftClassification,
+        reference_aircraft: Option<ReferenceAircraftMetadata>,
+    ) -> Self {
+        self.classification = classification;
+        self.reference_aircraft = reference_aircraft;
+        self
     }
 
     pub(crate) fn with_control_surface_bindings(
@@ -68,6 +85,16 @@ impl AircraftModel {
     #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    #[must_use]
+    pub const fn classification(&self) -> AircraftClassification {
+        self.classification
+    }
+
+    #[must_use]
+    pub const fn reference_aircraft(&self) -> Option<&ReferenceAircraftMetadata> {
+        self.reference_aircraft.as_ref()
     }
 
     #[must_use]
@@ -272,16 +299,20 @@ pub struct AircraftModelFingerprint([u8; 32]);
 impl AircraftModelFingerprint {
     fn from_model(model: &AircraftModel) -> Self {
         let mut hasher = blake3::Hasher::new();
-        match model.schema_version {
+        let fingerprint_schema_version = match model.schema_version {
             AIRCRAFT_MODEL_SCHEMA_VERSION_V0 => {
                 hasher.update(b"rcsim:aircraft-model:v0");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V0
             }
-            AIRCRAFT_MODEL_SCHEMA_VERSION_V1 => {
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V1 | AIRCRAFT_MODEL_SCHEMA_VERSION_V2 => {
+                // V2 adds documentary semantics only. Identical v1/v2 physics intentionally has
+                // the same deterministic identity.
                 hasher.update(b"rcsim:aircraft-model:v1");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V1
             }
             _ => unreachable!("runtime models are created only from supported schemas"),
-        }
-        hasher.update(&model.schema_version.to_le_bytes());
+        };
+        hasher.update(&fingerprint_schema_version.to_le_bytes());
 
         update_f64(&mut hasher, model.rigid_body.mass_kg());
         let inertia = model.rigid_body.inertia_body_kg_m2();
@@ -368,7 +399,10 @@ impl AircraftModelFingerprint {
             }
         }
 
-        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V1 {
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V1 | AIRCRAFT_MODEL_SCHEMA_VERSION_V2
+        ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
                 update_len(&mut hasher, binding.element_index);

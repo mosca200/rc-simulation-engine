@@ -166,7 +166,7 @@ fields or scores have been fabricated. Status: **NOT TESTED**.
 | Input-based deterministic replay | PASS | S8A and validation manoeuvre replay verification |
 | Simulation/render separation | PASS | headless crate boundaries; renderer is presentation-only |
 | Telemetry availability | PASS | strict S9 JSONL and analyzer |
-| Model versioning | PASS | schema v1 plus physics fingerprint |
+| Model versioning | PASS | schema v2 plus physics fingerprint |
 | Input pipeline | PARTIAL | CPU/keyboard/backend verified; real hardware NOT TESTED |
 | Acro Electric characterization | PASS | eight deterministic manoeuvres and metrics |
 | Real pilot review | NOT TESTED | protocol prepared only |

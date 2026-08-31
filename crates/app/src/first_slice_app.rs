@@ -632,12 +632,12 @@ fn architecture_criteria(repository_root: &Path, model: &AircraftModel) -> Vec<C
             "versioned_model_format",
             "Versioned model format",
             GateKind::Technical,
-            if model.schema_version() == 1 {
+            if model.schema_version() == 2 {
                 AcceptanceStatus::Pass
             } else {
                 AcceptanceStatus::Fail
             },
-            "canonical model loaded through strict schema-v1 validation",
+            "canonical model loaded through strict schema-v2 validation",
         )
         .with("schema_version", model.schema_version()),
     ]
@@ -732,7 +732,7 @@ fn model_versioning_criterion(
     simple(
         "model_versioning",
         "Model versioning and identity",
-        model.schema_version() == 1 && !model.model_id().is_empty() && matches,
+        model.schema_version() == 2 && !model.model_id().is_empty() && matches,
         "schema, model ID, physics fingerprint, and canonical replay identity agree",
     )
     .with("schema_version", model.schema_version())
