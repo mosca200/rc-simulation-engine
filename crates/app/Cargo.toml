@@ -8,12 +8,16 @@ rust-version.workspace = true
 [dependencies]
 aircraft = { path = "../aircraft" }
 model = { path = "../model" }
+pollster.workspace = true
+renderer = { path = "../renderer" }
 replay = { path = "../replay" }
 sim_core = { path = "../sim_core" }
 sim_math = { path = "../sim_math" }
 telemetry = { path = "../telemetry" }
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+winit.workspace = true
 
 [lints]
 workspace = true

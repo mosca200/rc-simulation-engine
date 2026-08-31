@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod render_app;
+
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
 use model::{AircraftModelFingerprint, load_aircraft_model};
+use render_app::{RenderOptions, run_render};
 use replay::ReplayRecorder;
 use sim_core::{
     AeroEnvironment, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyParams, RigidBodyState, Simulation,
@@ -23,6 +26,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut arguments = env::args().skip(1);
     match arguments.next() {
+        Some(command) if command == "render" => {
+            run_render(RenderOptions::parse(arguments)?)?;
+            Ok(())
+        }
         Some(command) if command == "aircraft" => run_aircraft(AircraftOptions::parse(arguments)?),
         Some(first_argument) => run_foundation(Options::parse(
             std::iter::once(first_argument).chain(arguments),
@@ -270,6 +277,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  rcsim-app [--steps N] [--physics-hz HZ]");
     println!("  rcsim-app aircraft [--model PATH] [--steps N] [--physics-hz HZ]");
+    println!("  rcsim-app render [--model PATH] [--throttle VALUE]");
 }
 
 fn parse_value<T>(flag: &str, value: Option<String>) -> Result<T, String>
