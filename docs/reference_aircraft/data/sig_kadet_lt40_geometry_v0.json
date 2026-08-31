@@ -1,0 +1,596 @@
+{
+  "schema": "reference_geometry_reconstruction_v0",
+  "artifact_kind": "reference_geometry_evidence_not_runtime_configuration",
+  "subject": {
+    "manufacturer": "SIG Manufacturing",
+    "family": "KADET LT-40",
+    "target_operational_variant": "KADET LT-40 EGV ARF",
+    "measured_plan_variant": "original RC-67 LT-40 kit",
+    "runtime_ready": false
+  },
+  "coordinate_system": {
+    "documentary_origin": "wing root leading edge in the wing reference plane",
+    "x_aft_positive": true,
+    "y_right_positive": true,
+    "z_down_positive": true,
+    "horizontal_polygon_coordinates": [
+      "span_or_y_m",
+      "x_aft_m"
+    ],
+    "vertical_polygon_coordinates": [
+      "x_aft_m",
+      "height_up_m"
+    ],
+    "runtime_body_conversion": {
+      "x_body_m": "cg_x_aft_from_wing_le_m - x_aft_m",
+      "y_body_m": "y_right_m",
+      "z_body_m": "-height_up_m for vertical-tail local coordinates"
+    },
+    "runtime_origin_relation": null,
+    "runtime_origin_relation_quality": "unknown"
+  },
+  "source_refs": [
+    {
+      "id": "sig-lt40-kit-product",
+      "kind": "manufacturer_documentation",
+      "url": "https://sigmfg.com/products/sig-lt-40-trainer-kit"
+    },
+    {
+      "id": "sig-lt40-build-manual",
+      "kind": "manufacturer_documentation",
+      "url": "https://cdn.shopify.com/s/files/1/2281/6393/files/sigrc67kadetlt40.pdf?1161818709039042179="
+    },
+    {
+      "id": "sig-lt40-egv-arf-product",
+      "kind": "manufacturer_documentation",
+      "url": "https://sigmfg.com/collections/sig-arfs-almost-ready-to-fly/products/sig-kadet-lt-40-egv-arf?variant=45138130441"
+    },
+    {
+      "id": "sig-lt40-egv-arf-manual",
+      "kind": "manufacturer_documentation_retrieval_copy",
+      "url": "https://manuals.plus/m/ff89ac931f6fcc8e935416d04673ba56b31f1ecf2e08465d1e7912a4482a9812.pdf"
+    },
+    {
+      "id": "lt40-community-plan-sheet-1-scan",
+      "kind": "secondary_plan_scan",
+      "filename": "Kadet LT-40 1.pdf",
+      "retrieval_page": "https://aeroboc.webnode.page/plantas/",
+      "sha256": "2c3c95b59012a49e1bd10f86c2890e924f709d38eb508bae353e78ccec8f20d2",
+      "committed": false
+    },
+    {
+      "id": "lt40-community-plan-sheet-2-scan",
+      "kind": "secondary_plan_scan",
+      "filename": "Kadet LT-40 2.pdf",
+      "retrieval_page": "https://aeroboc.webnode.page/plantas/",
+      "sha256": "07feee42c7e394f3c541623f97f391b01fdd1d72e184aa43b4a0bdf9445d7ee5",
+      "committed": false
+    }
+  ],
+  "calibration": {
+    "sheet_1": {
+      "pdf_page_points": [
+        2757.31,
+        3643.2
+      ],
+      "embedded_raster_pixels": [
+        4787,
+        6325
+      ],
+      "nominal_pixels_per_inch": [
+        125.0,
+        125.0
+      ],
+      "validation_features": [
+        {
+          "feature": "fin trailing-edge post marked 5/16 x 1/2 in",
+          "observed_pixels": 65,
+          "expected_inches": 0.5,
+          "note": "Small-feature residual includes both printed outline thicknesses."
+        }
+      ],
+      "adopted_pixels_per_inch": [
+        125.0,
+        125.0
+      ]
+    },
+    "sheet_2": {
+      "pdf_page_points": [
+        2759.04,
+        3636.29
+      ],
+      "embedded_raster_pixels": [
+        4790,
+        6313
+      ],
+      "nominal_pixels_per_inch": [
+        125.0,
+        125.0
+      ],
+      "long_axis_anchor": {
+        "feature": "35 in wing semi-span",
+        "observed_pixels": 4377,
+        "pixels_per_inch": 125.057143,
+        "nominal_residual_inches": 0.016,
+        "nominal_residual_percent": 0.045714
+      },
+      "short_axis_anchor": {
+        "feature": "27 in stabilizer trailing-edge member",
+        "observed_pixels": 3357,
+        "pixels_per_inch": 124.333333,
+        "nominal_residual_inches": -0.144,
+        "nominal_residual_percent": -0.533333
+      },
+      "axis_scale_difference_percent": 0.5806,
+      "correction": "Use the two axis-specific pixels-per-inch values.",
+      "default_linear_uncertainty_m": 0.002,
+      "default_polygon_area_uncertainty_m2": 0.0032
+    }
+  },
+  "wing": {
+    "applicability": "original kit plan; EGV equality is supported only for manufacturer span and reference area",
+    "span": {
+      "value_m": 1.778,
+      "quality": "manufacturer_spec",
+      "source_refs": [
+        "sig-lt40-kit-product",
+        "sig-lt40-egv-arf-product"
+      ]
+    },
+    "semi_span": {
+      "value_m": 0.889,
+      "quality": "derived"
+    },
+    "reference_area": {
+      "value_m2": 0.580644,
+      "quality": "derived",
+      "original_manufacturer_value_in2": 900
+    },
+    "planform_type": {
+      "value": "constant-chord center region with a rounded tip; not an exact rectangle",
+      "quality": "measured_from_validated_plan"
+    },
+    "root_chord": {
+      "value_m": 0.330745,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "conventional_tip_chord": {
+      "value_m": null,
+      "quality": "unknown",
+      "note": "The rounded outline closes to a point and has no trapezoidal tip-chord station."
+    },
+    "gross_plan_outline_area": {
+      "value_m2": 0.572016,
+      "uncertainty_m2": 0.0032,
+      "quality": "derived",
+      "includes_fuselage_intersection": true
+    },
+    "fixed_plan_outline_area": {
+      "value_m2": 0.516109,
+      "uncertainty_m2": 0.0036,
+      "quality": "derived"
+    },
+    "mean_aerodynamic_chord_geometric": {
+      "value_m": 0.325952,
+      "uncertainty_m": 0.0025,
+      "quality": "derived"
+    },
+    "area_weighted_quarter_chord_aft_wing_le": {
+      "value_m": 0.08196,
+      "uncertainty_m": 0.002,
+      "quality": "derived"
+    },
+    "each_panel_area_centroid": {
+      "span_station_m": 0.432667,
+      "x_aft_m": 0.163448,
+      "quality": "derived"
+    },
+    "right_half_plan_outline_polygon_m": [
+      [0.0, 0.0],
+      [0.0, 0.330745],
+      [0.806945, 0.330745],
+      [0.8171, 0.315014],
+      [0.831318, 0.294586],
+      [0.841473, 0.274157],
+      [0.849597, 0.253728],
+      [0.856097, 0.233299],
+      [0.862799, 0.21287],
+      [0.869502, 0.192441],
+      [0.876001, 0.172012],
+      [0.882094, 0.151583],
+      [0.88636, 0.131154],
+      [0.888797, 0.110725],
+      [0.889609, 0.090296],
+      [0.887781, 0.069867],
+      [0.88311, 0.049438],
+      [0.876001, 0.029009],
+      [0.858737, 0.00858],
+      [0.838426, 0.0]
+    ],
+    "incidence_original_kit": {
+      "value_deg": 1.5,
+      "quality": "manufacturer_spec",
+      "egv_applicability": "unknown"
+    },
+    "dihedral_original_kit": {
+      "value_deg_per_panel": 3.0,
+      "quality": "manufacturer_spec",
+      "egv_applicability": "unknown"
+    }
+  },
+  "ailerons": {
+    "symmetry": "left and right mirrored",
+    "each": {
+      "inboard_hinge_span_station_m": {
+        "value_m": 0.084493,
+        "uncertainty_m": 0.002,
+        "quality": "measured_from_validated_plan"
+      },
+      "outboard_hinge_span_station_m": {
+        "value_m": 0.833349,
+        "uncertainty_m": 0.002,
+        "quality": "measured_from_validated_plan"
+      },
+      "outboard_trailing_edge_span_station_m": {
+        "value_m": 0.806945,
+        "uncertainty_m": 0.002,
+        "quality": "measured_from_validated_plan"
+      },
+      "hinge_span_m": {
+        "value_m": 0.748856,
+        "uncertainty_m": 0.003,
+        "quality": "derived"
+      },
+      "inboard_chord_m": {
+        "value_m": 0.038,
+        "uncertainty_m": 0.0013,
+        "quality": "measured_from_validated_plan"
+      },
+      "tip_chord_m": {
+        "value_m": null,
+        "quality": "unknown",
+        "note": "The oblique cut closes at the rounded wing tip; polygon vertices are authoritative."
+      },
+      "area_m2": {
+        "value_m2": 0.027953,
+        "uncertainty_m2": 0.0013,
+        "quality": "derived"
+      },
+      "centroid": {
+        "span_station_m": 0.452359,
+        "x_aft_m": 0.311632,
+        "quality": "derived"
+      },
+      "right_polygon_m": [
+        [0.084493, 0.292747],
+        [0.833349, 0.292747],
+        [0.806945, 0.330745],
+        [0.084493, 0.330745]
+      ]
+    }
+  },
+  "horizontal_tail": {
+    "applicability": "original kit plan; EGV correspondence unknown",
+    "span": {
+      "value_m": 0.6858,
+      "uncertainty_m": 0.002,
+      "quality": "measured_from_validated_plan"
+    },
+    "root_total_chord_m": {
+      "value_m": 0.252892,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "tip_total_chord_m": {
+      "value_m": 0.139964,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "fixed_root_chord_m": {
+      "value_m": 0.202092,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "fixed_tip_chord_m": {
+      "value_m": 0.089164,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "gross_area_m2": {
+      "value_m2": 0.13732,
+      "uncertainty_m2": 0.0026,
+      "quality": "derived",
+      "includes_fuselage_intersection": true
+    },
+    "fixed_area_m2": {
+      "value_m2": 0.102482,
+      "uncertainty_m2": 0.0026,
+      "quality": "derived"
+    },
+    "geometric_mac_m": {
+      "value_m": 0.206183,
+      "uncertainty_m": 0.003,
+      "quality": "derived"
+    },
+    "area_weighted_quarter_chord_aft_root_le_m": {
+      "value_m": 0.098255,
+      "uncertainty_m": 0.003,
+      "quality": "derived"
+    },
+    "gross_centroid_x_aft_root_le_m": {
+      "value_m": 0.149799,
+      "uncertainty_m": 0.003,
+      "quality": "derived"
+    },
+    "gross_polygon_m": [
+      [-0.3429, 0.112928],
+      [-0.023114, 0.0],
+      [0.023114, 0.0],
+      [0.3429, 0.112928],
+      [0.3429, 0.252892],
+      [-0.3429, 0.252892]
+    ],
+    "fixed_polygon_m": [
+      [-0.3429, 0.112928],
+      [-0.023114, 0.0],
+      [0.023114, 0.0],
+      [0.3429, 0.112928],
+      [0.3429, 0.202092],
+      [-0.3429, 0.202092]
+    ],
+    "incidence_original_kit": {
+      "value_deg": 0.0,
+      "quality": "manufacturer_spec",
+      "egv_applicability": "unknown"
+    }
+  },
+  "elevator": {
+    "hinge_axis_x_aft_tail_root_le_m": {
+      "value_m": 0.202092,
+      "uncertainty_m": 0.0025,
+      "quality": "measured_from_validated_plan"
+    },
+    "span_m": {
+      "value_m": 0.6858,
+      "uncertainty_m": 0.002,
+      "quality": "measured_from_validated_plan"
+    },
+    "center_cutout": {
+      "value": "none shown",
+      "quality": "measured_from_validated_plan"
+    },
+    "chord_m": {
+      "value_m": 0.0508,
+      "uncertainty_m": 0.0013,
+      "quality": "measured_from_validated_plan"
+    },
+    "area_m2": {
+      "value_m2": 0.034839,
+      "uncertainty_m2": 0.0013,
+      "quality": "derived"
+    },
+    "centroid_x_aft_tail_root_le_m": {
+      "value_m": 0.227492,
+      "uncertainty_m": 0.003,
+      "quality": "derived"
+    },
+    "polygon_m": [
+      [-0.3429, 0.202092],
+      [0.3429, 0.202092],
+      [0.3429, 0.252892],
+      [-0.3429, 0.252892]
+    ]
+  },
+  "vertical_tail": {
+    "applicability": "original kit plan; EGV correspondence unknown",
+    "height_m": {
+      "value_m": 0.226568,
+      "uncertainty_m": 0.002,
+      "quality": "measured_from_validated_plan"
+    },
+    "gross_root_chord_m": {
+      "value_m": 0.319227,
+      "uncertainty_m": 0.003,
+      "quality": "measured_from_validated_plan"
+    },
+    "gross_tip_chord_m": {
+      "value_m": 0.154229,
+      "uncertainty_m": 0.003,
+      "quality": "measured_from_validated_plan"
+    },
+    "fixed_root_chord_m": {
+      "value_m": 0.243027,
+      "uncertainty_m": 0.003,
+      "quality": "measured_from_validated_plan"
+    },
+    "fixed_tip_chord_m": {
+      "value_m": 0.090424,
+      "uncertainty_m": 0.003,
+      "quality": "measured_from_validated_plan"
+    },
+    "gross_area_m2": {
+      "value_m2": 0.053635,
+      "uncertainty_m2": 0.0016,
+      "quality": "derived",
+      "includes_fuselage_intersection": false
+    },
+    "fixed_area_m2": {
+      "value_m2": 0.037775,
+      "uncertainty_m2": 0.0016,
+      "quality": "derived"
+    },
+    "geometric_mac_m": {
+      "value_m": 0.246312,
+      "uncertainty_m": 0.004,
+      "quality": "derived"
+    },
+    "area_weighted_quarter_chord_aft_root_le_m": {
+      "value_m": 0.129016,
+      "uncertainty_m": 0.004,
+      "quality": "derived"
+    },
+    "gross_centroid": {
+      "x_aft_root_le_m": 0.190594,
+      "height_m": 0.100124,
+      "quality": "derived"
+    },
+    "gross_polygon_m": [
+      [0.0, 0.0],
+      [0.152603, 0.226568],
+      [0.306832, 0.226568],
+      [0.319227, 0.0]
+    ],
+    "fixed_polygon_m": [
+      [0.0, 0.0],
+      [0.152603, 0.226568],
+      [0.243027, 0.226568],
+      [0.243027, 0.0]
+    ]
+  },
+  "rudder": {
+    "hinge_axis_x_aft_fin_root_le_m": {
+      "value_m": 0.243027,
+      "uncertainty_m": 0.003,
+      "quality": "measured_from_validated_plan"
+    },
+    "height_m": {
+      "value_m": 0.226568,
+      "uncertainty_m": 0.002,
+      "quality": "measured_from_validated_plan"
+    },
+    "bottom_chord_m": {
+      "value_m": 0.0762,
+      "uncertainty_m": 0.0013,
+      "quality": "measured_from_validated_plan"
+    },
+    "top_chord_m": {
+      "value_m": 0.063805,
+      "uncertainty_m": 0.0013,
+      "quality": "measured_from_validated_plan"
+    },
+    "area_m2": {
+      "value_m2": 0.01586,
+      "uncertainty_m2": 0.001,
+      "quality": "derived"
+    },
+    "centroid": {
+      "x_aft_fin_root_le_m": 0.27812,
+      "height_m": 0.109941,
+      "quality": "derived"
+    },
+    "polygon_m": [
+      [0.243027, 0.0],
+      [0.243027, 0.226568],
+      [0.306832, 0.226568],
+      [0.319227, 0.0]
+    ],
+    "published_measurement_radius_m": {
+      "value_m": 0.0762,
+      "uncertainty_m": 0.0013,
+      "quality": "measured_from_validated_plan",
+      "measurement_point": "bottom of rudder at its widest point"
+    }
+  },
+  "longitudinal_datums": {
+    "wing_le_x_aft_m": {
+      "value_m": 0.0,
+      "quality": "derived",
+      "note": "Documentary datum, not a measured aircraft position."
+    },
+    "wing_geometric_quarter_chord_x_aft_m": {
+      "value_m": 0.08196,
+      "uncertainty_m": 0.002,
+      "quality": "derived"
+    },
+    "egv_cg_range_aft_wing_le_m": {
+      "minimum_m": 0.0889,
+      "maximum_m": 0.10795,
+      "quality": "manufacturer_spec"
+    },
+    "horizontal_tail_root_le_x_aft_wing_le_m": {
+      "value_m": null,
+      "quality": "unknown"
+    },
+    "vertical_tail_root_le_x_aft_wing_le_m": {
+      "value_m": null,
+      "quality": "unknown"
+    },
+    "wing_to_horizontal_tail_quarter_chord_arm_m": {
+      "value_m": null,
+      "quality": "unknown"
+    },
+    "wing_to_vertical_tail_quarter_chord_arm_m": {
+      "value_m": null,
+      "quality": "unknown"
+    }
+  },
+  "control_travel_geometry": {
+    "aileron": {
+      "published_linear_travel_m": 0.009525,
+      "measurement_radius_m": null,
+      "angle_rad": null,
+      "quality": "unknown"
+    },
+    "elevator": {
+      "published_linear_travel_m": 0.0142875,
+      "measurement_radius_m": null,
+      "angle_rad": null,
+      "quality": "unknown"
+    },
+    "rudder": {
+      "published_linear_travel_m": 0.0254,
+      "measurement_radius_m": 0.0762,
+      "angle_rad": null,
+      "quality": "unknown",
+      "reason": "The point and radius are resolved, but the manual does not distinguish perpendicular offset, endpoint chord, or arc-length convention."
+    }
+  },
+  "propulsion_axis": {
+    "original_kit": {
+      "down_deg": 6.0,
+      "right_deg": 6.0,
+      "quality": "manufacturer_spec"
+    },
+    "egv": {
+      "down_deg": null,
+      "right_deg": null,
+      "quality": "unknown"
+    }
+  },
+  "consistency_checks": {
+    "plan_wing_span_vs_70_in": {
+      "absolute_residual_m_before_axis_correction": 0.0004064,
+      "percent_residual": 0.045714
+    },
+    "plan_outline_area_vs_900_in2_reference": {
+      "absolute_residual_m2": -0.008628,
+      "percent_residual": -1.486008
+    },
+    "plan_bounding_rectangle_area_vs_900_in2_reference": {
+      "calculated_m2": 0.588333,
+      "absolute_residual_m2": 0.007689,
+      "percent_residual": 1.324225
+    },
+    "stabilizer_member_vs_27_in_before_axis_correction": {
+      "absolute_residual_m": -0.0036576,
+      "percent_residual": -0.533333
+    },
+    "forward_cg_percent_of_measured_root_chord": 26.8787,
+    "intermediate_cg_percent_of_measured_root_chord": 29.7586,
+    "rear_cg_percent_of_measured_root_chord": 32.6385,
+    "dihedral_tip_rise_each_panel_m": 0.0465267,
+    "aircraft_length_check": null
+  },
+  "unknowns": [
+    "EGV equality for original-kit detailed wing and tail planforms",
+    "horizontal-tail and vertical-tail longitudinal positions relative to wing leading edge",
+    "wing-to-tail aerodynamic reference arms",
+    "aileron and elevator travel measurement points and radii",
+    "linear-travel measurement convention needed for all angular conversions",
+    "EGV motor thrust-axis down/right offsets",
+    "surface vertical positions in the runtime CG frame",
+    "operational CG and all mass properties",
+    "aerodynamic coefficients and propulsion coefficients"
+  ]
+}
