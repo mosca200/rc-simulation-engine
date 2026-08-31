@@ -428,6 +428,23 @@ fn verify_dataset(path: &Path, expected_steps: u64) {
     let recording = AircraftReplayRecording::from_json(&json).unwrap();
     assert_eq!(recording.schema_version(), AIRCRAFT_REPLAY_SCHEMA_VERSION);
     assert_eq!(recording.frames().len() as u64, expected_steps);
+
+    // Bit-identical hashes are qualified only for the target that produced the
+    // canonical dataset. Other targets still consume every committed input and
+    // verify the complete replay chain against hashes produced on that target.
+    #[cfg(not(target_os = "windows"))]
+    let recording = {
+        let mut simulation = recording.reconstruct_simulation(load_model()).unwrap();
+        let mut recorder =
+            AircraftReplayRecorder::with_capacity(&simulation, recording.frames().len()).unwrap();
+        for frame in recording.frames() {
+            recorder
+                .record(&mut simulation, frame.step_index(), frame.pilot_input())
+                .unwrap();
+        }
+        recorder.finish()
+    };
+
     let mut simulation = recording.reconstruct_simulation(load_model()).unwrap();
     let player = AircraftReplayPlayer::new(&recording, &simulation).unwrap();
     assert_eq!(player.verify_all(&mut simulation).unwrap(), expected_steps);
