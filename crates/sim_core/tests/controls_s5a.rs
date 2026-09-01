@@ -1,7 +1,7 @@
 use sim_core::{
     AxisResponseConfig, ControlActuatorConfig, ControlConfigError, ControlResponseConfig,
     ControlSystemConfig, ControlSystemState, PilotInput, ServoConfig, ServoState, advance_controls,
-    advance_servo, mix_conventional, shape_pilot_input,
+    advance_servo, evaluate_steady_controls, mix_conventional, shape_pilot_input,
 };
 use std::hint::black_box;
 
@@ -298,6 +298,19 @@ fn c20_repeated_control_run_is_bit_identical() {
         first.actuators().rudder().angle_rad().to_bits(),
         second.actuators().rudder().angle_rad().to_bits()
     );
+}
+
+#[test]
+fn m2_5_steady_controls_equal_the_eventual_rate_limited_targets() {
+    let config = system_config();
+    let input = PilotInput::new(0.45, -0.35, 0.25, 0.72);
+    let steady = evaluate_steady_controls(&config, &input);
+    let mut state = ControlSystemState::neutral(&config);
+    let mut dynamic = advance_controls(&mut state, &config, &input, 0.002);
+    for _ in 0..1_000 {
+        dynamic = advance_controls(&mut state, &config, &input, 0.002);
+    }
+    assert_eq!(steady, dynamic);
 }
 
 #[test]

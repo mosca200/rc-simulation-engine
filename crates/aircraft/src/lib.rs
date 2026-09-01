@@ -3,10 +3,18 @@
 
 mod config;
 mod simulation;
+mod trim;
 
 pub use config::AircraftSimulationConfig;
 pub use simulation::{
-    AircraftAeroElementOutput, AircraftSimulation, AircraftSimulationError, AircraftSnapshot,
-    AircraftState, deflected_aero_element, evaluate_aerodynamic_wrench,
-    evaluate_aircraft_aero_element, evaluate_aircraft_wrench,
+    AircraftAeroElementOutput, AircraftInstantaneousEvaluation, AircraftSimulation,
+    AircraftSimulationError, AircraftSnapshot, AircraftState, apply_control_surface_positions,
+    deflected_aero_element, effective_aero_elements_for_positions, evaluate_aerodynamic_wrench,
+    evaluate_aircraft_aero_element, evaluate_aircraft_instantaneous, evaluate_aircraft_wrench,
+};
+pub use trim::{
+    LongitudinalTrimEvaluation, LongitudinalTrimFailure, LongitudinalTrimFailureReason,
+    LongitudinalTrimRequest, LongitudinalTrimRequestError, LongitudinalTrimResiduals,
+    LongitudinalTrimSolution, LongitudinalTrimTolerances, LongitudinalTrimVariables, TrimBounds,
+    evaluate_longitudinal_trim_candidate, solve_longitudinal_trim,
 };

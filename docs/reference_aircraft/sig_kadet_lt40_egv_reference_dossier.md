@@ -368,8 +368,9 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 
 ### M2.5 - Trim solver
 
-- Trim definition and solution after geometry, mass properties, aerodynamics, and propulsion are
-  credible.
+- Generic deterministic longitudinal trim infrastructure is implemented with synthetic runtime
+  data. LT-40 trim remains blocked until geometry, operational mass properties, aerodynamics, and
+  installed propulsion are all runtime-credible.
 
 ### M2.6 - Automated physics validation
 

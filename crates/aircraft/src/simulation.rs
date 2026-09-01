@@ -2,8 +2,8 @@ use crate::AircraftSimulationConfig;
 use model::{AircraftModel, ControlActuator, RuntimeAeroElement, RuntimeAeroPolarBinding};
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
-    PilotInput, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyState, Rk4Integrator,
-    StateError, advance_controls, evaluate_aero_element, evaluate_derivative,
+    PilotInput, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
+    Rk4Integrator, StateError, advance_controls, evaluate_aero_element, evaluate_derivative,
     evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
@@ -42,6 +42,31 @@ pub struct AircraftSnapshot {
 pub enum AircraftAeroElementOutput<'a> {
     Polar(AeroElementOutput),
     ReynoldsFamily(ReynoldsAeroElementOutput<'a>),
+}
+
+/// Instantaneous aircraft physics evaluated through the same path used by one RK4 stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AircraftInstantaneousEvaluation {
+    total_wrench: BodyWrench,
+    derivative: RigidBodyDerivative,
+    propulsion: Option<PropulsionOutput>,
+}
+
+impl AircraftInstantaneousEvaluation {
+    #[must_use]
+    pub const fn total_wrench(&self) -> &BodyWrench {
+        &self.total_wrench
+    }
+
+    #[must_use]
+    pub const fn derivative(&self) -> &RigidBodyDerivative {
+        &self.derivative
+    }
+
+    #[must_use]
+    pub const fn propulsion(&self) -> Option<&PropulsionOutput> {
+        self.propulsion.as_ref()
+    }
 }
 
 impl AircraftAeroElementOutput<'_> {
@@ -180,38 +205,7 @@ impl AircraftSimulation {
     }
 
     fn update_effective_aero_elements(&mut self, positions: &ControlSurfacePositions) {
-        for binding in self.model.control_surface_bindings() {
-            let servo_angle_rad = match binding.actuator() {
-                ControlActuator::Aileron => positions.aileron_angle_rad(),
-                ControlActuator::Elevator => positions.elevator_angle_rad(),
-                ControlActuator::Rudder => positions.rudder_angle_rad(),
-            };
-            let servo_neutral_angle_rad = match binding.actuator() {
-                ControlActuator::Aileron => self
-                    .model
-                    .controls()
-                    .actuators()
-                    .aileron()
-                    .neutral_angle_rad(),
-                ControlActuator::Elevator => self
-                    .model
-                    .controls()
-                    .actuators()
-                    .elevator()
-                    .neutral_angle_rad(),
-                ControlActuator::Rudder => self
-                    .model
-                    .controls()
-                    .actuators()
-                    .rudder()
-                    .neutral_angle_rad(),
-            };
-            let surface_deflection_rad =
-                binding.deflection_gain() * (servo_angle_rad - servo_neutral_angle_rad);
-            let base = self.model.aero_elements()[binding.element_index()].element();
-            self.effective_aero_elements[binding.element_index()] =
-                deflected_aero_element(base, surface_deflection_rad);
-        }
+        apply_control_surface_positions(&self.model, positions, &mut self.effective_aero_elements);
     }
 
     fn step_with_stage_observer<F>(
@@ -220,7 +214,7 @@ impl AircraftSimulation {
         mut observe_stage: F,
     ) -> AircraftSnapshot
     where
-        F: FnMut(&RigidBodyState, &[AeroElement], &StageEvaluation),
+        F: FnMut(&RigidBodyState, &[AeroElement], &AircraftInstantaneousEvaluation),
     {
         let control_surface_positions = advance_controls(
             &mut self.state.controls,
@@ -233,29 +227,22 @@ impl AircraftSimulation {
         let initial_state = self.state.rigid_body;
         let model = &self.model;
         let effective_aero_elements = &self.effective_aero_elements;
-        let environment = self.config.aero_environment();
-        let gravity = self.config.gravity_world_mps2();
         let throttle = control_surface_positions.throttle();
         self.state.rigid_body =
             Rk4Integrator::step(&initial_state, self.config.dt_s(), |stage_state| {
-                let evaluation = evaluate_stage(
+                let evaluation = evaluate_aircraft_instantaneous(
                     stage_state,
                     effective_aero_elements,
                     model,
                     throttle,
-                    environment,
+                    &self.config,
                 );
                 debug_assert_eq!(
                     evaluation.propulsion.is_some(),
                     model.propulsion().is_some()
                 );
                 observe_stage(stage_state, effective_aero_elements, &evaluation);
-                evaluate_derivative(
-                    stage_state,
-                    model.rigid_body(),
-                    &evaluation.total_wrench,
-                    gravity,
-                )
+                *evaluation.derivative()
             });
         self.step_index += 1;
         debug_assert!(self.state.rigid_body.validate().is_ok());
@@ -267,6 +254,49 @@ impl AircraftSimulation {
             control_surface_positions,
         }
     }
+}
+
+/// Applies physical actuator positions to an existing model-ordered element buffer.
+pub fn apply_control_surface_positions(
+    model: &AircraftModel,
+    positions: &ControlSurfacePositions,
+    effective_aero_elements: &mut [AeroElement],
+) {
+    assert_eq!(effective_aero_elements.len(), model.aero_elements().len());
+    for binding in model.control_surface_bindings() {
+        let servo_angle_rad = match binding.actuator() {
+            ControlActuator::Aileron => positions.aileron_angle_rad(),
+            ControlActuator::Elevator => positions.elevator_angle_rad(),
+            ControlActuator::Rudder => positions.rudder_angle_rad(),
+        };
+        let servo_neutral_angle_rad = match binding.actuator() {
+            ControlActuator::Aileron => model.controls().actuators().aileron().neutral_angle_rad(),
+            ControlActuator::Elevator => {
+                model.controls().actuators().elevator().neutral_angle_rad()
+            }
+            ControlActuator::Rudder => model.controls().actuators().rudder().neutral_angle_rad(),
+        };
+        let surface_deflection_rad =
+            binding.deflection_gain() * (servo_angle_rad - servo_neutral_angle_rad);
+        let base = model.aero_elements()[binding.element_index()].element();
+        effective_aero_elements[binding.element_index()] =
+            deflected_aero_element(base, surface_deflection_rad);
+    }
+}
+
+/// Builds model-ordered effective elements and applies the supplied steady actuator positions.
+#[must_use]
+pub fn effective_aero_elements_for_positions(
+    model: &AircraftModel,
+    positions: &ControlSurfacePositions,
+) -> Vec<AeroElement> {
+    let mut elements = model
+        .aero_elements()
+        .iter()
+        .map(|runtime| *runtime.element())
+        .collect::<Vec<_>>();
+    apply_control_surface_positions(model, positions, &mut elements);
+    elements
 }
 
 /// Applies a hinge rotation in the element's local frame: `base * rotation_about_local_Y`.
@@ -304,6 +334,35 @@ pub fn evaluate_aircraft_wrench(
         environment,
     )
     .total_wrench
+}
+
+/// Evaluates wrench and rigid-body derivative without advancing controls or integrating time.
+#[must_use]
+pub fn evaluate_aircraft_instantaneous(
+    state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    config: &AircraftSimulationConfig,
+) -> AircraftInstantaneousEvaluation {
+    let stage = evaluate_stage(
+        state,
+        effective_aero_elements,
+        model,
+        throttle,
+        config.aero_environment(),
+    );
+    let derivative = evaluate_derivative(
+        state,
+        model.rigid_body(),
+        &stage.total_wrench,
+        config.gravity_world_mps2(),
+    );
+    AircraftInstantaneousEvaluation {
+        total_wrench: stage.total_wrench,
+        derivative,
+        propulsion: stage.propulsion,
+    }
 }
 
 /// Aggregates every S4 element wrench, preserving the model's declaration order.

@@ -23,7 +23,7 @@ pub use controls::{
     AxisResponseConfig, ControlActuatorConfig, ControlActuatorState, ControlConfigError,
     ControlResponseConfig, ControlSurfacePositions, ControlSystemConfig, ControlSystemState,
     ControlTargets, ServoConfig, ServoState, ShapedPilotCommand, advance_controls, advance_servo,
-    mix_conventional, shape_pilot_input,
+    evaluate_steady_controls, mix_conventional, shape_pilot_input,
 };
 pub use dynamics::{BodyWrench, RigidBodyDerivative, evaluate_derivative};
 pub use input::PilotInput;

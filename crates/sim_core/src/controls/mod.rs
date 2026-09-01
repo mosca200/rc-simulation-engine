@@ -476,3 +476,23 @@ pub fn advance_controls(
         throttle: targets.throttle,
     }
 }
+
+/// Evaluates the steady actuator positions for a constant pilot input.
+///
+/// This follows the same response shaping, conventional mixer, servo reversal, and asymmetric
+/// travel mapping as [`advance_controls`], but places each actuator directly at its eventual
+/// rate-limited target. It is intended for static equilibrium calculations, not time stepping.
+#[must_use]
+pub fn evaluate_steady_controls(
+    config: &ControlSystemConfig,
+    input: &PilotInput,
+) -> ControlSurfacePositions {
+    let shaped = shape_pilot_input(input, &config.response);
+    let targets = mix_conventional(&shaped);
+    ControlSurfacePositions {
+        aileron_angle_rad: config.actuators.aileron.target_angle_rad(targets.aileron),
+        elevator_angle_rad: config.actuators.elevator.target_angle_rad(targets.elevator),
+        rudder_angle_rad: config.actuators.rudder.target_angle_rad(targets.rudder),
+        throttle: targets.throttle,
+    }
+}
