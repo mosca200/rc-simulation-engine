@@ -1040,6 +1040,22 @@ fn validate_series(
             });
         }
     }
+    let summary = summarize(series);
+    if ![
+        summary.mean,
+        summary.minimum,
+        summary.maximum,
+        summary.range,
+        summary.effective_uncertainty,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return Err(ReferenceSurveyError::InvalidMeasurement {
+            field: field.to_owned(),
+            reason: "measurement summary is not representable as finite f64",
+        });
+    }
     validate_required_text("measurement.datum_definition", &series.datum_definition)?;
     validate_optional_text("measurement.notes", series.notes.as_deref())?;
     validate_refs(
@@ -1211,7 +1227,7 @@ fn summarize(series: &MeasurementSeriesFile) -> MeasurementSummary {
     let maximum = a.max(b).max(c);
     let range = maximum - minimum;
     MeasurementSummary {
-        mean: (a + b + c) / 3.0,
+        mean: stable_mean([a, b, c]),
         minimum,
         maximum,
         range,
@@ -1219,6 +1235,15 @@ fn summarize(series: &MeasurementSeriesFile) -> MeasurementSummary {
             .stated_uncertainty
             .max(series.instrument_resolution / 2.0)
             .max(range / 2.0),
+    }
+}
+
+fn stable_mean(values: [f64; 3]) -> f64 {
+    let scale = values.into_iter().map(f64::abs).fold(0.0, f64::max);
+    if scale == 0.0 {
+        0.0
+    } else {
+        (values.into_iter().map(|value| value / scale).sum::<f64>() / 3.0) * scale
     }
 }
 
@@ -1239,11 +1264,9 @@ fn summarize_bilateral(
     let right = summarize(observation.right.as_ref()?);
     let asymmetry = right.mean - left.mean;
     Some(BilateralMeasurementSummary {
-        combined_mean: (left.mean + right.mean) / 2.0,
-        effective_uncertainty: ((left.effective_uncertainty.powi(2)
-            + right.effective_uncertainty.powi(2))
-        .sqrt()
-            / 2.0)
+        combined_mean: left.mean / 2.0 + right.mean / 2.0,
+        effective_uncertainty: (left.effective_uncertainty / 2.0)
+            .hypot(right.effective_uncertainty / 2.0)
             .max(asymmetry.abs() / 2.0),
         asymmetry_right_minus_left: asymmetry,
         left,
@@ -1326,7 +1349,7 @@ fn planform_offset(
         chord_uncertainty: tip_chord.effective_uncertainty,
     });
     let nominal = integrate_quarter_chord(&points)?;
-    let mut squared_uncertainty = 0.0;
+    let mut propagated_uncertainty = 0.0_f64;
     for index in 0..points.len() {
         for component in 0..3 {
             let uncertainty = match component {
@@ -1353,20 +1376,17 @@ fn planform_offset(
                     minus[index].chord -= uncertainty;
                 }
             }
-            let deviation = [
-                integrate_quarter_chord(&plus),
-                integrate_quarter_chord(&minus),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|value| (value - nominal).abs())
-            .fold(0.0, f64::max);
-            squared_uncertainty += deviation.powi(2);
+            let plus_value = integrate_quarter_chord(&plus)?;
+            let minus_value = integrate_quarter_chord(&minus)?;
+            let deviation = (plus_value - nominal)
+                .abs()
+                .max((minus_value - nominal).abs());
+            propagated_uncertainty = propagated_uncertainty.hypot(deviation);
         }
     }
     Some(DerivedSurveyValue {
         value: nominal,
-        uncertainty: squared_uncertainty.sqrt(),
+        uncertainty: propagated_uncertainty,
     })
 }
 
@@ -1387,7 +1407,9 @@ fn integrate_quarter_chord(points: &[PlanformPoint]) -> Option<f64> {
         area += width * (a.chord + b.chord) / 2.0;
         first_moment += width * (integral_x_times_chord + 0.25 * integral_chord_squared);
     }
-    (area > 0.0).then_some(first_moment / area)
+    let result = first_moment / area;
+    (area.is_finite() && area > 0.0 && first_moment.is_finite() && result.is_finite())
+        .then_some(result)
 }
 
 fn add_values(a: DerivedSurveyValue, b: DerivedSurveyValue) -> DerivedSurveyValue {
@@ -1417,6 +1439,22 @@ fn evaluate_survey(file: &SurveyFile) -> Result<SurveyEvaluation, ReferenceSurve
     let horizontal_planform_offset =
         horizontal_planform_offset(&observations.horizontal_tail_planform);
     let vertical_planform_offset = vertical_planform_offset(&observations.vertical_tail_planform);
+    if horizontal_planform_values_complete(&observations.horizontal_tail_planform)
+        && horizontal_planform_offset.is_none()
+    {
+        return Err(ReferenceSurveyError::InvalidMeasurement {
+            field: "raw_observations.horizontal_tail_planform".to_owned(),
+            reason: "derived quarter-chord offset is not representable as finite f64",
+        });
+    }
+    if vertical_planform_values_complete(&observations.vertical_tail_planform)
+        && vertical_planform_offset.is_none()
+    {
+        return Err(ReferenceSurveyError::InvalidMeasurement {
+            field: "raw_observations.vertical_tail_planform".to_owned(),
+            reason: "derived quarter-chord offset is not representable as finite f64",
+        });
+    }
     let horizontal_planform_station = horizontal_root
         .zip(horizontal_planform_offset)
         .map(|(root, offset)| add_values(root, offset));
@@ -1521,6 +1559,27 @@ fn evaluate_survey(file: &SurveyFile) -> Result<SurveyEvaluation, ReferenceSurve
         .zip(wing_qc)
         .map(|(tail, wing)| subtract_values(tail, wing));
     for (field, value) in [
+        (
+            "horizontal_tail_planform_quarter_chord_offset",
+            horizontal_planform_offset,
+        ),
+        (
+            "vertical_tail_planform_quarter_chord_offset",
+            vertical_planform_offset,
+        ),
+        ("horizontal_tail_quarter_chord_station", horizontal_qc),
+        ("vertical_tail_quarter_chord_station", vertical_qc),
+        ("horizontal_tail_quarter_chord_arm", horizontal_arm),
+        ("vertical_tail_quarter_chord_arm", vertical_arm),
+    ] {
+        if value.is_some_and(|value| !value.value.is_finite() || !value.uncertainty.is_finite()) {
+            return Err(ReferenceSurveyError::InvalidMeasurement {
+                field: field.to_owned(),
+                reason: "derived value or uncertainty is not representable as finite f64",
+            });
+        }
+    }
+    for (field, value) in [
         ("horizontal_tail_quarter_chord_arm", horizontal_arm),
         ("vertical_tail_quarter_chord_arm", vertical_arm),
     ] {
@@ -1604,8 +1663,9 @@ fn select_qc_station(
             let consistent = criteria
                 .maximum_direct_vs_planform_qc_difference_m
                 .is_some_and(|tolerance| {
-                    (direct.value - planform.value).abs()
-                        <= tolerance + direct.uncertainty.hypot(planform.uncertainty)
+                    let difference = (direct.value - planform.value).abs();
+                    let threshold = tolerance + direct.uncertainty.hypot(planform.uncertainty);
+                    difference.is_finite() && threshold.is_finite() && difference <= threshold
                 });
             if !consistent {
                 missing.push(match prefix {
@@ -1688,6 +1748,17 @@ fn horizontal_planform_has_evidence(planform: &HorizontalPlanformFile) -> bool {
         })
 }
 
+fn horizontal_planform_values_complete(planform: &HorizontalPlanformFile) -> bool {
+    [
+        planform.span_m.as_ref(),
+        planform.root_chord_m.as_ref(),
+        planform.tip_chord_m.as_ref(),
+        planform.tip_le_offset_aft_root_le_m.as_ref(),
+    ]
+    .into_iter()
+    .all(|series| series.is_some())
+}
+
 fn vertical_planform_has_evidence(planform: &VerticalPlanformFile) -> bool {
     [
         planform.height_m.as_ref(),
@@ -1702,6 +1773,17 @@ fn vertical_planform_has_evidence(planform: &VerticalPlanformFile) -> bool {
                 && series_has_evidence(&station.leading_edge_offset_aft_root_le_m)
                 && series_has_evidence(&station.chord_m)
         })
+}
+
+fn vertical_planform_values_complete(planform: &VerticalPlanformFile) -> bool {
+    [
+        planform.height_m.as_ref(),
+        planform.root_chord_m.as_ref(),
+        planform.tip_chord_m.as_ref(),
+        planform.tip_le_offset_aft_root_le_m.as_ref(),
+    ]
+    .into_iter()
+    .all(|series| series.is_some())
 }
 
 fn require_horizontal_planform_campaign(
@@ -1857,6 +1939,13 @@ fn compare_one(
     };
     let difference = (measured.value - reference.value).abs();
     let combined_uncertainty = measured.uncertainty.hypot(reference.uncertainty);
+    if !difference.is_finite() || !combined_uncertainty.is_finite() {
+        return CrossVariantComparison {
+            quantity,
+            status: CrossVariantStatus::Different,
+            absolute_difference: None,
+        };
+    }
     let status = match identity_tolerance {
         Some(tolerance) if difference <= tolerance => CrossVariantStatus::ConfirmedIdentical,
         Some(tolerance) if difference <= tolerance + combined_uncertainty => {

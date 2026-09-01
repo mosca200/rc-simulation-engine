@@ -229,6 +229,30 @@ fn duplicate_dataset_ids_and_undistinguished_flow_points_are_rejected() {
         load(&duplicate_point),
         Err(ReferenceAerodynamicEvidenceError::DuplicateFlowCondition { .. })
     ));
+
+    let mut signed_zero_point = synthetic_campaign();
+    signed_zero_point["polar_datasets"] = json!([
+        dataset(
+            "synthetic-positive-zero",
+            "published",
+            10.0,
+            0.0,
+            "method-a",
+            "not_applicable_published"
+        ),
+        dataset(
+            "synthetic-negative-zero",
+            "published",
+            10.0,
+            -0.0,
+            "method-a",
+            "not_applicable_published"
+        )
+    ]);
+    assert!(matches!(
+        load(&signed_zero_point),
+        Err(ReferenceAerodynamicEvidenceError::DuplicateFlowCondition { .. })
+    ));
 }
 
 #[test]
@@ -372,6 +396,49 @@ fn missing_grid_coverage_is_reported_exactly() {
     assert_eq!(evidence.evaluation().coverage_holes().len(), 1);
     assert_eq!(evidence.evaluation().coverage_holes()[0].reynolds(), 30.0);
     assert_eq!(evidence.evaluation().coverage_holes()[0].mach(), 0.03);
+}
+
+#[test]
+fn diagnostics_are_canonical_across_equivalent_authoring_order() {
+    let first_dataset = dataset(
+        "synthetic-re20",
+        "generated_solver",
+        20.0,
+        0.02,
+        "solver-b",
+        "failed",
+    );
+    let second_dataset = dataset(
+        "synthetic-re10",
+        "generated_solver",
+        10.0,
+        0.01,
+        "solver-a",
+        "failed",
+    );
+
+    let mut first = synthetic_campaign();
+    first["polar_datasets"] = json!([first_dataset.clone(), second_dataset.clone()]);
+    set_complete_envelope(&mut first, &[(40.0, 0.04), (30.0, 0.03)]);
+
+    let mut second = synthetic_campaign();
+    second["polar_datasets"] = json!([second_dataset, first_dataset]);
+    set_complete_envelope(&mut second, &[(30.0, 0.03), (40.0, 0.04)]);
+
+    let first = load(&first).unwrap();
+    let second = load(&second).unwrap();
+    assert_eq!(
+        first.evaluation().datasets(),
+        second.evaluation().datasets()
+    );
+    assert_eq!(
+        first.evaluation().coverage_holes(),
+        second.evaluation().coverage_holes()
+    );
+    assert_eq!(
+        first.evaluation().blockers(),
+        second.evaluation().blockers()
+    );
 }
 
 #[test]

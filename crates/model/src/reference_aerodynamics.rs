@@ -593,7 +593,7 @@ fn validate_operating_envelope(
     let mut seen = HashSet::new();
     for point in &envelope.required_points {
         validate_flow_point("operating envelope", point.reynolds, point.mach)?;
-        if !seen.insert((point.reynolds.to_bits(), point.mach.to_bits())) {
+        if !seen.insert((canonical_bits(point.reynolds), canonical_bits(point.mach))) {
             return Err(ReferenceAerodynamicEvidenceError::InvalidMetadata {
                 field: "operating_envelope.required_points",
                 reason: "duplicate Reynolds/Mach requirement",
@@ -629,8 +629,8 @@ fn validate_datasets(
         validate_method(dataset)?;
         validate_samples(dataset)?;
         let condition = (
-            dataset.flow_conditions.reynolds.to_bits(),
-            dataset.flow_conditions.mach.to_bits(),
+            canonical_bits(dataset.flow_conditions.reynolds),
+            canonical_bits(dataset.flow_conditions.mach),
         );
         if let Some((first, _)) = conditions.iter().find(|(first, existing)| {
             *existing == condition && first.method.id == dataset.method.id
@@ -838,7 +838,7 @@ fn evaluate(file: &AerodynamicEvidenceFile) -> AerodynamicEvidenceEvaluation {
                 id: dataset.id.clone(),
                 evidence_class: dataset.evidence_class,
                 reynolds: dataset.flow_conditions.reynolds,
-                mach: dataset.flow_conditions.mach,
+                mach: canonical_zero(dataset.flow_conditions.mach),
                 method_id: dataset.method.id.clone(),
                 convergence_status: dataset.method.convergence_status,
                 evidence_ready,
@@ -871,25 +871,31 @@ fn evaluate(file: &AerodynamicEvidenceFile) -> AerodynamicEvidenceEvaluation {
             for point in &envelope.required_points {
                 let covered = datasets.iter().any(|dataset| {
                     dataset.evidence_ready
-                        && dataset.reynolds.to_bits() == point.reynolds.to_bits()
-                        && dataset.mach.to_bits() == point.mach.to_bits()
+                        && canonical_bits(dataset.reynolds) == canonical_bits(point.reynolds)
+                        && canonical_bits(dataset.mach) == canonical_bits(point.mach)
                 });
                 if !covered {
                     coverage_holes.push(CoveragePoint {
                         reynolds: point.reynolds,
-                        mach: point.mach,
+                        mach: canonical_zero(point.mach),
                     });
                     blockers.push(format!(
                         "coverage_point:re_{:016x}:mach_{:016x}",
-                        point.reynolds.to_bits(),
-                        point.mach.to_bits()
+                        canonical_bits(point.reynolds),
+                        canonical_bits(point.mach)
                     ));
                 }
             }
             !envelope.source_ids.is_empty() && coverage_holes.is_empty()
         }
     };
-    deduplicate(&mut blockers);
+    coverage_holes.sort_by(|a, b| {
+        a.reynolds
+            .total_cmp(&b.reynolds)
+            .then_with(|| a.mach.total_cmp(&b.mach))
+    });
+    blockers.sort();
+    blockers.dedup();
     let aerodynamic_evidence_ready =
         airfoil_identity_ready && coordinates_ready && polar_evidence_ready && coverage_ready;
     AerodynamicEvidenceEvaluation {
@@ -1044,7 +1050,10 @@ fn is_iso_date(value: &str) -> bool {
     year != 0 && day != 0 && day <= days
 }
 
-fn deduplicate(values: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    values.retain(|value| seen.insert(value.clone()));
+fn canonical_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
+fn canonical_bits(value: f64) -> u64 {
+    canonical_zero(value).to_bits()
 }

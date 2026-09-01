@@ -327,6 +327,30 @@ fn invalid_measurements_and_unresolved_evidence_fail_closed() {
 }
 
 #[test]
+fn finite_measurements_cannot_overflow_evidence_summaries() {
+    let mut stable_large_mean = complete_synthetic_campaign();
+    stable_large_mean["raw_observations"]["vertical_tail_root_le_aft_wing_le_m"] =
+        series([1.0e308, 1.0e308, 1.0e308]);
+    let survey = load(&stable_large_mean).unwrap();
+    assert_eq!(
+        survey
+            .evaluation()
+            .vertical_tail_root_le_station()
+            .unwrap()
+            .value(),
+        1.0e308
+    );
+
+    let mut unrepresentable_spread = complete_synthetic_campaign();
+    unrepresentable_spread["raw_observations"]["horizontal_tail_planform"]["tip_le_offset_aft_root_le_m"] =
+        series([-1.0e308, 0.0, 1.0e308]);
+    assert!(matches!(
+        load(&unrepresentable_spread),
+        Err(ReferenceSurveyError::InvalidMeasurement { .. })
+    ));
+}
+
+#[test]
 fn survey_metadata_is_outside_the_aircraft_runtime_fingerprint() {
     let model_before = load_value(&valid_v2_reference_model_value()).unwrap();
     let fingerprint_before = model_before.physics_fingerprint();

@@ -152,10 +152,10 @@ exact horizontal-tail planform remains unknown pending validated plan reconstruc
 ## Airfoil reference
 
 The target EGV product identifies the airfoil as Clark Y (`manufacturer_spec`,
-`sig-lt40-egv-arf-product`). The preferred coordinate source for M2.3 is UIUC's original
-`clarky.dat` (`published`, `uiuc-clark-y`). The coordinate file is reference input only. M2.2A does
-not run XFOIL, generate Reynolds-dependent polars, alter the aerodynamic solver, or create a
-coefficient table. Those activities belong to M2.3.
+`sig-lt40-egv-arf-product`). M2.3A ingests UIUC's original `clarky.dat` (`published`,
+`uiuc-clark-y`) as traceable coordinate evidence. M2.2A does not run XFOIL, generate
+Reynolds-dependent polars, alter the aerodynamic solver, or create a coefficient table. Those
+activities remain future M2.3 work.
 
 ## Electric-propulsion references
 
@@ -225,17 +225,17 @@ The only known mass evidence is the manufacturer EGV flying-weight range of 2.72
 operational mass, `Ixx`, `Iyy`, `Izz`, and all relevant products of inertia are `unknown`. No
 plausible inertia or convenient midpoint mass is introduced.
 
-M2.2D should build mass properties from traceable component masses and locations, including at
-least fuselage, left and right wings, horizontal tail, vertical tail, motor, battery, ESC, servos,
-receiver, landing gear, wheels, and remaining structure. Conceptually:
+M2.2D defines a strict evidence and derivation path for traceable component masses and locations,
+including at least fuselage, left and right wings, horizontal tail, vertical tail, motor, battery,
+ESC, servos, receiver, landing gear, wheels, and remaining structure. Conceptually:
 
 ```text
 CG = sum(m_i * r_i) / sum(m_i)
 ```
 
-The rigid-body tensor must combine each component's own inertia with its translated contribution
-using the parallel-axis theorem. This is a future method statement, not an implemented solver or a
-source of numbers.
+The implemented off-runtime derivation combines each component's own inertia with its translated
+contribution using the parallel-axis theorem. The committed campaign remains unmeasured, so this
+method supplies no LT-40 numerical mass properties or runtime authority.
 
 ## Parameter matrix
 
@@ -247,7 +247,7 @@ where EGV applicability still requires verification.
 | Wingspan | 1.778 | m | `derived` | `sig-lt40-egv-arf-product`, `sig-lt40-kit-product` | Both published as 70 in | Future geometry reference | Exact conversion |
 | Reference wing area | 0.580644 | m^2 | `derived` | `sig-lt40-egv-arf-product`, `sig-lt40-kit-product` | Both published as 900 in^2 | Future aerodynamic reference | Exact conversion |
 | Aircraft length | 1.447 | m | `manufacturer_spec` | `sig-lt40-egv-arf-product`, `sig-lt40-kit-product` | Both product specifications | Future geometry reference | Manufacturer-rounded SI; 57 in converts exactly to 1.4478 m |
-| Airfoil identity | Clark Y | - | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | Future M2.3 input | UIUC coordinates are a separate source |
+| Airfoil identity | Clark Y | - | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | M2.3A evidence input | UIUC coordinates are a separate source |
 | Flying-weight range | 2.720-2.835 | kg | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | Evidence only | No authoritative single mass selected |
 | Reference geometric chord | 0.3265714286 | m | `derived` | This dossier from span and area | Rectangular baseline | Future geometry check | Not yet an exact aerodynamic MAC |
 | Aspect ratio | 5.4444444444 | - | `derived` | This dossier from span and area | Rectangular baseline | Future geometry check | `b^2 / S` |
@@ -312,7 +312,7 @@ would falsely imply physical validity and violate the unknown-data policy.
 Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remains the unchanged
 `synthetic_test` regression aircraft.
 
-## Next work packages
+## Reference-aircraft roadmap
 
 ### M2.2B - LT-40 geometry reconstruction
 
@@ -338,10 +338,14 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 
 - Component mass build-up, operational mass, CG, and full inertia tensor.
 
+### M2.3A - Aerodynamic evidence preparation
+
+- Traceable Clark Y coordinates plus strict, off-runtime polar evidence and coverage gates.
+
 ### M2.3 - Reynolds-dependent Clark Y aerodynamics
 
-- Auditable Reynolds/Mach operating envelope, coordinate preparation, polar generation or
-  published-data selection, and validation.
+- Future auditable Reynolds/Mach operating envelope, polar generation or published-data selection,
+  validation, and separately reviewed runtime integration.
 
 ### M2.4 - Validated electric propulsion and APC propeller model
 

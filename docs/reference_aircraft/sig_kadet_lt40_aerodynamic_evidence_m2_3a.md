@@ -122,8 +122,10 @@ blockers and cannot satisfy polar or coverage readiness. A method name by itself
 
 ## Reynolds/Mach grid and coverage
 
-Evaluation canonicalizes dataset summaries by Reynolds, then Mach, method ID, and dataset ID. This
-ordering is deterministic and does not rewrite the source artifact.
+Evaluation canonicalizes dataset summaries by Reynolds, then Mach, method ID, and dataset ID.
+Coverage holes use Reynolds/Mach order, and blocker IDs use lexical order. Positive and negative
+floating-point zero are treated as the same Mach grid value. These deterministic views do not
+rewrite the source artifact.
 
 An optional `operating_envelope` contains explicitly sourced required Reynolds/Mach points and a
 rationale. Coverage is exact evidence-level membership: every required point needs at least one

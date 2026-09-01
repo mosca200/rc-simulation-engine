@@ -72,7 +72,10 @@ range. Effective uncertainty follows M2.2C:
 u = max(stated_uncertainty, instrument_resolution / 2, reading_range / 2)
 ```
 
-This is an auditable engineering rule, not a population-statistics confidence interval.
+The mean and norm calculations avoid avoidable intermediate overflow. Any aggregate, component
+build-up, tensor, or propagated uncertainty that still cannot be represented as finite `f64`
+fails closed. This is an auditable engineering rule, not a population-statistics confidence
+interval.
 
 ## Direct whole-aircraft evidence
 

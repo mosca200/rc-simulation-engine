@@ -401,8 +401,36 @@ fn published_range_and_reference_only_components_never_supply_operational_mass()
 #[test]
 fn m2_2c_aft_station_bridge_negates_x_exactly() {
     assert_close(x_aft_to_frd_x(123.0).unwrap(), -123.0);
+    assert_eq!(x_aft_to_frd_x(0.0).unwrap().to_bits(), 0.0_f64.to_bits());
     assert_eq!(x_aft_to_frd_x(-0.0).unwrap().to_bits(), 0.0_f64.to_bits());
     assert!(x_aft_to_frd_x(f64::NAN).is_err());
+}
+
+#[test]
+fn finite_component_arithmetic_cannot_create_non_finite_mass_properties() {
+    let mut stable_large_mean = complete_component_campaign();
+    stable_large_mean["raw_observations"]["direct_total_mass_kg"] = series(1.0e308);
+    assert_eq!(
+        load(&stable_large_mean)
+            .unwrap()
+            .evaluation()
+            .direct_mass()
+            .unwrap()
+            .mean(),
+        1.0e308
+    );
+
+    let mut value = complete_component_campaign();
+    for component in value["raw_observations"]["components"]
+        .as_array_mut()
+        .unwrap()
+    {
+        component["mass_kg"] = series(1.0e308);
+    }
+    assert!(matches!(
+        load(&value),
+        Err(ReferenceMassPropertiesError::InvalidMeasurement { .. })
+    ));
 }
 
 #[test]

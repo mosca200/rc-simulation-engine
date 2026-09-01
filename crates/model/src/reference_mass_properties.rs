@@ -269,7 +269,7 @@ pub fn x_aft_to_frd_x(x_aft_m: f64) -> Result<f64, ReferenceMassPropertiesError>
             reason: "coordinate must be finite",
         });
     }
-    Ok(-x_aft_m)
+    Ok(if x_aft_m == 0.0 { 0.0 } else { -x_aft_m })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -918,6 +918,22 @@ fn validate_series(
             });
         }
     }
+    let summary = summarize(series);
+    if ![
+        summary.mean,
+        summary.minimum,
+        summary.maximum,
+        summary.range,
+        summary.effective_uncertainty,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return Err(ReferenceMassPropertiesError::InvalidMeasurement {
+            field: field.to_owned(),
+            reason: "measurement summary is not representable as finite f64",
+        });
+    }
     validate_required_text(
         "measurement.datum_or_method_definition",
         &series.datum_or_method_definition,
@@ -1085,7 +1101,7 @@ fn summarize(series: &MeasurementSeriesFile) -> MassMeasurementSummary {
     let maximum = a.max(b).max(c);
     let range = maximum - minimum;
     MassMeasurementSummary {
-        mean: (a + b + c) / 3.0,
+        mean: stable_mean([a, b, c]),
         minimum,
         maximum,
         range,
@@ -1093,6 +1109,15 @@ fn summarize(series: &MeasurementSeriesFile) -> MassMeasurementSummary {
             .stated_uncertainty
             .max(series.instrument_resolution / 2.0)
             .max(range / 2.0),
+    }
+}
+
+fn stable_mean(values: [f64; 3]) -> f64 {
+    let scale = values.into_iter().map(f64::abs).fold(0.0, f64::max);
+    if scale == 0.0 {
+        0.0
+    } else {
+        (values.into_iter().map(|value| value / scale).sum::<f64>() / 3.0) * scale
     }
 }
 
@@ -1148,7 +1173,7 @@ fn summarize_tensor(tensor: &TensorObservationFile) -> InertiaEstimate {
         }
     }
     for (a, b) in [(0, 1), (0, 2), (1, 2)] {
-        let average = (matrix[a][b] + matrix[b][a]) / 2.0;
+        let average = matrix[a][b] / 2.0 + matrix[b][a] / 2.0;
         let pair_uncertainty = uncertainty[a][b]
             .max(uncertainty[b][a])
             .max((matrix[a][b] - matrix[b][a]).abs() / 2.0);
@@ -1255,67 +1280,100 @@ fn resolve_installed_components(file: &MassPropertiesFile) -> Vec<ResolvedCompon
 fn derive_mass(
     components: &[ResolvedComponent],
     inventory_complete: bool,
-) -> Option<ScalarEstimate> {
+) -> Result<Option<ScalarEstimate>, ReferenceMassPropertiesError> {
     if !inventory_complete
         || components.is_empty()
         || components.iter().any(|item| item.mass.is_none())
     {
-        return None;
+        return Ok(None);
     }
-    let mut value = 0.0;
-    let mut uncertainty_squared = 0.0;
+    let mut value = 0.0_f64;
+    let mut uncertainty = 0.0_f64;
     for component in components {
-        let mass = component.mass?;
+        let mass = component.mass.expect("complete component mass");
         value += mass.value;
-        uncertainty_squared += mass.uncertainty.powi(2);
+        uncertainty = uncertainty.hypot(mass.uncertainty);
     }
-    Some(ScalarEstimate {
-        value,
-        uncertainty: uncertainty_squared.sqrt(),
-    })
+    if !value.is_finite() || !uncertainty.is_finite() {
+        return Err(ReferenceMassPropertiesError::InvalidMeasurement {
+            field: "component_build_up_mass_kg".to_owned(),
+            reason: "derived value or uncertainty is not representable as finite f64",
+        });
+    }
+    Ok(Some(ScalarEstimate { value, uncertainty }))
 }
 
-fn derive_cg(components: &[ResolvedComponent], inventory_complete: bool) -> Option<VectorEstimate> {
+fn derive_cg(
+    components: &[ResolvedComponent],
+    inventory_complete: bool,
+) -> Result<Option<VectorEstimate>, ReferenceMassPropertiesError> {
     if !inventory_complete
         || components.is_empty()
         || components
             .iter()
             .any(|item| item.mass.is_none() || item.position.is_none())
     {
-        return None;
+        return Ok(None);
     }
-    let mass = derive_mass(components, true)?;
-    let value = compute_cg(components)?;
-    let mut uncertainty_squared = [0.0; 3];
+    let mass = derive_mass(components, true)?.expect("complete component mass");
+    let value =
+        compute_cg(components).ok_or_else(|| ReferenceMassPropertiesError::InvalidMeasurement {
+            field: "component_build_up_cg_frd_m".to_owned(),
+            reason: "derived value is not representable as finite f64",
+        })?;
+    let mut uncertainty = [0.0_f64; 3];
     for component in components {
-        let component_mass = component.mass?;
-        let position = component.position?;
+        let component_mass = component.mass.expect("complete component mass");
+        let position = component.position.expect("complete component position");
         for axis in 0..3 {
             let mass_contribution =
                 (position.value[axis] - value[axis]) / mass.value * component_mass.uncertainty;
             let position_contribution =
                 component_mass.value / mass.value * position.uncertainty[axis];
-            uncertainty_squared[axis] += mass_contribution.powi(2) + position_contribution.powi(2);
+            uncertainty[axis] = uncertainty[axis]
+                .hypot(mass_contribution)
+                .hypot(position_contribution);
         }
     }
-    Some(VectorEstimate {
-        value,
-        uncertainty: uncertainty_squared.map(f64::sqrt),
-    })
+    if !uncertainty.into_iter().all(f64::is_finite) {
+        return Err(ReferenceMassPropertiesError::InvalidMeasurement {
+            field: "component_build_up_cg_frd_m".to_owned(),
+            reason: "derived uncertainty is not representable as finite f64",
+        });
+    }
+    Ok(Some(VectorEstimate { value, uncertainty }))
 }
 
 fn compute_cg(components: &[ResolvedComponent]) -> Option<[f64; 3]> {
     let mut total_mass = 0.0;
-    let mut moment = [0.0; 3];
     for component in components {
         let mass = component.mass?.value;
-        let position = component.position?.value;
         total_mass += mass;
-        for axis in 0..3 {
-            moment[axis] += mass * position[axis];
-        }
     }
-    (total_mass > 0.0).then(|| moment.map(|value| value / total_mass))
+    if !total_mass.is_finite() || total_mass <= 0.0 {
+        return None;
+    }
+    let mut cg = [0.0; 3];
+    for (axis, cg_axis) in cg.iter_mut().enumerate() {
+        let scale = components
+            .iter()
+            .filter_map(|component| {
+                component
+                    .position
+                    .map(|position| position.value[axis].abs())
+            })
+            .fold(0.0, f64::max);
+        if scale == 0.0 {
+            continue;
+        }
+        let normalized = components.iter().try_fold(0.0, |sum, component| {
+            let mass = component.mass?.value;
+            let position = component.position?.value[axis];
+            Some(sum + position / scale * (mass / total_mass))
+        })?;
+        *cg_axis = normalized * scale;
+    }
+    cg.into_iter().all(f64::is_finite).then_some(cg)
 }
 
 fn derive_inertia(
@@ -1330,32 +1388,37 @@ fn derive_inertia(
     {
         return Ok(None);
     }
-    let nominal = compute_inertia_matrix(components).expect("complete components derive inertia");
+    let nominal = compute_inertia_matrix(components).ok_or_else(|| {
+        ReferenceMassPropertiesError::InvalidMeasurement {
+            field: "component_build_up_inertia_frd_kg_m2".to_owned(),
+            reason: "derived tensor is not representable as finite f64",
+        }
+    })?;
     if !is_positive_definite(&nominal) {
         return Err(ReferenceMassPropertiesError::NonPositiveDefiniteInertia {
             field: "component_build_up_inertia_frd_kg_m2".to_owned(),
         });
     }
-    let mut squared = [[0.0; 3]; 3];
+    let mut uncertainty = [[0.0; 3]; 3];
     for index in 0..components.len() {
         let component = &components[index];
         let mass = component.mass.expect("complete mass");
         accumulate_perturbation(
             components,
             &nominal,
-            &mut squared,
+            &mut uncertainty,
             index,
             Perturbation::Mass(mass.uncertainty),
-        );
+        )?;
         let position = component.position.expect("complete position");
         for axis in 0..3 {
             accumulate_perturbation(
                 components,
                 &nominal,
-                &mut squared,
+                &mut uncertainty,
                 index,
                 Perturbation::Position(axis, position.uncertainty[axis]),
-            );
+            )?;
         }
         let intrinsic = component
             .intrinsic_inertia
@@ -1364,15 +1427,15 @@ fn derive_inertia(
             accumulate_perturbation(
                 components,
                 &nominal,
-                &mut squared,
+                &mut uncertainty,
                 index,
                 Perturbation::Intrinsic(row, column, intrinsic.uncertainty_kg_m2[row][column]),
-            );
+            )?;
         }
     }
     Ok(Some(InertiaEstimate {
         matrix_frd_kg_m2: nominal,
-        uncertainty_kg_m2: squared.map(|row| row.map(f64::sqrt)),
+        uncertainty_kg_m2: uncertainty,
     }))
 }
 
@@ -1386,17 +1449,17 @@ enum Perturbation {
 fn accumulate_perturbation(
     components: &[ResolvedComponent],
     nominal: &[[f64; 3]; 3],
-    squared: &mut [[f64; 3]; 3],
+    accumulated_uncertainty: &mut [[f64; 3]; 3],
     index: usize,
     perturbation: Perturbation,
-) {
+) -> Result<(), ReferenceMassPropertiesError> {
     let uncertainty = match perturbation {
         Perturbation::Mass(value)
         | Perturbation::Position(_, value)
         | Perturbation::Intrinsic(_, _, value) => value,
     };
     if uncertainty == 0.0 {
-        return;
+        return Ok(());
     }
     let mut deviations = [[0.0_f64; 3]; 3];
     for sign in [-1.0, 1.0] {
@@ -1426,19 +1489,36 @@ fn accumulate_perturbation(
                 matrix[column][row] = matrix[row][column];
             }
         }
-        if let Some(candidate) = compute_inertia_matrix(&changed) {
-            for row in 0..3 {
-                for column in 0..3 {
-                    deviations[row][column] = deviations[row][column]
-                        .max((candidate[row][column] - nominal[row][column]).abs());
-                }
+        let candidate = compute_inertia_matrix(&changed).ok_or_else(|| {
+            ReferenceMassPropertiesError::InvalidMeasurement {
+                field: "component_build_up_inertia_frd_kg_m2".to_owned(),
+                reason: "uncertainty perturbation is not representable as finite f64",
+            }
+        })?;
+        for row in 0..3 {
+            for column in 0..3 {
+                deviations[row][column] = deviations[row][column]
+                    .max((candidate[row][column] - nominal[row][column]).abs());
             }
         }
     }
     for row in 0..3 {
         for column in 0..3 {
-            squared[row][column] += deviations[row][column].powi(2);
+            accumulated_uncertainty[row][column] =
+                accumulated_uncertainty[row][column].hypot(deviations[row][column]);
         }
+    }
+    if accumulated_uncertainty
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite())
+    {
+        Ok(())
+    } else {
+        Err(ReferenceMassPropertiesError::InvalidMeasurement {
+            field: "component_build_up_inertia_frd_kg_m2".to_owned(),
+            reason: "derived uncertainty is not representable as finite f64",
+        })
     }
 }
 
@@ -1463,7 +1543,11 @@ fn compute_inertia_matrix(components: &[ResolvedComponent]) -> Option<[[f64; 3];
             }
         }
     }
-    Some(result)
+    result
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite())
+        .then_some(result)
 }
 
 fn evaluate(
@@ -1484,8 +1568,8 @@ fn evaluate(
         .map(summarize_tensor);
 
     let components = resolve_installed_components(file);
-    let component_mass = derive_mass(&components, observations.component_inventory_complete);
-    let component_cg = derive_cg(&components, observations.component_inventory_complete);
+    let component_mass = derive_mass(&components, observations.component_inventory_complete)?;
+    let component_cg = derive_cg(&components, observations.component_inventory_complete)?;
     let component_inertia = derive_inertia(&components, observations.component_inventory_complete)?;
 
     let mut missing = Vec::new();
@@ -1671,9 +1755,10 @@ fn scalar_consistency(
         missing.push(criterion_blocker.to_owned());
         return false;
     };
-    if (direct.value - build_up.value).abs()
-        <= tolerance + direct.uncertainty.hypot(build_up.uncertainty)
-    {
+    let difference = (direct.value - build_up.value).abs();
+    let uncertainty = direct.uncertainty.hypot(build_up.uncertainty);
+    let threshold = tolerance + uncertainty;
+    if difference.is_finite() && threshold.is_finite() && difference <= threshold {
         true
     } else {
         missing.push(inconsistency_blocker.to_owned());
@@ -1701,10 +1786,9 @@ fn vector_consistency(
         .uncertainty
         .into_iter()
         .chain(build_up.uncertainty)
-        .map(|value| value.powi(2))
-        .sum::<f64>()
-        .sqrt();
-    if difference <= tolerance + uncertainty {
+        .fold(0.0, f64::hypot);
+    let threshold = tolerance + uncertainty;
+    if difference.is_finite() && threshold.is_finite() && difference <= threshold {
         true
     } else {
         missing.push(inconsistency_blocker.to_owned());
@@ -1732,10 +1816,9 @@ fn tensor_consistency(
         .into_iter()
         .flatten()
         .chain(build_up.uncertainty_kg_m2.into_iter().flatten())
-        .map(|value| value.powi(2))
-        .sum::<f64>()
-        .sqrt();
-    if difference <= tolerance + uncertainty {
+        .fold(0.0, f64::hypot);
+    let threshold = tolerance + uncertainty;
+    if difference.is_finite() && threshold.is_finite() && difference <= threshold {
         true
     } else {
         missing.push("direct_vs_build_up_inertia_consistency".to_owned());
@@ -1788,13 +1871,13 @@ fn is_positive_definite(matrix: &[[f64; 3]; 3]) -> bool {
 }
 
 fn matrix_frobenius_difference(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> f64 {
-    let mut sum = 0.0;
+    let mut norm = 0.0_f64;
     for row in 0..3 {
         for column in 0..3 {
-            sum += (a[row][column] - b[row][column]).powi(2);
+            norm = norm.hypot(a[row][column] - b[row][column]);
         }
     }
-    sum.sqrt()
+    norm
 }
 
 fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1806,7 +1889,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 fn norm(value: [f64; 3]) -> f64 {
-    dot(value, value).sqrt()
+    value.into_iter().fold(0.0, f64::hypot)
 }
 
 fn deduplicate(values: &mut Vec<String>) {

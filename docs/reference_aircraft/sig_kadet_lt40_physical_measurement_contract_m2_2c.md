@@ -58,6 +58,11 @@ For readings `r1`, `r2`, and `r3`, evaluation reports the deterministic arithmet
 u_series = max(stated_uncertainty, instrument_resolution / 2, range / 2)
 ```
 
+The mean uses a scale-normalized calculation so large finite readings do not overflow merely from
+intermediate addition. If a range, derived station, arm, planform integral, or propagated
+uncertainty cannot be represented as finite `f64`, loading fails closed rather than emitting a
+non-finite result or falling back to another geometry path.
+
 For bilateral `H`, the closure station is the mean of the independently aggregated left and right means. The signed diagnostic remains available as:
 
 ```text
