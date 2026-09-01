@@ -217,7 +217,8 @@ Cq = Cp / (2 * pi)
 ```
 
 This relationship is recorded as `derived`; no new `Ct` or `Cp` values are produced. M2.4A records
-the parser interpretation and derived `Cq`; a calibrated runtime propeller model remains M2.4B.
+the parser interpretation and derived `Cq`; M2.4B supplies a generic calibratable runtime, but an
+LT-40 runtime propeller model remains blocked on installed-configuration evidence.
 
 ## Mass properties and planned derivation
 
@@ -361,8 +362,9 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 
 - M2.4A: off-runtime configuration/component evidence, exact APC source ingestion, strict parsing,
   provenance, and readiness blockers.
-- M2.4B: future electrical calibration, battery/ESC behavior, validated coefficient transformation,
-  and separately reviewed LT-40 runtime integration.
+- M2.4B: generic electrical calibration, explicit battery/ESC behavior, speed-dependent
+  coefficient maps, and synthetic propulsion-runtime integration are implemented; LT-40 runtime
+  configuration remains blocked until installed-configuration evidence closes.
 
 ### M2.5 - Trim solver
 

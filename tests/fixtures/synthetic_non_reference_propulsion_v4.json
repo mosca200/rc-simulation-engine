@@ -1,0 +1,62 @@
+{
+  "schema_version": 4,
+  "model_id": "synthetic_non_reference_propulsion_v4",
+  "display_name": "Synthetic Calibratable Propulsion Test Fixture",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 1.7,
+    "inertia_body_kg_m2": [[0.18, 0.0, 0.0], [0.0, 0.24, 0.0], [0.0, 0.0, 0.31]]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.0000147,
+    "polars": [],
+    "polar_families": [],
+    "elements": []
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 1.0, "expo": 0.0},
+      "pitch": {"rate": 1.0, "expo": 0.0},
+      "yaw": {"rate": 1.0, "expo": 0.0}
+    },
+    "servos": {
+      "aileron": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false},
+      "elevator": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false},
+      "rudder": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false}
+    }
+  },
+  "control_surface_bindings": [],
+  "propulsion": {
+    "battery": {"open_circuit_voltage_v": 13.2, "internal_resistance_ohm": 0.031},
+    "esc": {"series_resistance_ohm": 0.012},
+    "motor": {"kv_rpm_per_v": 777.0, "winding_resistance_ohm": 0.057, "no_load_current_a": 0.9},
+    "propeller": {
+      "position_body_m": [0.28, 0.0, 0.0],
+      "orientation_body_from_prop_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "diameter_m": 0.287,
+      "spin_direction": "positive_about_local_x"
+    },
+    "coefficient_source": {
+      "kind": "shaft_speed_map",
+      "nodes": [
+        {
+          "shaft_speed_rad_s": 240.0,
+          "samples": [
+            {"advance_ratio_j": 0.0, "ct": 0.101, "cq": 0.0151},
+            {"advance_ratio_j": 0.6, "ct": 0.061, "cq": 0.0102}
+          ]
+        },
+        {
+          "shaft_speed_rad_s": 720.0,
+          "samples": [
+            {"advance_ratio_j": 0.0, "ct": 0.123, "cq": 0.0184},
+            {"advance_ratio_j": 0.35, "ct": 0.092, "cq": 0.0137},
+            {"advance_ratio_j": 0.9, "ct": 0.028, "cq": 0.0061}
+          ]
+        }
+      ]
+    }
+  },
+  "presentation": null
+}

@@ -1,6 +1,7 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V4,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -25,15 +26,18 @@ use crate::{
         ReferenceScalarFileV2,
     },
     v3::{AeroPolarBindingFileV3, AircraftModelFileV3},
+    v4::{AircraftModelFileV4, PropellerCoefficientSourceFileV4, PropulsionFileV4},
 };
 use serde::Deserialize;
 use sim_core::{
     AeroElement, AeroElementError, AxisResponseConfig, BatteryConfig, BatteryConfigError,
     ControlActuatorConfig, ControlConfigError, ControlResponseConfig, ControlSystemConfig,
-    ElectricPropulsionConfig, MotorConfig, MotorConfigError, ParameterError, PolarError,
-    PolarSample, PolarTable, PropellerCoefficientError, PropellerCoefficientTable, PropellerConfig,
-    PropellerConfigError, PropellerSample, PropellerSpinDirection, ReynoldsPolar,
-    ReynoldsPolarFamily, ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig,
+    ElectricPropulsionConfig, EscConfig, EscConfigError, MotorConfig, MotorConfigError,
+    ParameterError, PolarError, PolarSample, PolarTable, PropellerCoefficientError,
+    PropellerCoefficientMap, PropellerCoefficientMapError, PropellerCoefficientNode,
+    PropellerCoefficientSource, PropellerCoefficientTable, PropellerConfig, PropellerConfigError,
+    PropellerSample, PropellerSpinDirection, ReynoldsPolar, ReynoldsPolarFamily,
+    ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig,
 };
 use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use std::{fs, io, path::Path};
@@ -170,6 +174,11 @@ pub enum ModelLoadError {
         #[source]
         source: BatteryConfigError,
     },
+    #[error("invalid propulsion ESC: {source}")]
+    InvalidEsc {
+        #[source]
+        source: EscConfigError,
+    },
     #[error("invalid propulsion motor: {source}")]
     InvalidMotor {
         #[source]
@@ -184,6 +193,12 @@ pub enum ModelLoadError {
     InvalidPropellerCoefficientTable {
         #[source]
         source: PropellerCoefficientError,
+    },
+    #[error("invalid propulsion coefficient map node {node_index:?}: {source}")]
+    InvalidPropellerCoefficientMap {
+        node_index: Option<usize>,
+        #[source]
+        source: PropellerCoefficientMapError,
     },
     #[error(
         "invalid presentation GLB path {path:?}: expected a nonempty relative path without '..'"
@@ -265,6 +280,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V3);
                 resolve_v3(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V4) => {
+                let file: AircraftModelFileV4 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V4);
+                resolve_v4(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -390,6 +411,13 @@ fn resolve_reference_framework(
 }
 
 fn resolve_v3(file: AircraftModelFileV3) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v3_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V3)
+}
+
+fn resolve_v3_fields(
+    file: AircraftModelFileV3,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
     let AircraftModelFileV3 {
         schema_version,
         model_id,
@@ -424,7 +452,7 @@ fn resolve_v3(file: AircraftModelFileV3) -> Result<AircraftModel, ModelLoadError
         propulsion,
         presentation,
     };
-    let mut model = resolve_common(common_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V3)?;
+    let mut model = resolve_common(common_file, runtime_schema_version)?;
 
     let mut families = Vec::with_capacity(aerodynamics.polar_families.len());
     for (family_index, family_file) in aerodynamics.polar_families.into_iter().enumerate() {
@@ -528,6 +556,120 @@ fn resolve_v3(file: AircraftModelFileV3) -> Result<AircraftModel, ModelLoadError
     let bindings = resolve_control_surface_bindings(&model, control_surface_bindings)?;
     model = model.with_control_surface_bindings(bindings);
     resolve_reference_framework(model, classification, reference_aircraft)
+}
+
+fn resolve_v4(file: AircraftModelFileV4) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV4 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    } = file;
+    let runtime_propulsion = propulsion.map(resolve_propulsion_v4).transpose()?;
+    let v3_file = AircraftModelFileV3 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion: None,
+        presentation,
+    };
+    Ok(
+        resolve_v3_fields(v3_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V4)?
+            .with_propulsion(runtime_propulsion),
+    )
+}
+
+fn resolve_propulsion_v4(
+    file: PropulsionFileV4,
+) -> Result<RuntimeElectricPropulsion, ModelLoadError> {
+    let battery = BatteryConfig::new(
+        file.battery.open_circuit_voltage_v,
+        file.battery.internal_resistance_ohm,
+    )
+    .map_err(|source| ModelLoadError::InvalidBattery { source })?;
+    let esc = EscConfig::new(file.esc.series_resistance_ohm)
+        .map_err(|source| ModelLoadError::InvalidEsc { source })?;
+    let motor = MotorConfig::new(
+        file.motor.kv_rpm_per_v,
+        file.motor.winding_resistance_ohm,
+        file.motor.no_load_current_a,
+    )
+    .map_err(|source| ModelLoadError::InvalidMotor { source })?;
+    let spin_direction = match file.propeller.spin_direction {
+        PropellerSpinDirectionFileV0::PositiveAboutLocalX => {
+            PropellerSpinDirection::PositiveAboutLocalX
+        }
+        PropellerSpinDirectionFileV0::NegativeAboutLocalX => {
+            PropellerSpinDirection::NegativeAboutLocalX
+        }
+    };
+    let propeller = PropellerConfig::new(
+        vector(file.propeller.position_body_m),
+        orientation(file.propeller.orientation_body_from_prop_wxyz),
+        file.propeller.diameter_m,
+        spin_direction,
+    )
+    .map_err(|source| ModelLoadError::InvalidPropeller { source })?;
+    let coefficient_source = match file.coefficient_source {
+        PropellerCoefficientSourceFileV4::FixedTable { samples } => {
+            PropellerCoefficientSource::FixedTable(resolve_propeller_table(samples)?)
+        }
+        PropellerCoefficientSourceFileV4::ShaftSpeedMap { nodes } => {
+            let mut runtime_nodes = Vec::with_capacity(nodes.len());
+            for (node_index, node) in nodes.into_iter().enumerate() {
+                let table = resolve_propeller_table(node.samples)?;
+                runtime_nodes.push(
+                    PropellerCoefficientNode::new(node.shaft_speed_rad_s, table).map_err(
+                        |source| ModelLoadError::InvalidPropellerCoefficientMap {
+                            node_index: Some(node_index),
+                            source,
+                        },
+                    )?,
+                );
+            }
+            PropellerCoefficientSource::ShaftSpeedMap(
+                PropellerCoefficientMap::new(runtime_nodes).map_err(|source| {
+                    ModelLoadError::InvalidPropellerCoefficientMap {
+                        node_index: None,
+                        source,
+                    }
+                })?,
+            )
+        }
+    };
+    Ok(RuntimeElectricPropulsion::new(
+        ElectricPropulsionConfig::new_with_esc(battery, esc, motor, propeller),
+        coefficient_source,
+    ))
+}
+
+fn resolve_propeller_table(
+    samples: Vec<crate::v0::PropellerSampleFileV0>,
+) -> Result<PropellerCoefficientTable, ModelLoadError> {
+    PropellerCoefficientTable::new(
+        samples
+            .into_iter()
+            .map(|sample| PropellerSample {
+                advance_ratio_j: sample.advance_ratio_j,
+                ct: sample.ct,
+                cq: sample.cq,
+            })
+            .collect(),
+    )
+    .map_err(|source| ModelLoadError::InvalidPropellerCoefficientTable { source })
 }
 
 fn resolve_common(
@@ -672,7 +814,7 @@ fn resolve_common(
                 .collect();
             let coefficient_table = PropellerCoefficientTable::new(samples)
                 .map_err(|source| ModelLoadError::InvalidPropellerCoefficientTable { source })?;
-            Ok(RuntimeElectricPropulsion::new(
+            Ok(RuntimeElectricPropulsion::new_legacy(
                 ElectricPropulsionConfig::new(battery, motor, propeller),
                 coefficient_table,
             ))

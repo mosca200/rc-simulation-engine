@@ -190,18 +190,19 @@ loss evidence and battery electrical/load evidence also remain blockers.
 the 500 Hz path, or replay. Existing synthetic propulsion behavior and regression fixtures are
 unchanged.
 
-## Requirements for M2.4B
+## Remaining LT-40 runtime gates after M2.4B
 
-M2.4B should remain a separate, reviewed calibration/integration slice. Before any LT-40 runtime
-configuration is authorized it needs, at minimum:
+M2.4B implements the generic explicit-ESC and shaft-speed-map architecture using synthetic data.
+It does not promote this evidence. Before any LT-40 runtime configuration is authorized it still
+needs, at minimum:
 
 - a specific physical airframe and operational/propulsion configuration identity;
 - photographs or equivalent evidence for installed motor, ESC, battery, propeller, and spinner;
 - traceable installed-component datasheets and serial/model identity where available;
 - battery open-circuit and loaded-voltage evidence across relevant SOC and temperature, including
   justified internal resistance or a reviewed replacement model;
-- ESC compatibility and loss/efficiency evidence, with an explicit decision on how S5B's ideal ESC
-  limitation is handled;
+- ESC compatibility and loss/efficiency evidence sufficient to calibrate or replace the generic
+  M2.4B equivalent-resistance model;
 - installed motor electrical evidence and reconciliation of limits with the chosen battery/prop;
 - an explicit, reviewed transformation of applicable APC rows into the runtime coefficient domain,
   including treatment of negative `Ct`, sparse terminal rows, RPM dependence, advance-ratio range,
@@ -212,4 +213,4 @@ configuration is authorized it needs, at minimum:
 - deterministic fingerprint, propulsion-regression, stage-local, and replay tests for the new
   runtime model.
 
-M2.4A stops before all of those runtime decisions.
+M2.4A and M2.4B both stop before those LT-40-specific runtime decisions.

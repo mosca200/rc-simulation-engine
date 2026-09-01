@@ -11,6 +11,40 @@ pub const PROPULSION_BISECTION_ITERATIONS: usize = 48;
 pub const MIN_SHAFT_SPEED_RAD_S: f64 = 1.0e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EscConfig {
+    series_resistance_ohm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum EscConfigError {
+    #[error("ESC series resistance must be finite and non-negative")]
+    InvalidSeriesResistance,
+}
+
+impl EscConfig {
+    pub fn new(series_resistance_ohm: f64) -> Result<Self, EscConfigError> {
+        if !series_resistance_ohm.is_finite() || series_resistance_ohm < 0.0 {
+            return Err(EscConfigError::InvalidSeriesResistance);
+        }
+        Ok(Self {
+            series_resistance_ohm,
+        })
+    }
+
+    #[must_use]
+    pub const fn ideal() -> Self {
+        Self {
+            series_resistance_ohm: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub const fn series_resistance_ohm(&self) -> f64 {
+        self.series_resistance_ohm
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BatteryConfig {
     open_circuit_voltage_v: f64,
     internal_resistance_ohm: f64,
@@ -332,9 +366,204 @@ impl PropellerCoefficientTable {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropellerCoefficientNode {
+    shaft_speed_rad_s: f64,
+    table: PropellerCoefficientTable,
+}
+
+impl PropellerCoefficientNode {
+    pub fn new(
+        shaft_speed_rad_s: f64,
+        table: PropellerCoefficientTable,
+    ) -> Result<Self, PropellerCoefficientMapError> {
+        if !shaft_speed_rad_s.is_finite() {
+            return Err(PropellerCoefficientMapError::NonFiniteShaftSpeed);
+        }
+        if shaft_speed_rad_s <= 0.0 {
+            return Err(PropellerCoefficientMapError::NonPositiveShaftSpeed);
+        }
+        Ok(Self {
+            shaft_speed_rad_s,
+            table,
+        })
+    }
+
+    #[must_use]
+    pub const fn shaft_speed_rad_s(&self) -> f64 {
+        self.shaft_speed_rad_s
+    }
+
+    #[must_use]
+    pub const fn table(&self) -> &PropellerCoefficientTable {
+        &self.table
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PropellerCoefficientMapError {
+    #[error("propeller coefficient map requires at least one node")]
+    Empty,
+    #[error("propeller map shaft speed must be finite")]
+    NonFiniteShaftSpeed,
+    #[error("propeller map shaft speed must be greater than zero")]
+    NonPositiveShaftSpeed,
+    #[error("propeller map shaft speeds must be strictly increasing at node {index}")]
+    NonIncreasingShaftSpeed { index: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaftSpeedRangeStatus {
+    BelowRange,
+    ExactOrInRange,
+    AboveRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropellerCoefficientMapSample {
+    pub coefficients: PropellerCoefficients,
+    pub lower_shaft_speed_rad_s: f64,
+    pub upper_shaft_speed_rad_s: f64,
+    pub interpolation_fraction: f64,
+    pub range_status: ShaftSpeedRangeStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropellerCoefficientMap {
+    nodes: Vec<PropellerCoefficientNode>,
+}
+
+impl PropellerCoefficientMap {
+    pub fn new(nodes: Vec<PropellerCoefficientNode>) -> Result<Self, PropellerCoefficientMapError> {
+        if nodes.is_empty() {
+            return Err(PropellerCoefficientMapError::Empty);
+        }
+        for index in 1..nodes.len() {
+            if nodes[index].shaft_speed_rad_s <= nodes[index - 1].shaft_speed_rad_s {
+                return Err(PropellerCoefficientMapError::NonIncreasingShaftSpeed { index });
+            }
+        }
+        Ok(Self { nodes })
+    }
+
+    #[must_use]
+    pub fn nodes(&self) -> &[PropellerCoefficientNode] {
+        &self.nodes
+    }
+
+    /// Samples both bracketing tables at the same advance ratio, then interpolates linearly in
+    /// shaft speed. Requests outside the node range clamp to an endpoint without extrapolation.
+    #[must_use]
+    pub fn sample(
+        &self,
+        shaft_speed_rad_s: f64,
+        advance_ratio_j: f64,
+    ) -> PropellerCoefficientMapSample {
+        debug_assert!(shaft_speed_rad_s.is_finite() && shaft_speed_rad_s >= 0.0);
+        debug_assert!(advance_ratio_j.is_finite());
+        if self.nodes.len() == 1 {
+            return self.sample_single(0, advance_ratio_j, ShaftSpeedRangeStatus::ExactOrInRange);
+        }
+        match self
+            .nodes
+            .binary_search_by(|node| node.shaft_speed_rad_s.total_cmp(&shaft_speed_rad_s))
+        {
+            Ok(index) => self.sample_single(
+                index,
+                advance_ratio_j,
+                ShaftSpeedRangeStatus::ExactOrInRange,
+            ),
+            Err(0) => self.sample_single(0, advance_ratio_j, ShaftSpeedRangeStatus::BelowRange),
+            Err(upper) if upper == self.nodes.len() => self.sample_single(
+                self.nodes.len() - 1,
+                advance_ratio_j,
+                ShaftSpeedRangeStatus::AboveRange,
+            ),
+            Err(upper) => {
+                let lower = upper - 1;
+                let lower_node = &self.nodes[lower];
+                let upper_node = &self.nodes[upper];
+                let fraction = (shaft_speed_rad_s - lower_node.shaft_speed_rad_s)
+                    / (upper_node.shaft_speed_rad_s - lower_node.shaft_speed_rad_s);
+                let lower_coefficients = lower_node.table.sample_clamped(advance_ratio_j);
+                let upper_coefficients = upper_node.table.sample_clamped(advance_ratio_j);
+                PropellerCoefficientMapSample {
+                    coefficients: PropellerCoefficients {
+                        ct: lower_coefficients.ct
+                            + fraction * (upper_coefficients.ct - lower_coefficients.ct),
+                        cq: lower_coefficients.cq
+                            + fraction * (upper_coefficients.cq - lower_coefficients.cq),
+                    },
+                    lower_shaft_speed_rad_s: lower_node.shaft_speed_rad_s,
+                    upper_shaft_speed_rad_s: upper_node.shaft_speed_rad_s,
+                    interpolation_fraction: fraction,
+                    range_status: ShaftSpeedRangeStatus::ExactOrInRange,
+                }
+            }
+        }
+    }
+
+    fn sample_single(
+        &self,
+        index: usize,
+        advance_ratio_j: f64,
+        range_status: ShaftSpeedRangeStatus,
+    ) -> PropellerCoefficientMapSample {
+        let node = &self.nodes[index];
+        PropellerCoefficientMapSample {
+            coefficients: node.table.sample_clamped(advance_ratio_j),
+            lower_shaft_speed_rad_s: node.shaft_speed_rad_s,
+            upper_shaft_speed_rad_s: node.shaft_speed_rad_s,
+            interpolation_fraction: 0.0,
+            range_status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropellerCoefficientSource {
+    FixedTable(PropellerCoefficientTable),
+    ShaftSpeedMap(PropellerCoefficientMap),
+}
+
+impl PropellerCoefficientSource {
+    fn as_ref(&self) -> PropellerCoefficientSourceRef<'_> {
+        match self {
+            Self::FixedTable(table) => PropellerCoefficientSourceRef::FixedTable(table),
+            Self::ShaftSpeedMap(map) => PropellerCoefficientSourceRef::ShaftSpeedMap(map),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PropellerCoefficientSourceRef<'a> {
+    FixedTable(&'a PropellerCoefficientTable),
+    ShaftSpeedMap(&'a PropellerCoefficientMap),
+}
+
+impl PropellerCoefficientSourceRef<'_> {
+    fn sample(
+        &self,
+        shaft_speed_rad_s: f64,
+        advance_ratio_j: f64,
+    ) -> PropellerCoefficientMapSample {
+        match self {
+            Self::FixedTable(table) => PropellerCoefficientMapSample {
+                coefficients: table.sample_clamped(advance_ratio_j),
+                lower_shaft_speed_rad_s: shaft_speed_rad_s,
+                upper_shaft_speed_rad_s: shaft_speed_rad_s,
+                interpolation_fraction: 0.0,
+                range_status: ShaftSpeedRangeStatus::ExactOrInRange,
+            },
+            Self::ShaftSpeedMap(map) => map.sample(shaft_speed_rad_s, advance_ratio_j),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElectricPropulsionConfig {
     battery: BatteryConfig,
+    esc: EscConfig,
     motor: MotorConfig,
     propeller: PropellerConfig,
 }
@@ -348,6 +577,22 @@ impl ElectricPropulsionConfig {
     ) -> Self {
         Self {
             battery,
+            esc: EscConfig::ideal(),
+            motor,
+            propeller,
+        }
+    }
+
+    #[must_use]
+    pub const fn new_with_esc(
+        battery: BatteryConfig,
+        esc: EscConfig,
+        motor: MotorConfig,
+        propeller: PropellerConfig,
+    ) -> Self {
+        Self {
+            battery,
+            esc,
             motor,
             propeller,
         }
@@ -356,6 +601,11 @@ impl ElectricPropulsionConfig {
     #[must_use]
     pub const fn battery(&self) -> &BatteryConfig {
         &self.battery
+    }
+
+    #[must_use]
+    pub const fn esc(&self) -> &EscConfig {
+        &self.esc
     }
 
     #[must_use]
@@ -374,8 +624,11 @@ impl ElectricPropulsionConfig {
 pub struct ElectricalDriveOutput {
     pub battery_terminal_voltage_v: f64,
     pub battery_current_a: f64,
+    pub battery_terminal_electrical_power_w: f64,
+    pub esc_loss_power_w: f64,
     pub motor_voltage_v: f64,
     pub motor_current_a: f64,
+    pub motor_electrical_input_power_w: f64,
     pub motor_torque_nm: f64,
 }
 
@@ -387,11 +640,30 @@ pub fn evaluate_electrical_drive(
     battery: &BatteryConfig,
     motor: &MotorConfig,
 ) -> ElectricalDriveOutput {
+    evaluate_electrical_drive_with_esc(
+        throttle,
+        shaft_speed_rad_s,
+        battery,
+        &EscConfig::ideal(),
+        motor,
+    )
+}
+
+/// Analytic one-quadrant battery/series-loss ESC/motor evaluation at a known shaft speed.
+#[must_use]
+pub fn evaluate_electrical_drive_with_esc(
+    throttle: f64,
+    shaft_speed_rad_s: f64,
+    battery: &BatteryConfig,
+    esc: &EscConfig,
+    motor: &MotorConfig,
+) -> ElectricalDriveOutput {
     debug_assert!(throttle.is_finite() && (0.0..=1.0).contains(&throttle));
     debug_assert!(shaft_speed_rad_s.is_finite() && shaft_speed_rad_s >= 0.0);
 
-    let denominator_ohm =
-        motor.winding_resistance_ohm + throttle * throttle * battery.internal_resistance_ohm;
+    let denominator_ohm = motor.winding_resistance_ohm
+        + esc.series_resistance_ohm
+        + throttle * throttle * battery.internal_resistance_ohm;
     let motor_current_raw_a = (throttle * battery.open_circuit_voltage_v
         - motor.back_emf_constant_v_per_rad_s * shaft_speed_rad_s)
         / denominator_ohm;
@@ -399,15 +671,22 @@ pub fn evaluate_electrical_drive(
     let battery_current_a = throttle * motor_current_a;
     let battery_terminal_voltage_v =
         battery.open_circuit_voltage_v - battery_current_a * battery.internal_resistance_ohm;
-    let motor_voltage_v = throttle * battery_terminal_voltage_v;
+    let esc_output_ideal_voltage_v = throttle * battery_terminal_voltage_v;
+    let motor_voltage_v = esc_output_ideal_voltage_v - motor_current_a * esc.series_resistance_ohm;
+    let battery_terminal_electrical_power_w = battery_terminal_voltage_v * battery_current_a;
+    let esc_loss_power_w = motor_current_a * motor_current_a * esc.series_resistance_ohm;
+    let motor_electrical_input_power_w = motor_voltage_v * motor_current_a;
     let motor_torque_nm =
         motor.torque_constant_nm_per_a * (motor_current_a - motor.no_load_current_a).max(0.0);
 
     ElectricalDriveOutput {
         battery_terminal_voltage_v,
         battery_current_a,
+        battery_terminal_electrical_power_w,
+        esc_loss_power_w,
         motor_voltage_v,
         motor_current_a,
+        motor_electrical_input_power_w,
         motor_torque_nm,
     }
 }
@@ -416,6 +695,7 @@ pub fn evaluate_electrical_drive(
 struct PropellerLoad {
     advance_ratio_j: f64,
     coefficients: PropellerCoefficients,
+    coefficient_map_sample: PropellerCoefficientMapSample,
     load_torque_nm: f64,
     thrust_n: f64,
 }
@@ -425,12 +705,14 @@ fn evaluate_propeller_load(
     axial_airspeed_mps: f64,
     air_density_kg_m3: f64,
     propeller: &PropellerConfig,
-    table: &PropellerCoefficientTable,
+    source: PropellerCoefficientSourceRef<'_>,
 ) -> PropellerLoad {
     if shaft_speed_rad_s <= MIN_SHAFT_SPEED_RAD_S {
+        let coefficient_map_sample = source.sample(shaft_speed_rad_s, 0.0);
         return PropellerLoad {
             advance_ratio_j: 0.0,
-            coefficients: table.sample_clamped(0.0),
+            coefficients: coefficient_map_sample.coefficients,
+            coefficient_map_sample,
             load_torque_nm: 0.0,
             thrust_n: 0.0,
         };
@@ -448,7 +730,8 @@ fn evaluate_propeller_load(
     } else {
         0.0
     };
-    let coefficients = table.sample_clamped(advance_ratio_j);
+    let coefficient_map_sample = source.sample(shaft_speed_rad_s, advance_ratio_j);
+    let coefficients = coefficient_map_sample.coefficients;
     let revolutions_per_s_squared = revolutions_per_s * revolutions_per_s;
     let diameter_squared_m2 = propeller.diameter_m * propeller.diameter_m;
     let diameter_fourth_m4 = diameter_squared_m2 * diameter_squared_m2;
@@ -462,6 +745,7 @@ fn evaluate_propeller_load(
     PropellerLoad {
         advance_ratio_j,
         coefficients,
+        coefficient_map_sample,
         load_torque_nm,
         thrust_n,
     }
@@ -473,16 +757,21 @@ fn torque_residual_nm(
     axial_airspeed_mps: f64,
     air_density_kg_m3: f64,
     config: &ElectricPropulsionConfig,
-    table: &PropellerCoefficientTable,
+    source: PropellerCoefficientSourceRef<'_>,
 ) -> f64 {
-    let electrical =
-        evaluate_electrical_drive(throttle, shaft_speed_rad_s, &config.battery, &config.motor);
+    let electrical = evaluate_electrical_drive_with_esc(
+        throttle,
+        shaft_speed_rad_s,
+        &config.battery,
+        &config.esc,
+        &config.motor,
+    );
     let propeller = evaluate_propeller_load(
         shaft_speed_rad_s,
         axial_airspeed_mps,
         air_density_kg_m3,
         &config.propeller,
-        table,
+        source,
     );
     electrical.motor_torque_nm - propeller.load_torque_nm
 }
@@ -495,6 +784,41 @@ pub fn solve_quasi_static_shaft_speed(
     air_density_kg_m3: f64,
     config: &ElectricPropulsionConfig,
     table: &PropellerCoefficientTable,
+) -> f64 {
+    solve_quasi_static_shaft_speed_impl(
+        throttle,
+        axial_airspeed_mps,
+        air_density_kg_m3,
+        config,
+        PropellerCoefficientSourceRef::FixedTable(table),
+    )
+}
+
+/// Solves with either a fixed table or a shaft-speed map, sampling the candidate speed inside
+/// every residual evaluation.
+#[must_use]
+pub fn solve_quasi_static_shaft_speed_with_source(
+    throttle: f64,
+    axial_airspeed_mps: f64,
+    air_density_kg_m3: f64,
+    config: &ElectricPropulsionConfig,
+    source: &PropellerCoefficientSource,
+) -> f64 {
+    solve_quasi_static_shaft_speed_impl(
+        throttle,
+        axial_airspeed_mps,
+        air_density_kg_m3,
+        config,
+        source.as_ref(),
+    )
+}
+
+fn solve_quasi_static_shaft_speed_impl(
+    throttle: f64,
+    axial_airspeed_mps: f64,
+    air_density_kg_m3: f64,
+    config: &ElectricPropulsionConfig,
+    source: PropellerCoefficientSourceRef<'_>,
 ) -> f64 {
     debug_assert!(throttle.is_finite() && (0.0..=1.0).contains(&throttle));
     debug_assert!(axial_airspeed_mps.is_finite());
@@ -512,7 +836,7 @@ pub fn solve_quasi_static_shaft_speed(
         axial_airspeed_mps,
         air_density_kg_m3,
         config,
-        table,
+        source,
     ) <= 0.0
     {
         return 0.0;
@@ -526,7 +850,7 @@ pub fn solve_quasi_static_shaft_speed(
             axial_airspeed_mps,
             air_density_kg_m3,
             config,
-            table,
+            source,
         ) > 0.0
         {
             lower_rad_s = midpoint_rad_s;
@@ -545,13 +869,17 @@ pub struct PropulsionOutput {
     pub axial_airspeed_mps: f64,
     pub battery_terminal_voltage_v: f64,
     pub battery_current_a: f64,
+    pub battery_terminal_electrical_power_w: f64,
+    pub esc_loss_power_w: f64,
     pub motor_voltage_v: f64,
     pub motor_current_a: f64,
+    pub motor_electrical_input_power_w: f64,
     pub shaft_speed_rad_s: f64,
     pub shaft_speed_rpm: f64,
     pub motor_torque_nm: f64,
     pub advance_ratio_j: f64,
     pub coefficients: PropellerCoefficients,
+    pub coefficient_map_sample: PropellerCoefficientMapSample,
     pub propeller_load_torque_nm: f64,
     pub thrust_n: f64,
     pub force_prop_n: Vec3,
@@ -566,6 +894,34 @@ pub fn evaluate_electric_propulsion(
     config: &ElectricPropulsionConfig,
     environment: &AeroEnvironment,
     table: &PropellerCoefficientTable,
+) -> PropulsionOutput {
+    evaluate_electric_propulsion_impl(
+        state,
+        throttle,
+        config,
+        environment,
+        PropellerCoefficientSourceRef::FixedTable(table),
+    )
+}
+
+/// Evaluates one assembly with a fixed table or shaft-speed coefficient map.
+#[must_use]
+pub fn evaluate_electric_propulsion_with_source(
+    state: &RigidBodyState,
+    throttle: f64,
+    config: &ElectricPropulsionConfig,
+    environment: &AeroEnvironment,
+    source: &PropellerCoefficientSource,
+) -> PropulsionOutput {
+    evaluate_electric_propulsion_impl(state, throttle, config, environment, source.as_ref())
+}
+
+fn evaluate_electric_propulsion_impl(
+    state: &RigidBodyState,
+    throttle: f64,
+    config: &ElectricPropulsionConfig,
+    environment: &AeroEnvironment,
+    source: PropellerCoefficientSourceRef<'_>,
 ) -> PropulsionOutput {
     debug_assert!(state.validate().is_ok());
     debug_assert!(throttle.is_finite() && (0.0..=1.0).contains(&throttle));
@@ -587,21 +943,26 @@ pub fn evaluate_electric_propulsion(
         .inverse_transform_vector(&air_relative_velocity_body_at_prop_mps);
     let axial_airspeed_mps = air_relative_velocity_prop_mps.x;
 
-    let shaft_speed_rad_s = solve_quasi_static_shaft_speed(
+    let shaft_speed_rad_s = solve_quasi_static_shaft_speed_impl(
         throttle,
         axial_airspeed_mps,
         environment.air_density_kg_m3(),
         config,
-        table,
+        source,
     );
-    let electrical =
-        evaluate_electrical_drive(throttle, shaft_speed_rad_s, &config.battery, &config.motor);
+    let electrical = evaluate_electrical_drive_with_esc(
+        throttle,
+        shaft_speed_rad_s,
+        &config.battery,
+        &config.esc,
+        &config.motor,
+    );
     let propeller = evaluate_propeller_load(
         shaft_speed_rad_s,
         axial_airspeed_mps,
         environment.air_density_kg_m3(),
         &config.propeller,
-        table,
+        source,
     );
 
     let force_prop_n = Vec3::new(propeller.thrust_n, 0.0, 0.0);
@@ -628,13 +989,17 @@ pub fn evaluate_electric_propulsion(
         axial_airspeed_mps,
         battery_terminal_voltage_v: electrical.battery_terminal_voltage_v,
         battery_current_a: electrical.battery_current_a,
+        battery_terminal_electrical_power_w: electrical.battery_terminal_electrical_power_w,
+        esc_loss_power_w: electrical.esc_loss_power_w,
         motor_voltage_v: electrical.motor_voltage_v,
         motor_current_a: electrical.motor_current_a,
+        motor_electrical_input_power_w: electrical.motor_electrical_input_power_w,
         shaft_speed_rad_s,
         shaft_speed_rpm: shaft_speed_rad_s * 60.0 / TAU,
         motor_torque_nm: electrical.motor_torque_nm,
         advance_ratio_j: propeller.advance_ratio_j,
         coefficients: propeller.coefficients,
+        coefficient_map_sample: propeller.coefficient_map_sample,
         propeller_load_torque_nm: propeller.load_torque_nm,
         thrust_n: propeller.thrust_n,
         force_prop_n,

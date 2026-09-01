@@ -199,3 +199,10 @@ configuration identity, and measured component data are evidence claims; none co
 `BatteryConfig`, `MotorConfig`, `PropellerConfig`, `PropellerCoefficientTable`, or
 `ElectricPropulsionConfig`. M2.4A therefore does not affect the physics fingerprint, RK4 stages,
 the 500 Hz path, or replay, and its `runtime_ready` state is always false.
+
+## M2.4B extension
+
+The generic calibratable successor is documented in
+[`calibratable_electric_propulsion_m2_4b.md`](calibratable_electric_propulsion_m2_4b.md). Legacy
+S5B models retain an ideal ESC and fixed Ct/Cq table and execute through the same authoritative
+physics path as schema-v4 ESC loss and shaft-speed coefficient maps.

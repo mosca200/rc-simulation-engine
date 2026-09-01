@@ -1,11 +1,12 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3, AircraftClassification,
-    ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AircraftClassification, ReferenceAircraftMetadata,
 };
 use sim_core::{
     AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
-    PropellerCoefficientTable, PropellerSpinDirection, ReynoldsPolarFamily, RigidBodyParams,
+    PropellerCoefficientSource, PropellerCoefficientTable, PropellerSpinDirection,
+    ReynoldsPolarFamily, RigidBodyParams,
 };
 
 /// Immutable validated aircraft configuration with all file references resolved.
@@ -89,6 +90,11 @@ impl AircraftModel {
         self
     }
 
+    pub(crate) fn with_propulsion(mut self, propulsion: Option<RuntimeElectricPropulsion>) -> Self {
+        self.propulsion = propulsion;
+        self
+    }
+
     #[must_use]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
@@ -134,7 +140,7 @@ impl AircraftModel {
         &self.aero_elements
     }
 
-    /// Explicit model-authoritative viscosity for schema-v3 Reynolds aerodynamics.
+    /// Explicit model-authoritative viscosity for schema-v3/v4 Reynolds aerodynamics.
     #[must_use]
     pub const fn kinematic_viscosity_m2_s(&self) -> Option<f64> {
         self.kinematic_viscosity_m2_s
@@ -338,18 +344,28 @@ impl RuntimeAeroElement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeElectricPropulsion {
     config: ElectricPropulsionConfig,
-    coefficient_table: PropellerCoefficientTable,
+    coefficient_source: PropellerCoefficientSource,
 }
 
 impl RuntimeElectricPropulsion {
     pub(crate) const fn new(
         config: ElectricPropulsionConfig,
-        coefficient_table: PropellerCoefficientTable,
+        coefficient_source: PropellerCoefficientSource,
     ) -> Self {
         Self {
             config,
-            coefficient_table,
+            coefficient_source,
         }
+    }
+
+    pub(crate) const fn new_legacy(
+        config: ElectricPropulsionConfig,
+        coefficient_table: PropellerCoefficientTable,
+    ) -> Self {
+        Self::new(
+            config,
+            PropellerCoefficientSource::FixedTable(coefficient_table),
+        )
     }
 
     #[must_use]
@@ -358,8 +374,19 @@ impl RuntimeElectricPropulsion {
     }
 
     #[must_use]
+    pub const fn coefficient_source(&self) -> &PropellerCoefficientSource {
+        &self.coefficient_source
+    }
+
+    /// Legacy fixed-table accessor. Schema-v4 map consumers should use `coefficient_source`.
+    #[must_use]
     pub const fn coefficient_table(&self) -> &PropellerCoefficientTable {
-        &self.coefficient_table
+        match &self.coefficient_source {
+            PropellerCoefficientSource::FixedTable(table) => table,
+            PropellerCoefficientSource::ShaftSpeedMap(_) => {
+                panic!("shaft-speed map has no single coefficient table")
+            }
+        }
     }
 }
 
@@ -400,6 +427,10 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v3");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V3
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V4 => {
+                hasher.update(b"rcsim:aircraft-model:v4");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -422,12 +453,15 @@ impl AircraftModelFingerprint {
             }
         }
 
-        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V3 {
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+        ) {
             update_f64(
                 &mut hasher,
                 model
                     .kinematic_viscosity_m2_s
-                    .expect("schema v3 models have explicit viscosity"),
+                    .expect("schema v3/v4 models have explicit viscosity"),
             );
             hasher.update(b"reynolds-family:ln-re-clamped:v1");
             update_len(&mut hasher, model.aero_polar_families.len());
@@ -457,13 +491,19 @@ impl AircraftModelFingerprint {
             update_f64(&mut hasher, element.chord_m());
             match runtime_element.polar_binding {
                 RuntimeAeroPolarBinding::Polar { polar_index } => {
-                    if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V3 {
+                    if matches!(
+                        model.schema_version,
+                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                    ) {
                         hasher.update(&[0]);
                     }
                     update_len(&mut hasher, polar_index);
                 }
                 RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
-                    debug_assert_eq!(model.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V3);
+                    debug_assert!(matches!(
+                        model.schema_version,
+                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                    ));
                     hasher.update(&[1]);
                     update_len(&mut hasher, family_index);
                 }
@@ -498,6 +538,10 @@ impl AircraftModelFingerprint {
                 let battery = config.battery();
                 update_f64(&mut hasher, battery.open_circuit_voltage_v());
                 update_f64(&mut hasher, battery.internal_resistance_ohm());
+                if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V4 {
+                    hasher.update(b"esc:series-resistance:v1");
+                    update_f64(&mut hasher, config.esc().series_resistance_ohm());
+                }
                 let motor = config.motor();
                 update_f64(&mut hasher, motor.kv_rpm_per_v());
                 update_f64(&mut hasher, motor.winding_resistance_ohm());
@@ -514,11 +558,34 @@ impl AircraftModelFingerprint {
                     PropellerSpinDirection::NegativeAboutLocalX => 1,
                 };
                 hasher.update(&[spin_tag]);
-                let samples = runtime_propulsion.coefficient_table().samples();
-                update_len(&mut hasher, samples.len());
-                for sample in samples {
-                    for value in [sample.advance_ratio_j, sample.ct, sample.cq] {
-                        update_f64(&mut hasher, value);
+                match runtime_propulsion.coefficient_source() {
+                    PropellerCoefficientSource::FixedTable(table) => {
+                        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V4 {
+                            hasher
+                                .update(b"propeller-coefficients:fixed-table:j-linear-clamped:v1");
+                        }
+                        update_len(&mut hasher, table.samples().len());
+                        for sample in table.samples() {
+                            for value in [sample.advance_ratio_j, sample.ct, sample.cq] {
+                                update_f64(&mut hasher, value);
+                            }
+                        }
+                    }
+                    PropellerCoefficientSource::ShaftSpeedMap(map) => {
+                        debug_assert_eq!(model.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V4);
+                        hasher.update(
+                            b"propeller-coefficients:shaft-speed-linear:j-linear-clamped:v1",
+                        );
+                        update_len(&mut hasher, map.nodes().len());
+                        for node in map.nodes() {
+                            update_f64(&mut hasher, node.shaft_speed_rad_s());
+                            update_len(&mut hasher, node.table().samples().len());
+                            for sample in node.table().samples() {
+                                for value in [sample.advance_ratio_j, sample.ct, sample.cq] {
+                                    update_f64(&mut hasher, value);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -529,6 +596,7 @@ impl AircraftModelFingerprint {
             AIRCRAFT_MODEL_SCHEMA_VERSION_V1
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V2
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V3
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {

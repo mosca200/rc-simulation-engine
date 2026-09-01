@@ -30,11 +30,15 @@ pub use input::PilotInput;
 pub use integrator::Rk4Integrator;
 pub use parameters::{ParameterError, RigidBodyParams};
 pub use propulsion::{
-    BatteryConfig, BatteryConfigError, ElectricPropulsionConfig, ElectricalDriveOutput,
-    MIN_SHAFT_SPEED_RAD_S, MotorConfig, MotorConfigError, PROPULSION_BISECTION_ITERATIONS,
-    PropellerCoefficientError, PropellerCoefficientTable, PropellerCoefficients, PropellerConfig,
+    BatteryConfig, BatteryConfigError, ElectricPropulsionConfig, ElectricalDriveOutput, EscConfig,
+    EscConfigError, MIN_SHAFT_SPEED_RAD_S, MotorConfig, MotorConfigError,
+    PROPULSION_BISECTION_ITERATIONS, PropellerCoefficientError, PropellerCoefficientMap,
+    PropellerCoefficientMapError, PropellerCoefficientMapSample, PropellerCoefficientNode,
+    PropellerCoefficientSource, PropellerCoefficientTable, PropellerCoefficients, PropellerConfig,
     PropellerConfigError, PropellerSample, PropellerSpinDirection, PropulsionOutput,
-    evaluate_electric_propulsion, evaluate_electrical_drive, solve_quasi_static_shaft_speed,
+    ShaftSpeedRangeStatus, evaluate_electric_propulsion, evaluate_electric_propulsion_with_source,
+    evaluate_electrical_drive, evaluate_electrical_drive_with_esc, solve_quasi_static_shaft_speed,
+    solve_quasi_static_shaft_speed_with_source,
 };
 pub use reynolds_polar::{
     ReynoldsPolar, ReynoldsPolarFamily, ReynoldsPolarFamilyError, ReynoldsPolarSample,

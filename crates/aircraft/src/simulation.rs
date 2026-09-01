@@ -4,7 +4,7 @@ use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
     PilotInput, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyState, Rk4Integrator,
     StateError, advance_controls, evaluate_aero_element, evaluate_derivative,
-    evaluate_electric_propulsion, evaluate_reynolds_aero_element,
+    evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -354,7 +354,7 @@ pub fn evaluate_aircraft_aero_element<'a>(
         RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
             let viscosity = model
                 .kinematic_viscosity_m2_s()
-                .expect("Reynolds-family bindings exist only in schema-v3 models");
+                .expect("Reynolds-family bindings exist only in schema-v3/v4 models");
             AircraftAeroElementOutput::ReynoldsFamily(evaluate_reynolds_aero_element(
                 stage_state,
                 effective_element,
@@ -383,12 +383,12 @@ fn evaluate_stage(
         evaluate_aerodynamic_wrench(stage_state, effective_aero_elements, model, environment);
 
     let propulsion = model.propulsion().map(|runtime_propulsion| {
-        let output = evaluate_electric_propulsion(
+        let output = evaluate_electric_propulsion_with_source(
             stage_state,
             throttle,
             runtime_propulsion.config(),
             environment,
-            runtime_propulsion.coefficient_table(),
+            runtime_propulsion.coefficient_source(),
         );
         total_wrench.force_body_n += output.wrench_body.force_body_n;
         total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
@@ -912,6 +912,46 @@ mod tests {
         assert_eq!(count, 4);
         assert!((axial_speeds[1] - axial_speeds[0]).abs() > 1.0e-8);
         assert!((shaft_speeds[1] - shaft_speeds[0]).abs() > 1.0e-8);
+    }
+
+    #[test]
+    fn m2_4b_v4_map_is_stage_local_instead_of_freezing_the_k1_operating_point() {
+        let model = AircraftModelLoader::from_json_str(include_str!(
+            "../../../tests/fixtures/synthetic_non_reference_propulsion_v4.json"
+        ))
+        .unwrap();
+        let mut simulation = AircraftSimulation::new(
+            model,
+            config(0.08, 1.225, Vec3::zeros()),
+            state_with_velocity(Vec3::new(3.0, 0.0, 0.0)),
+        )
+        .unwrap();
+        let mut stages = Vec::with_capacity(4);
+        let _ = simulation.step_with_stage_observer(
+            &PilotInput::new(0.0, 0.0, 0.0, 0.85),
+            |stage_state, _, output| {
+                stages.push((*stage_state, output.propulsion.unwrap()));
+            },
+        );
+        assert_eq!(stages.len(), 4);
+        let runtime = simulation.model().propulsion().unwrap();
+        for (stage_state, observed) in &stages {
+            let direct = evaluate_electric_propulsion_with_source(
+                stage_state,
+                0.85,
+                runtime.config(),
+                simulation.config().aero_environment(),
+                runtime.coefficient_source(),
+            );
+            assert_eq!(*observed, direct);
+        }
+        let frozen_k1 = stages[0].1;
+        assert_ne!(stages[1].1, frozen_k1);
+        assert_ne!(stages[3].1, frozen_k1);
+        assert_ne!(
+            stages[1].1.coefficient_map_sample,
+            frozen_k1.coefficient_map_sample
+        );
     }
 
     #[test]
