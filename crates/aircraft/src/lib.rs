@@ -21,5 +21,6 @@ pub use trim::{
 };
 pub use trim_sweep::{
     LongitudinalTrimSweep, LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome,
-    LongitudinalTrimSweepPoint, LongitudinalTrimSweepRequest, solve_longitudinal_trim_sweep,
+    LongitudinalTrimSweepPoint, LongitudinalTrimSweepRequest, ReEvaluationMismatchDetail,
+    ReEvaluationUnverifiableDetail, solve_longitudinal_trim_sweep,
 };

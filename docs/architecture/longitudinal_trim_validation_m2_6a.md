@@ -97,10 +97,29 @@ The sweep is fully deterministic and stable:
   caller-supplied `target_airspeeds_mps[i]`.
 - Identical inputs (same model, same config, same request) produce identical structured
   results: `assert_eq!(first, second)` is asserted in tests.
-- The shared template means the per-point trim request construction and the per-point trim
-  solve are allocation-free aside from the per-point result buffer. The sweep iterates over
-  the request's `&[f64]` of target airspeeds by copied `f64` values, so no `Vec` of speeds
-  is cloned per sweep call.
+
+### Allocation profile (M2.6A as a whole)
+
+- **No cloned target-speed `Vec`.** The sweep iterates over the request's `&[f64]` of target
+  airspeeds by copied `f64` values, so the request's `Vec<f64>` is never cloned per sweep
+  call. The per-point trim request construction that follows is allocation-free aside from
+  its own internal state, and the per-point M2.5 trim solve remains allocation-free aside
+  from its own internal state — the M2.6A wrapper does not change that.
+- **One result `Vec` allocation.** A single `Vec<LongitudinalTrimSweepPoint>` of the
+  requested length is allocated by the sweep; each per-point result is then pushed into
+  that buffer.
+- **Boxed payload allocations for successful and integrity outcomes.** The
+  `LongitudinalTrimSweepOutcome` enum is a compact public representation: the
+  `Success` variant holds a `Box<LongitudinalTrimSolution>`, the `ReEvaluationMismatch`
+  variant holds a `Box<ReEvaluationMismatchDetail>`, and the `ReEvaluationUnverifiable`
+  variant holds a `Box<ReEvaluationUnverifiableDetail>`. Each constructed outcome therefore
+  performs one heap allocation for its boxed payload. This is a property of the public
+  outcome representation, not of the M2.5 trim solve; the M2.5 trim path is unchanged.
+- **None of this occurs in the 500 Hz runtime hot path.** M2.6A is an offline validation
+  primitive that wraps M2.5 once per requested airspeed in a developer / CI run. The
+  aircraft runtime simulation never calls `solve_longitudinal_trim_sweep`; the per-point
+  result buffer and the boxed outcome payloads are entirely scoped to the validation
+  invocation that produces them.
 
 The M2.5 trim types are reused for per-point solutions and failures, so the sweep result can be
 consumed without any conversion in the test or reporting layer.

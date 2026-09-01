@@ -39,6 +39,10 @@ pub enum LongitudinalTrimSweepError {
 /// Integrity-level detail: the M2.5 solver produced a solution whose independent runtime
 /// re-evaluation exists but disagrees with the solver-cached residuals. Boxed to keep the
 /// outcome enum compact, following the [`LongitudinalTrimFailure`] precedent.
+///
+/// The fields are private: an instance can only be produced through the validated sweep
+/// path. Downstream reporting layers read the fields through the public read-only
+/// accessors below.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReEvaluationMismatchDetail {
     iteration_count: usize,
@@ -46,15 +50,56 @@ pub struct ReEvaluationMismatchDetail {
     independent_evaluation: LongitudinalTrimEvaluation,
 }
 
+impl ReEvaluationMismatchDetail {
+    /// M2.5 solver iteration count at the point the divergence was recorded.
+    #[must_use]
+    pub const fn iteration_count(&self) -> usize {
+        self.iteration_count
+    }
+
+    /// The evaluation the M2.5 solver cached as converged.
+    #[must_use]
+    pub fn solver_evaluation(&self) -> &LongitudinalTrimEvaluation {
+        &self.solver_evaluation
+    }
+
+    /// The independent runtime re-evaluation that disagreed with the solver-cached
+    /// evaluation.
+    #[must_use]
+    pub fn independent_evaluation(&self) -> &LongitudinalTrimEvaluation {
+        &self.independent_evaluation
+    }
+}
+
 /// Integrity-level detail: the M2.5 solver produced a solution whose independent runtime
 /// re-evaluation could not be produced because the runtime path produced non-finite values
 /// for a state the solver accepted as converged. No independent evaluation exists; the
 /// absence is represented truthfully by this variant rather than by copying the solver
 /// evaluation into an `Option`. Boxed to keep the outcome enum compact.
+///
+/// The fields are private: an instance can only be produced through the validated sweep
+/// path. Downstream reporting layers read the fields through the public read-only
+/// accessors below.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReEvaluationUnverifiableDetail {
     iteration_count: usize,
     solver_evaluation: LongitudinalTrimEvaluation,
+}
+
+impl ReEvaluationUnverifiableDetail {
+    /// M2.5 solver iteration count at the point the unverifiable outcome was recorded.
+    #[must_use]
+    pub const fn iteration_count(&self) -> usize {
+        self.iteration_count
+    }
+
+    /// The evaluation the M2.5 solver cached as converged. The runtime path returned
+    /// `None` when asked to independently re-evaluate this state, so no independent
+    /// evaluation exists to expose.
+    #[must_use]
+    pub fn solver_evaluation(&self) -> &LongitudinalTrimEvaluation {
+        &self.solver_evaluation
+    }
 }
 
 /// Per-point result of a longitudinal trim sweep. Determinism, ordering, and independent
@@ -395,6 +440,23 @@ impl LongitudinalTrimSweepOutcome {
             solver_evaluation,
         }))
     }
+
+    /// Test-only constructor for the mismatch variant. The public M2.6A path constructs
+    /// this variant only when the M2.5 solver converged and the independent runtime
+    /// re-evaluation diverged from the cached one; the constructor exists so unit tests
+    /// can exercise the new variant's public accessors without contriving a runtime
+    /// scenario that produces a divergence.
+    pub(crate) fn re_evaluation_mismatch_for_test(
+        iteration_count: usize,
+        solver_evaluation: LongitudinalTrimEvaluation,
+        independent_evaluation: LongitudinalTrimEvaluation,
+    ) -> Self {
+        Self::ReEvaluationMismatch(Box::new(ReEvaluationMismatchDetail {
+            iteration_count,
+            solver_evaluation,
+            independent_evaluation,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -444,21 +506,21 @@ mod tests {
 
     #[test]
     fn unverifiable_outcome_does_not_carry_an_independent_evaluation() {
-        let outcome = LongitudinalTrimSweepOutcome::re_evaluation_unverifiable_for_test(
-            3,
-            well_formed_evaluation(),
-        );
+        let solver = well_formed_evaluation();
+        let outcome = LongitudinalTrimSweepOutcome::re_evaluation_unverifiable_for_test(3, solver);
         assert!(outcome.is_re_evaluation_unverifiable());
         assert!(!outcome.is_success());
         assert!(!outcome.is_trim_failure());
         assert!(!outcome.is_re_evaluation_mismatch());
         match outcome {
             LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(detail) => {
-                assert_eq!(detail.iteration_count, 3);
-                // The struct itself has no `independent_evaluation` field. The absence of
-                // such a field is the type-level guarantee that no fabricated evaluation
-                // can be smuggled in: the variant encodes "no independent evaluation
-                // exists" by construction.
+                assert_eq!(detail.iteration_count(), 3);
+                // The accessor round-trips the solver-cached evaluation it was built
+                // with, and the struct itself has no `independent_evaluation` field or
+                // accessor. The absence of such a field is the type-level guarantee that
+                // no fabricated evaluation can be smuggled in: the variant encodes "no
+                // independent evaluation exists" by construction.
+                assert_eq!(detail.solver_evaluation(), &solver);
             }
             other => panic!("expected ReEvaluationUnverifiable, got {other:?}"),
         }
@@ -483,7 +545,12 @@ mod tests {
             1,
             well_formed_evaluation(),
         );
-        for outcome in [&success, &failure, &unverifiable] {
+        let mismatch = LongitudinalTrimSweepOutcome::re_evaluation_mismatch_for_test(
+            2,
+            well_formed_evaluation(),
+            well_formed_evaluation(),
+        );
+        for outcome in [&success, &failure, &unverifiable, &mismatch] {
             let mut true_count = 0;
             if outcome.is_success() {
                 true_count += 1;
@@ -501,6 +568,22 @@ mod tests {
                 true_count, 1,
                 "exactly one outcome predicate must hold at a time; got {true_count} for {outcome:?}"
             );
+        }
+    }
+
+    #[test]
+    fn mismatch_detail_accessors_round_trip_inputs() {
+        let solver = well_formed_evaluation();
+        let independent = well_formed_evaluation();
+        let outcome =
+            LongitudinalTrimSweepOutcome::re_evaluation_mismatch_for_test(5, solver, independent);
+        match outcome {
+            LongitudinalTrimSweepOutcome::ReEvaluationMismatch(detail) => {
+                assert_eq!(detail.iteration_count(), 5);
+                assert_eq!(detail.solver_evaluation(), &solver);
+                assert_eq!(detail.independent_evaluation(), &independent);
+            }
+            other => panic!("expected ReEvaluationMismatch, got {other:?}"),
         }
     }
 }

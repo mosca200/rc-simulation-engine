@@ -1,8 +1,9 @@
 use aircraft::{
-    AircraftSimulationConfig, LongitudinalTrimFailureReason, LongitudinalTrimRequest,
-    LongitudinalTrimRequestError, LongitudinalTrimResiduals, LongitudinalTrimSolution,
-    LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome, LongitudinalTrimSweepRequest,
-    LongitudinalTrimTolerances, LongitudinalTrimVariables, TrimBounds,
+    AircraftSimulationConfig, LongitudinalTrimEvaluation, LongitudinalTrimFailureReason,
+    LongitudinalTrimRequest, LongitudinalTrimRequestError, LongitudinalTrimResiduals,
+    LongitudinalTrimSolution, LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome,
+    LongitudinalTrimSweepRequest, LongitudinalTrimTolerances, LongitudinalTrimVariables,
+    ReEvaluationMismatchDetail, ReEvaluationUnverifiableDetail, TrimBounds,
     evaluate_longitudinal_trim_candidate, solve_longitudinal_trim, solve_longitudinal_trim_sweep,
 };
 use model::{AircraftClassification, AircraftModel, AircraftModelLoader};
@@ -391,4 +392,64 @@ fn fixture_remains_synthetic_test_and_does_not_promote_reference_aircraft() {
         solve_longitudinal_trim_sweep(&model, &config(), &sweep_request(vec![15.0, 18.0, 21.0]))
             .unwrap();
     assert_eq!(sweep.success_count(), 3);
+}
+
+/// Compile-time and import coverage for the public integrity-detail types and their
+/// required accessors.
+///
+/// M2.6A's public re-exports place `ReEvaluationMismatchDetail` and
+/// `ReEvaluationUnverifiableDetail` at the crate root, but the integrity variants are
+/// constructed only through the validated sweep path. The synthetic fixture used by every
+/// other test never produces a real mismatch or unverifiable outcome, and the in-crate
+/// test-only constructors are `pub(crate)` and therefore unreachable from an integration
+/// test. We therefore exercise the public API surface (re-exports + accessor signatures)
+/// at the compile / signature level here, and leave the runtime construction path to the
+/// in-crate unit tests. A real `LongitudinalTrimSweep` from a public sweep call is also
+/// walked to demonstrate that the public `Success` outcome's boxed payload is consumable
+/// end-to-end from outside the module.
+#[test]
+fn public_integrity_detail_api_is_reachable_from_outside_the_module() {
+    // Type-level reachability: the detail types are re-exported from `aircraft`.
+    // Referencing them as types proves the re-export is in place and gives a
+    // compile-time guarantee that the public names are stable.
+    let _mismatch_detail: ReEvaluationMismatchDetail;
+    let _unverifiable_detail: ReEvaluationUnverifiableDetail;
+    let _evaluation: LongitudinalTrimEvaluation;
+
+    // Accessor-signature coverage: bind function pointers to the required accessors so
+    // that a missing or wrongly-typed public method would fail to compile.
+    let _mismatch_iteration: fn(&ReEvaluationMismatchDetail) -> usize =
+        ReEvaluationMismatchDetail::iteration_count;
+    let _mismatch_solver: fn(&ReEvaluationMismatchDetail) -> &LongitudinalTrimEvaluation =
+        ReEvaluationMismatchDetail::solver_evaluation;
+    let _mismatch_independent: fn(&ReEvaluationMismatchDetail) -> &LongitudinalTrimEvaluation =
+        ReEvaluationMismatchDetail::independent_evaluation;
+
+    let _unverifiable_iteration: fn(&ReEvaluationUnverifiableDetail) -> usize =
+        ReEvaluationUnverifiableDetail::iteration_count;
+    let _unverifiable_solver: fn(&ReEvaluationUnverifiableDetail) -> &LongitudinalTrimEvaluation =
+        ReEvaluationUnverifiableDetail::solver_evaluation;
+
+    // End-to-end reachability: drive the public sweep and walk a `Success` outcome
+    // through the public `LongitudinalTrimSweepOutcome` API path. This is the only
+    // outcome the public validated sweep can produce on the synthetic fixture, and
+    // reaching it through the public type proves the `Success.solution` boxed payload
+    // and the standard accessors are consumable from outside the `trim_sweep` module.
+    let sweep =
+        solve_longitudinal_trim_sweep(&model(), &config(), &sweep_request(vec![15.0, 18.0, 21.0]))
+            .unwrap();
+    let success: LongitudinalTrimSolution = sweep
+        .points()
+        .iter()
+        .find_map(|point| match &point.outcome {
+            LongitudinalTrimSweepOutcome::Success { solution } => Some(**solution),
+            _ => None,
+        })
+        .expect("the public sweep must produce a Success outcome on the synthetic fixture");
+    assert!(
+        success
+            .evaluation
+            .residuals
+            .is_within(LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap())
+    );
 }
