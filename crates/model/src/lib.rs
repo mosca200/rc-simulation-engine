@@ -3,6 +3,7 @@
 
 mod loader;
 mod reference;
+mod reference_mass_properties;
 mod reference_survey;
 mod runtime;
 pub mod v0;
@@ -15,6 +16,11 @@ pub use reference::{
     ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity, ReferenceAircraftMetadata,
     ReferenceCgLocation, ReferenceControlSurfaceTravel, ReferenceParameterEvidence,
     ReferencePhysicalSpecification, ReferenceScalar,
+};
+pub use reference_mass_properties::{
+    InertiaEstimate, MassMeasurementSummary, MassPropertiesCampaign, MassPropertiesEvaluation,
+    MassPropertiesLoader, PublishedWeightRangeStatus, ReferenceMassPropertiesError, ScalarEstimate,
+    VectorEstimate, load_reference_mass_properties, x_aft_to_frd_x,
 };
 pub use reference_survey::{
     BilateralMeasurementSummary, CrossVariantComparison, CrossVariantStatus, DerivedSurveyValue,
@@ -29,4 +35,5 @@ pub use runtime::{
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V0: u32 = 0;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V1: u32 = 1;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V2: u32 = 2;
+pub const REFERENCE_MASS_PROPERTIES_SCHEMA_V0: &str = "reference_aircraft_mass_properties_v0";
 pub const REFERENCE_SURVEY_SCHEMA_V0: &str = "reference_aircraft_physical_survey_v0";

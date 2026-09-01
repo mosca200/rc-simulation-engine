@@ -1,0 +1,73 @@
+{
+  "schema": "reference_aircraft_mass_properties_v0",
+  "artifact_kind": "mass_properties_evidence_not_runtime_configuration",
+  "campaign": {
+    "id": "sig-kadet-lt40-egv-mass-properties-unmeasured-template",
+    "classification": "physical_reference_measurement",
+    "identity": {
+      "manufacturer": "SIG Manufacturing",
+      "family": "KADET LT-40",
+      "variant": "KADET LT-40 EGV ARF",
+      "airframe_id": null
+    },
+    "measurement_date": null,
+    "linked_geometry_campaign_id": "sig-kadet-lt40-egv-survey-unmeasured-template",
+    "operational_configuration": {
+      "id": null,
+      "battery_configuration_id": null,
+      "propulsion_configuration_description": null,
+      "landing_gear_configuration": null,
+      "installed_equipment_notes": null
+    },
+    "notes": "Unmeasured M2.2D campaign template. Null observations are unknown, never zero or inferred."
+  },
+  "coordinate_frame": {
+    "axes_parallel_to_frd": false,
+    "origin_definition": "Proposed origin at the physical wing-root leading-edge centre-plane datum; establishment on an identified airframe remains unresolved.",
+    "positive_x_direction": "forward",
+    "positive_y_direction": "right",
+    "positive_z_direction": "down",
+    "wing_root_le_center_plane_datum_established": false,
+    "lateral_datum_established": false,
+    "lateral_datum_definition": "Proposed y = 0 aircraft centre plane; physical establishment remains unresolved.",
+    "vertical_datum_established": false,
+    "vertical_datum_definition": "Proposed z = 0 at the evidenced survey origin with positive z down; physical establishment remains unresolved.",
+    "source_ids": [],
+    "photograph_ids": []
+  },
+  "provenance_sources": [
+    {
+      "id": "sig-lt40-egv-arf-product",
+      "kind": "manufacturer_documentation",
+      "title": "SIG KADET LT-40 EGV ARF product specification",
+      "url": "https://sigmfg.com/collections/sig-arfs-almost-ready-to-fly/products/sig-kadet-lt-40-egv-arf",
+      "sha256": null,
+      "notes": "Supports only the published 2.720-2.835 kg comparison range; it does not select operational mass."
+    }
+  ],
+  "photographs": [],
+  "acceptance_criteria": {
+    "maximum_direct_vs_build_up_mass_difference_kg": null,
+    "maximum_direct_vs_build_up_cg_distance_m": null,
+    "maximum_direct_vs_build_up_inertia_frobenius_difference_kg_m2": null
+  },
+  "published_weight_range_comparison": {
+    "minimum_kg": 2.72,
+    "maximum_kg": 2.835,
+    "source_ids": [
+      "sig-lt40-egv-arf-product"
+    ],
+    "authority": "comparison_only_never_operational_mass"
+  },
+  "raw_observations": {
+    "direct_total_mass_kg": null,
+    "direct_cg_position_frd_m": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "direct_inertia_about_operational_cg_frd_kg_m2": null,
+    "component_inventory_complete": false,
+    "components": []
+  }
+}
