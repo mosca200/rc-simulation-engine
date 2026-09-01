@@ -24,10 +24,12 @@ Configuration claims have four non-interchangeable classes:
   operational configuration, and propulsion configuration; and
 - `measured_configuration`: an identified installation with measurement provenance.
 
-The campaign separately carries its airframe, operational-configuration, and
-propulsion-configuration IDs. Installed or measured claims must match all three and identify motor,
-ESC, battery, and propeller. Motor, ESC, battery, propeller, and optional spinner records declare
-the exact configuration claims to which they apply. Source and photograph registries are resolved
+The campaign separates aircraft type identity (`manufacturer`, `family`, and `variant`) from the
+nullable `physical_airframe_id`. A product variant is not a serial or identity for a particular
+airframe. Installed or measured claims require a physical-airframe ID plus operational- and
+propulsion-configuration IDs, must match all three campaign IDs, and must identify motor, ESC,
+battery, and propeller. Motor, ESC, battery, propeller, and optional spinner records declare the
+exact configuration claims to which they apply. Source and photograph registries are resolved
 strictly; applicability is not inferred from a similar model name.
 
 ## SIG recommendation and historical configurations
@@ -50,8 +52,9 @@ two battery alternatives are separate historical claims. Neither is promoted to 
 physical reference airframe.
 
 No `specific_installed_configuration` or `measured_configuration` claim exists in the committed
-template. The campaign operational-configuration ID, propulsion-configuration ID, and measurement
-date therefore remain null.
+template. Its `physical_airframe_id`, operational-configuration ID, propulsion-configuration ID,
+and measurement date therefore remain null. Recommendation and historical claims also carry no
+physical-airframe ID and cannot identify the future reference installation.
 
 ## Motor evidence
 
@@ -124,6 +127,14 @@ Independent variables must be finite and strictly ordered, RPM must be positive,
 `Cp` must be positive. The artifact records the source format/version, path, dimensions, row and
 block counts, provenance, parser interpretation, and source hash.
 
+When loading a linked raw source, the loader computes SHA-256 with `sha2` directly over the exact
+bytes returned by the filesystem, before UTF-8 decoding or parsing, encodes the digest as lowercase
+hexadecimal, and compares it with the dataset metadata. A mismatch fails as
+`LinkedDatasetMismatch { field: "sha256", .. }`. When the referenced provenance source also has a
+SHA-256 value, source and dataset hashes must agree case-insensitively before the raw file is
+accepted. Byte/line counts and parser checks remain additional gates, not substitutes for the
+cryptographic check.
+
 The APC designation supplies 11 in diameter and 7 in pitch. Their exact SI conversions are
 0.2794 m and 0.1778 m. Dataset and propeller dimensions must agree.
 
@@ -144,10 +155,11 @@ runtime `PropellerCoefficientTable`.
 
 Validation fails closed for invalid schema or artifact kind, unknown JSON fields, malformed IDs,
 duplicate IDs or references, unresolved sources/photos/components/datasets, unsafe linked-source
-paths, invalid dates or SHA-256 syntax, blank metadata, non-finite/non-positive present physical
-values, unordered ranges, invalid battery points, incompatible configuration identity, mismatched
-component applicability, inconsistent propeller dimensions, and malformed APC tables. Bad evidence
-is never silently repaired.
+paths, invalid dates or SHA-256 syntax, source/dataset hash disagreement, exact-byte digest
+mismatch, blank metadata, non-finite/non-positive present physical values, unordered ranges,
+invalid battery points, incompatible physical/configuration identity, mismatched component
+applicability, inconsistent propeller dimensions, and malformed APC tables. Bad evidence is never
+silently repaired.
 
 The evaluation exposes:
 

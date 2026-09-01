@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{REFERENCE_PROPULSION_EVIDENCE_SCHEMA_V0, SurveyClassification};
@@ -76,7 +77,7 @@ pub enum PropulsionConfigurationEvidenceClass {
 pub struct ConfigurationClaimSummary {
     id: String,
     evidence_class: PropulsionConfigurationEvidenceClass,
-    airframe_id: String,
+    physical_airframe_id: Option<String>,
     operational_configuration_id: Option<String>,
     propulsion_configuration_id: Option<String>,
 }
@@ -88,8 +89,8 @@ impl ConfigurationClaimSummary {
     pub const fn evidence_class(&self) -> PropulsionConfigurationEvidenceClass {
         self.evidence_class
     }
-    pub fn airframe_id(&self) -> &str {
-        &self.airframe_id
+    pub fn physical_airframe_id(&self) -> Option<&str> {
+        self.physical_airframe_id.as_deref()
     }
     pub fn operational_configuration_id(&self) -> Option<&str> {
         self.operational_configuration_id.as_deref()
@@ -201,6 +202,13 @@ pub fn load_reference_propulsion_evidence(
                 path: source_path.clone(),
                 source,
             })?;
+        let calculated_sha256 = sha256_hex(&bytes);
+        if !calculated_sha256.eq_ignore_ascii_case(&dataset.sha256) {
+            return Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+                dataset_id: dataset.id.clone(),
+                field: "sha256",
+            });
+        }
         if bytes.len() != dataset.byte_count {
             return Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
                 dataset_id: dataset.id.clone(),
@@ -366,7 +374,10 @@ struct PropulsionEvidenceFile {
 struct CampaignFile {
     id: String,
     classification: SurveyClassification,
-    airframe_id: String,
+    manufacturer: String,
+    family: String,
+    variant: String,
+    physical_airframe_id: Option<String>,
     operational_configuration_id: Option<String>,
     propulsion_configuration_id: Option<String>,
     measurement_date: Option<String>,
@@ -410,7 +421,7 @@ struct PhotographFile {
 struct ConfigurationClaimFile {
     id: String,
     evidence_class: PropulsionConfigurationEvidenceClass,
-    airframe_id: String,
+    physical_airframe_id: Option<String>,
     operational_configuration_id: Option<String>,
     propulsion_configuration_id: Option<String>,
     measurement_date: Option<String>,
@@ -804,7 +815,13 @@ fn validate_file(file: &PropulsionEvidenceFile) -> Result<(), ReferencePropulsio
 
 fn validate_campaign(campaign: &CampaignFile) -> Result<(), ReferencePropulsionEvidenceError> {
     validate_stable_id("campaign", &campaign.id)?;
-    validate_stable_id("airframe", &campaign.airframe_id)?;
+    validate_required_text("campaign.manufacturer", &campaign.manufacturer)?;
+    validate_required_text("campaign.family", &campaign.family)?;
+    validate_required_text("campaign.variant", &campaign.variant)?;
+    validate_optional_stable_id(
+        "physical airframe",
+        campaign.physical_airframe_id.as_deref(),
+    )?;
     validate_optional_stable_id(
         "operational configuration",
         campaign.operational_configuration_id.as_deref(),
@@ -880,7 +897,7 @@ fn validate_claims(
     spinner_ids: &HashSet<String>,
 ) -> Result<(), ReferencePropulsionEvidenceError> {
     for claim in &file.configuration_claims {
-        validate_stable_id("airframe", &claim.airframe_id)?;
+        validate_optional_stable_id("physical airframe", claim.physical_airframe_id.as_deref())?;
         validate_optional_stable_id(
             "operational configuration",
             claim.operational_configuration_id.as_deref(),
@@ -940,6 +957,7 @@ fn validate_claims(
         match claim.evidence_class {
             PropulsionConfigurationEvidenceClass::ManufacturerRecommendation => {
                 if claim.recommendation.is_none()
+                    || claim.physical_airframe_id.is_some()
                     || claim.motor_id.is_some()
                     || claim.esc_id.is_some()
                     || claim.battery_id.is_some()
@@ -948,7 +966,7 @@ fn validate_claims(
                     return Err(
                         ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity {
                             claim_id: claim.id.clone(),
-                            reason: "recommendation must be an envelope, not an installed component claim",
+                            reason: "recommendation must be a type-level envelope, not a physical-airframe or installed-component claim",
                         },
                     );
                 }
@@ -966,7 +984,8 @@ fn validate_claims(
             }
             PropulsionConfigurationEvidenceClass::SpecificInstalledConfiguration
             | PropulsionConfigurationEvidenceClass::MeasuredConfiguration => {
-                let complete = claim.airframe_id == file.campaign.airframe_id
+                let complete = claim.physical_airframe_id.is_some()
+                    && claim.physical_airframe_id == file.campaign.physical_airframe_id
                     && claim.operational_configuration_id.is_some()
                     && claim.operational_configuration_id
                         == file.campaign.operational_configuration_id
@@ -1308,6 +1327,21 @@ fn validate_datasets(
         }
         validate_relative_path(&dataset.raw_source_path)?;
         validate_sha256(Some(&dataset.sha256), "propeller_dataset.sha256")?;
+        let source = file
+            .provenance_sources
+            .iter()
+            .find(|source| source.id == dataset.source_id)
+            .expect("validated source reference");
+        if source
+            .sha256
+            .as_deref()
+            .is_some_and(|source_sha256| !source_sha256.eq_ignore_ascii_case(&dataset.sha256))
+        {
+            return Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+                dataset_id: dataset.id.clone(),
+                field: "source_sha256",
+            });
+        }
         if dataset.byte_count == 0
             || dataset.line_count == 0
             || dataset.rpm_block_count == 0
@@ -1455,7 +1489,7 @@ fn evaluate(
         .map(|claim| ConfigurationClaimSummary {
             id: claim.id.clone(),
             evidence_class: claim.evidence_class,
-            airframe_id: claim.airframe_id.clone(),
+            physical_airframe_id: claim.physical_airframe_id.clone(),
             operational_configuration_id: claim.operational_configuration_id.clone(),
             propulsion_configuration_id: claim.propulsion_configuration_id.clone(),
         })
@@ -1743,6 +1777,17 @@ fn invalid<T>(field: &str, reason: &'static str) -> Result<T, ReferencePropulsio
 
 fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 { 0 } else { value.to_bits() }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn is_iso_date(value: &str) -> bool {

@@ -1,6 +1,10 @@
 mod common;
 
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use common::valid_model_value;
 use model::{
@@ -8,20 +12,40 @@ use model::{
     PropulsionEvidenceLoader, ReferencePropulsionEvidenceError, load_reference_propulsion_evidence,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const COMMITTED_EVIDENCE: &str = include_str!(
     "../../../docs/reference_aircraft/data/sig_kadet_lt40_egv_propulsion_evidence_v0.json"
 );
+const COMMITTED_APC_BYTES: &[u8] =
+    include_bytes!("../../../docs/reference_aircraft/data/sources/APC_PER3_11x7E_v2022-0915.dat");
+const EXPECTED_APC_SHA256: &str =
+    "f81055914654dd7f04a7fe337fb895f7332a9070813b368afcd8b048c9a17587";
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn committed_value() -> Value {
     serde_json::from_str(COMMITTED_EVIDENCE).expect("committed propulsion evidence JSON")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn empty_template() -> Value {
     let mut value = committed_value();
     value["campaign"]["id"] = json!("synthetic-empty-propulsion-evidence");
     value["campaign"]["classification"] = json!("synthetic_non_reference");
-    value["campaign"]["airframe_id"] = json!("synthetic-airframe");
+    value["campaign"]["manufacturer"] = json!("Synthetic Test Manufacturer");
+    value["campaign"]["family"] = json!("Synthetic Test Family");
+    value["campaign"]["variant"] = json!("synthetic-test-variant");
+    value["campaign"]["physical_airframe_id"] = Value::Null;
     value["provenance_sources"] = json!([]);
     value["configuration_claims"] = json!([]);
     value["motors"] = json!([]);
@@ -40,6 +64,126 @@ fn load(value: &Value) -> Result<model::PropulsionEvidence, ReferencePropulsionE
 fn evidence_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/reference_aircraft/data/sig_kadet_lt40_egv_propulsion_evidence_v0.json")
+}
+
+fn load_with_raw_file(
+    mut value: Value,
+    raw: &[u8],
+) -> Result<model::PropulsionEvidence, ReferencePropulsionEvidenceError> {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("rcsim-m2-4a1-{}-{unique}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    value["propeller_datasets"][0]["raw_source_path"] = json!("source.dat");
+    let source_path = directory.join("source.dat");
+    let artifact_path = directory.join("evidence.json");
+    fs::write(&source_path, raw).unwrap();
+    fs::write(&artifact_path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let result = load_reference_propulsion_evidence(&artifact_path);
+    fs::remove_dir_all(directory).unwrap();
+    result
+}
+
+fn synthetic_identified_fixture(class: &str) -> Value {
+    let mut value = empty_template();
+    value["campaign"]["id"] = json!("synthetic-identified-propulsion-campaign");
+    value["campaign"]["physical_airframe_id"] = json!("synthetic-physical-airframe-001");
+    value["campaign"]["operational_configuration_id"] =
+        json!("synthetic-operational-configuration");
+    value["campaign"]["propulsion_configuration_id"] = json!("synthetic-propulsion-configuration");
+    value["provenance_sources"] = json!([{
+        "id": "synthetic-physical-evidence-source",
+        "kind": "physical_measurement",
+        "title": "Synthetic test-only physical evidence",
+        "publisher": "Model test suite",
+        "url": "https://example.invalid/synthetic-propulsion-evidence",
+        "retrieval_date": "2030-01-02",
+        "sha256": null,
+        "notes": "Obviously synthetic non-reference evidence."
+    }]);
+    value["configuration_claims"] = json!([{
+        "id": "synthetic-identified-configuration-claim",
+        "evidence_class": class,
+        "physical_airframe_id": "synthetic-physical-airframe-001",
+        "operational_configuration_id": "synthetic-operational-configuration",
+        "propulsion_configuration_id": "synthetic-propulsion-configuration",
+        "measurement_date": "2030-01-02",
+        "motor_id": "synthetic-motor",
+        "esc_id": "synthetic-esc",
+        "battery_id": "synthetic-battery",
+        "propeller_id": "synthetic-propeller",
+        "spinner_id": null,
+        "recommendation": null,
+        "source_ids": ["synthetic-physical-evidence-source"],
+        "photograph_ids": [],
+        "notes": "Synthetic configuration identity used only by tests."
+    }]);
+    value["motors"] = json!([{
+        "id": "synthetic-motor",
+        "evidence_class": "measured_data",
+        "manufacturer": "Synthetic Test Manufacturer",
+        "model": "synthetic-motor-model",
+        "kv_rpm_per_v": null,
+        "winding_resistance_ohm": null,
+        "no_load_current_a": null,
+        "mass_kg": null,
+        "diameter_m": null,
+        "length_m": null,
+        "shaft_diameter_m": null,
+        "maximum_current_a": null,
+        "maximum_current_duration_s": null,
+        "maximum_power_w": null,
+        "efficient_current_range_a": null,
+        "efficiency": null,
+        "applicable_configuration_claim_ids": ["synthetic-identified-configuration-claim"],
+        "source_ids": ["synthetic-physical-evidence-source"],
+        "notes": "Synthetic test-only component."
+    }]);
+    value["escs"] = json!([{
+        "id": "synthetic-esc",
+        "evidence_class": "measured_data",
+        "manufacturer": "Synthetic Test Manufacturer",
+        "model": "synthetic-esc-model",
+        "current_rating_a": null,
+        "minimum_cell_count": null,
+        "maximum_cell_count": null,
+        "resistance_ohm": null,
+        "efficiency": null,
+        "switching_frequency_hz": null,
+        "control_protocol": null,
+        "applicable_configuration_claim_ids": ["synthetic-identified-configuration-claim"],
+        "source_ids": ["synthetic-physical-evidence-source"],
+        "notes": "Synthetic test-only component."
+    }]);
+    value["batteries"] = json!([{
+        "id": "synthetic-battery",
+        "evidence_class": "measured_data",
+        "manufacturer": "Synthetic Test Manufacturer",
+        "model": "synthetic-battery-model",
+        "chemistry": null,
+        "cell_count": null,
+        "capacity_ah": null,
+        "nominal_voltage_v": null,
+        "mass_kg": null,
+        "internal_resistance_ohm": null,
+        "voltage_load_points": [],
+        "applicable_configuration_claim_ids": ["synthetic-identified-configuration-claim"],
+        "source_ids": ["synthetic-physical-evidence-source"],
+        "notes": "Synthetic test-only component."
+    }]);
+    value["propellers"] = json!([{
+        "id": "synthetic-propeller",
+        "evidence_class": "measured_data",
+        "manufacturer": "Synthetic Test Manufacturer",
+        "model": "synthetic-propeller-model",
+        "diameter_m": null,
+        "pitch_m": null,
+        "dataset_ids": [],
+        "applicable_configuration_claim_ids": ["synthetic-identified-configuration-claim"],
+        "source_ids": ["synthetic-physical-evidence-source"],
+        "notes": "Synthetic test-only component."
+    }]);
+    value
 }
 
 fn synthetic_apc_fixture() -> &'static str {
@@ -83,6 +227,99 @@ fn committed_template_loads_linked_apc_data_but_remains_unresolved() {
     assert!(!evaluation.propeller_evidence_ready());
     assert!(!evaluation.propulsion_evidence_ready());
     assert!(!evaluation.runtime_ready());
+}
+
+#[test]
+fn committed_template_has_no_physical_airframe_identity() {
+    let value = committed_value();
+    assert!(value["campaign"]["physical_airframe_id"].is_null());
+    assert_eq!(value["campaign"]["manufacturer"], "SIG Manufacturing");
+    assert_eq!(value["campaign"]["family"], "KADET LT-40");
+    assert_eq!(value["campaign"]["variant"], "EGV ARF");
+    let evidence = PropulsionEvidenceLoader::from_json_str(COMMITTED_EVIDENCE).unwrap();
+    assert!(
+        evidence
+            .evaluation()
+            .configuration_claims()
+            .iter()
+            .all(|claim| claim.physical_airframe_id().is_none())
+    );
+}
+
+#[test]
+fn committed_apc_sha256_is_calculated_from_exact_bytes() {
+    let calculated = sha256_hex(COMMITTED_APC_BYTES);
+    assert_eq!(calculated, EXPECTED_APC_SHA256);
+    assert_eq!(
+        committed_value()["propeller_datasets"][0]["sha256"],
+        calculated
+    );
+}
+
+#[test]
+fn malformed_sha256_metadata_is_rejected() {
+    let mut value = committed_value();
+    value["propeller_datasets"][0]["sha256"] = json!("not-a-sha256");
+    assert!(matches!(
+        load(&value),
+        Err(ReferencePropulsionEvidenceError::InvalidEvidence { .. })
+    ));
+}
+
+#[test]
+fn formally_valid_but_wrong_sha256_is_rejected_against_raw_bytes() {
+    let mut value = committed_value();
+    let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    value["provenance_sources"][3]["sha256"] = json!(wrong);
+    value["propeller_datasets"][0]["sha256"] = json!(wrong);
+    assert!(matches!(
+        load_with_raw_file(value, COMMITTED_APC_BYTES),
+        Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+            field: "sha256",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn same_size_same_lines_parseable_raw_tamper_is_rejected_by_sha256() {
+    let mut tampered = COMMITTED_APC_BYTES.to_vec();
+    let position = tampered
+        .windows(b"0.1097".len())
+        .position(|window| window == b"0.1097")
+        .expect("known first-row Ct token");
+    tampered[position + 5] = b'8';
+    assert_eq!(tampered.len(), COMMITTED_APC_BYTES.len());
+    assert_eq!(
+        tampered.iter().filter(|byte| **byte == b'\n').count(),
+        COMMITTED_APC_BYTES
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+    );
+    ApcPerformanceDataLoader::parse_str(std::str::from_utf8(&tampered).unwrap())
+        .expect("single-digit tamper remains structurally parseable");
+    assert!(matches!(
+        load_with_raw_file(committed_value(), &tampered),
+        Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+            field: "sha256",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn source_and_dataset_sha256_must_agree() {
+    let mut value = committed_value();
+    value["provenance_sources"][3]["sha256"] =
+        json!("0000000000000000000000000000000000000000000000000000000000000000");
+    assert!(matches!(
+        load(&value),
+        Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+            field: "source_sha256",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -260,6 +497,7 @@ fn recommendation_is_not_an_installation() {
         PropulsionConfigurationEvidenceClass::ManufacturerRecommendation
     );
     assert!(claims[0].operational_configuration_id().is_none());
+    assert!(claims[0].physical_airframe_id().is_none());
     assert!(!evidence.evaluation().configuration_identified());
 }
 
@@ -271,17 +509,50 @@ fn historical_configuration_is_not_physical_installation() {
         claims[1].evidence_class(),
         PropulsionConfigurationEvidenceClass::HistoricallyFlightTestedConfiguration
     );
+    assert!(claims[1].physical_airframe_id().is_none());
     assert!(!evidence.evaluation().configuration_identified());
 }
 
 #[test]
-fn incompatible_installed_configuration_identity_is_rejected() {
+fn specific_installation_without_physical_airframe_id_is_rejected() {
     let mut value = committed_value();
     value["configuration_claims"][1]["evidence_class"] = json!("specific_installed_configuration");
     assert!(matches!(
         load(&value),
         Err(ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity { .. })
     ));
+}
+
+#[test]
+fn measured_configuration_without_physical_airframe_id_is_rejected() {
+    let mut value = synthetic_identified_fixture("measured_configuration");
+    value["campaign"]["physical_airframe_id"] = Value::Null;
+    value["configuration_claims"][0]["physical_airframe_id"] = Value::Null;
+    assert!(matches!(
+        load(&value),
+        Err(ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity { .. })
+    ));
+}
+
+#[test]
+fn installed_configuration_with_mismatched_physical_airframe_id_is_rejected() {
+    let mut value = synthetic_identified_fixture("specific_installed_configuration");
+    value["configuration_claims"][0]["physical_airframe_id"] =
+        json!("synthetic-different-physical-airframe");
+    assert!(matches!(
+        load(&value),
+        Err(ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity { .. })
+    ));
+}
+
+#[test]
+fn synthetic_physically_identified_fixture_sets_configuration_gate_only() {
+    for class in ["specific_installed_configuration", "measured_configuration"] {
+        let evidence = load(&synthetic_identified_fixture(class)).unwrap();
+        assert!(evidence.evaluation().configuration_identified());
+        assert!(!evidence.evaluation().propulsion_evidence_ready());
+        assert!(!evidence.evaluation().runtime_ready());
+    }
 }
 
 #[test]

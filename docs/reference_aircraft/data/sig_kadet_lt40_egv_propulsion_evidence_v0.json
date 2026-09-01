@@ -4,7 +4,10 @@
   "campaign": {
     "id": "sig-kadet-lt40-egv-propulsion-evidence-m2-4a",
     "classification": "physical_reference_measurement",
-    "airframe_id": "sig-kadet-lt40-egv-arf",
+    "manufacturer": "SIG Manufacturing",
+    "family": "KADET LT-40",
+    "variant": "EGV ARF",
+    "physical_airframe_id": null,
     "operational_configuration_id": null,
     "propulsion_configuration_id": null,
     "measurement_date": null,
@@ -57,7 +60,7 @@
     {
       "id": "sig-current-recommendation-envelope",
       "evidence_class": "manufacturer_recommendation",
-      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "physical_airframe_id": null,
       "operational_configuration_id": null,
       "propulsion_configuration_id": null,
       "measurement_date": null,
@@ -81,7 +84,7 @@
     {
       "id": "sig-historical-flight-test-3s",
       "evidence_class": "historically_flight_tested_configuration",
-      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "physical_airframe_id": null,
       "operational_configuration_id": "sig-manual-historical-airframe",
       "propulsion_configuration_id": "sig-manual-hc3528-apc11x7e-3s",
       "measurement_date": null,
@@ -98,7 +101,7 @@
     {
       "id": "sig-historical-flight-test-4s",
       "evidence_class": "historically_flight_tested_configuration",
-      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "physical_airframe_id": null,
       "operational_configuration_id": "sig-manual-historical-airframe",
       "propulsion_configuration_id": "sig-manual-hc3528-apc11x7e-4s",
       "measurement_date": null,
