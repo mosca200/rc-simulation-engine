@@ -1,0 +1,244 @@
+{
+  "schema": "reference_aircraft_propulsion_evidence_v0",
+  "artifact_kind": "propulsion_evidence_not_runtime_configuration",
+  "campaign": {
+    "id": "sig-kadet-lt40-egv-propulsion-evidence-m2-4a",
+    "classification": "physical_reference_measurement",
+    "airframe_id": "sig-kadet-lt40-egv-arf",
+    "operational_configuration_id": null,
+    "propulsion_configuration_id": null,
+    "measurement_date": null,
+    "notes": "Evidence template only. No specific physical airframe installation has been identified or measured."
+  },
+  "provenance_sources": [
+    {
+      "id": "sig-lt40-egv-arf-product",
+      "kind": "manufacturer_documentation",
+      "title": "SIG KADET LT-40 EGV ARF",
+      "publisher": "SIG Manufacturing",
+      "url": "https://sigmfg.com/collections/sig-arfs-almost-ready-to-fly/products/sig-kadet-lt-40-egv-arf?variant=45138130441",
+      "retrieval_date": "2026-08-31",
+      "sha256": null,
+      "notes": "Current manufacturer recommendation envelope for the target EGV ARF; not installation evidence."
+    },
+    {
+      "id": "sig-lt40-egv-arf-manual",
+      "kind": "manufacturer_documentation",
+      "title": "SIG KADET LT-40 EG ARF instruction manual",
+      "publisher": "SIG Manufacturing; retrieval mirror",
+      "url": "https://manuals.plus/m/ff89ac931f6fcc8e935416d04673ba56b31f1ecf2e08465d1e7912a4482a9812.pdf",
+      "retrieval_date": "2026-08-31",
+      "sha256": null,
+      "notes": "Manufacturer-authored historical flight-test configurations, retrieved from a mirror."
+    },
+    {
+      "id": "himax-hc3528-1000",
+      "kind": "manufacturer_documentation",
+      "title": "Himax Brushless Outrunner Motor HC3528-1000 operating manual",
+      "publisher": "Maxx Products International, Inc.; retrieval mirror",
+      "url": "https://www.manuallib.com/download/HIMAX-BRUSHLESS-OUTRUNNER-MOTOR-HC3528-1000.PDF",
+      "retrieval_date": "2026-08-31",
+      "sha256": null,
+      "notes": "Dated 2005 manufacturer manual; candidate/reference component data, not installed-component evidence."
+    },
+    {
+      "id": "apc-11x7e-performance",
+      "kind": "manufacturer_data",
+      "title": "APC 11x7E PER3 performance data",
+      "publisher": "APC Propellers",
+      "url": "https://www.apcprop.com/files/PER3_11x7E.dat",
+      "retrieval_date": "2026-09-01",
+      "sha256": "f81055914654dd7f04a7fe337fb895f7332a9070813b368afcd8b048c9a17587",
+      "notes": "Exact manufacturer text file committed byte-for-byte under data/sources."
+    }
+  ],
+  "photographs": [],
+  "configuration_claims": [
+    {
+      "id": "sig-current-recommendation-envelope",
+      "evidence_class": "manufacturer_recommendation",
+      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "operational_configuration_id": null,
+      "propulsion_configuration_id": null,
+      "measurement_date": null,
+      "motor_id": null,
+      "esc_id": null,
+      "battery_id": null,
+      "propeller_id": null,
+      "spinner_id": null,
+      "recommendation": {
+        "electric_power_w": [500.0, 800.0],
+        "motor_kv_rpm_per_v": [800.0, 1000.0],
+        "esc_current_a": [50.0, 75.0],
+        "battery_cell_count": [3, 4],
+        "battery_capacity_ah": [4.0, 5.0],
+        "battery_chemistry": "lithium polymer"
+      },
+      "source_ids": ["sig-lt40-egv-arf-product"],
+      "photograph_ids": [],
+      "notes": "Compatibility envelope only; it identifies no installed component or physical build."
+    },
+    {
+      "id": "sig-historical-flight-test-3s",
+      "evidence_class": "historically_flight_tested_configuration",
+      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "operational_configuration_id": "sig-manual-historical-airframe",
+      "propulsion_configuration_id": "sig-manual-hc3528-apc11x7e-3s",
+      "measurement_date": null,
+      "motor_id": "himax-hc3528-1000",
+      "esc_id": "castle-creations-50a-unspecified",
+      "battery_id": "unspecified-lipo-3s-4500mah",
+      "propeller_id": "apc-11x7e",
+      "spinner_id": null,
+      "recommendation": null,
+      "source_ids": ["sig-lt40-egv-arf-manual"],
+      "photograph_ids": [],
+      "notes": "One of two historically flown battery alternatives documented by SIG; not the future measured airframe."
+    },
+    {
+      "id": "sig-historical-flight-test-4s",
+      "evidence_class": "historically_flight_tested_configuration",
+      "airframe_id": "sig-kadet-lt40-egv-arf",
+      "operational_configuration_id": "sig-manual-historical-airframe",
+      "propulsion_configuration_id": "sig-manual-hc3528-apc11x7e-4s",
+      "measurement_date": null,
+      "motor_id": "himax-hc3528-1000",
+      "esc_id": "castle-creations-50a-unspecified",
+      "battery_id": "unspecified-lipo-4s-4500mah",
+      "propeller_id": "apc-11x7e",
+      "spinner_id": null,
+      "recommendation": null,
+      "source_ids": ["sig-lt40-egv-arf-manual"],
+      "photograph_ids": [],
+      "notes": "Second historically flown battery alternative documented by SIG; not the future measured airframe."
+    }
+  ],
+  "motors": [
+    {
+      "id": "himax-hc3528-1000",
+      "evidence_class": "manufacturer_data",
+      "manufacturer": "Maxx Products International, Inc.",
+      "model": "Himax HC3528-1000",
+      "kv_rpm_per_v": 1000.0,
+      "winding_resistance_ohm": 0.02,
+      "no_load_current_a": 2.6,
+      "mass_kg": 0.197,
+      "diameter_m": 0.0352,
+      "length_m": 0.0542,
+      "shaft_diameter_m": 0.005,
+      "maximum_current_a": 68.0,
+      "maximum_current_duration_s": 15.0,
+      "maximum_power_w": 450.0,
+      "efficient_current_range_a": [15.0, 48.0],
+      "efficiency": null,
+      "applicable_configuration_claim_ids": [
+        "sig-historical-flight-test-3s",
+        "sig-historical-flight-test-4s"
+      ],
+      "source_ids": ["himax-hc3528-1000", "sig-lt40-egv-arf-manual"],
+      "notes": "Traceable historical candidate/reference motor values; no claim that this motor is installed in a future measured airframe."
+    }
+  ],
+  "escs": [
+    {
+      "id": "castle-creations-50a-unspecified",
+      "evidence_class": "manufacturer_data",
+      "manufacturer": "Castle Creations",
+      "model": null,
+      "current_rating_a": 50.0,
+      "minimum_cell_count": null,
+      "maximum_cell_count": null,
+      "resistance_ohm": null,
+      "efficiency": null,
+      "switching_frequency_hz": null,
+      "control_protocol": null,
+      "applicable_configuration_claim_ids": [
+        "sig-historical-flight-test-3s",
+        "sig-historical-flight-test-4s"
+      ],
+      "source_ids": ["sig-lt40-egv-arf-manual"],
+      "notes": "Historical manual identifies only brand and 50 A rating; exact model, compatibility, losses, efficiency, and control metadata remain unknown."
+    }
+  ],
+  "batteries": [
+    {
+      "id": "unspecified-lipo-3s-4500mah",
+      "evidence_class": "manufacturer_data",
+      "manufacturer": null,
+      "model": null,
+      "chemistry": "lithium polymer",
+      "cell_count": 3,
+      "capacity_ah": 4.5,
+      "nominal_voltage_v": null,
+      "mass_kg": null,
+      "internal_resistance_ohm": null,
+      "voltage_load_points": [],
+      "applicable_configuration_claim_ids": ["sig-historical-flight-test-3s"],
+      "source_ids": ["sig-lt40-egv-arf-manual"],
+      "notes": "Historical alternative. Brand, model, nominal-voltage definition, mass, resistance, temperature behavior, and sag remain unknown."
+    },
+    {
+      "id": "unspecified-lipo-4s-4500mah",
+      "evidence_class": "manufacturer_data",
+      "manufacturer": null,
+      "model": null,
+      "chemistry": "lithium polymer",
+      "cell_count": 4,
+      "capacity_ah": 4.5,
+      "nominal_voltage_v": null,
+      "mass_kg": null,
+      "internal_resistance_ohm": null,
+      "voltage_load_points": [],
+      "applicable_configuration_claim_ids": ["sig-historical-flight-test-4s"],
+      "source_ids": ["sig-lt40-egv-arf-manual"],
+      "notes": "Historical alternative. Brand, model, nominal-voltage definition, mass, resistance, temperature behavior, and sag remain unknown."
+    }
+  ],
+  "propellers": [
+    {
+      "id": "apc-11x7e",
+      "evidence_class": "manufacturer_data",
+      "manufacturer": "APC Propellers",
+      "model": "11x7E",
+      "diameter_m": 0.2794,
+      "pitch_m": 0.1778,
+      "dataset_ids": ["apc-per3-11x7e-v2022-0915"],
+      "applicable_configuration_claim_ids": [
+        "sig-historical-flight-test-3s",
+        "sig-historical-flight-test-4s"
+      ],
+      "source_ids": ["apc-11x7e-performance", "sig-lt40-egv-arf-manual"],
+      "notes": "Manufacturer component and dataset linked to historical SIG claims only; no future physical installation is asserted."
+    }
+  ],
+  "spinners": [],
+  "propeller_datasets": [
+    {
+      "id": "apc-per3-11x7e-v2022-0915",
+      "propeller_id": "apc-11x7e",
+      "evidence_class": "manufacturer_data",
+      "source_id": "apc-11x7e-performance",
+      "raw_source_path": "sources/APC_PER3_11x7E_v2022-0915.dat",
+      "sha256": "f81055914654dd7f04a7fe337fb895f7332a9070813b368afcd8b048c9a17587",
+      "byte_count": 131404,
+      "line_count": 722,
+      "source_format": "APC PER3 fixed-column whitespace-delimited text",
+      "source_version": "v2022-0915",
+      "simulation_date": "09/22/2022",
+      "diameter_m": 0.2794,
+      "pitch_m": 0.1778,
+      "rpm_block_count": 19,
+      "row_count": 570,
+      "coefficient_row_count": 564,
+      "parser_interpretation": {
+        "rpm": "PROP RPM marker; revolutions per minute",
+        "advance_ratio_j": "published J column using file definition J=V/nD",
+        "ct": "published Ct column using file definition Ct=T/(rho*n^2*D^4)",
+        "cp": "published Cp column using file definition Cp=P/(rho*n^3*D^5)",
+        "efficiency": "published Pe column using file definition Pe=Ct*J/Cp",
+        "cq": "derived only as Cq=Cp/(2*pi); not a published APC column"
+      },
+      "notes": "No interpolation, resampling, coefficient fabrication, or runtime conversion occurs in M2.4A."
+    }
+  ]
+}

@@ -48,7 +48,7 @@ manufacturer evidence unless their identity is independently established. None a
 | `sig-lt40-egv-arf-manual` | `manufacturer_documentation` | SIG KADET LT-40 EG ARF instruction manual | SIG Manufacturing; retrieval mirror | [retrieval copy](https://manuals.plus/m/ff89ac931f6fcc8e935416d04673ba56b31f1ecf2e08465d1e7912a4482a9812.pdf) | 2026-08-31 | Historically flight-tested motor, ESC, propeller, and battery configurations | EGV ARF; the current SIG product page independently identifies and links its instruction manual, while this URL is a mirror and is not treated as the publisher |
 | `uiuc-clark-y` | `airfoil_database` | UIUC Airfoil Coordinates Database, `clarky.dat` | Michael S. Selig, UIUC | [coordinate file](https://m-selig.ae.illinois.edu/ads/coord_seligFmt/clarky.dat) ([database index](https://m-selig.web.engr.illinois.edu/ads/coord_database.html)) | 2026-08-31 | Clark Y coordinates for future analysis | Coordinate source only; no polar is generated in M2.2A |
 | `himax-hc3528-1000` | `manufacturer_documentation` | Himax Brushless Outrunner Motor HC3528-1000 operating manual | Maxx Products International, Inc.; retrieval mirror | [manual PDF](https://www.manuallib.com/download/HIMAX-BRUSHLESS-OUTRUNNER-MOTOR-HC3528-1000.PDF) | 2026-08-31 | Motor electrical, dimensional, mass, power, and current ratings | Candidate/reference component; dated 2005 manufacturer manual retrieved from a mirror |
-| `apc-11x7e-performance` | `manufacturer_documentation` | APC 11x7E and propeller performance data | APC Propellers | [product](https://www.apcprop.com/product/11x7e/) and [`PER3_11x7E.dat`](https://www.apcprop.com/files/PER3_11x7E.dat) | 2026-08-31 | Propeller identity, diameter, pitch, and manufacturer performance coefficients | Reference component and future M2.4 dataset; not ingested here |
+| `apc-11x7e-performance` | `manufacturer_documentation` | APC 11x7E and propeller performance data | APC Propellers | [product](https://www.apcprop.com/product/11x7e/) and [`PER3_11x7E.dat`](https://www.apcprop.com/files/PER3_11x7E.dat) | 2026-08-31 | Propeller identity, diameter, pitch, and manufacturer performance coefficients | Reference component; exact manufacturer dataset ingested as off-runtime M2.4A evidence |
 
 Retrieval mirrors preserve manufacturer-authored documents but are weaker locations than current
 publisher-hosted files. Their titles, branding, part identifiers, and contents are recorded rather
@@ -208,16 +208,16 @@ airframe recommendation. They are distinct claims with distinct sources and inte
 | Pitch | 7 in = 0.1778 m | Published size `manufacturer_spec`; SI conversion `derived` | `apc-11x7e-performance` |
 
 APC publishes `PER3_11x7E.dat`, which contains performance coefficients across operating
-conditions. It remains an external manufacturer dataset in M2.2A: it is not ingested, resampled,
-or simplified into the runtime propeller table. For future coefficient handling, the conventional
-relationship is
+conditions. M2.4A preserves the exact retrieved manufacturer file and parses its declared columns
+as off-runtime evidence; it does not resample or simplify the data into the runtime propeller
+table. For coefficient handling, the conventional relationship is
 
 ```text
 Cq = Cp / (2 * pi)
 ```
 
-This relationship is recorded as `derived`; no new coefficient values are produced. Dataset
-interpretation and a validated propeller model belong to M2.4.
+This relationship is recorded as `derived`; no new `Ct` or `Cp` values are produced. M2.4A records
+the parser interpretation and derived `Cq`; a calibrated runtime propeller model remains M2.4B.
 
 ## Mass properties and planned derivation
 
@@ -280,18 +280,18 @@ where EGV applicability still requires verification.
 | Exact operational mass | Unknown | kg | `unknown` | - | Specific operational build | None | Must not use range midpoint by convenience |
 | `Ixx`, `Iyy`, `Izz` | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2D mass build-up required |
 | Products of inertia | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2D mass build-up required |
-| Motor Kv | 1000 | rpm/V | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | Not installed in a runtime model |
-| Motor Rm | 0.020 | ohm | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | - |
-| Motor Io | 2.6 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | - |
+| Motor Kv | 1000 | rpm/V | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | Not installed in a runtime model |
+| Motor Rm | 0.020 | ohm | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | - |
+| Motor Io | 2.6 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | - |
 | Motor mass | 0.197 | kg | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.2D evidence | Exact conversion from 197 g manufacturer spec |
 | Motor diameter | 0.0352 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future fit/mass evidence | Exact conversion from 35.2 mm |
 | Motor length | 0.0542 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future fit/mass evidence | Exact conversion from 54.2 mm |
 | Motor shaft diameter | 0.005 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future component evidence | Exact conversion from 5 mm |
-| Motor maximum power | 450 | W | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | Conditional manufacturer rating |
-| Motor efficient current | 15-48 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | - |
-| Motor 15-second maximum current | 68 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | Short-duration limit |
-| Propeller diameter | 0.2794 | m | `derived` | `apc-11x7e-performance` | APC 11x7E reference | Future M2.4 evidence | Exact conversion of 11 in |
-| Propeller pitch | 0.1778 | m | `derived` | `apc-11x7e-performance` | APC 11x7E reference | Future M2.4 evidence | Exact conversion of 7 in |
+| Motor maximum power | 450 | W | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | Conditional manufacturer rating |
+| Motor efficient current | 15-48 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | - |
+| Motor 15-second maximum current | 68 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | M2.4A evidence | Short-duration limit |
+| Propeller diameter | 0.2794 | m | `derived` | `apc-11x7e-performance` | APC 11x7E reference | M2.4A evidence | Exact conversion of 11 in |
+| Propeller pitch | 0.1778 | m | `derived` | `apc-11x7e-performance` | APC 11x7E reference | M2.4A evidence | Exact conversion of 7 in |
 | Airframe electric power recommendation | 500-800 | W | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | Compatibility evidence only | Not a motor model |
 | Airframe motor-Kv recommendation | 800-1000 | rpm/V | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | Compatibility evidence only | - |
 | Airframe ESC recommendation | 50-75 | A | `manufacturer_spec` | `sig-lt40-egv-arf-product` | EGV | Compatibility evidence only | - |
@@ -359,7 +359,10 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 
 ### M2.4 - Validated electric propulsion and APC propeller model
 
-- Electrical component selection, battery/ESC behavior, and traceable use of APC performance data.
+- M2.4A: off-runtime configuration/component evidence, exact APC source ingestion, strict parsing,
+  provenance, and readiness blockers.
+- M2.4B: future electrical calibration, battery/ESC behavior, validated coefficient transformation,
+  and separately reviewed LT-40 runtime integration.
 
 ### M2.5 - Trim solver
 

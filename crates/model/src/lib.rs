@@ -5,6 +5,7 @@ mod loader;
 mod reference;
 mod reference_aerodynamics;
 mod reference_mass_properties;
+mod reference_propulsion;
 mod reference_survey;
 mod runtime;
 pub mod v0;
@@ -29,6 +30,12 @@ pub use reference_mass_properties::{
     MassPropertiesLoader, PublishedWeightRangeStatus, ReferenceMassPropertiesError, ScalarEstimate,
     VectorEstimate, load_reference_mass_properties, x_aft_to_frd_x,
 };
+pub use reference_propulsion::{
+    ApcPerformanceData, ApcPerformanceDataLoader, ApcPerformanceRow, ApcRpmBlock,
+    ConfigurationClaimSummary, PropulsionConfigurationEvidenceClass, PropulsionEvidence,
+    PropulsionEvidenceEvaluation, PropulsionEvidenceLoader, ReferencePropulsionEvidenceError,
+    load_reference_propulsion_evidence,
+};
 pub use reference_survey::{
     BilateralMeasurementSummary, CrossVariantComparison, CrossVariantStatus, DerivedSurveyValue,
     MeasurementSummary, PhysicalSurvey, PhysicalSurveyLoader, ReferenceSurveyError,
@@ -47,4 +54,6 @@ pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V3: u32 = 3;
 pub const REFERENCE_AERODYNAMIC_EVIDENCE_SCHEMA_V0: &str =
     "reference_aircraft_aerodynamic_evidence_v0";
 pub const REFERENCE_MASS_PROPERTIES_SCHEMA_V0: &str = "reference_aircraft_mass_properties_v0";
+pub const REFERENCE_PROPULSION_EVIDENCE_SCHEMA_V0: &str =
+    "reference_aircraft_propulsion_evidence_v0";
 pub const REFERENCE_SURVEY_SCHEMA_V0: &str = "reference_aircraft_physical_survey_v0";

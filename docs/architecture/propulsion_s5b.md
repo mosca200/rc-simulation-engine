@@ -190,3 +190,12 @@ arbitrarily extreme combinations remain representable in `f64` (for example `Voc
 Physically representative RC configurations remain far inside these numerical limits. A valid but
 pathological non-monotonic `Cq(J)` table can also contain multiple equilibria; fixed bisection stays
 deterministic but does not assert uniqueness or stability of such a dataset.
+
+## M2.4A evidence boundary
+
+The M2.4A reference-aircraft propulsion artifact and APC source parser are deliberately separate
+from this runtime subsystem. Manufacturer recommendations, historical configurations, installed
+configuration identity, and measured component data are evidence claims; none constructs a
+`BatteryConfig`, `MotorConfig`, `PropellerConfig`, `PropellerCoefficientTable`, or
+`ElectricPropulsionConfig`. M2.4A therefore does not affect the physics fingerprint, RK4 stages,
+the 500 Hz path, or replay, and its `runtime_ready` state is always false.

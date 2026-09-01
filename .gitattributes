@@ -1,0 +1,2 @@
+# Preserve externally sourced manufacturer datasets byte-for-byte.
+docs/reference_aircraft/data/sources/*.dat binary
