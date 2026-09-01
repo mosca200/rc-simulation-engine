@@ -225,7 +225,7 @@ The only known mass evidence is the manufacturer EGV flying-weight range of 2.72
 operational mass, `Ixx`, `Iyy`, `Izz`, and all relevant products of inertia are `unknown`. No
 plausible inertia or convenient midpoint mass is introduced.
 
-M2.2C should build mass properties from traceable component masses and locations, including at
+M2.2D should build mass properties from traceable component masses and locations, including at
 least fuselage, left and right wings, horizontal tail, vertical tail, motor, battery, ESC, servos,
 receiver, landing gear, wheels, and remaining structure. Conceptually:
 
@@ -278,12 +278,12 @@ where EGV applicability still requires verification.
 | Aerodynamic-center positions | Unknown | m | `unknown` | - | EGV | None | Wing and tail reference positions unresolved |
 | Detailed fuselage aerodynamic geometry | Unknown | - | `unknown` | - | EGV | None | No body-aero surrogate authorized |
 | Exact operational mass | Unknown | kg | `unknown` | - | Specific operational build | None | Must not use range midpoint by convenience |
-| `Ixx`, `Iyy`, `Izz` | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2C mass build-up required |
-| Products of inertia | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2C mass build-up required |
+| `Ixx`, `Iyy`, `Izz` | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2D mass build-up required |
+| Products of inertia | Unknown | kg m^2 | `unknown` | - | Specific operational build | None | M2.2D mass build-up required |
 | Motor Kv | 1000 | rpm/V | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | Not installed in a runtime model |
 | Motor Rm | 0.020 | ohm | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | - |
 | Motor Io | 2.6 | A | `manufacturer_spec` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.4 evidence | - |
-| Motor mass | 0.197 | kg | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.2C evidence | Exact conversion from 197 g manufacturer spec |
+| Motor mass | 0.197 | kg | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future M2.2D evidence | Exact conversion from 197 g manufacturer spec |
 | Motor diameter | 0.0352 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future fit/mass evidence | Exact conversion from 35.2 mm |
 | Motor length | 0.0542 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future fit/mass evidence | Exact conversion from 54.2 mm |
 | Motor shaft diameter | 0.005 | m | `derived` | `himax-hc3528-1000` | Historical candidate/reference | Future component evidence | Exact conversion from 5 mm |
@@ -319,13 +319,22 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 - Obtain and validate a full-size plan or equivalent authoritative geometry.
 - Freeze exact wing, horizontal-tail, vertical-tail, aileron, elevator, and rudder planforms.
 - Freeze hinge locations and the radii needed to convert published linear travel into angles.
-- Resolve whether each original LT-40 geometry datum applies unchanged to the EGV ARF.
 - Define wing, tail, control-surface, and aerodynamic-element placements against an explicit body
   coordinate system, CG datum, and aerodynamic reference datum.
 - Record the measurement method, scale calibration, uncertainty, and source for every reconstructed
   quantity.
 
-### M2.2C - LT-40 mass-properties derivation
+### M2.2B.1 - LT-40 longitudinal/cross-variant geometry closure investigation
+
+- Investigate unresolved longitudinal stations and tail arms, and determine the evidence status of
+  original-kit geometry for EGV applicability.
+
+### M2.2C - SIG KADET LT-40 EGV Physical Measurement Contract & Geometry Closure Gate
+
+- Deterministic physical-survey ingestion, EGV geometry derivation, cross-variant comparison, and
+  an explicit non-runtime closure gate.
+
+### M2.2D - LT-40 mass-properties evidence and derivation
 
 - Component mass build-up, operational mass, CG, and full inertia tensor.
 

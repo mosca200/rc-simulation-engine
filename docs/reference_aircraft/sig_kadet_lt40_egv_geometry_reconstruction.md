@@ -348,8 +348,9 @@ calibrated physical outline trace with rounded tips. Neither silently replaces t
 
 ## 18. Readiness assessment
 
-The reconstruction is suitable evidence input for M2.2C mass-property planning: it supplies local
+The reconstruction is suitable evidence input for M2.2D mass-property planning: it supplies local
 surface polygons, areas, and centroids that can support component placement once longitudinal
-stations and an operational build are measured. It is **not** sufficient to complete M2.2C or to
-create a runtime LT-40 model. Missing tail arms, operational mass/CG, inertia, control angles,
-aerodynamics, propulsion coefficients, and EGV-specific thrust-axis evidence remain hard gates.
+stations and an operational build are measured. It is **not** sufficient to close the M2.2C
+geometry gate, complete M2.2D, or create a runtime LT-40 model. Missing tail arms, operational
+mass/CG, inertia, control angles, aerodynamics, propulsion coefficients, and EGV-specific
+thrust-axis evidence remain hard gates.

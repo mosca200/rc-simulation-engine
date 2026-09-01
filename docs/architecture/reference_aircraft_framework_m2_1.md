@@ -102,4 +102,5 @@ the existing `acro_electric_01` replay fingerprint.
 7. Run strict loader, fingerprint, replay, determinism, and zero-allocation tests before accepting
    the model.
 
-Real numerical aircraft data and validation work are intentionally deferred to M2.2/M2.3.
+The subsequent reference-aircraft roadmap is staged across M2.2A through M2.2D and M2.3 through
+M2.6; M2.1 itself introduces no real numerical aircraft model.

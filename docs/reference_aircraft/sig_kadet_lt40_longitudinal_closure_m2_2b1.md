@@ -264,9 +264,9 @@ categorical: local applicability remains unproven.
 
 ### Minimum physical measurement campaign
 
-Documentary closure failed, so an EGV airframe survey is required before M2.2C can depend on tail
-arms. Use a fully assembled airframe in the intended operational configuration, but perform these
-geometry measurements before selecting mass or inertia values.
+Documentary closure failed, so an EGV airframe survey is required before the M2.2C geometry gate
+can close the tail-arm requirements. Use a fully assembled airframe in the intended operational
+configuration, but perform these geometry measurements before selecting mass or inertia values.
 
 | Item | Protocol |
 | --- | --- |
@@ -282,8 +282,8 @@ geometry measurements before selecting mass or inertia values.
 | repetitions | three independent setups and readings per quantity; left/right measurements for symmetric features; report mean, range, instrument resolution, and any asymmetry rather than silently averaging it away |
 | photographs | one full side, one full top, close-ups of every datum/endpoint, ruler or scale bar coplanar with each measured feature, camera approximately normal to the measurement plane, and labels for airframe identity, motor mount, battery, and date |
 
-Actual operational CG and battery location should be documented in the same campaign for M2.2C,
-but they are not geometry substitutes and are not added here.
+Actual operational CG and battery location should be documented in the same campaign under the
+M2.2C measurement contract, but they are not geometry substitutes and are not added here.
 
 ## 15. Final readiness assessment
 
@@ -301,5 +301,5 @@ not close the longitudinal model:
 
 The geometry dataset remains `runtime_ready: false`. Recommendation: **perform targeted geometry
 measurement first (option B)**. Acquiring an unbroken dimensioned SIG drawing (option C) would be an
-equivalent documentary closure path, but proceeding directly to a mass/inertia slice would leave
-the aerodynamic placement gate unresolved.
+equivalent documentary closure path, but proceeding directly to the M2.2D mass-properties slice
+would leave the aerodynamic placement gate unresolved.

@@ -1,8 +1,8 @@
-# M2.2C — SIG KADET LT-40 EGV physical measurement contract and geometry closure gate
+# M2.2C — SIG KADET LT-40 EGV Physical Measurement Contract & Geometry Closure Gate
 
 ## Scope and authority
 
-M2.2C adds an evidence-ingestion layer for a future physical survey of one identified SIG KADET LT-40 EGV airframe. It does not create a runtime aircraft model, calibrate aerodynamics, select mass properties, or modify the 500 Hz simulation path.
+M2.2C adds an evidence-ingestion layer for a future physical survey of one identified SIG KADET LT-40 EGV airframe. It does not create a runtime aircraft model, calibrate aerodynamics, select mass properties, or modify the 500 Hz simulation path. LT-40 mass-properties evidence and derivation remain assigned to M2.2D.
 
 The machine-readable campaign is [`data/sig_kadet_lt40_egv_physical_survey_v0.json`](data/sig_kadet_lt40_egv_physical_survey_v0.json). Its `artifact_kind` is deliberately `physical_measurement_evidence_not_runtime_configuration`. The model crate loads it through `PhysicalSurveyLoader`, separate from `AircraftModelLoader`; its contents do not enter an `AircraftModel` or its physics fingerprint. A successfully parsed survey therefore has `runtime_ready = false` in every case.
 
