@@ -958,10 +958,13 @@ fn validate_claims(
             PropulsionConfigurationEvidenceClass::ManufacturerRecommendation => {
                 if claim.recommendation.is_none()
                     || claim.physical_airframe_id.is_some()
+                    || claim.operational_configuration_id.is_some()
+                    || claim.propulsion_configuration_id.is_some()
                     || claim.motor_id.is_some()
                     || claim.esc_id.is_some()
                     || claim.battery_id.is_some()
                     || claim.propeller_id.is_some()
+                    || claim.spinner_id.is_some()
                 {
                     return Err(
                         ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity {
@@ -1332,11 +1335,13 @@ fn validate_datasets(
             .iter()
             .find(|source| source.id == dataset.source_id)
             .expect("validated source reference");
-        if source
-            .sha256
-            .as_deref()
-            .is_some_and(|source_sha256| !source_sha256.eq_ignore_ascii_case(&dataset.sha256))
-        {
+        let Some(source_sha256) = source.sha256.as_deref() else {
+            return Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+                dataset_id: dataset.id.clone(),
+                field: "source_sha256",
+            });
+        };
+        if !source_sha256.eq_ignore_ascii_case(&dataset.sha256) {
             return Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
                 dataset_id: dataset.id.clone(),
                 field: "source_sha256",

@@ -323,6 +323,19 @@ fn source_and_dataset_sha256_must_agree() {
 }
 
 #[test]
+fn linked_dataset_requires_source_sha256() {
+    let mut value = committed_value();
+    value["provenance_sources"][3]["sha256"] = Value::Null;
+    assert!(matches!(
+        load(&value),
+        Err(ReferencePropulsionEvidenceError::LinkedDatasetMismatch {
+            field: "source_sha256",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn unknown_is_null_and_not_zero() {
     let mut value = committed_value();
     assert!(value["batteries"][0]["internal_resistance_ohm"].is_null());
@@ -499,6 +512,61 @@ fn recommendation_is_not_an_installation() {
     assert!(claims[0].operational_configuration_id().is_none());
     assert!(claims[0].physical_airframe_id().is_none());
     assert!(!evidence.evaluation().configuration_identified());
+}
+
+#[test]
+fn recommendation_rejects_every_physical_or_installed_identity_field() {
+    let mutations = [
+        (
+            "/configuration_claims/0/physical_airframe_id",
+            json!("synthetic-physical-airframe"),
+        ),
+        (
+            "/configuration_claims/0/operational_configuration_id",
+            json!("synthetic-operational-configuration"),
+        ),
+        (
+            "/configuration_claims/0/propulsion_configuration_id",
+            json!("synthetic-propulsion-configuration"),
+        ),
+        (
+            "/configuration_claims/0/motor_id",
+            json!("himax-hc3528-1000"),
+        ),
+        (
+            "/configuration_claims/0/esc_id",
+            json!("castle-creations-50a-unspecified"),
+        ),
+        (
+            "/configuration_claims/0/battery_id",
+            json!("unspecified-lipo-3s-4500mah"),
+        ),
+        ("/configuration_claims/0/propeller_id", json!("apc-11x7e")),
+        (
+            "/configuration_claims/0/spinner_id",
+            json!("synthetic-spinner"),
+        ),
+    ];
+
+    for (pointer, populated_identity) in mutations {
+        let mut value = committed_value();
+        value["spinners"] = json!([{
+            "id": "synthetic-spinner",
+            "evidence_class": "manufacturer_data",
+            "manufacturer": "Synthetic Test Manufacturer",
+            "model": "synthetic-spinner-model",
+            "diameter_m": null,
+            "mass_kg": null,
+            "applicable_configuration_claim_ids": [],
+            "source_ids": ["sig-lt40-egv-arf-product"],
+            "notes": "Synthetic resolver fixture for recommendation identity validation."
+        }]);
+        *value.pointer_mut(pointer).expect("known identity pointer") = populated_identity;
+        assert!(matches!(
+            load(&value),
+            Err(ReferencePropulsionEvidenceError::IncompatibleConfigurationIdentity { .. })
+        ));
+    }
 }
 
 #[test]

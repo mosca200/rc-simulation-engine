@@ -130,10 +130,11 @@ block counts, provenance, parser interpretation, and source hash.
 When loading a linked raw source, the loader computes SHA-256 with `sha2` directly over the exact
 bytes returned by the filesystem, before UTF-8 decoding or parsing, encodes the digest as lowercase
 hexadecimal, and compares it with the dataset metadata. A mismatch fails as
-`LinkedDatasetMismatch { field: "sha256", .. }`. When the referenced provenance source also has a
-SHA-256 value, source and dataset hashes must agree case-insensitively before the raw file is
-accepted. Byte/line counts and parser checks remain additional gates, not substitutes for the
-cryptographic check.
+`LinkedDatasetMismatch { field: "sha256", .. }`. The provenance source referenced by a propeller
+dataset must also declare SHA-256, and its value must agree case-insensitively with the dataset
+hash before the raw file is accepted. This stronger presence rule applies only to sources linked
+by committed propeller datasets; unrelated page/manual sources may retain null SHA-256. Byte/line
+counts and parser checks remain additional gates, not substitutes for the cryptographic check.
 
 The APC designation supplies 11 in diameter and 7 in pitch. Their exact SI conversions are
 0.2794 m and 0.1778 m. Dataset and propeller dimensions must agree.
