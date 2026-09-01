@@ -3,6 +3,7 @@
 
 mod loader;
 mod reference;
+mod reference_aerodynamics;
 mod reference_mass_properties;
 mod reference_survey;
 mod runtime;
@@ -16,6 +17,11 @@ pub use reference::{
     ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity, ReferenceAircraftMetadata,
     ReferenceCgLocation, ReferenceControlSurfaceTravel, ReferenceParameterEvidence,
     ReferencePhysicalSpecification, ReferenceScalar,
+};
+pub use reference_aerodynamics::{
+    AerodynamicDatasetSummary, AerodynamicEvidence, AerodynamicEvidenceClass,
+    AerodynamicEvidenceEvaluation, AerodynamicEvidenceLoader, ConvergenceStatus, CoveragePoint,
+    ReferenceAerodynamicEvidenceError, load_reference_aerodynamic_evidence,
 };
 pub use reference_mass_properties::{
     InertiaEstimate, MassMeasurementSummary, MassPropertiesCampaign, MassPropertiesEvaluation,
@@ -35,5 +41,7 @@ pub use runtime::{
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V0: u32 = 0;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V1: u32 = 1;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V2: u32 = 2;
+pub const REFERENCE_AERODYNAMIC_EVIDENCE_SCHEMA_V0: &str =
+    "reference_aircraft_aerodynamic_evidence_v0";
 pub const REFERENCE_MASS_PROPERTIES_SCHEMA_V0: &str = "reference_aircraft_mass_properties_v0";
 pub const REFERENCE_SURVEY_SCHEMA_V0: &str = "reference_aircraft_physical_survey_v0";
