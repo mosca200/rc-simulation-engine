@@ -86,4 +86,6 @@ same-build/same-target boundary.
 `ReynoldsPolarFamily` is exported by `sim_core`, but no `AircraftModel`, `RuntimePolar`,
 `AeroElement`, RK4 evaluator, replay record, physics fingerprint, or 500 Hz path contains or calls
 it in M2.3B. Connecting evidence to this primitive and integrating it into aircraft simulation
-requires a later, separately reviewed M2.3 slice.
+requires a later, separately reviewed M2.3 slice. M2.3C subsequently provides that generic,
+schema-v3 integration while leaving the historical M2.3B primitive contract unchanged; see
+[`reynolds_runtime_m2_3c.md`](reynolds_runtime_m2_3c.md).

@@ -1,4 +1,4 @@
-use crate::{BodyWrench, RigidBodyState};
+use crate::{BodyWrench, ReynoldsPolarFamily, ReynoldsPolarSample, RigidBodyState};
 use sim_math::{Orientation, Vec3, world_to_body};
 use thiserror::Error;
 
@@ -247,6 +247,48 @@ pub struct AeroElementOutput {
     pub wrench_body: BodyWrench,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ReynoldsCalculationError {
+    #[error("section airspeed must be finite and non-negative")]
+    InvalidSectionAirspeed,
+    #[error("section chord must be finite and greater than zero")]
+    InvalidChord,
+    #[error("kinematic viscosity must be finite and greater than zero")]
+    InvalidKinematicViscosity,
+    #[error("computed Reynolds number must be finite and non-negative")]
+    InvalidResult,
+}
+
+/// Allocation-free Reynolds-aware aerodynamic result with borrowed family diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReynoldsAeroElementOutput<'a> {
+    pub aero: AeroElementOutput,
+    pub local_reynolds: f64,
+    pub reynolds_sample: ReynoldsPolarSample<'a>,
+}
+
+/// Computes section Reynolds number from local quasi-2D speed, chord, and explicit viscosity.
+pub fn calculate_reynolds_number(
+    section_airspeed_mps: f64,
+    chord_m: f64,
+    kinematic_viscosity_m2_s: f64,
+) -> Result<f64, ReynoldsCalculationError> {
+    if !section_airspeed_mps.is_finite() || section_airspeed_mps < 0.0 {
+        return Err(ReynoldsCalculationError::InvalidSectionAirspeed);
+    }
+    if !chord_m.is_finite() || chord_m <= 0.0 {
+        return Err(ReynoldsCalculationError::InvalidChord);
+    }
+    if !kinematic_viscosity_m2_s.is_finite() || kinematic_viscosity_m2_s <= 0.0 {
+        return Err(ReynoldsCalculationError::InvalidKinematicViscosity);
+    }
+    let reynolds_number = section_airspeed_mps * chord_m / kinematic_viscosity_m2_s;
+    if !reynolds_number.is_finite() || reynolds_number < 0.0 {
+        return Err(ReynoldsCalculationError::InvalidResult);
+    }
+    Ok(reynolds_number)
+}
+
 /// Evaluates one immutable quasi-2D aerodynamic element without allocation.
 #[must_use]
 pub fn evaluate_aero_element(
@@ -255,6 +297,53 @@ pub fn evaluate_aero_element(
     environment: &AeroEnvironment,
     polar: &PolarTable,
 ) -> AeroElementOutput {
+    evaluate_aero_element_with_sampler(state, element, environment, |_, alpha_rad| {
+        (polar.sample_clamped(alpha_rad), ())
+    })
+    .0
+}
+
+/// Evaluates one Reynolds-aware quasi-2D element from its local RK4-stage velocity.
+#[must_use]
+pub fn evaluate_reynolds_aero_element<'a>(
+    state: &RigidBodyState,
+    element: &AeroElement,
+    environment: &AeroEnvironment,
+    polar_family: &'a ReynoldsPolarFamily,
+    kinematic_viscosity_m2_s: f64,
+) -> ReynoldsAeroElementOutput<'a> {
+    debug_assert!(kinematic_viscosity_m2_s.is_finite() && kinematic_viscosity_m2_s > 0.0);
+    let (aero, (local_reynolds, reynolds_sample)) = evaluate_aero_element_with_sampler(
+        state,
+        element,
+        environment,
+        |section_airspeed_mps, alpha_rad| {
+            let local_reynolds = calculate_reynolds_number(
+                section_airspeed_mps,
+                element.chord_m,
+                kinematic_viscosity_m2_s,
+            )
+            .expect("validated stage state, element, and viscosity produce finite Reynolds");
+            let sample = polar_family.sample(local_reynolds, alpha_rad);
+            (sample.coefficients, (local_reynolds, sample))
+        },
+    );
+    ReynoldsAeroElementOutput {
+        aero,
+        local_reynolds,
+        reynolds_sample,
+    }
+}
+
+fn evaluate_aero_element_with_sampler<T, F>(
+    state: &RigidBodyState,
+    element: &AeroElement,
+    environment: &AeroEnvironment,
+    sample_coefficients: F,
+) -> (AeroElementOutput, T)
+where
+    F: FnOnce(f64, f64) -> (PolarCoefficients, T),
+{
     debug_assert!(state.validate().is_ok());
 
     let air_relative_velocity_world_mps =
@@ -280,20 +369,24 @@ pub fn evaluate_aero_element(
     let beta_rad = spanwise_mps.atan2(section_airspeed_mps);
 
     if section_airspeed_mps < MIN_SECTION_AIRSPEED_MPS {
-        return AeroElementOutput {
-            air_relative_velocity_element_mps,
-            section_airspeed_mps,
-            alpha_rad: 0.0,
-            beta_rad,
-            dynamic_pressure_pa: 0.0,
-            coefficients: polar.sample_clamped(0.0),
-            force_element_n: Vec3::zeros(),
-            wrench_body: BodyWrench::zero(),
-        };
+        let (coefficients, diagnostic) = sample_coefficients(section_airspeed_mps, 0.0);
+        return (
+            AeroElementOutput {
+                air_relative_velocity_element_mps,
+                section_airspeed_mps,
+                alpha_rad: 0.0,
+                beta_rad,
+                dynamic_pressure_pa: 0.0,
+                coefficients,
+                force_element_n: Vec3::zeros(),
+                wrench_body: BodyWrench::zero(),
+            },
+            diagnostic,
+        );
     }
 
     let alpha_rad = w_mps.atan2(u_mps);
-    let coefficients = polar.sample_clamped(alpha_rad);
+    let (coefficients, diagnostic) = sample_coefficients(section_airspeed_mps, alpha_rad);
     let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3 * section_speed_squared_mps2;
     let velocity_hat_section = Vec3::new(
         u_mps / section_airspeed_mps,
@@ -317,14 +410,17 @@ pub fn evaluate_aero_element(
     wrench_body.add_force_at_body_point(force_body_n, element.position_body_m);
     wrench_body.add_moment_body(intrinsic_moment_body_nm);
 
-    AeroElementOutput {
-        air_relative_velocity_element_mps,
-        section_airspeed_mps,
-        alpha_rad,
-        beta_rad,
-        dynamic_pressure_pa,
-        coefficients,
-        force_element_n,
-        wrench_body,
-    }
+    (
+        AeroElementOutput {
+            air_relative_velocity_element_mps,
+            section_airspeed_mps,
+            alpha_rad,
+            beta_rad,
+            dynamic_pressure_pa,
+            coefficients,
+            force_element_n,
+            wrench_body,
+        },
+        diagnostic,
+    )
 }

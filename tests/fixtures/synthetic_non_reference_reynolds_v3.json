@@ -1,0 +1,88 @@
+{
+  "schema_version": 3,
+  "model_id": "synthetic_non_reference_reynolds",
+  "display_name": "Synthetic Reynolds Test Fixture",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 2.0,
+    "inertia_body_kg_m2": [
+      [0.2, 0.0, 0.0],
+      [0.0, 0.3, 0.0],
+      [0.0, 0.0, 0.4]
+    ]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.0001,
+    "polars": [
+      {
+        "id": "synthetic-fixed",
+        "samples": [
+          { "alpha_rad": -0.5, "cl": -0.2, "cd": 0.03, "cm": 0.01 },
+          { "alpha_rad":  0.5, "cl":  0.2, "cd": 0.03, "cm": -0.01 }
+        ]
+      }
+    ],
+    "polar_families": [
+      {
+        "id": "synthetic-family",
+        "nodes": [
+          {
+            "reynolds_number": 100000.0,
+            "samples": [
+              { "alpha_rad": -0.5, "cl": 0.0, "cd": 0.02, "cm": 0.0 },
+              { "alpha_rad":  0.5, "cl": 0.0, "cd": 0.02, "cm": 0.0 }
+            ]
+          },
+          {
+            "reynolds_number": 400000.0,
+            "samples": [
+              { "alpha_rad": -0.4, "cl":  0.0, "cd": 0.18, "cm": 0.00 },
+              { "alpha_rad":  0.0, "cl":  0.0, "cd": 0.18, "cm": 0.00 },
+              { "alpha_rad":  0.4, "cl":  0.0, "cd": 0.18, "cm": 0.00 }
+            ]
+          }
+        ]
+      }
+    ],
+    "elements": [
+      {
+        "id": "reynolds-surface",
+        "position_body_m": [0.0, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 1.0,
+        "chord_m": 0.5,
+        "polar_binding": {
+          "kind": "reynolds_family",
+          "family_id": "synthetic-family"
+        }
+      },
+      {
+        "id": "fixed-surface",
+        "position_body_m": [-0.5, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.1,
+        "chord_m": 0.2,
+        "polar_binding": {
+          "kind": "polar",
+          "polar_id": "synthetic-fixed"
+        }
+      }
+    ]
+  },
+  "controls": {
+    "response": {
+      "roll":  { "rate": 1.0, "expo": 0.0 },
+      "pitch": { "rate": 1.0, "expo": 0.0 },
+      "yaw":   { "rate": 1.0, "expo": 0.0 }
+    },
+    "servos": {
+      "aileron":  { "min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false },
+      "elevator": { "min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false },
+      "rudder":   { "min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false }
+    }
+  },
+  "control_surface_bindings": [],
+  "propulsion": null,
+  "presentation": null
+}

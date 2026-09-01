@@ -167,6 +167,10 @@ nodes, deterministic sampling, logarithmic-Reynolds interpolation, explicit rang
 Reynolds extrapolation. It does not read this evidence artifact, interpolate Mach, modify
 `AircraftModel`, or connect a family to the flight loop.
 
+M2.3C subsequently adds a generic schema-v3 runtime path with explicit viscosity and stage-local
+Reynolds evaluation. Its tests and fixture are synthetic. It still does not read this evidence
+artifact, authorize an LT-40 operating envelope, supply Clark Y polars, or create an LT-40 model.
+
 Reference-aircraft integration still needs:
 
 - a justified and sourced LT-40 operational speed/atmosphere/chord envelope;
@@ -178,5 +182,5 @@ Reference-aircraft integration still needs:
 - stall and out-of-grid behavior defined without hidden extrapolation; and
 - regression evidence that any new runtime semantics remain deterministic and allocation-free.
 
-Neither M2.3A nor M2.3B implements those reference-aircraft runtime decisions. No runnable SIG
-KADET LT-40 model exists after either slice, and M2.4 propulsion remains outside their scope.
+M2.3A, M2.3B, and M2.3C do not implement those reference-aircraft evidence decisions. No runnable
+SIG KADET LT-40 model exists after these slices, and M2.4 propulsion remains outside their scope.

@@ -13,7 +13,9 @@ from [v1](aircraft_model_v1.md), then adds two required root fields:
 ```
 
 The fragment is explanatory; a complete model still requires all v1 physical fields. The loader
-selects v0, v1, or v2 strictly from `schema_version`. It performs no implicit migration.
+selects v0, v1, v2, or the additive Reynolds-aware v3 strictly from `schema_version`. It performs
+no implicit migration. V3 is documented in
+[`reynolds_runtime_m2_3c.md`](../architecture/reynolds_runtime_m2_3c.md).
 
 ## Classification
 

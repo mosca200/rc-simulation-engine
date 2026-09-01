@@ -1,6 +1,6 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V2,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -10,8 +10,12 @@ use crate::{
     runtime::{
         AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroElement,
         RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
+        RuntimeReynoldsPolarFamily,
     },
-    v0::{AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0, ServoFileV0},
+    v0::{
+        AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
+        ServoFileV0,
+    },
     v1::{AircraftModelFileV1, ControlActuatorFileV1, ControlSurfaceBindingFileV1},
     v2::{
         AircraftClassificationFileV2, AircraftModelFileV2, CgReferenceKindFileV2,
@@ -20,6 +24,7 @@ use crate::{
         ReferenceParameterEvidenceFileV2, ReferencePhysicalSpecificationFileV2,
         ReferenceScalarFileV2,
     },
+    v3::{AeroPolarBindingFileV3, AircraftModelFileV3},
 };
 use serde::Deserialize;
 use sim_core::{
@@ -27,7 +32,8 @@ use sim_core::{
     ControlActuatorConfig, ControlConfigError, ControlResponseConfig, ControlSystemConfig,
     ElectricPropulsionConfig, MotorConfig, MotorConfigError, ParameterError, PolarError,
     PolarSample, PolarTable, PropellerCoefficientError, PropellerCoefficientTable, PropellerConfig,
-    PropellerConfigError, PropellerSample, PropellerSpinDirection, RigidBodyParams, ServoConfig,
+    PropellerConfigError, PropellerSample, PropellerSpinDirection, ReynoldsPolar,
+    ReynoldsPolarFamily, ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig,
 };
 use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use std::{fs, io, path::Path};
@@ -82,6 +88,28 @@ pub enum ModelLoadError {
         #[source]
         source: PolarError,
     },
+    #[error("kinematic_viscosity_m2_s must be finite and greater than zero, got {value:?}")]
+    InvalidKinematicViscosity { value: f64 },
+    #[error(
+        "invalid polar table for Reynolds family {family_id:?} at family index {family_index}, node index {node_index}: {source}"
+    )]
+    InvalidReynoldsFamilyPolar {
+        family_id: String,
+        family_index: usize,
+        node_index: usize,
+        #[source]
+        source: PolarError,
+    },
+    #[error(
+        "invalid Reynolds family {family_id:?} at family index {family_index}, node index {node_index:?}: {source}"
+    )]
+    InvalidReynoldsPolarFamily {
+        family_id: String,
+        family_index: usize,
+        node_index: Option<usize>,
+        #[source]
+        source: ReynoldsPolarFamilyError,
+    },
     #[error("invalid aerodynamic element {id:?} at index {index}: {source}")]
     InvalidAeroElement {
         id: String,
@@ -96,6 +124,14 @@ pub enum ModelLoadError {
         element_id: String,
         element_index: usize,
         polar_id: String,
+    },
+    #[error(
+        "aerodynamic element {element_id:?} at index {element_index} references unknown Reynolds family {family_id:?}"
+    )]
+    UnresolvedReynoldsFamilyReference {
+        element_id: String,
+        element_index: usize,
+        family_id: String,
     },
     #[error(
         "control-surface binding {binding_id:?} at index {binding_index} references unknown aerodynamic element {element_id:?}"
@@ -224,6 +260,12 @@ impl AircraftModelLoader {
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V2);
                 resolve_v2(file)
             }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V3) => {
+                let file: AircraftModelFileV3 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V3);
+                resolve_v3(file)
+            }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
     }
@@ -318,6 +360,14 @@ fn resolve_v2(file: AircraftModelFileV2) -> Result<AircraftModel, ModelLoadError
         presentation,
     };
     let model = resolve_v1_fields(v1_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V2)?;
+    resolve_reference_framework(model, classification, reference_aircraft)
+}
+
+fn resolve_reference_framework(
+    model: AircraftModel,
+    classification: AircraftClassificationFileV2,
+    reference_aircraft: Option<ReferenceAircraftFileV2>,
+) -> Result<AircraftModel, ModelLoadError> {
     let classification = match classification {
         AircraftClassificationFileV2::SyntheticTest => AircraftClassification::SyntheticTest,
         AircraftClassificationFileV2::ReferenceAircraft => {
@@ -337,6 +387,147 @@ fn resolve_v2(file: AircraftModelFileV2) -> Result<AircraftModel, ModelLoadError
         }
     };
     Ok(model.with_reference_framework(classification, reference_aircraft))
+}
+
+fn resolve_v3(file: AircraftModelFileV3) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV3 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    } = file;
+    if !aerodynamics.kinematic_viscosity_m2_s.is_finite()
+        || aerodynamics.kinematic_viscosity_m2_s <= 0.0
+    {
+        return Err(ModelLoadError::InvalidKinematicViscosity {
+            value: aerodynamics.kinematic_viscosity_m2_s,
+        });
+    }
+
+    let common_file = AircraftModelFileV0 {
+        schema_version,
+        model_id,
+        display_name,
+        rigid_body,
+        aerodynamics: AerodynamicsFileV0 {
+            polars: aerodynamics.polars,
+            elements: Vec::new(),
+        },
+        controls,
+        propulsion,
+        presentation,
+    };
+    let mut model = resolve_common(common_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V3)?;
+
+    let mut families = Vec::with_capacity(aerodynamics.polar_families.len());
+    for (family_index, family_file) in aerodynamics.polar_families.into_iter().enumerate() {
+        validate_unique_id(
+            "Reynolds polar family",
+            family_index,
+            &family_file.id,
+            families.iter().map(RuntimeReynoldsPolarFamily::id),
+        )?;
+        let mut nodes = Vec::with_capacity(family_file.nodes.len());
+        for (node_index, node_file) in family_file.nodes.into_iter().enumerate() {
+            let samples = node_file
+                .samples
+                .into_iter()
+                .map(|sample| PolarSample {
+                    alpha_rad: sample.alpha_rad,
+                    cl: sample.cl,
+                    cd: sample.cd,
+                    cm: sample.cm,
+                })
+                .collect();
+            let table = PolarTable::new(samples).map_err(|source| {
+                ModelLoadError::InvalidReynoldsFamilyPolar {
+                    family_id: family_file.id.clone(),
+                    family_index,
+                    node_index,
+                    source,
+                }
+            })?;
+            nodes.push(
+                ReynoldsPolar::new(node_file.reynolds_number, table).map_err(|source| {
+                    ModelLoadError::InvalidReynoldsPolarFamily {
+                        family_id: family_file.id.clone(),
+                        family_index,
+                        node_index: Some(node_index),
+                        source,
+                    }
+                })?,
+            );
+        }
+        let family = ReynoldsPolarFamily::new(nodes).map_err(|source| {
+            ModelLoadError::InvalidReynoldsPolarFamily {
+                family_id: family_file.id.clone(),
+                family_index,
+                node_index: None,
+                source,
+            }
+        })?;
+        families.push(RuntimeReynoldsPolarFamily::new(family_file.id, family));
+    }
+
+    let mut elements = Vec::with_capacity(aerodynamics.elements.len());
+    for (element_index, element_file) in aerodynamics.elements.into_iter().enumerate() {
+        validate_unique_id(
+            "aerodynamic element",
+            element_index,
+            &element_file.id,
+            elements.iter().map(RuntimeAeroElement::id),
+        )?;
+        let element = AeroElement::new(
+            vector(element_file.position_body_m),
+            orientation(element_file.orientation_body_from_element_wxyz),
+            element_file.area_m2,
+            element_file.chord_m,
+        )
+        .map_err(|source| ModelLoadError::InvalidAeroElement {
+            id: element_file.id.clone(),
+            index: element_index,
+            source,
+        })?;
+        let runtime_element = match element_file.polar_binding {
+            AeroPolarBindingFileV3::Polar { polar_id } => {
+                let polar_index = model
+                    .aero_polars()
+                    .iter()
+                    .position(|polar| polar.id() == polar_id)
+                    .ok_or_else(|| ModelLoadError::UnresolvedPolarReference {
+                        element_id: element_file.id.clone(),
+                        element_index,
+                        polar_id,
+                    })?;
+                RuntimeAeroElement::new(element_file.id, element, polar_index)
+            }
+            AeroPolarBindingFileV3::ReynoldsFamily { family_id } => {
+                let family_index = families
+                    .iter()
+                    .position(|family| family.id() == family_id)
+                    .ok_or_else(|| ModelLoadError::UnresolvedReynoldsFamilyReference {
+                        element_id: element_file.id.clone(),
+                        element_index,
+                        family_id,
+                    })?;
+                RuntimeAeroElement::new_reynolds_family(element_file.id, element, family_index)
+            }
+        };
+        elements.push(runtime_element);
+    }
+
+    model =
+        model.with_reynolds_aerodynamics(aerodynamics.kinematic_viscosity_m2_s, families, elements);
+    let bindings = resolve_control_surface_bindings(&model, control_surface_bindings)?;
+    model = model.with_control_surface_bindings(bindings);
+    resolve_reference_framework(model, classification, reference_aircraft)
 }
 
 fn resolve_common(

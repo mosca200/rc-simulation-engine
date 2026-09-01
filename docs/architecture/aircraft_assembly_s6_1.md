@@ -37,6 +37,10 @@ tables, base aerodynamic-element geometry, resolved control-surface bindings, th
 configuration, and optional S5B propulsion configuration. The base orientation of every
 `AeroElement` describes its neutral geometry.
 
+Schema v3 additionally owns explicit kinematic viscosity, ordered Reynolds polar families, and a
+tagged fixed-polar or family binding for every element. This is an additive M2.3C path; legacy
+v0/v1/v2 models retain their fixed `PolarTable` bindings and behavior.
+
 Dynamic values live separately in `AircraftState`:
 
 ```text
@@ -155,6 +159,7 @@ step follow this policy:
 | Effective surface orientation | Computed once, held for k1/k2/k3/k4 |
 | Throttle | Read once, held for k1/k2/k3/k4 |
 | Aerodynamic wrench | Recomputed from each RK4 stage state |
+| Local Reynolds and family coefficients | Recomputed from each RK4 stage state for v3 family elements |
 | Propulsion operating point and wrench | Recomputed from each RK4 stage state |
 
 This zero-order hold is deliberate. Servo state is not numerically integrated inside RK4. Holding
@@ -169,6 +174,10 @@ visited in their stable model order. Each element uses the real S4 evaluator wit
 stage state, its effective geometry, the shared environment, and its resolved `PolarTable`; its
 body force and moment are added to the accumulator. S6.1 does not duplicate angle-of-attack,
 lift, drag, pitching-moment, or lever-arm equations.
+
+For schema-v3 family bindings, M2.3C dispatches to the Reynolds-aware S4 evaluator instead. Local
+section velocity, `Re = V_section * chord / nu`, family coefficients, and wrench are all computed
+from the current stage state. The element geometry and viscosity remain immutable during the run.
 
 If the model has electric propulsion, the real S5B evaluator is then called with the same stage
 state, held throttle, environment, propulsion configuration, and coefficient table. Its force and

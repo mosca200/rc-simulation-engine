@@ -59,7 +59,12 @@ Positive CM produces a positive +Y right-hand-rule pitch moment, corresponding t
 
 M2.3B adds a separate generic `ReynoldsPolarFamily` core primitive while preserving this legacy
 table contract. It samples each table with `sample_clamped` before Reynolds interpolation and is
-not connected to the S4 element evaluator or aircraft runtime in that slice. See
+not connected to the S4 element evaluator or aircraft runtime in that slice. M2.3C adds a separate
+Reynolds-aware evaluator that reuses the same S4 kinematics and wrench equations with stage-local
+section speed, explicit viscosity, and element chord; `evaluate_aero_element` remains the fixed
+`PolarTable` path. See
 [`reynolds_polar_family_m2_3b.md`](reynolds_polar_family_m2_3b.md).
+Runtime integration is documented in
+[`reynolds_runtime_m2_3c.md`](reynolds_runtime_m2_3c.md).
 
 S4 intentionally does not model side force, induced drag, finite-wing effects, propwash, propulsion, controls, atmosphere variation, ground effect, turbulence, aircraft assembly, or rendering. The canonical `Simulation` does not yet own aerodynamic elements; stage-correct integration is exercised directly through the generic RK4 evaluator boundary.

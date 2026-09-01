@@ -1,9 +1,10 @@
 use crate::AircraftSimulationConfig;
-use model::{AircraftModel, ControlActuator};
+use model::{AircraftModel, ControlActuator, RuntimeAeroElement, RuntimeAeroPolarBinding};
 use sim_core::{
-    AeroElement, BodyWrench, ControlSurfacePositions, ControlSystemState, PilotInput,
-    PropulsionOutput, RigidBodyState, Rk4Integrator, StateError, advance_controls,
-    evaluate_aero_element, evaluate_derivative, evaluate_electric_propulsion,
+    AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
+    PilotInput, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyState, Rk4Integrator,
+    StateError, advance_controls, evaluate_aero_element, evaluate_derivative,
+    evaluate_electric_propulsion, evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -34,6 +35,31 @@ pub struct AircraftSnapshot {
     sim_time_s: f64,
     rigid_body_state: RigidBodyState,
     control_surface_positions: ControlSurfacePositions,
+}
+
+/// Per-element aerodynamic output, preserving Reynolds diagnostics without hot-path allocation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AircraftAeroElementOutput<'a> {
+    Polar(AeroElementOutput),
+    ReynoldsFamily(ReynoldsAeroElementOutput<'a>),
+}
+
+impl AircraftAeroElementOutput<'_> {
+    #[must_use]
+    pub const fn aero(&self) -> &AeroElementOutput {
+        match self {
+            Self::Polar(output) => output,
+            Self::ReynoldsFamily(output) => &output.aero,
+        }
+    }
+
+    #[must_use]
+    pub const fn reynolds(&self) -> Option<&ReynoldsAeroElementOutput<'_>> {
+        match self {
+            Self::Polar(_) => None,
+            Self::ReynoldsFamily(output) => Some(output),
+        }
+    }
 }
 
 impl AircraftSnapshot {
@@ -293,13 +319,51 @@ pub fn evaluate_aerodynamic_wrench(
     for (effective_element, runtime_element) in
         effective_aero_elements.iter().zip(model.aero_elements())
     {
-        let polar = &model.aero_polars()[runtime_element.polar_index()];
-        let output =
-            evaluate_aero_element(stage_state, effective_element, environment, polar.table());
+        let output = evaluate_aircraft_aero_element(
+            stage_state,
+            effective_element,
+            runtime_element,
+            model,
+            environment,
+        );
+        let output = output.aero();
         total_wrench.force_body_n += output.wrench_body.force_body_n;
         total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
     }
     total_wrench
+}
+
+/// Evaluates one resolved model element and exposes Reynolds diagnostics when applicable.
+#[must_use]
+pub fn evaluate_aircraft_aero_element<'a>(
+    stage_state: &RigidBodyState,
+    effective_element: &AeroElement,
+    runtime_element: &RuntimeAeroElement,
+    model: &'a AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+) -> AircraftAeroElementOutput<'a> {
+    match runtime_element.polar_binding() {
+        RuntimeAeroPolarBinding::Polar { polar_index } => {
+            AircraftAeroElementOutput::Polar(evaluate_aero_element(
+                stage_state,
+                effective_element,
+                environment,
+                model.aero_polars()[polar_index].table(),
+            ))
+        }
+        RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+            let viscosity = model
+                .kinematic_viscosity_m2_s()
+                .expect("Reynolds-family bindings exist only in schema-v3 models");
+            AircraftAeroElementOutput::ReynoldsFamily(evaluate_reynolds_aero_element(
+                stage_state,
+                effective_element,
+                environment,
+                model.aero_polar_families()[family_index].family(),
+                viscosity,
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

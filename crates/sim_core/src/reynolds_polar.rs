@@ -103,11 +103,12 @@ impl ReynoldsPolarFamily {
     /// interpolates CL/CD/CM in `ln(Re)`. Reynolds values outside the family are clamped to the
     /// nearest node and reported; no Reynolds extrapolation occurs.
     ///
-    /// Callers must provide a finite, positive Reynolds number and finite angle of attack, as they
-    /// do for the existing `PolarTable` hot-path sampler.
+    /// Callers must provide a finite, non-negative Reynolds number and finite angle of attack, as
+    /// they do for the existing `PolarTable` hot-path sampler. Zero is below every valid family
+    /// node and therefore clamps to the first node without evaluating a logarithm.
     #[must_use]
     pub fn sample(&self, reynolds_number: f64, alpha_rad: f64) -> ReynoldsPolarSample<'_> {
-        debug_assert!(reynolds_number.is_finite() && reynolds_number > 0.0);
+        debug_assert!(reynolds_number.is_finite() && reynolds_number >= 0.0);
         debug_assert!(alpha_rad.is_finite());
 
         match self

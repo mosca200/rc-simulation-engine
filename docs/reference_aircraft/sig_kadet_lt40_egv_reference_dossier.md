@@ -347,6 +347,11 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 - Generic deterministic `ln(Re)` interpolation across independently gridded alpha polars, without
   aircraft-runtime wiring or Mach interpolation.
 
+### M2.3C - Stage-correct local Reynolds aerodynamics integration
+
+- Generic schema-v3 family bindings, explicit kinematic viscosity, per-RK4-stage local Reynolds,
+  diagnostics, and fingerprint/replay coverage using synthetic data only.
+
 ### M2.3 - Reynolds-dependent Clark Y aerodynamics
 
 - Future auditable Reynolds/Mach operating envelope, polar generation or published-data selection,

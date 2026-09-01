@@ -6,6 +6,7 @@ mod simulation;
 
 pub use config::AircraftSimulationConfig;
 pub use simulation::{
-    AircraftSimulation, AircraftSimulationError, AircraftSnapshot, AircraftState,
-    deflected_aero_element, evaluate_aerodynamic_wrench, evaluate_aircraft_wrench,
+    AircraftAeroElementOutput, AircraftSimulation, AircraftSimulationError, AircraftSnapshot,
+    AircraftState, deflected_aero_element, evaluate_aerodynamic_wrench,
+    evaluate_aircraft_aero_element, evaluate_aircraft_wrench,
 };

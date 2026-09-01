@@ -1,10 +1,11 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AircraftClassification, ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3, AircraftClassification,
+    ReferenceAircraftMetadata,
 };
 use sim_core::{
     AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
-    PropellerCoefficientTable, PropellerSpinDirection, RigidBodyParams,
+    PropellerCoefficientTable, PropellerSpinDirection, ReynoldsPolarFamily, RigidBodyParams,
 };
 
 /// Immutable validated aircraft configuration with all file references resolved.
@@ -17,7 +18,9 @@ pub struct AircraftModel {
     reference_aircraft: Option<ReferenceAircraftMetadata>,
     rigid_body: RigidBodyParams,
     aero_polars: Vec<RuntimePolar>,
+    aero_polar_families: Vec<RuntimeReynoldsPolarFamily>,
     aero_elements: Vec<RuntimeAeroElement>,
+    kinematic_viscosity_m2_s: Option<f64>,
     controls: ControlSystemConfig,
     control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
     propulsion: Option<RuntimeElectricPropulsion>,
@@ -46,7 +49,9 @@ impl AircraftModel {
             reference_aircraft: None,
             rigid_body,
             aero_polars,
+            aero_polar_families: Vec::new(),
             aero_elements,
+            kinematic_viscosity_m2_s: None,
             controls,
             control_surface_bindings,
             propulsion,
@@ -69,6 +74,18 @@ impl AircraftModel {
         control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
     ) -> Self {
         self.control_surface_bindings = control_surface_bindings;
+        self
+    }
+
+    pub(crate) fn with_reynolds_aerodynamics(
+        mut self,
+        kinematic_viscosity_m2_s: f64,
+        aero_polar_families: Vec<RuntimeReynoldsPolarFamily>,
+        aero_elements: Vec<RuntimeAeroElement>,
+    ) -> Self {
+        self.kinematic_viscosity_m2_s = Some(kinematic_viscosity_m2_s);
+        self.aero_polar_families = aero_polar_families;
+        self.aero_elements = aero_elements;
         self
     }
 
@@ -108,8 +125,19 @@ impl AircraftModel {
     }
 
     #[must_use]
+    pub fn aero_polar_families(&self) -> &[RuntimeReynoldsPolarFamily] {
+        &self.aero_polar_families
+    }
+
+    #[must_use]
     pub fn aero_elements(&self) -> &[RuntimeAeroElement] {
         &self.aero_elements
+    }
+
+    /// Explicit model-authoritative viscosity for schema-v3 Reynolds aerodynamics.
+    #[must_use]
+    pub const fn kinematic_viscosity_m2_s(&self) -> Option<f64> {
+        self.kinematic_viscosity_m2_s
     }
 
     #[must_use]
@@ -200,6 +228,34 @@ pub struct RuntimePolar {
     table: PolarTable,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeReynoldsPolarFamily {
+    id: String,
+    family: ReynoldsPolarFamily,
+}
+
+impl RuntimeReynoldsPolarFamily {
+    pub(crate) fn new(id: String, family: ReynoldsPolarFamily) -> Self {
+        Self { id, family }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn family(&self) -> &ReynoldsPolarFamily {
+        &self.family
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAeroPolarBinding {
+    Polar { polar_index: usize },
+    ReynoldsFamily { family_index: usize },
+}
+
 impl RuntimePolar {
     pub(crate) fn new(id: String, table: PolarTable) -> Self {
         Self { id, table }
@@ -220,7 +276,7 @@ impl RuntimePolar {
 pub struct RuntimeAeroElement {
     id: String,
     element: AeroElement,
-    polar_index: usize,
+    polar_binding: RuntimeAeroPolarBinding,
 }
 
 impl RuntimeAeroElement {
@@ -228,7 +284,19 @@ impl RuntimeAeroElement {
         Self {
             id,
             element,
-            polar_index,
+            polar_binding: RuntimeAeroPolarBinding::Polar { polar_index },
+        }
+    }
+
+    pub(crate) fn new_reynolds_family(
+        id: String,
+        element: AeroElement,
+        family_index: usize,
+    ) -> Self {
+        Self {
+            id,
+            element,
+            polar_binding: RuntimeAeroPolarBinding::ReynoldsFamily { family_index },
         }
     }
 
@@ -245,7 +313,25 @@ impl RuntimeAeroElement {
     /// Compact resolved handle into `AircraftModel::aero_polars()`.
     #[must_use]
     pub const fn polar_index(&self) -> usize {
-        self.polar_index
+        match self.polar_binding {
+            RuntimeAeroPolarBinding::Polar { polar_index } => polar_index,
+            RuntimeAeroPolarBinding::ReynoldsFamily { .. } => {
+                panic!("Reynolds-family element has no legacy polar index")
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn fixed_polar_index(&self) -> Option<usize> {
+        match self.polar_binding {
+            RuntimeAeroPolarBinding::Polar { polar_index } => Some(polar_index),
+            RuntimeAeroPolarBinding::ReynoldsFamily { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn polar_binding(&self) -> RuntimeAeroPolarBinding {
+        self.polar_binding
     }
 }
 
@@ -310,6 +396,10 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v1");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V1
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V3 => {
+                hasher.update(b"rcsim:aircraft-model:v3");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V3
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -332,6 +422,29 @@ impl AircraftModelFingerprint {
             }
         }
 
+        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V3 {
+            update_f64(
+                &mut hasher,
+                model
+                    .kinematic_viscosity_m2_s
+                    .expect("schema v3 models have explicit viscosity"),
+            );
+            hasher.update(b"reynolds-family:ln-re-clamped:v1");
+            update_len(&mut hasher, model.aero_polar_families.len());
+            for runtime_family in &model.aero_polar_families {
+                update_len(&mut hasher, runtime_family.family.nodes().len());
+                for node in runtime_family.family.nodes() {
+                    update_f64(&mut hasher, node.reynolds_number());
+                    update_len(&mut hasher, node.table().samples().len());
+                    for sample in node.table().samples() {
+                        for value in [sample.alpha_rad, sample.cl, sample.cd, sample.cm] {
+                            update_f64(&mut hasher, value);
+                        }
+                    }
+                }
+            }
+        }
+
         update_len(&mut hasher, model.aero_elements.len());
         for runtime_element in &model.aero_elements {
             let element = &runtime_element.element;
@@ -342,7 +455,19 @@ impl AircraftModelFingerprint {
             );
             update_f64(&mut hasher, element.area_m2());
             update_f64(&mut hasher, element.chord_m());
-            update_len(&mut hasher, runtime_element.polar_index);
+            match runtime_element.polar_binding {
+                RuntimeAeroPolarBinding::Polar { polar_index } => {
+                    if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V3 {
+                        hasher.update(&[0]);
+                    }
+                    update_len(&mut hasher, polar_index);
+                }
+                RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+                    debug_assert_eq!(model.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V3);
+                    hasher.update(&[1]);
+                    update_len(&mut hasher, family_index);
+                }
+            }
         }
 
         let response = model.controls.response();
@@ -401,7 +526,9 @@ impl AircraftModelFingerprint {
 
         if matches!(
             model.schema_version,
-            AIRCRAFT_MODEL_SCHEMA_VERSION_V1 | AIRCRAFT_MODEL_SCHEMA_VERSION_V2
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V1
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V2
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V3
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
