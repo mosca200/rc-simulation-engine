@@ -3,6 +3,7 @@
 
 mod loader;
 mod reference;
+mod reference_survey;
 mod runtime;
 pub mod v0;
 pub mod v1;
@@ -15,6 +16,11 @@ pub use reference::{
     ReferenceCgLocation, ReferenceControlSurfaceTravel, ReferenceParameterEvidence,
     ReferencePhysicalSpecification, ReferenceScalar,
 };
+pub use reference_survey::{
+    BilateralMeasurementSummary, CrossVariantComparison, CrossVariantStatus, DerivedSurveyValue,
+    MeasurementSummary, PhysicalSurvey, PhysicalSurveyLoader, ReferenceSurveyError,
+    SurveyClassification, SurveyEvaluation, load_reference_survey,
+};
 pub use runtime::{
     AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationMetadata,
     RuntimeAeroElement, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
@@ -23,3 +29,4 @@ pub use runtime::{
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V0: u32 = 0;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V1: u32 = 1;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V2: u32 = 2;
+pub const REFERENCE_SURVEY_SCHEMA_V0: &str = "reference_aircraft_physical_survey_v0";

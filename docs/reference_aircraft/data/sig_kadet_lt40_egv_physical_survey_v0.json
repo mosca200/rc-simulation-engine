@@ -1,0 +1,115 @@
+{
+  "schema": "reference_aircraft_physical_survey_v0",
+  "artifact_kind": "physical_measurement_evidence_not_runtime_configuration",
+  "campaign": {
+    "id": "sig-kadet-lt40-egv-survey-unmeasured-template",
+    "classification": "physical_reference_measurement",
+    "identity": {
+      "manufacturer": "SIG Manufacturing",
+      "family": "KADET LT-40",
+      "variant": "KADET LT-40 EGV ARF",
+      "airframe_id": null
+    },
+    "measurement_date": null,
+    "notes": "Unmeasured M2.2C campaign template. Null observations are unresolved evidence, not zero-valued measurements."
+  },
+  "datum": {
+    "wing_root_le_established": false,
+    "definition": "x_aft = 0 at the physical EGV wing-root leading edge; positive x is aft along the aircraft reference longitudinal axis.",
+    "source_ids": [],
+    "photograph_ids": []
+  },
+  "provenance_sources": [
+    {
+      "id": "lt40-geometry-v0",
+      "kind": "derived_reference",
+      "title": "SIG KADET LT-40 legacy geometry reconstruction v0",
+      "url": null,
+      "sha256": null,
+      "notes": "Comparison baseline only. These values are never substituted for missing EGV measurements."
+    }
+  ],
+  "photographs": [],
+  "acceptance_criteria": {
+    "maximum_station_asymmetry_m": null,
+    "maximum_direct_vs_planform_qc_difference_m": null,
+    "cross_variant_identity_tolerance_m": null
+  },
+  "comparison_baseline": {
+    "source_ids": [
+      "lt40-geometry-v0"
+    ],
+    "wing_quarter_chord_offset_m": {
+      "value": 0.08196,
+      "uncertainty": 0.002
+    },
+    "horizontal_tail": {
+      "span_m": {
+        "value": 0.6858,
+        "uncertainty": 0.002
+      },
+      "root_chord_m": {
+        "value": 0.252892,
+        "uncertainty": 0.0025
+      },
+      "tip_chord_m": {
+        "value": 0.139964,
+        "uncertainty": 0.0025
+      },
+      "area_weighted_quarter_chord_aft_root_le_m": {
+        "value": 0.098255,
+        "uncertainty": 0.003
+      },
+      "tip_le_offset_aft_root_le_m": null
+    },
+    "vertical_tail": {
+      "height_m": {
+        "value": 0.226568,
+        "uncertainty": 0.002
+      },
+      "root_chord_m": {
+        "value": 0.319227,
+        "uncertainty": 0.003
+      },
+      "tip_chord_m": {
+        "value": 0.154229,
+        "uncertainty": 0.003
+      },
+      "area_weighted_quarter_chord_aft_root_le_m": {
+        "value": 0.129016,
+        "uncertainty": 0.004
+      },
+      "tip_le_offset_aft_root_le_m": null
+    }
+  },
+  "raw_observations": {
+    "horizontal_tail_root_le_aft_wing_le_m": {
+      "left": null,
+      "right": null
+    },
+    "vertical_tail_root_le_aft_wing_le_m": null,
+    "wing_quarter_chord_aft_wing_le_m": null,
+    "direct_horizontal_tail_quarter_chord_aft_wing_le_m": null,
+    "direct_vertical_tail_quarter_chord_aft_wing_le_m": null,
+    "horizontal_tail_planform": {
+      "span_m": null,
+      "root_chord_m": null,
+      "tip_chord_m": null,
+      "tip_le_offset_aft_root_le_m": null,
+      "intermediate_stations": []
+    },
+    "vertical_tail_planform": {
+      "height_m": null,
+      "root_chord_m": null,
+      "tip_chord_m": null,
+      "tip_le_offset_aft_root_le_m": null,
+      "intermediate_stations": []
+    },
+    "wing_incidence_rad": null,
+    "stabilizer_incidence_rad": null,
+    "motor_thrust_axis_top_view_rad": null,
+    "motor_thrust_axis_side_view_rad": null,
+    "operational_cg_aft_wing_le_m": null,
+    "battery": null
+  }
+}
