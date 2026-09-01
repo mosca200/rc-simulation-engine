@@ -105,5 +105,6 @@ the existing `acro_electric_01` replay fingerprint.
 The reference-aircraft roadmap is M2.2A dossier, M2.2B geometry reconstruction, M2.2B.1
 longitudinal/cross-variant closure, M2.2C physical measurement contract and geometry gate, M2.2D
 mass properties, M2.3A aerodynamic evidence preparation, future M2.3 Reynolds-dependent
-aerodynamics, M2.4 propulsion, M2.5 trim, and M2.6 automated physics validation. M2.1 itself
-introduces no real numerical aircraft model.
+aerodynamics including the generic M2.3B Reynolds polar-family primitive, M2.4 propulsion, M2.5
+trim, and M2.6 automated physics validation. M2.1 itself introduces no real numerical aircraft
+model.

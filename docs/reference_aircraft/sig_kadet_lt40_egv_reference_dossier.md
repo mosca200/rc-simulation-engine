@@ -342,6 +342,11 @@ Accordingly, no runtime LT-40 model is created. `models/acro_electric_01` remain
 
 - Traceable Clark Y coordinates plus strict, off-runtime polar evidence and coverage gates.
 
+### M2.3B - Reynolds-aware polar family core primitive
+
+- Generic deterministic `ln(Re)` interpolation across independently gridded alpha polars, without
+  aircraft-runtime wiring or Mach interpolation.
+
 ### M2.3 - Reynolds-dependent Clark Y aerodynamics
 
 - Future auditable Reynolds/Mach operating envelope, polar generation or published-data selection,

@@ -57,5 +57,9 @@ Positive CM produces a positive +Y right-hand-rule pitch moment, corresponding t
 
 `PolarTable` owns at least two finite samples with strictly increasing radian alpha and non-negative CD. Construction validates order; the hot path performs a deterministic binary search and piecewise-linear interpolation without allocation. Exact table samples and endpoints are preserved. `sample_clamped` returns the first or last coefficients outside the tabulated range; there is no extrapolation or stall heuristic.
 
-S4 intentionally does not model side force, induced drag, finite-wing effects, propwash, propulsion, controls, atmosphere variation, ground effect, turbulence, aircraft assembly, or rendering. The canonical `Simulation` does not yet own aerodynamic elements; stage-correct integration is exercised directly through the generic RK4 evaluator boundary.
+M2.3B adds a separate generic `ReynoldsPolarFamily` core primitive while preserving this legacy
+table contract. It samples each table with `sample_clamped` before Reynolds interpolation and is
+not connected to the S4 element evaluator or aircraft runtime in that slice. See
+[`reynolds_polar_family_m2_3b.md`](reynolds_polar_family_m2_3b.md).
 
+S4 intentionally does not model side force, induced drag, finite-wing effects, propwash, propulsion, controls, atmosphere variation, ground effect, turbulence, aircraft assembly, or rendering. The canonical `Simulation` does not yet own aerodynamic elements; stage-correct integration is exercised directly through the generic RK4 evaluator boundary.

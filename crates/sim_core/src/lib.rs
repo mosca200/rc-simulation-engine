@@ -8,6 +8,7 @@ mod input;
 mod integrator;
 mod parameters;
 mod propulsion;
+mod reynolds_polar;
 mod simulation;
 mod snapshot;
 mod state;
@@ -33,6 +34,10 @@ pub use propulsion::{
     PropellerCoefficientError, PropellerCoefficientTable, PropellerCoefficients, PropellerConfig,
     PropellerConfigError, PropellerSample, PropellerSpinDirection, PropulsionOutput,
     evaluate_electric_propulsion, evaluate_electrical_drive, solve_quasi_static_shaft_speed,
+};
+pub use reynolds_polar::{
+    ReynoldsPolar, ReynoldsPolarFamily, ReynoldsPolarFamilyError, ReynoldsPolarSample,
+    ReynoldsRangeStatus,
 };
 pub use simulation::{
     DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ, Simulation, SimulationConfig, SimulationConfigError,

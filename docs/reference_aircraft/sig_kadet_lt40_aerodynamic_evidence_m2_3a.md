@@ -160,18 +160,23 @@ The M2.3A loader is separate from `AircraftModelLoader`, model schema v0/v1/v2, 
 endpoint clamping, participates in the physics fingerprint, or executes in the 500 Hz step. RK4,
 controls, propulsion, replay, renderer, and existing model files remain unchanged.
 
-## Requirements for a future M2.3B
+## Boundary to M2.3B and remaining M2.3 work
 
-A separately reviewed M2.3B would first need:
+M2.3B adds only a generic `sim_core::ReynoldsPolarFamily`: independently gridded `PolarTable`
+nodes, deterministic sampling, logarithmic-Reynolds interpolation, explicit range status, and no
+Reynolds extrapolation. It does not read this evidence artifact, interpolate Mach, modify
+`AircraftModel`, or connect a family to the flight loop.
+
+Reference-aircraft integration still needs:
 
 - a justified and sourced LT-40 operational speed/atmosphere/chord envelope;
 - a reviewed Reynolds/Mach grid derived from that evidence;
 - published polars or reproducible, converged solver runs with exact versions and configurations;
 - explicit transition policy and convergence acceptance rules;
 - evidence coverage across the authorized grid;
-- a documented policy for Reynolds/Mach selection or interpolation;
+- a documented Mach selection or interpolation policy;
 - stall and out-of-grid behavior defined without hidden extrapolation; and
 - regression evidence that any new runtime semantics remain deterministic and allocation-free.
 
-M2.3A implements none of those runtime decisions. No runnable SIG KADET LT-40 model exists after
-this slice, and M2.4 propulsion is outside its scope.
+Neither M2.3A nor M2.3B implements those reference-aircraft runtime decisions. No runnable SIG
+KADET LT-40 model exists after either slice, and M2.4 propulsion remains outside their scope.
