@@ -36,6 +36,27 @@ pub enum LongitudinalTrimSweepError {
     InvalidSharedRequest(#[from] LongitudinalTrimRequestError),
 }
 
+/// Integrity-level detail: the M2.5 solver produced a solution whose independent runtime
+/// re-evaluation exists but disagrees with the solver-cached residuals. Boxed to keep the
+/// outcome enum compact, following the [`LongitudinalTrimFailure`] precedent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReEvaluationMismatchDetail {
+    iteration_count: usize,
+    solver_evaluation: LongitudinalTrimEvaluation,
+    independent_evaluation: LongitudinalTrimEvaluation,
+}
+
+/// Integrity-level detail: the M2.5 solver produced a solution whose independent runtime
+/// re-evaluation could not be produced because the runtime path produced non-finite values
+/// for a state the solver accepted as converged. No independent evaluation exists; the
+/// absence is represented truthfully by this variant rather than by copying the solver
+/// evaluation into an `Option`. Boxed to keep the outcome enum compact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReEvaluationUnverifiableDetail {
+    iteration_count: usize,
+    solver_evaluation: LongitudinalTrimEvaluation,
+}
+
 /// Per-point result of a longitudinal trim sweep. Determinism, ordering, and independent
 /// re-evaluation are all expressed through this enum.
 ///
@@ -47,23 +68,22 @@ pub enum LongitudinalTrimSweepError {
 ///   that, when independently re-evaluated through the runtime path, disagreed with the cached
 ///   residuals. This SHOULD never happen if M2.5 is internally consistent and is recorded as a
 ///   distinct, integrity-level outcome so reporting layers can flag it.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "ReEvaluationMismatch is an exceptional integrity path; its larger size keeps the success/failure outcomes unboxed and the public API ergonomic"
-)]
+/// * [`LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable`] — M2.5 solver produced a
+///   solution but the independent runtime re-evaluation could not be produced (the runtime
+///   path returned `None` because the candidate produced non-finite values for a state the
+///   solver already accepted as converged). This is also an integrity-level outcome and is
+///   distinct from [`Self::ReEvaluationMismatch`] precisely because no independent
+///   evaluation exists to compare against the solver-cached one.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongitudinalTrimSweepOutcome {
     Success {
-        solution: LongitudinalTrimSolution,
+        solution: Box<LongitudinalTrimSolution>,
     },
     TrimFailure {
         failure: LongitudinalTrimFailure,
     },
-    ReEvaluationMismatch {
-        iteration_count: usize,
-        solver_evaluation: LongitudinalTrimEvaluation,
-        independent_evaluation: LongitudinalTrimEvaluation,
-    },
+    ReEvaluationMismatch(Box<ReEvaluationMismatchDetail>),
+    ReEvaluationUnverifiable(Box<ReEvaluationUnverifiableDetail>),
 }
 
 impl LongitudinalTrimSweepOutcome {
@@ -81,6 +101,11 @@ impl LongitudinalTrimSweepOutcome {
     pub const fn is_re_evaluation_mismatch(&self) -> bool {
         matches!(self, Self::ReEvaluationMismatch { .. })
     }
+
+    #[must_use]
+    pub const fn is_re_evaluation_unverifiable(&self) -> bool {
+        matches!(self, Self::ReEvaluationUnverifiable { .. })
+    }
 }
 
 /// One sweep point: the original target airspeed paired with its evaluated outcome.
@@ -95,14 +120,21 @@ pub struct LongitudinalTrimSweepPoint {
 
 /// Ordered sweep result. Points are stored in the same order as the request's target airspeeds;
 /// indexing is therefore deterministic and stable.
+///
+/// Construction is private: the only validated path that produces a [`LongitudinalTrimSweep`]
+/// is [`solve_longitudinal_trim_sweep`]. External callers cannot bypass the validated
+/// execution path and forge an arbitrary or empty result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LongitudinalTrimSweep {
     points: Vec<LongitudinalTrimSweepPoint>,
 }
 
 impl LongitudinalTrimSweep {
+    /// Private constructor used only by [`solve_longitudinal_trim_sweep`]. Not exposed to
+    /// external callers so a [`LongitudinalTrimSweep`] can only be produced through the
+    /// validated execution path.
     #[must_use]
-    pub const fn from_points(points: Vec<LongitudinalTrimSweepPoint>) -> Self {
+    const fn from_points(points: Vec<LongitudinalTrimSweepPoint>) -> Self {
         Self { points }
     }
 
@@ -149,13 +181,29 @@ impl LongitudinalTrimSweep {
             .count()
     }
 
-    /// Counts how many points exhibited a re-evaluation mismatch. A non-zero value indicates an
-    /// internal inconsistency between the M2.5 solver and the runtime path.
+    /// Counts how many points exhibited a re-evaluation mismatch (independent evaluation
+    /// exists but disagrees with the solver-cached evaluation). A non-zero value indicates
+    /// an internal inconsistency between the M2.5 solver and the runtime path.
     #[must_use]
     pub fn re_evaluation_mismatch_count(&self) -> usize {
         self.points
             .iter()
             .filter(|point| point.outcome.is_re_evaluation_mismatch())
+            .count()
+    }
+
+    /// Counts how many points were unverifiable: the M2.5 solver produced a solution but
+    /// the independent runtime re-evaluation could not be produced (the runtime path
+    /// returned `None` because the candidate produced non-finite values for a state the
+    /// solver already accepted as converged). A non-zero value indicates an internal
+    /// inconsistency between the M2.5 solver and the runtime path; this is a separate
+    /// integrity counter from [`Self::re_evaluation_mismatch_count`] because the absence
+    /// of an independent evaluation is itself the signal — no comparison is possible.
+    #[must_use]
+    pub fn re_evaluation_unverifiable_count(&self) -> usize {
+        self.points
+            .iter()
+            .filter(|point| point.outcome.is_re_evaluation_unverifiable())
             .count()
     }
 }
@@ -259,18 +307,22 @@ impl LongitudinalTrimSweepRequest {
 /// The sweep preserves input ordering and determinism: identical inputs produce identical
 /// structured results. A point whose bounded physical problem lacks a feasible solution is
 /// recorded as [`LongitudinalTrimSweepOutcome::TrimFailure`] without aborting the sweep.
-/// A point whose M2.5 solution cannot be re-evaluated through the runtime path is recorded as
-/// [`LongitudinalTrimSweepOutcome::ReEvaluationMismatch`]; the sweep also continues in that
-/// case. Invalid sweep requests fail closed through [`LongitudinalTrimSweepError`] and produce
-/// no partial results.
+/// A point whose M2.5 solution exists but whose independent runtime re-evaluation disagrees
+/// with the solver-cached evaluation is recorded as
+/// [`LongitudinalTrimSweepOutcome::ReEvaluationMismatch`]. A point whose M2.5 solution
+/// exists but whose independent runtime re-evaluation could not be produced (the runtime
+/// path returned `None` because the candidate produced non-finite values for a state the
+/// solver already accepted as converged) is recorded as
+/// [`LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable`]; the sweep also continues in
+/// these integrity cases. Invalid sweep requests fail closed through
+/// [`LongitudinalTrimSweepError`] and produce no partial results.
 pub fn solve_longitudinal_trim_sweep(
     model: &AircraftModel,
     config: &AircraftSimulationConfig,
     sweep_request: &LongitudinalTrimSweepRequest,
 ) -> Result<LongitudinalTrimSweep, LongitudinalTrimSweepError> {
-    let speeds = sweep_request.target_airspeeds_mps.clone();
-    let mut points = Vec::with_capacity(speeds.len());
-    for speed in speeds {
+    let mut points = Vec::with_capacity(sweep_request.target_airspeeds_mps.len());
+    for &speed in &sweep_request.target_airspeeds_mps {
         let request = LongitudinalTrimRequest::new(
             speed,
             sweep_request.alpha_bounds_rad,
@@ -302,22 +354,153 @@ fn evaluate_one(
             solution.evaluation.variables,
         ) {
             Some(independent) if independent == solution.evaluation => {
-                LongitudinalTrimSweepOutcome::Success { solution }
+                LongitudinalTrimSweepOutcome::Success {
+                    solution: Box::new(solution),
+                }
             }
-            Some(independent) => LongitudinalTrimSweepOutcome::ReEvaluationMismatch {
-                iteration_count: solution.iteration_count,
-                solver_evaluation: solution.evaluation,
-                independent_evaluation: independent,
-            },
+            Some(independent) => LongitudinalTrimSweepOutcome::ReEvaluationMismatch(Box::new(
+                ReEvaluationMismatchDetail {
+                    iteration_count: solution.iteration_count,
+                    solver_evaluation: solution.evaluation,
+                    independent_evaluation: independent,
+                },
+            )),
             // Independent evaluation only fails when runtime physics produces non-finite values
-            // for a point that the M2.5 solver accepted as converged. Treat that the same as a
-            // re-evaluation mismatch so the sweep completes and reporting can flag it.
-            None => LongitudinalTrimSweepOutcome::ReEvaluationMismatch {
-                iteration_count: solution.iteration_count,
-                solver_evaluation: solution.evaluation,
-                independent_evaluation: solution.evaluation,
-            },
+            // for a point that the M2.5 solver accepted as converged. Treat that as a distinct
+            // unverifiable outcome so the absence of an independent evaluation is represented
+            // truthfully rather than by copying the solver evaluation into the mismatch slot.
+            None => LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(Box::new(
+                ReEvaluationUnverifiableDetail {
+                    iteration_count: solution.iteration_count,
+                    solver_evaluation: solution.evaluation,
+                },
+            )),
         },
         Err(failure) => LongitudinalTrimSweepOutcome::TrimFailure { failure },
+    }
+}
+
+#[cfg(test)]
+impl LongitudinalTrimSweepOutcome {
+    /// Test-only constructor for the unverifiable variant. The public M2.6A path constructs
+    /// this variant only when the M2.5 solver converged and `evaluate_longitudinal_trim_candidate`
+    /// returned `None`; the constructor exists so unit tests can exercise the new variant
+    /// without contriving a runtime scenario that produces non-finite values.
+    pub(crate) fn re_evaluation_unverifiable_for_test(
+        iteration_count: usize,
+        solver_evaluation: LongitudinalTrimEvaluation,
+    ) -> Self {
+        Self::ReEvaluationUnverifiable(Box::new(ReEvaluationUnverifiableDetail {
+            iteration_count,
+            solver_evaluation,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Internal tests for the sweep outcome representation. These cover shape-level invariants
+    //! that the integration tests in `crates/aircraft/tests/` cannot reach directly, such as
+    //! the absence of a fabricated `independent_evaluation` in the unverifiable variant.
+
+    use super::*;
+    use crate::trim::{LongitudinalTrimFailure, LongitudinalTrimFailureReason};
+
+    const FIXTURE: &str =
+        include_str!("../../../tests/fixtures/synthetic_non_reference_trim_v4.json");
+
+    fn aircraft() -> AircraftModel {
+        model::AircraftModelLoader::from_json_str(FIXTURE).unwrap()
+    }
+
+    fn sim_config() -> AircraftSimulationConfig {
+        AircraftSimulationConfig::new(
+            0.002,
+            sim_math::Vec3::new(0.0, 0.0, 9.80665),
+            sim_core::AeroEnvironment::new(1.225, sim_math::Vec3::zeros()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn well_formed_evaluation() -> LongitudinalTrimEvaluation {
+        // Build a real, well-formed `LongitudinalTrimEvaluation` by running one real trim
+        // solve. The shape-level invariants tested here do not care about its values, only
+        // that the type-level construction is correct.
+        let (alpha, elevator, throttle, guess, tolerance, iters) = (
+            TrimBounds::new(-0.15, 0.30).unwrap(),
+            TrimBounds::new(-0.9, 0.9).unwrap(),
+            TrimBounds::new(0.02, 1.0).unwrap(),
+            LongitudinalTrimVariables::new(0.08, 0.1, 0.45).unwrap(),
+            LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap(),
+            40,
+        );
+        let request =
+            LongitudinalTrimRequest::new(18.0, alpha, elevator, throttle, guess, tolerance, iters)
+                .unwrap();
+        solve_longitudinal_trim(&aircraft(), &sim_config(), &request)
+            .unwrap()
+            .evaluation
+    }
+
+    #[test]
+    fn unverifiable_outcome_does_not_carry_an_independent_evaluation() {
+        let outcome = LongitudinalTrimSweepOutcome::re_evaluation_unverifiable_for_test(
+            3,
+            well_formed_evaluation(),
+        );
+        assert!(outcome.is_re_evaluation_unverifiable());
+        assert!(!outcome.is_success());
+        assert!(!outcome.is_trim_failure());
+        assert!(!outcome.is_re_evaluation_mismatch());
+        match outcome {
+            LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(detail) => {
+                assert_eq!(detail.iteration_count, 3);
+                // The struct itself has no `independent_evaluation` field. The absence of
+                // such a field is the type-level guarantee that no fabricated evaluation
+                // can be smuggled in: the variant encodes "no independent evaluation
+                // exists" by construction.
+            }
+            other => panic!("expected ReEvaluationUnverifiable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outcome_predicates_are_disjoint() {
+        let success = LongitudinalTrimSweepOutcome::Success {
+            solution: Box::new(LongitudinalTrimSolution {
+                evaluation: well_formed_evaluation(),
+                iteration_count: 1,
+            }),
+        };
+        let failure = LongitudinalTrimSweepOutcome::TrimFailure {
+            failure: LongitudinalTrimFailure {
+                reason: LongitudinalTrimFailureReason::NoFeasibleSolution,
+                iteration_count: 0,
+                last_evaluation: None,
+            },
+        };
+        let unverifiable = LongitudinalTrimSweepOutcome::re_evaluation_unverifiable_for_test(
+            1,
+            well_formed_evaluation(),
+        );
+        for outcome in [&success, &failure, &unverifiable] {
+            let mut true_count = 0;
+            if outcome.is_success() {
+                true_count += 1;
+            }
+            if outcome.is_trim_failure() {
+                true_count += 1;
+            }
+            if outcome.is_re_evaluation_mismatch() {
+                true_count += 1;
+            }
+            if outcome.is_re_evaluation_unverifiable() {
+                true_count += 1;
+            }
+            assert_eq!(
+                true_count, 1,
+                "exactly one outcome predicate must hold at a time; got {true_count} for {outcome:?}"
+            );
+        }
     }
 }

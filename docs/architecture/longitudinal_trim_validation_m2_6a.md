@@ -63,11 +63,14 @@ classifies the result:
 - Solver success → independently re-evaluate the returned variables through
   `evaluate_longitudinal_trim_candidate`. If the re-evaluation produces an identical
   `LongitudinalTrimEvaluation`, the point is recorded as
-  `LongitudinalTrimSweepOutcome::Success { solution }`. If the re-evaluation diverges (or returns
-  `None` because runtime physics produced non-finite values for a state the M2.5 solver already
-  accepted as converged), the point is recorded as
-  `LongitudinalTrimSweepOutcome::ReEvaluationMismatch` with both evaluations preserved so a
-  reporting layer can flag the integrity issue.
+  `LongitudinalTrimSweepOutcome::Success { solution }`. If the re-evaluation diverges, the
+  point is recorded as `LongitudinalTrimSweepOutcome::ReEvaluationMismatch` with both
+  evaluations preserved so a reporting layer can flag the integrity issue. If the
+  re-evaluation returns `None` (runtime physics produced non-finite values for a state the
+  M2.5 solver already accepted as converged), the point is recorded as
+  `LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable`; no independent evaluation exists
+  to compare against the solver-cached one, and the absence is represented truthfully by
+  the variant rather than by copying the solver evaluation into a fabricated slot.
 - Solver failure → the point is recorded as
   `LongitudinalTrimSweepOutcome::TrimFailure { failure }` with the M2.5 failure reason, iteration
   count, and last finite evaluation preserved.
@@ -94,11 +97,24 @@ The sweep is fully deterministic and stable:
   caller-supplied `target_airspeeds_mps[i]`.
 - Identical inputs (same model, same config, same request) produce identical structured
   results: `assert_eq!(first, second)` is asserted in tests.
-- The shared template means the per-point constructor is allocation-free; the only allocation is
-  the per-point result buffer itself.
+- The shared template means the per-point trim request construction and the per-point trim
+  solve are allocation-free aside from the per-point result buffer. The sweep iterates over
+  the request's `&[f64]` of target airspeeds by copied `f64` values, so no `Vec` of speeds
+  is cloned per sweep call.
 
 The M2.5 trim types are reused for per-point solutions and failures, so the sweep result can be
 consumed without any conversion in the test or reporting layer.
+
+## Result construction invariant
+
+`LongitudinalTrimSweep::from_points` is private. The only validated path that produces a
+`LongitudinalTrimSweep` is `solve_longitudinal_trim_sweep`, which validates the request
+fail-closed and then evaluates every requested airspeed in input order. External callers
+cannot bypass the validated execution path and forge an arbitrary or empty
+`LongitudinalTrimSweep` value. The public accessors (`points`, `into_points`, `len`,
+`is_empty`, `target_airspeeds_mps`, `success_count`, `trim_failure_count`,
+`re_evaluation_mismatch_count`, `re_evaluation_unverifiable_count`) consume the result
+without re-introducing a construction path.
 
 ## Evidence boundary and limitations
 

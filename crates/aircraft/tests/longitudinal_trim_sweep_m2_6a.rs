@@ -1,9 +1,9 @@
 use aircraft::{
     AircraftSimulationConfig, LongitudinalTrimFailureReason, LongitudinalTrimRequest,
-    LongitudinalTrimRequestError, LongitudinalTrimResiduals, LongitudinalTrimSweepError,
-    LongitudinalTrimSweepOutcome, LongitudinalTrimSweepRequest, LongitudinalTrimTolerances,
-    LongitudinalTrimVariables, TrimBounds, evaluate_longitudinal_trim_candidate,
-    solve_longitudinal_trim, solve_longitudinal_trim_sweep,
+    LongitudinalTrimRequestError, LongitudinalTrimResiduals, LongitudinalTrimSolution,
+    LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome, LongitudinalTrimSweepRequest,
+    LongitudinalTrimTolerances, LongitudinalTrimVariables, TrimBounds,
+    evaluate_longitudinal_trim_candidate, solve_longitudinal_trim, solve_longitudinal_trim_sweep,
 };
 use model::{AircraftClassification, AircraftModel, AircraftModelLoader};
 use sim_core::AeroEnvironment;
@@ -138,6 +138,7 @@ fn successful_points_independently_re_evaluate_within_trim_tolerances() {
     let (alpha, elevator, throttle, guess, tolerance, iters) = sweep_template();
     for point in sweep.points() {
         if let LongitudinalTrimSweepOutcome::Success { solution } = &point.outcome {
+            let solution: &LongitudinalTrimSolution = solution;
             assert!(
                 solution.evaluation.residuals.is_within(tolerance),
                 "converged solution at {} mps exceeded tolerance",
@@ -169,6 +170,7 @@ fn successful_points_independently_re_evaluate_within_trim_tolerances() {
         }
     }
     assert_eq!(sweep.re_evaluation_mismatch_count(), 0);
+    assert_eq!(sweep.re_evaluation_unverifiable_count(), 0);
 }
 
 #[test]
@@ -231,6 +233,7 @@ fn changing_speed_changes_successful_trim_solutions() {
         let LongitudinalTrimSweepOutcome::Success { solution } = &point.outcome else {
             panic!("both 15 and 21 mps should converge for the synthetic fixture");
         };
+        let solution: &LongitudinalTrimSolution = solution;
         variables_by_speed.push((point.target_airspeed_mps, solution.evaluation.variables));
     }
     assert_eq!(
@@ -337,17 +340,22 @@ fn deterministic_ordering_is_explicit_and_partial_results_are_not_built_for_inva
 fn sweep_outcome_helpers_match_variants() {
     let (alpha, elevator, throttle, guess, tolerance, iters) = sweep_template();
     let success = LongitudinalTrimSweepOutcome::Success {
-        solution: solve_longitudinal_trim(
-            &model(),
-            &config(),
-            &LongitudinalTrimRequest::new(18.0, alpha, elevator, throttle, guess, tolerance, iters)
+        solution: Box::new(
+            solve_longitudinal_trim(
+                &model(),
+                &config(),
+                &LongitudinalTrimRequest::new(
+                    18.0, alpha, elevator, throttle, guess, tolerance, iters,
+                )
                 .unwrap(),
-        )
-        .unwrap(),
+            )
+            .unwrap(),
+        ),
     };
     assert!(success.is_success());
     assert!(!success.is_trim_failure());
     assert!(!success.is_re_evaluation_mismatch());
+    assert!(!success.is_re_evaluation_unverifiable());
 }
 
 #[test]
