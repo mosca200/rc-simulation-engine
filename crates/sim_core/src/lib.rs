@@ -16,7 +16,8 @@ mod state;
 pub use aero::{
     AeroElement, AeroElementError, AeroElementOutput, AeroEnvironment, AeroEnvironmentError,
     MIN_SECTION_AIRSPEED_MPS, PolarCoefficients, PolarError, PolarSample, PolarTable,
-    ReynoldsAeroElementOutput, ReynoldsCalculationError, calculate_reynolds_number,
+    ReynoldsAeroElementOutput, ReynoldsCalculationError, SectionKinematics,
+    assemble_aero_element_wrench, calculate_reynolds_number, compute_section_kinematics,
     evaluate_aero_element, evaluate_reynolds_aero_element,
 };
 pub use controls::{

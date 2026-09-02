@@ -289,6 +289,56 @@ pub fn calculate_reynolds_number(
     Ok(reynolds_number)
 }
 
+/// Assembles a body wrench from pre-computed section kinematics and polar coefficients.
+///
+/// This is the shared force-construction primitive used by both the legacy quasi-2D
+/// evaluation path and the finite-wing surface evaluation path. The key invariant:
+/// force directions come from the ACTUAL local section flow (encoded in `kinematics`),
+/// while the coefficients may have been sampled at a different effective alpha.
+///
+/// Lift direction = spanwise(y) × section-flow-hat
+/// Drag direction = -section-flow-hat
+/// Force = lift_dir * (q * S * CL) + drag_dir * (q * S * CD)
+/// Moment = r × F + intrinsic CM pitch moment
+#[must_use]
+pub fn assemble_aero_element_wrench(
+    element: &AeroElement,
+    kinematics: &SectionKinematics,
+    coefficients: &PolarCoefficients,
+) -> BodyWrench {
+    let q = kinematics.dynamic_pressure_pa;
+    let s = element.area_m2();
+
+    let velocity_hat_section = if kinematics.section_airspeed_mps > 0.0 {
+        Vec3::new(
+            kinematics.air_relative_velocity_element_mps.x / kinematics.section_airspeed_mps,
+            0.0,
+            kinematics.air_relative_velocity_element_mps.z / kinematics.section_airspeed_mps,
+        )
+    } else {
+        Vec3::zeros()
+    };
+    let drag_direction = -velocity_hat_section;
+    let lift_direction = Vec3::y().cross(&velocity_hat_section);
+
+    let lift_n = q * s * coefficients.cl;
+    let drag_n = q * s * coefficients.cd;
+    let force_element = lift_direction * lift_n + drag_direction * drag_n;
+    let force_body = element
+        .orientation_body_from_element
+        .transform_vector(&force_element);
+
+    let intrinsic_pitch_nm = q * s * element.chord_m * coefficients.cm;
+    let intrinsic_moment_body = element
+        .orientation_body_from_element
+        .transform_vector(&Vec3::new(0.0, intrinsic_pitch_nm, 0.0));
+
+    let mut wrench = BodyWrench::zero();
+    wrench.add_force_at_body_point(force_body, element.position_body_m);
+    wrench.add_moment_body(intrinsic_moment_body);
+    wrench
+}
+
 /// Evaluates one immutable quasi-2D aerodynamic element without allocation.
 #[must_use]
 pub fn evaluate_aero_element(
@@ -301,6 +351,78 @@ pub fn evaluate_aero_element(
         (polar.sample_clamped(alpha_rad), ())
     })
     .0
+}
+
+/// Section-plane kinematics for one quasi-2D element at a given RK4 stage state.
+///
+/// This primitive computes the air-relative velocity decomposition, angle of attack,
+/// sideslip, and dynamic pressure without sampling any polar or assembling forces.
+/// It is the reusable building block for finite-wing induced-angle solvers that need
+/// to evaluate section kinematics repeatedly with different effective alpha values
+/// while keeping force directions tied to the actual local flow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionKinematics {
+    pub air_relative_velocity_element_mps: Vec3,
+    pub section_airspeed_mps: f64,
+    pub alpha_rad: f64,
+    pub beta_rad: f64,
+    pub dynamic_pressure_pa: f64,
+}
+
+/// Computes section-plane kinematics for one element without polar sampling or force assembly.
+///
+/// The velocity transformation chain is identical to [`evaluate_aero_element`]:
+/// world-relative wind → body-frame at CG → add rotational contribution → element frame.
+/// The section airspeed uses only the chordwise (u) and normal (w) components (quasi-2D).
+/// Below [`MIN_SECTION_AIRSPEED_MPS`], alpha and dynamic pressure are zero.
+#[must_use]
+pub fn compute_section_kinematics(
+    state: &RigidBodyState,
+    element: &AeroElement,
+    environment: &AeroEnvironment,
+) -> SectionKinematics {
+    let air_relative_velocity_world_mps =
+        state.linear_velocity_world_mps - environment.wind_velocity_world_mps;
+    let air_relative_velocity_body_at_cg_mps = world_to_body(
+        &state.orientation_world_from_body,
+        &air_relative_velocity_world_mps,
+    );
+    let rotational_velocity_body_mps = state
+        .angular_velocity_body_radps
+        .cross(&element.position_body_m);
+    let air_relative_velocity_body_at_element_mps =
+        air_relative_velocity_body_at_cg_mps + rotational_velocity_body_mps;
+    let air_relative_velocity_element_mps = element
+        .orientation_body_from_element
+        .inverse_transform_vector(&air_relative_velocity_body_at_element_mps);
+
+    let u_mps = air_relative_velocity_element_mps.x;
+    let spanwise_mps = air_relative_velocity_element_mps.y;
+    let w_mps = air_relative_velocity_element_mps.z;
+    let section_speed_squared_mps2 = u_mps.mul_add(u_mps, w_mps * w_mps);
+    let section_airspeed_mps = section_speed_squared_mps2.sqrt();
+    let beta_rad = spanwise_mps.atan2(section_airspeed_mps);
+
+    if section_airspeed_mps < MIN_SECTION_AIRSPEED_MPS {
+        return SectionKinematics {
+            air_relative_velocity_element_mps,
+            section_airspeed_mps,
+            alpha_rad: 0.0,
+            beta_rad,
+            dynamic_pressure_pa: 0.0,
+        };
+    }
+
+    let alpha_rad = w_mps.atan2(u_mps);
+    let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3 * section_speed_squared_mps2;
+
+    SectionKinematics {
+        air_relative_velocity_element_mps,
+        section_airspeed_mps,
+        alpha_rad,
+        beta_rad,
+        dynamic_pressure_pa,
+    }
 }
 
 /// Evaluates one Reynolds-aware quasi-2D element from its local RK4-stage velocity.
@@ -388,27 +510,24 @@ where
     let alpha_rad = w_mps.atan2(u_mps);
     let (coefficients, diagnostic) = sample_coefficients(section_airspeed_mps, alpha_rad);
     let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3 * section_speed_squared_mps2;
+
+    let kinematics = SectionKinematics {
+        air_relative_velocity_element_mps,
+        section_airspeed_mps,
+        alpha_rad,
+        beta_rad,
+        dynamic_pressure_pa,
+    };
+    let wrench_body = assemble_aero_element_wrench(element, &kinematics, &coefficients);
+
     let velocity_hat_section = Vec3::new(
         u_mps / section_airspeed_mps,
         0.0,
         w_mps / section_airspeed_mps,
     );
-    let drag_direction_element = -velocity_hat_section;
-    let lift_direction_element = Vec3::y().cross(&velocity_hat_section);
-    let lift_n = dynamic_pressure_pa * element.area_m2 * coefficients.cl;
-    let drag_n = dynamic_pressure_pa * element.area_m2 * coefficients.cd;
-    let force_element_n = lift_direction_element * lift_n + drag_direction_element * drag_n;
-    let force_body_n = element
-        .orientation_body_from_element
-        .transform_vector(&force_element_n);
-    let intrinsic_pitch_moment_element_nm =
-        dynamic_pressure_pa * element.area_m2 * element.chord_m * coefficients.cm;
-    let intrinsic_moment_body_nm = element
-        .orientation_body_from_element
-        .transform_vector(&Vec3::new(0.0, intrinsic_pitch_moment_element_nm, 0.0));
-    let mut wrench_body = BodyWrench::zero();
-    wrench_body.add_force_at_body_point(force_body_n, element.position_body_m);
-    wrench_body.add_moment_body(intrinsic_moment_body_nm);
+    let force_element_n = Vec3::y().cross(&velocity_hat_section)
+        * (dynamic_pressure_pa * element.area_m2 * coefficients.cl)
+        + (-velocity_hat_section) * (dynamic_pressure_pa * element.area_m2 * coefficients.cd);
 
     (
         AeroElementOutput {
