@@ -4,6 +4,7 @@
 mod config;
 mod simulation;
 mod trim;
+mod trim_characterization;
 mod trim_sweep;
 
 pub use config::AircraftSimulationConfig;
@@ -18,6 +19,13 @@ pub use trim::{
     LongitudinalTrimRequest, LongitudinalTrimRequestError, LongitudinalTrimResiduals,
     LongitudinalTrimSolution, LongitudinalTrimTolerances, LongitudinalTrimVariables, TrimBounds,
     evaluate_longitudinal_trim_candidate, solve_longitudinal_trim,
+};
+pub use trim_characterization::{
+    CharacterizationStepsError, CharacterizationUnavailableReason,
+    LongitudinalTrimCharacterization, LongitudinalTrimCharacterizationData,
+    LongitudinalTrimCharacterizationError, LongitudinalTrimCharacterizationPoint,
+    LongitudinalTrimCharacterizationPointOutcome, LongitudinalTrimCharacterizationSteps,
+    PerturbationSide, characterize_longitudinal_trim_sweep,
 };
 pub use trim_sweep::{
     LongitudinalTrimSweep, LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome,
