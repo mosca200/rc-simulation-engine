@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         non_success_points,
                     }) => {
                         eprintln!(
-                            "trim sweep validation completed with FAIL: {non_success_points} of {total_points} point(s) are not Success; see report.md"
+                            "trim sweep validation completed with FAIL: {non_success_points} of {total_points} point(s) are not Success; see trim_sweep.md"
                         );
                         std::process::exit(2);
                     }
