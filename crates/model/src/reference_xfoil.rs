@@ -257,6 +257,16 @@ pub enum XfoilPolarImportError {
     #[error("XFOIL polar header line not found")]
     HeaderNotFound,
 
+    #[error("unsupported XFOIL polar header layout: {0}")]
+    UnsupportedHeader(&'static str),
+
+    #[error("XFOIL polar data row {row}: expected {expected} columns, found {found}")]
+    ColumnCountMismatch {
+        row: usize,
+        expected: usize,
+        found: usize,
+    },
+
     #[error("XFOIL polar data row {row}: {reason}")]
     MalformedRow { row: usize, reason: &'static str },
 
@@ -307,11 +317,34 @@ impl fmt::Display for InvalidMetadataReason {
 
 const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 
+/// Recognized column layouts for XFOIL polar tables.
+///
+/// The parser is header-aware: it inspects the column header tokens to
+/// determine which layout is in use, then validates every data row against
+/// that layout's expected column count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnLayout {
+    /// `alpha  CL  CD  CM` — four columns, no diagnostics.
+    Basic,
+    /// `alpha  CL  CD  CDp  CM  Top_Xtr  Bot_Xtr` — seven columns.
+    Full,
+}
+
+impl ColumnLayout {
+    const fn expected_columns(self) -> usize {
+        match self {
+            Self::Basic => 4,
+            Self::Full => 7,
+        }
+    }
+}
+
 /// Parse standard textual XFOIL polar output with caller-supplied metadata.
 ///
-/// The parser locates the column header line (containing the `alpha` keyword),
-/// skips an optional dashed separator, then parses numeric data rows until
-/// end-of-file or an empty line.
+/// The parser locates the column header line, detects the column layout from
+/// the header tokens, skips an optional dashed separator, then parses numeric
+/// data rows until end-of-file or an empty line. Each data row must match the
+/// detected layout's column count exactly.
 pub fn parse_xfoil_polar(
     text: &str,
     metadata: XfoilSolverMetadata,
@@ -327,6 +360,8 @@ fn parse_data_section(lines: &[&str]) -> Result<Vec<XfoilPolarSample>, XfoilPola
         .position(|line| contains_alpha_keyword(line))
         .ok_or(XfoilPolarImportError::HeaderNotFound)?;
 
+    let layout = detect_layout(lines[header_idx])?;
+
     let data_start = if header_idx + 1 < lines.len() && is_separator_line(lines[header_idx + 1]) {
         header_idx + 2
     } else {
@@ -341,7 +376,7 @@ fn parse_data_section(lines: &[&str]) -> Result<Vec<XfoilPolarSample>, XfoilPola
             break;
         }
         source_row += 1;
-        samples.push(parse_data_row(line, source_row)?);
+        samples.push(parse_data_row(line, source_row, layout)?);
     }
 
     if samples.len() < 2 {
@@ -374,9 +409,92 @@ fn is_separator_line(line: &str) -> bool {
         && trimmed.chars().all(|c| c == '-' || c.is_whitespace())
 }
 
+fn header_token_matches(token: &str, column: &str) -> bool {
+    let normalized: String = token
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    normalized == column
+}
+
+fn detect_layout(header_line: &str) -> Result<ColumnLayout, XfoilPolarImportError> {
+    let tokens: Vec<&str> = header_line.split_whitespace().collect();
+    let mut alpha_idx = None;
+    let mut cl_idx = None;
+    let mut cd_idx = None;
+    let mut cdp_idx = None;
+    let mut cm_idx = None;
+    let mut top_idx = None;
+    let mut bot_idx = None;
+
+    for (i, token) in tokens.iter().enumerate() {
+        if header_token_matches(token, "alpha") {
+            alpha_idx = Some(i);
+        } else if header_token_matches(token, "cl") {
+            cl_idx = Some(i);
+        } else if header_token_matches(token, "cd") {
+            cd_idx = Some(i);
+        } else if header_token_matches(token, "cdp") {
+            cdp_idx = Some(i);
+        } else if header_token_matches(token, "cm") {
+            cm_idx = Some(i);
+        } else if header_token_matches(token, "topxtr") {
+            top_idx = Some(i);
+        } else if header_token_matches(token, "botxtr") {
+            bot_idx = Some(i);
+        }
+    }
+
+    let has_cdp = cdp_idx.is_some();
+    let has_cm = cm_idx.is_some();
+    let has_top = top_idx.is_some();
+    let has_bot = bot_idx.is_some();
+
+    match (has_cdp, has_cm, has_top, has_bot) {
+        (true, true, true, true) => {
+            let order_ok = alpha_idx
+                .zip(cl_idx)
+                .zip(cd_idx)
+                .zip(cdp_idx)
+                .zip(cm_idx)
+                .zip(top_idx)
+                .zip(bot_idx)
+                .is_some_and(|((((((a, cl), cd), cdp), cm), top), bot)| {
+                    a < cl && cl < cd && cd < cdp && cdp < cm && cm < top && top < bot
+                });
+            if order_ok {
+                Ok(ColumnLayout::Full)
+            } else {
+                Err(XfoilPolarImportError::UnsupportedHeader(
+                    "expected 'alpha CL CD CDp CM Top_Xtr Bot_Xtr'",
+                ))
+            }
+        }
+        (false, true, false, false) => {
+            let order_ok = alpha_idx
+                .zip(cl_idx)
+                .zip(cd_idx)
+                .zip(cm_idx)
+                .is_some_and(|(((a, cl), cd), cm)| a < cl && cl < cd && cd < cm);
+            if order_ok {
+                Ok(ColumnLayout::Basic)
+            } else {
+                Err(XfoilPolarImportError::UnsupportedHeader(
+                    "expected 'alpha CL CD CM'",
+                ))
+            }
+        }
+        _ => Err(XfoilPolarImportError::UnsupportedHeader(
+            "expected 'alpha CL CD CM' or 'alpha CL CD CDp CM Top_Xtr Bot_Xtr'",
+        )),
+    }
+}
+
 fn parse_data_row(
     line: &str,
     source_row: usize,
+    layout: ColumnLayout,
 ) -> Result<XfoilPolarSample, XfoilPolarImportError> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let values: Result<Vec<f64>, _> = fields.iter().map(|f| f.parse::<f64>()).collect();
@@ -385,23 +503,26 @@ fn parse_data_row(
         reason: "non-numeric value in data row",
     })?;
 
-    let (alpha_deg, cl, cd, cm, cd_pressure, top_xtr, bot_xtr) = match values.len() {
-        4 => (values[0], values[1], values[2], values[3], None, None, None),
-        6 => (
+    let expected = layout.expected_columns();
+    if values.len() != expected {
+        return Err(XfoilPolarImportError::ColumnCountMismatch {
+            row: source_row,
+            expected,
+            found: values.len(),
+        });
+    }
+
+    let (alpha_deg, cl, cd, cm, cd_pressure, top_xtr, bot_xtr) = match layout {
+        ColumnLayout::Basic => (values[0], values[1], values[2], values[3], None, None, None),
+        ColumnLayout::Full => (
             values[0],
             values[1],
             values[2],
-            0.0,
+            values[4],
             Some(values[3]),
-            Some(values[4]),
             Some(values[5]),
+            Some(values[6]),
         ),
-        _ => {
-            return Err(XfoilPolarImportError::MalformedRow {
-                row: source_row,
-                reason: "expected 4 or 6 columns",
-            });
-        }
     };
 
     let alpha_rad = alpha_deg * DEG_TO_RAD;
@@ -490,7 +611,7 @@ mod tests {
  XFOIL 6.99
 
 
- Calculated polar for: CLARK Y
+ Calculated polar for: SYNTHETIC TEST AIRFOIL
 
 
  1 1 Reynolds number: 300000    Mach number: 0.00
@@ -499,13 +620,13 @@ mod tests {
  Ncrit: 9.0
 
 
- alpha    CL         CD         CDp       Top_Xtr   Bot_Xtr
- ------   ---------  ---------  ---------  ---------  ---------
-  -2.000  -0.0414    0.01134    0.00442    0.5412    0.6178
-  -1.000   0.0593    0.00822    0.00254    0.5631    0.5971
-   0.000   0.1593    0.00700    0.00156    0.5812    0.5612
-   2.000   0.3593    0.00720    0.00180    0.6200    0.5200
-   4.000   0.5593    0.00900    0.00300    0.6500    0.4800
+ alpha    CL         CD         CDp        CM         Top_Xtr  Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  -------  -------
+  -2.000  -0.0414    0.01134    0.00442   -0.0120     0.5412   0.6178
+  -1.000   0.0593    0.00822    0.00254   -0.0310     0.5631   0.5971
+   0.000   0.1593    0.00700    0.00156   -0.0549     0.5812   0.5612
+   2.000   0.3593    0.00720    0.00180   -0.0570     0.6200   0.5200
+   4.000   0.5593    0.00900    0.00300   -0.0530     0.6500   0.4800
 ";
 
     const MINIMAL_4COL: &str = "\
@@ -557,10 +678,11 @@ mod tests {
         let s = &import.samples()[0];
         assert_eq!(s.cl(), -0.0414);
         assert_eq!(s.cd(), 0.01134);
-        assert_eq!(s.cm(), 0.0);
+        assert_eq!(s.cm(), -0.0120);
         let s3 = &import.samples()[2];
         assert_eq!(s3.cl(), 0.1593);
         assert_eq!(s3.cd(), 0.00700);
+        assert_eq!(s3.cm(), -0.0549);
     }
 
     #[test]
@@ -568,9 +690,9 @@ mod tests {
         let import = parse_xfoil_polar(STANDARD_POLAR, valid_metadata()).unwrap();
         let s = &import.samples()[0];
         assert_eq!(s.cd_pressure(), Some(0.00442));
+        assert_eq!(s.cm(), -0.0120);
         assert_eq!(s.top_xtr(), Some(0.5412));
         assert_eq!(s.bot_xtr(), Some(0.6178));
-        assert_eq!(s.cm(), 0.0);
     }
 
     #[test]
@@ -997,9 +1119,53 @@ mod tests {
         let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
         assert!(matches!(
             err,
-            XfoilPolarImportError::MalformedRow {
+            XfoilPolarImportError::ColumnCountMismatch {
                 row: 1,
-                reason: "expected 4 or 6 columns"
+                expected: 4,
+                found: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn six_column_layout_rejected() {
+        let text = "\
+ alpha    CL         CD         CDp       Top_Xtr   Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  ---------
+   0.000   0.1000    0.00800    0.00300    0.6000    0.5000
+   1.000   0.2000    0.00900    0.00400    0.6500    0.4500
+";
+        let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+        assert!(matches!(err, XfoilPolarImportError::UnsupportedHeader(_)));
+    }
+
+    #[test]
+    fn unsupported_reordered_header_rejected() {
+        let text = "\
+ alpha    CD         CL         CM
+ ------   ---------  ---------  ---------
+   0.000   0.00800    0.1000    0.0050
+   1.000   0.00900    0.2000   -0.0100
+";
+        let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+        assert!(matches!(err, XfoilPolarImportError::UnsupportedHeader(_)));
+    }
+
+    #[test]
+    fn data_row_column_count_must_match_header() {
+        let text = "\
+ alpha    CL         CD         CDp        CM         Top_Xtr  Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  -------  -------
+   0.000   0.1000    0.00800    0.00300   -0.0100     0.6000   0.5000
+   1.000   0.2000    0.00900
+";
+        let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+        assert!(matches!(
+            err,
+            XfoilPolarImportError::ColumnCountMismatch {
+                row: 2,
+                expected: 7,
+                found: 3
             }
         ));
     }

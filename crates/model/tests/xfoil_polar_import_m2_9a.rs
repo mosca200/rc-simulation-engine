@@ -10,11 +10,11 @@ use model::{
     XfoilPolarSample, XfoilSolverMetadata, parse_xfoil_polar,
 };
 
-const STANDARD_6COL: &str = "\
+const STANDARD_7COL: &str = "\
  XFOIL 6.99
 
 
- Calculated polar for: SOME AIRFOIL
+ Calculated polar for: SYNTHETIC TEST AIRFOIL
 
 
  1 1 Reynolds number: 250000    Mach number: 0.04
@@ -23,15 +23,15 @@ const STANDARD_6COL: &str = "\
  Ncrit: 9.0
 
 
- alpha    CL         CD         CDp       Top_Xtr   Bot_Xtr
- ------   ---------  ---------  ---------  ---------  ---------
-  -3.000  -0.2000    0.02000    0.01000    0.4000    0.7000
-  -2.000  -0.0500    0.01200    0.00500    0.5000    0.6000
-  -1.000   0.1000    0.00850    0.00300    0.5500    0.5500
-   0.000   0.2500    0.00700    0.00200    0.6000    0.5000
-   2.000   0.4500    0.00750    0.00250    0.6500    0.4500
-   4.000   0.6500    0.01000    0.00400    0.7000    0.4000
-   6.000   0.8500    0.01500    0.00700    0.7500    0.3500
+ alpha    CL         CD         CDp        CM         Top_Xtr  Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  -------  -------
+  -3.000  -0.2000    0.02000    0.01000   -0.0400     0.4000   0.7000
+  -2.000  -0.0500    0.01200    0.00500   -0.0480     0.5000   0.6000
+  -1.000   0.1000    0.00850    0.00300   -0.0530     0.5500   0.5500
+   0.000   0.2339    0.00930    0.00403   -0.0549     0.9375   1.0000
+   1.000   0.3642    0.00891    0.00354   -0.0570     0.8925   1.0000
+   2.000   0.4500    0.00750    0.00250   -0.0560     0.6500   0.4500
+   4.000   0.6500    0.01000    0.00400   -0.0520     0.7000   0.4000
 ";
 
 const MINIMAL_4COL: &str = "\
@@ -55,8 +55,8 @@ fn valid_metadata() -> XfoilSolverMetadata {
 }
 
 #[test]
-fn standard_6col_full_parse() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+fn standard_7col_full_parse() {
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     assert_eq!(import.sample_count(), 7);
     assert_eq!(import.metadata().reynolds(), 250_000.0);
     assert_eq!(import.metadata().mach(), 0.04);
@@ -78,9 +78,9 @@ fn minimal_4col_no_diagnostics() {
 
 #[test]
 fn alpha_deg_to_rad_conversion() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     let factor = std::f64::consts::PI / 180.0;
-    let expected = [-3.0, -2.0, -1.0, 0.0, 2.0, 4.0, 6.0];
+    let expected = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0];
     for (sample, &deg) in import.samples().iter().zip(&expected) {
         let expected_rad = deg * factor;
         assert!(
@@ -92,27 +92,58 @@ fn alpha_deg_to_rad_conversion() {
 }
 
 #[test]
-fn cl_cd_cm_exact_preservation() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+fn nonzero_cm_preserved_exactly_from_column_5() {
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     let s = &import.samples()[3];
-    assert_eq!(s.cl(), 0.2500);
-    assert_eq!(s.cd(), 0.00700);
-    assert_eq!(s.cm(), 0.0);
+    assert_eq!(s.cl(), 0.2339);
+    assert_eq!(s.cd(), 0.00930);
+    assert_eq!(s.cm(), -0.0549);
+    let s1 = &import.samples()[4];
+    assert_eq!(s1.cm(), -0.0570);
+}
+
+#[test]
+fn cdp_is_column_4() {
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
+    let s = &import.samples()[3];
+    assert_eq!(s.cd_pressure(), Some(0.00403));
+    let s1 = &import.samples()[4];
+    assert_eq!(s1.cd_pressure(), Some(0.00354));
+}
+
+#[test]
+fn top_bot_xtr_are_columns_6_and_7() {
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
+    let s = &import.samples()[3];
+    assert_eq!(s.top_xtr(), Some(0.9375));
+    assert_eq!(s.bot_xtr(), Some(1.0000));
+    let s1 = &import.samples()[4];
+    assert_eq!(s1.top_xtr(), Some(0.8925));
+    assert_eq!(s1.bot_xtr(), Some(1.0000));
+}
+
+#[test]
+fn cl_cd_cm_exact_preservation() {
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
+    let s = &import.samples()[3];
+    assert_eq!(s.cl(), 0.2339);
+    assert_eq!(s.cd(), 0.00930);
+    assert_eq!(s.cm(), -0.0549);
 }
 
 #[test]
 fn diagnostic_columns_exact_preservation() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     let s = &import.samples()[0];
     assert_eq!(s.cd_pressure(), Some(0.01000));
+    assert_eq!(s.cm(), -0.0400);
     assert_eq!(s.top_xtr(), Some(0.4000));
     assert_eq!(s.bot_xtr(), Some(0.7000));
-    assert_eq!(s.cm(), 0.0);
 }
 
 #[test]
 fn source_ordering_preserved() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     for i in 1..import.sample_count() {
         assert!(import.samples()[i].alpha_rad() > import.samples()[i - 1].alpha_rad());
     }
@@ -121,14 +152,26 @@ fn source_ordering_preserved() {
 #[test]
 fn deterministic_reparse() {
     let meta = valid_metadata();
-    let a = parse_xfoil_polar(STANDARD_6COL, meta.clone()).unwrap();
-    let b = parse_xfoil_polar(STANDARD_6COL, meta).unwrap();
+    let a = parse_xfoil_polar(STANDARD_7COL, meta.clone()).unwrap();
+    let b = parse_xfoil_polar(STANDARD_7COL, meta).unwrap();
     assert_eq!(a.sample_count(), b.sample_count());
     for (a_s, b_s) in a.samples().iter().zip(b.samples()) {
         assert_eq!(a_s.alpha_rad().to_bits(), b_s.alpha_rad().to_bits());
         assert_eq!(a_s.cl().to_bits(), b_s.cl().to_bits());
         assert_eq!(a_s.cd().to_bits(), b_s.cd().to_bits());
         assert_eq!(a_s.cm().to_bits(), b_s.cm().to_bits());
+        assert_eq!(
+            a_s.cd_pressure().map(f64::to_bits),
+            b_s.cd_pressure().map(f64::to_bits)
+        );
+        assert_eq!(
+            a_s.top_xtr().map(f64::to_bits),
+            b_s.top_xtr().map(f64::to_bits)
+        );
+        assert_eq!(
+            a_s.bot_xtr().map(f64::to_bits),
+            b_s.bot_xtr().map(f64::to_bits)
+        );
     }
 }
 
@@ -259,6 +302,49 @@ fn header_not_found() {
 fn empty_input() {
     let err = parse_xfoil_polar("", valid_metadata()).unwrap_err();
     assert!(matches!(err, XfoilPolarImportError::HeaderNotFound));
+}
+
+#[test]
+fn six_column_pseudo_standard_layout_rejected() {
+    let text = "\
+ alpha    CL         CD         CDp       Top_Xtr   Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  ---------
+   0.000   0.1000    0.00800    0.00300    0.6000    0.5000
+   1.000   0.2000    0.00900    0.00400    0.6500    0.4500
+";
+    let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+    assert!(matches!(err, XfoilPolarImportError::UnsupportedHeader(_)));
+}
+
+#[test]
+fn unsupported_reordered_header_rejected() {
+    let text = "\
+ alpha    CD         CL         CM
+ ------   ---------  ---------  ---------
+   0.000   0.00800    0.1000    0.0050
+   1.000   0.00900    0.2000   -0.0100
+";
+    let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+    assert!(matches!(err, XfoilPolarImportError::UnsupportedHeader(_)));
+}
+
+#[test]
+fn data_row_column_count_must_match_recognized_header() {
+    let text = "\
+ alpha    CL         CD         CDp        CM         Top_Xtr  Bot_Xtr
+ ------   ---------  ---------  ---------  ---------  -------  -------
+   0.000   0.1000    0.00800    0.00300   -0.0100     0.6000   0.5000
+   1.000   0.2000    0.00900
+";
+    let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
+    assert!(matches!(
+        err,
+        XfoilPolarImportError::ColumnCountMismatch {
+            row: 2,
+            expected: 7,
+            found: 3,
+        }
+    ));
 }
 
 #[test]
@@ -481,9 +567,10 @@ fn wrong_column_count_rejected() {
     let err = parse_xfoil_polar(text, valid_metadata()).unwrap_err();
     assert!(matches!(
         err,
-        XfoilPolarImportError::MalformedRow {
+        XfoilPolarImportError::ColumnCountMismatch {
             row: 1,
-            reason: "expected 4 or 6 columns"
+            expected: 4,
+            found: 3,
         }
     ));
 }
@@ -503,14 +590,14 @@ fn negative_zero_cd_accepted() {
 
 #[test]
 fn import_is_off_runtime_evidence_only() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     let _: &XfoilPolarImport = &import;
     let _: &[XfoilPolarSample] = import.samples();
 }
 
 #[test]
 fn no_clark_y_data_fabricated() {
-    let import = parse_xfoil_polar(STANDARD_6COL, valid_metadata()).unwrap();
+    let import = parse_xfoil_polar(STANDARD_7COL, valid_metadata()).unwrap();
     for sample in import.samples() {
         assert!(sample.cl().abs() < 5.0);
         assert!(sample.cd() < 1.0);
@@ -567,6 +654,17 @@ fn error_display_messages() {
         reason: "non-numeric value in data row",
     };
     assert!(err.to_string().contains("5"));
+
+    let err = XfoilPolarImportError::ColumnCountMismatch {
+        row: 3,
+        expected: 7,
+        found: 4,
+    };
+    assert!(err.to_string().contains("7"));
+    assert!(err.to_string().contains("4"));
+
+    let err = XfoilPolarImportError::UnsupportedHeader("test reason");
+    assert!(err.to_string().contains("test reason"));
 
     let err =
         XfoilPolarImportError::InvalidMetadata(InvalidMetadataReason::ReynoldsNotFinitePositive);

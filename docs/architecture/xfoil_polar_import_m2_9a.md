@@ -35,21 +35,28 @@ structure:
    are ignored deterministically.
 
 2. **Column header line**: A line containing the keyword `alpha`
-   (case-insensitive). This marks the start of the numeric table.
+   (case-insensitive). The parser inspects the header tokens to detect
+   which of the two supported column layouts is in use.
 
 3. **Optional separator**: A line consisting entirely of dashes and
    whitespace (at least 3 characters), immediately following the column
    header. If present, it is skipped.
 
 4. **Data rows**: Whitespace-delimited numeric rows in source order.
-   Each row must contain either:
-   - **4 columns**: `alpha  CL  CD  CM`
-   - **6 columns**: `alpha  CL  CD  CDp  Top_Xtr  Bot_Xtr`
+   Each row must contain exactly the number of columns required by the
+   detected header layout. Two layouts are supported:
 
-   Note: XFOIL's standard 6-column output does not include CM. When 6
-   columns are present, the parser reads `alpha, CL, CD, CDp, Top_Xtr,
-   Bot_Xtr` and CM defaults to 0.0. When 4 columns are present, the
-   fourth column is CM.
+   - **Basic (4 columns)**: `alpha  CL  CD  CM`
+     Header must contain tokens matching: alpha, CL, CD, CM.
+     Header must NOT contain CDp, Top_Xtr, or Bot_Xtr.
+
+   - **Full (7 columns)**: `alpha  CL  CD  CDp  CM  Top_Xtr  Bot_Xtr`
+     Header must contain tokens matching: alpha, CL, CD, CDp, CM,
+     Top_Xtr, Bot_Xtr.
+
+   Any other header layout (including 6-column pseudo-standard without
+   CM, or reordered columns) is rejected fail-closed with
+   `UnsupportedHeader`.
 
 5. **Termination**: The data section ends at the first blank line or
    end-of-file.
