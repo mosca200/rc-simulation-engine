@@ -129,6 +129,28 @@ fn linear_samples_json(cd0: f64) -> String {
     format!("[{}]", samples.join(","))
 }
 
+fn linear_polar_with_slope_json(id: &str, slope: f64, cd0: f64) -> String {
+    let samples: Vec<String> = (-10..=10)
+        .map(|i| {
+            let alpha = i as f64 * 0.05;
+            let cl = slope * alpha;
+            format!(r#"{{"alpha_rad":{alpha},"cl":{cl},"cd":{cd0},"cm":0.0}}"#)
+        })
+        .collect();
+    format!(r#"{{"id":"{id}","samples":[{}]}}"#, samples.join(","))
+}
+
+fn linear_samples_with_slope_json(slope: f64, cd0: f64) -> String {
+    let samples: Vec<String> = (-10..=10)
+        .map(|i| {
+            let alpha = i as f64 * 0.05;
+            let cl = slope * alpha;
+            format!(r#"{{"alpha_rad":{alpha},"cl":{cl},"cd":{cd0},"cm":0.0}}"#)
+        })
+        .collect();
+    format!("[{}]", samples.join(","))
+}
+
 fn surface_json(id: &str, element_ids: &[&str], span_m: f64, e: f64) -> String {
     let ids: Vec<String> = element_ids.iter().map(|s| format!("\"{s}\"")).collect();
     format!(
@@ -835,7 +857,21 @@ fn assigned_element_not_double_counted() {
 }
 
 // ---------------------------------------------------------------------------
-// Real q*S weighting: asymmetric members with different areas
+// q*S weighting proof: different CL slopes AND different areas
+//
+// Previous version used the same polar for both members, so CL_left == CL_right
+// at every bisection iteration.  When CL is uniform, sum(w_j*CL_j)/sum(w_j) = CL
+// regardless of weights, so the test could not distinguish weighted from
+// unweighted averaging.
+//
+// This version assigns each member a polar with a different lift-curve slope
+// (a_L = 0.8, a_R = 1.2) AND different areas (S_L = 0.06, S_R = 0.14).
+// Both asymmetries make CL_left != CL_right, so the q*S weighting matters:
+//
+//   Weighted:   a_eff = (S_L*a_L + S_R*a_R) / (S_L + S_R) = 1.08
+//   Unweighted: a_eff = (a_L + a_R) / 2 = 1.00
+//
+// The two predictions differ by ~10 %, far above numerical tolerance.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -849,13 +885,21 @@ fn asymmetric_q_s_weighting() {
     let alpha_geom = alpha_geom_deg.to_radians();
     let vx: f64 = 25.0;
 
+    // Two polars with DIFFERENT lift-curve slopes.
+    let slope_left: f64 = 0.8;
+    let slope_right: f64 = 1.2;
+
     let model = build_v5_model(
-        &format!("[{}]", linear_polar_json("lp", 0.0)),
+        &format!(
+            "[{},{}]",
+            linear_polar_with_slope_json("lp_lo", slope_left, 0.0),
+            linear_polar_with_slope_json("lp_hi", slope_right, 0.0),
+        ),
         "[]",
         &format!(
             "[{},{}]",
-            element_json("left", [0.0, -0.25, 0.0], area_left, chord, "lp"),
-            element_json("right", [0.0, 0.25, 0.0], area_right, chord, "lp"),
+            element_json("left", [0.0, -0.25, 0.0], area_left, chord, "lp_lo"),
+            element_json("right", [0.0, 0.25, 0.0], area_right, chord, "lp_hi"),
         ),
         &format!(
             "[{}]",
@@ -869,19 +913,51 @@ fn asymmetric_q_s_weighting() {
     let q = 0.5 * 1.225 * vx * vx;
     let total_area = area_left + area_right;
     let ar = span * span / total_area;
-    let denom = 1.0 + 1.0 / (PI * ar * e_factor);
-    let cl_surface_expected = alpha_geom / denom;
-    let expected_lift = q * total_area * cl_surface_expected;
+    let pi_ar_e = PI * ar * e_factor;
 
+    // --- q*S-weighted prediction (correct) ---
+    // Both members see the same section speed and geometric alpha (identity
+    // orientation, zero angular rate, same body-x position).  Weights are
+    // w_j = q * S_j, so the weighted-average slope is:
+    let weighted_slope = (area_left * slope_left + area_right * slope_right) / total_area;
+    let alpha_eff_weighted = alpha_geom / (1.0 + weighted_slope / pi_ar_e);
+    let cl_weighted = weighted_slope * alpha_eff_weighted;
+    let expected_weighted_lift = q * total_area * cl_weighted;
+
+    // --- Unweighted prediction (intentionally wrong) ---
+    // If the solver averaged CL without q*S weights:
+    //   CL_avg = (CL_L + CL_R) / 2 = (a_L + a_R)/2 * alpha_eff
+    let unweighted_slope = (slope_left + slope_right) / 2.0;
+    let alpha_eff_unweighted = alpha_geom / (1.0 + unweighted_slope / pi_ar_e);
+    let cl_unweighted = unweighted_slope * alpha_eff_unweighted;
+    let expected_unweighted_lift = q * total_area * cl_unweighted;
+
+    // --- Verify the two predictions are materially different ---
+    let lift_gap = (expected_weighted_lift - expected_unweighted_lift).abs();
+    assert!(
+        lift_gap > 0.1,
+        "test must discriminate: gap={lift_gap:.4} N"
+    );
+
+    // --- Project actual wrench onto the section lift direction ---
     let alpha = alpha_geom;
     let v_hat = Vec3::new(alpha.cos(), 0.0, alpha.sin());
     let lift_dir = Vec3::y().cross(&v_hat);
     let actual_lift = wrench.force_body_n.dot(&lift_dir);
 
-    let tol = 2.0e-3 * expected_lift.abs().max(1.0);
+    // Actual must match the q*S-weighted prediction within 0.5 %
+    let tol = 5.0e-3 * expected_weighted_lift.abs();
     assert!(
-        (actual_lift - expected_lift).abs() < tol,
-        "asymmetric q*S lift: actual={actual_lift:.6}, expected={expected_lift:.6}"
+        (actual_lift - expected_weighted_lift).abs() < tol,
+        "q*S-weighted lift: actual={actual_lift:.6}, \
+         expected={expected_weighted_lift:.6}, tol={tol:.2e}"
+    );
+
+    // Actual must NOT match the unweighted prediction
+    let unweighted_gap = (actual_lift - expected_unweighted_lift).abs();
+    assert!(
+        unweighted_gap > 0.05,
+        "actual must diverge from unweighted: gap={unweighted_gap:.4}"
     );
 }
 
@@ -927,40 +1003,38 @@ fn reynolds_family_member_support() {
 }
 
 // ---------------------------------------------------------------------------
-// Reynolds number based on physical section speed, proven by force difference
+// Reynolds proof: physical section speed determines Re, proven by tight match
+//
+// Previous version only checked that lift fell between broad low/high bounds,
+// which did not prove WHICH Reynolds value the solver actually sampled.
+//
+// This version:
+// 1. Builds a Reynolds family with two nodes whose CL slopes differ by 3×
+//    (slope 0.5 at Re=50 000 vs slope 1.5 at Re=500 000).
+// 2. Computes the physical section speed from the exact section kinematics.
+// 3. Calculates Re_physical = V_section * chord / nu.
+// 4. Interpolates the expected CL slope in ln(Re) space at Re_physical.
+// 5. Solves the finite-wing equations analytically with that slope.
+// 6. Verifies the actual wrench matches with < 0.5 % tolerance.
+// 7. Proves that using the wrong Reynolds node would fail badly (~4.8 N gap).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn reynolds_uses_physical_speed_not_effective_alpha() {
-    // Build two Reynolds nodes with DELIBERATELY different CL slopes so that
-    // choosing different Reynolds produces measurably different forces.
     let chord: f64 = 0.2;
     let span: f64 = 1.0;
     let area_per = chord * span / 2.0;
     let viscosity: f64 = 1.5e-5;
     let vx: f64 = 20.0;
-    let _physical_re = vx * chord / viscosity;
+    let alpha_geom_deg: f64 = 5.0;
+    let alpha_geom = alpha_geom_deg.to_radians();
+    let e_factor: f64 = 0.9;
 
-    // Low-Re node: CL = 0.8 * alpha (reduced slope)
-    let low_samples: Vec<String> = (-10..=10)
-        .map(|i| {
-            let a = i as f64 * 0.05;
-            format!(
-                r#"{{"alpha_rad":{a},"cl":{},  "cd":0.02,"cm":0.0}}"#,
-                0.8 * a
-            )
-        })
-        .collect();
-    // High-Re node: CL = 1.2 * alpha (increased slope)
-    let high_samples: Vec<String> = (-10..=10)
-        .map(|i| {
-            let a = i as f64 * 0.05;
-            format!(
-                r#"{{"alpha_rad":{a},"cl":{},  "cd":0.015,"cm":0.0}}"#,
-                1.2 * a
-            )
-        })
-        .collect();
+    // Reynolds family with widely separated nodes and very different slopes.
+    let re_lo: f64 = 50_000.0;
+    let re_hi: f64 = 500_000.0;
+    let slope_lo: f64 = 0.5;
+    let slope_hi: f64 = 1.5;
 
     let model = build_v5_model(
         "[]",
@@ -970,8 +1044,8 @@ fn reynolds_uses_physical_speed_not_effective_alpha() {
                 "re-fam",
                 &format!(
                     "{},{}",
-                    reynolds_node_json(100000.0, &format!("[{}]", low_samples.join(","))),
-                    reynolds_node_json(500000.0, &format!("[{}]", high_samples.join(","))),
+                    reynolds_node_json(re_lo, &linear_samples_with_slope_json(slope_lo, 0.02)),
+                    reynolds_node_json(re_hi, &linear_samples_with_slope_json(slope_hi, 0.015)),
                 )
             )
         ),
@@ -980,38 +1054,73 @@ fn reynolds_uses_physical_speed_not_effective_alpha() {
             element_json_reynolds("left", [0.0, -0.25, 0.0], area_per, chord, "re-fam"),
             element_json_reynolds("right", [0.0, 0.25, 0.0], area_per, chord, "re-fam"),
         ),
-        &format!("[{}]", surface_json("wing", &["left", "right"], span, 0.9)),
+        &format!(
+            "[{}]",
+            surface_json("wing", &["left", "right"], span, e_factor)
+        ),
     );
 
-    let state = state_at_alpha(vx, 5.0);
+    let state = state_at_alpha(vx, alpha_geom_deg);
     let wrench = first_stage_wrench(&model, &state, &config());
-    assert!(wrench.force_body_n.iter().all(|v| v.is_finite()));
 
-    // The physical Re is ~266667, which is between the two nodes (100k and 500k).
-    // The interpolation fraction in ln(Re) space is:
-    // f = ln(266667/100000) / ln(500000/100000) ≈ 0.60
-    // So the effective CL slope ≈ 0.8 + 0.60 * (1.2 - 0.8) = 1.04
-    // If the implementation incorrectly used alpha_eff speed instead of physical speed,
-    // the Reynolds number would be different and the force would differ measurably.
-    // We verify the force is consistent with the physical-speed Reynolds by checking
-    // it's between the pure-low-Re and pure-high-Re bounds.
-    let alpha = 5.0_f64.to_radians();
-    let v_hat = Vec3::new(alpha.cos(), 0.0, alpha.sin());
+    // --- Compute physical section speed from section kinematics ---
+    // With identity orientation and zero angular velocity, both elements see
+    // the same section velocity: body-frame velocity = (V*cos(a), 0, V*sin(a)).
+    let section_airspeed = vx; // identity orientation, zero angular rate
+    let physical_re = section_airspeed * chord / viscosity;
+
+    // --- Canonical ln(Re) interpolation at Re_physical ---
+    let frac = (physical_re.ln() - re_lo.ln()) / (re_hi.ln() - re_lo.ln());
+    let interpolated_slope = slope_lo + frac * (slope_hi - slope_lo);
+
+    // --- Analytic finite-wing solution at the physical-Re slope ---
+    let total_area = 2.0 * area_per;
+    let ar = span * span / total_area;
+    let pi_ar_e = PI * ar * e_factor;
+    let alpha_eff = alpha_geom / (1.0 + interpolated_slope / pi_ar_e);
+    let cl_surface = interpolated_slope * alpha_eff;
+    let expected_lift = 0.5 * 1.225 * vx * vx * total_area * cl_surface;
+
+    // --- Same calculation using ONLY the low-Re node (deliberately wrong) ---
+    let alpha_eff_lo = alpha_geom / (1.0 + slope_lo / pi_ar_e);
+    let cl_lo = slope_lo * alpha_eff_lo;
+    let lift_at_lo_re = 0.5 * 1.225 * vx * vx * total_area * cl_lo;
+
+    // --- Same calculation using ONLY the high-Re node (deliberately wrong) ---
+    let alpha_eff_hi = alpha_geom / (1.0 + slope_hi / pi_ar_e);
+    let cl_hi = slope_hi * alpha_eff_hi;
+    let lift_at_hi_re = 0.5 * 1.225 * vx * vx * total_area * cl_hi;
+
+    // --- Verify the three predictions are mutually distinct ---
+    let gap_lo_vs_phys = (expected_lift - lift_at_lo_re).abs();
+    let gap_hi_vs_phys = (expected_lift - lift_at_hi_re).abs();
+    assert!(
+        gap_lo_vs_phys > 1.0,
+        "low-Re prediction must differ from physical-Re: gap={gap_lo_vs_phys:.4} N"
+    );
+    assert!(
+        gap_hi_vs_phys > 0.5,
+        "high-Re prediction must differ from physical-Re: gap={gap_hi_vs_phys:.4} N"
+    );
+
+    // --- Project actual wrench onto the section lift direction ---
+    let v_hat = Vec3::new(alpha_geom.cos(), 0.0, alpha_geom.sin());
     let lift_dir = Vec3::y().cross(&v_hat);
     let actual_lift = wrench.force_body_n.dot(&lift_dir);
 
-    // At physical Re, the effective slope is ~1.04, so lift should be substantial
+    // Actual must match the physical-Re prediction within 0.5 %
+    let tol = 5.0e-3 * expected_lift.abs();
     assert!(
-        actual_lift > 0.0,
-        "positive alpha should produce positive lift through Reynolds-interpolated polar"
+        (actual_lift - expected_lift).abs() < tol,
+        "physical-Re lift: actual={actual_lift:.6}, \
+         expected={expected_lift:.6} (Re_phys={physical_re:.0}, \
+         slope={interpolated_slope:.4}), tol={tol:.2e}"
     );
-    // The lift should be between the low-Re and high-Re extremes
-    let q = 0.5 * 1.225 * vx * vx;
-    let total_area = 2.0 * area_per;
-    let lift_pure_low = q * total_area * 0.8 * alpha * 0.5; // rough lower bound
-    let lift_pure_high = q * total_area * 1.2 * alpha * 1.5; // rough upper bound
+
+    // Actual must NOT match the low-Re-only prediction
+    let wrong_gap = (actual_lift - lift_at_lo_re).abs();
     assert!(
-        actual_lift > lift_pure_low && actual_lift < lift_pure_high,
-        "lift {actual_lift:.4} should be between low-Re bound {lift_pure_low:.4} and high-Re bound {lift_pure_high:.4}"
+        wrong_gap > 1.0,
+        "actual must diverge from low-Re-only: gap={wrong_gap:.4} N"
     );
 }
