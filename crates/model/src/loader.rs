@@ -1,7 +1,7 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V4,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -10,7 +10,7 @@ use crate::{
     },
     runtime::{
         AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroElement,
-        RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
+        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
         RuntimeReynoldsPolarFamily,
     },
     v0::{
@@ -27,6 +27,7 @@ use crate::{
     },
     v3::{AeroPolarBindingFileV3, AircraftModelFileV3},
     v4::{AircraftModelFileV4, PropellerCoefficientSourceFileV4, PropulsionFileV4},
+    v5::{AeroSurfaceFileV5, AircraftModelFileV5},
 };
 use serde::Deserialize;
 use sim_core::{
@@ -246,6 +247,85 @@ pub enum ModelLoadError {
         first_index: usize,
         duplicate_index: usize,
     },
+    #[error("aerodynamic surface {surface_id:?} at index {surface_index} has empty element_ids")]
+    EmptySurfaceMembership {
+        surface_id: String,
+        surface_index: usize,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} references unknown element {element_id:?}"
+    )]
+    UnresolvedSurfaceElementReference {
+        surface_id: String,
+        surface_index: usize,
+        element_id: String,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} contains duplicate element {element_id:?}"
+    )]
+    DuplicateSurfaceElement {
+        surface_id: String,
+        surface_index: usize,
+        element_id: String,
+    },
+    #[error(
+        "aerodynamic element {element_id:?} is assigned to both surface {first_surface_id:?} at index {first_surface_index} and surface {surface_id:?} at index {surface_index}"
+    )]
+    CrossSurfaceDuplicateElement {
+        element_id: Box<str>,
+        first_surface_id: Box<str>,
+        first_surface_index: usize,
+        surface_id: Box<str>,
+        surface_index: usize,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has invalid span_axis_body: {reason}"
+    )]
+    InvalidSurfaceSpanAxis {
+        surface_id: String,
+        surface_index: usize,
+        reason: &'static str,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has invalid span_m {value:?}; expected finite and greater than zero"
+    )]
+    InvalidSurfaceSpan {
+        surface_id: String,
+        surface_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has invalid span_efficiency_factor {value:?}; expected finite and greater than zero"
+    )]
+    InvalidSurfaceSpanEfficiency {
+        surface_id: String,
+        surface_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has non-finite derived area {value:?}"
+    )]
+    NonFiniteSurfaceArea {
+        surface_id: String,
+        surface_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has non-positive derived area {value:?}"
+    )]
+    NonPositiveSurfaceArea {
+        surface_id: String,
+        surface_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic surface {surface_id:?} at index {surface_index} has invalid derived aspect_ratio {value:?}; expected finite and greater than zero"
+    )]
+    InvalidSurfaceAspectRatio {
+        surface_id: String,
+        surface_index: usize,
+        value: f64,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -286,6 +366,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V4);
                 resolve_v4(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V5) => {
+                let file: AircraftModelFileV5 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V5);
+                resolve_v5(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -590,6 +676,192 @@ fn resolve_v4(file: AircraftModelFileV4) -> Result<AircraftModel, ModelLoadError
         resolve_v3_fields(v3_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V4)?
             .with_propulsion(runtime_propulsion),
     )
+}
+
+fn resolve_v5(file: AircraftModelFileV5) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV5 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    } = file;
+    let runtime_propulsion = propulsion.map(resolve_propulsion_v5).transpose()?;
+    let surfaces = aerodynamics.surfaces.clone();
+    let v3_file = AircraftModelFileV3 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics: crate::v3::AerodynamicsFileV3 {
+            kinematic_viscosity_m2_s: aerodynamics.kinematic_viscosity_m2_s,
+            polars: aerodynamics.polars,
+            polar_families: aerodynamics.polar_families,
+            elements: aerodynamics.elements,
+        },
+        controls,
+        control_surface_bindings,
+        propulsion: None,
+        presentation,
+    };
+    let model = resolve_v3_fields(v3_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V5)?
+        .with_propulsion(runtime_propulsion);
+    let runtime_surfaces = resolve_aero_surfaces(&model, surfaces)?;
+    Ok(model.with_aero_surfaces(runtime_surfaces))
+}
+
+fn resolve_propulsion_v5(
+    file: crate::v5::PropulsionFileV5,
+) -> Result<RuntimeElectricPropulsion, ModelLoadError> {
+    let v4_file = PropulsionFileV4 {
+        battery: file.battery,
+        esc: file.esc,
+        motor: file.motor,
+        propeller: file.propeller,
+        coefficient_source: file.coefficient_source,
+    };
+    resolve_propulsion_v4(v4_file)
+}
+
+fn resolve_aero_surfaces(
+    model: &AircraftModel,
+    surface_files: Vec<AeroSurfaceFileV5>,
+) -> Result<Vec<RuntimeAeroSurface>, ModelLoadError> {
+    let mut runtime_surfaces = Vec::with_capacity(surface_files.len());
+    let mut assigned_elements: Vec<(usize, String, usize)> = Vec::new();
+
+    for (surface_index, surface_file) in surface_files.into_iter().enumerate() {
+        validate_unique_id(
+            "aerodynamic surface",
+            surface_index,
+            &surface_file.id,
+            runtime_surfaces.iter().map(RuntimeAeroSurface::id),
+        )?;
+
+        if surface_file.element_ids.is_empty() {
+            return Err(ModelLoadError::EmptySurfaceMembership {
+                surface_id: surface_file.id,
+                surface_index,
+            });
+        }
+
+        let mut element_indices = Vec::with_capacity(surface_file.element_ids.len());
+        for element_id in &surface_file.element_ids {
+            let element_index = model
+                .aero_elements()
+                .iter()
+                .position(|element| element.id() == *element_id)
+                .ok_or_else(|| ModelLoadError::UnresolvedSurfaceElementReference {
+                    surface_id: surface_file.id.clone(),
+                    surface_index,
+                    element_id: element_id.clone(),
+                })?;
+
+            if element_indices.contains(&element_index) {
+                return Err(ModelLoadError::DuplicateSurfaceElement {
+                    surface_id: surface_file.id.clone(),
+                    surface_index,
+                    element_id: element_id.clone(),
+                });
+            }
+
+            if let Some((_, first_surface_id, first_surface_index)) = assigned_elements
+                .iter()
+                .find(|(idx, _, _)| *idx == element_index)
+            {
+                return Err(ModelLoadError::CrossSurfaceDuplicateElement {
+                    element_id: element_id.as_str().into(),
+                    first_surface_id: first_surface_id.as_str().into(),
+                    first_surface_index: *first_surface_index,
+                    surface_id: surface_file.id.as_str().into(),
+                    surface_index,
+                });
+            }
+
+            element_indices.push(element_index);
+            assigned_elements.push((element_index, surface_file.id.clone(), surface_index));
+        }
+
+        let span_axis = vector(surface_file.span_axis_body);
+        let norm = span_axis.norm();
+        if !norm.is_finite() || norm <= 1.0e-12 {
+            return Err(ModelLoadError::InvalidSurfaceSpanAxis {
+                surface_id: surface_file.id,
+                surface_index,
+                reason: "expected finite vector with norm greater than 1e-12",
+            });
+        }
+        let span_axis_body = span_axis.normalize();
+
+        if !surface_file.span_m.is_finite() || surface_file.span_m <= 0.0 {
+            return Err(ModelLoadError::InvalidSurfaceSpan {
+                surface_id: surface_file.id,
+                surface_index,
+                value: surface_file.span_m,
+            });
+        }
+
+        if !surface_file.span_efficiency_factor.is_finite()
+            || surface_file.span_efficiency_factor <= 0.0
+        {
+            return Err(ModelLoadError::InvalidSurfaceSpanEfficiency {
+                surface_id: surface_file.id,
+                surface_index,
+                value: surface_file.span_efficiency_factor,
+            });
+        }
+
+        let area_m2: f64 = element_indices
+            .iter()
+            .map(|&idx| model.aero_elements()[idx].element().area_m2())
+            .sum();
+
+        if !area_m2.is_finite() {
+            return Err(ModelLoadError::NonFiniteSurfaceArea {
+                surface_id: surface_file.id,
+                surface_index,
+                value: area_m2,
+            });
+        }
+
+        if area_m2 <= 0.0 {
+            return Err(ModelLoadError::NonPositiveSurfaceArea {
+                surface_id: surface_file.id,
+                surface_index,
+                value: area_m2,
+            });
+        }
+
+        let aspect_ratio = surface_file.span_m * surface_file.span_m / area_m2;
+
+        if !aspect_ratio.is_finite() || aspect_ratio <= 0.0 {
+            return Err(ModelLoadError::InvalidSurfaceAspectRatio {
+                surface_id: surface_file.id,
+                surface_index,
+                value: aspect_ratio,
+            });
+        }
+
+        runtime_surfaces.push(RuntimeAeroSurface::new(
+            surface_file.id,
+            element_indices,
+            span_axis_body,
+            surface_file.span_m,
+            surface_file.span_efficiency_factor,
+            area_m2,
+            aspect_ratio,
+        ));
+    }
+
+    Ok(runtime_surfaces)
 }
 
 fn resolve_propulsion_v4(

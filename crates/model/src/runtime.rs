@@ -1,7 +1,8 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AircraftClassification, ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5, AircraftClassification,
+    ReferenceAircraftMetadata,
 };
 use sim_core::{
     AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
@@ -21,6 +22,7 @@ pub struct AircraftModel {
     aero_polars: Vec<RuntimePolar>,
     aero_polar_families: Vec<RuntimeReynoldsPolarFamily>,
     aero_elements: Vec<RuntimeAeroElement>,
+    aero_surfaces: Vec<RuntimeAeroSurface>,
     kinematic_viscosity_m2_s: Option<f64>,
     controls: ControlSystemConfig,
     control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
@@ -52,6 +54,7 @@ impl AircraftModel {
             aero_polars,
             aero_polar_families: Vec::new(),
             aero_elements,
+            aero_surfaces: Vec::new(),
             kinematic_viscosity_m2_s: None,
             controls,
             control_surface_bindings,
@@ -92,6 +95,11 @@ impl AircraftModel {
 
     pub(crate) fn with_propulsion(mut self, propulsion: Option<RuntimeElectricPropulsion>) -> Self {
         self.propulsion = propulsion;
+        self
+    }
+
+    pub(crate) fn with_aero_surfaces(mut self, aero_surfaces: Vec<RuntimeAeroSurface>) -> Self {
+        self.aero_surfaces = aero_surfaces;
         self
     }
 
@@ -140,7 +148,13 @@ impl AircraftModel {
         &self.aero_elements
     }
 
-    /// Explicit model-authoritative viscosity for schema-v3/v4 Reynolds aerodynamics.
+    /// Aerodynamic surface groupings. Empty for schema v0-v4 models.
+    #[must_use]
+    pub fn aero_surfaces(&self) -> &[RuntimeAeroSurface] {
+        &self.aero_surfaces
+    }
+
+    /// Explicit model-authoritative viscosity for schema-v3/v4/v5 Reynolds aerodynamics.
     #[must_use]
     pub const fn kinematic_viscosity_m2_s(&self) -> Option<f64> {
         self.kinematic_viscosity_m2_s
@@ -341,6 +355,93 @@ impl RuntimeAeroElement {
     }
 }
 
+/// Immutable resolved aerodynamic surface grouping existing aero elements.
+///
+/// Created during model loading (schema v5 only). Surfaces group existing
+/// aerodynamic elements for future finite-wing physics (M2.8B).
+///
+/// - `element_indices`: compact resolved handles into `AircraftModel::aero_elements()`
+/// - `span_axis_body`: normalized body-frame span direction
+/// - `span_m`: authored physical span (finite, > 0)
+/// - `span_efficiency_factor`: finite-wing span-efficiency parameter (finite, > 0, no upper cap)
+/// - `area_m2`: derived as sum of member element areas
+/// - `aspect_ratio`: derived as `span_m^2 / area_m2`
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeAeroSurface {
+    id: String,
+    element_indices: Vec<usize>,
+    span_axis_body: sim_math::Vec3,
+    span_m: f64,
+    span_efficiency_factor: f64,
+    area_m2: f64,
+    aspect_ratio: f64,
+}
+
+impl RuntimeAeroSurface {
+    pub(crate) fn new(
+        id: String,
+        element_indices: Vec<usize>,
+        span_axis_body: sim_math::Vec3,
+        span_m: f64,
+        span_efficiency_factor: f64,
+        area_m2: f64,
+        aspect_ratio: f64,
+    ) -> Self {
+        Self {
+            id,
+            element_indices,
+            span_axis_body,
+            span_m,
+            span_efficiency_factor,
+            area_m2,
+            aspect_ratio,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Compact resolved handles into `AircraftModel::aero_elements()`.
+    /// Preserves author-specified membership ordering.
+    #[must_use]
+    pub fn element_indices(&self) -> &[usize] {
+        &self.element_indices
+    }
+
+    /// Normalized body-frame direction describing the surface span.
+    #[must_use]
+    pub const fn span_axis_body(&self) -> &sim_math::Vec3 {
+        &self.span_axis_body
+    }
+
+    /// Authored physical surface span (m). Finite and strictly positive.
+    #[must_use]
+    pub const fn span_m(&self) -> f64 {
+        self.span_m
+    }
+
+    /// Finite-wing span-efficiency parameter. Finite and strictly positive.
+    /// No arbitrary upper cap is imposed.
+    #[must_use]
+    pub const fn span_efficiency_factor(&self) -> f64 {
+        self.span_efficiency_factor
+    }
+
+    /// Derived surface area: sum of member element areas. Finite and strictly positive.
+    #[must_use]
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
+    /// Derived aspect ratio: `span_m^2 / area_m2`. Finite and strictly positive.
+    #[must_use]
+    pub const fn aspect_ratio(&self) -> f64 {
+        self.aspect_ratio
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeElectricPropulsion {
     config: ElectricPropulsionConfig,
@@ -431,6 +532,10 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v4");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V4
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V5 => {
+                hasher.update(b"rcsim:aircraft-model:v5");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -455,7 +560,9 @@ impl AircraftModelFingerprint {
 
         if matches!(
             model.schema_version,
-            AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V3
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
         ) {
             update_f64(
                 &mut hasher,
@@ -493,7 +600,9 @@ impl AircraftModelFingerprint {
                 RuntimeAeroPolarBinding::Polar { polar_index } => {
                     if matches!(
                         model.schema_version,
-                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                     ) {
                         hasher.update(&[0]);
                     }
@@ -502,7 +611,9 @@ impl AircraftModelFingerprint {
                 RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
                     debug_assert!(matches!(
                         model.schema_version,
-                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                        AIRCRAFT_MODEL_SCHEMA_VERSION_V3
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                     ));
                     hasher.update(&[1]);
                     update_len(&mut hasher, family_index);
@@ -538,7 +649,10 @@ impl AircraftModelFingerprint {
                 let battery = config.battery();
                 update_f64(&mut hasher, battery.open_circuit_voltage_v());
                 update_f64(&mut hasher, battery.internal_resistance_ohm());
-                if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V4 {
+                if matches!(
+                    model.schema_version,
+                    AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                ) {
                     hasher.update(b"esc:series-resistance:v1");
                     update_f64(&mut hasher, config.esc().series_resistance_ohm());
                 }
@@ -560,7 +674,10 @@ impl AircraftModelFingerprint {
                 hasher.update(&[spin_tag]);
                 match runtime_propulsion.coefficient_source() {
                     PropellerCoefficientSource::FixedTable(table) => {
-                        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V4 {
+                        if matches!(
+                            model.schema_version,
+                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                        ) {
                             hasher
                                 .update(b"propeller-coefficients:fixed-table:j-linear-clamped:v1");
                         }
@@ -572,7 +689,10 @@ impl AircraftModelFingerprint {
                         }
                     }
                     PropellerCoefficientSource::ShaftSpeedMap(map) => {
-                        debug_assert_eq!(model.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V4);
+                        debug_assert!(matches!(
+                            model.schema_version,
+                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                        ));
                         hasher.update(
                             b"propeller-coefficients:shaft-speed-linear:j-linear-clamped:v1",
                         );
@@ -597,6 +717,7 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V2
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V3
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
@@ -608,6 +729,22 @@ impl AircraftModelFingerprint {
                 };
                 hasher.update(&[actuator_tag]);
                 update_f64(&mut hasher, binding.deflection_gain);
+            }
+        }
+
+        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V5 {
+            hasher.update(b"aero-surfaces:v1");
+            update_len(&mut hasher, model.aero_surfaces.len());
+            for surface in &model.aero_surfaces {
+                update_len(&mut hasher, surface.element_indices.len());
+                for &element_index in &surface.element_indices {
+                    update_len(&mut hasher, element_index);
+                }
+                update_vector(&mut hasher, surface.span_axis_body.as_slice());
+                update_f64(&mut hasher, surface.span_m);
+                update_f64(&mut hasher, surface.span_efficiency_factor);
+                update_f64(&mut hasher, surface.area_m2);
+                update_f64(&mut hasher, surface.aspect_ratio);
             }
         }
 
