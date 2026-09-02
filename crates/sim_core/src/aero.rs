@@ -303,6 +303,78 @@ pub fn evaluate_aero_element(
     .0
 }
 
+/// Section-plane kinematics for one quasi-2D element at a given RK4 stage state.
+///
+/// This primitive computes the air-relative velocity decomposition, angle of attack,
+/// sideslip, and dynamic pressure without sampling any polar or assembling forces.
+/// It is the reusable building block for finite-wing induced-angle solvers that need
+/// to evaluate section kinematics repeatedly with different effective alpha values
+/// while keeping force directions tied to the actual local flow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionKinematics {
+    pub air_relative_velocity_element_mps: Vec3,
+    pub section_airspeed_mps: f64,
+    pub alpha_rad: f64,
+    pub beta_rad: f64,
+    pub dynamic_pressure_pa: f64,
+}
+
+/// Computes section-plane kinematics for one element without polar sampling or force assembly.
+///
+/// The velocity transformation chain is identical to [`evaluate_aero_element`]:
+/// world-relative wind → body-frame at CG → add rotational contribution → element frame.
+/// The section airspeed uses only the chordwise (u) and normal (w) components (quasi-2D).
+/// Below [`MIN_SECTION_AIRSPEED_MPS`], alpha and dynamic pressure are zero.
+#[must_use]
+pub fn compute_section_kinematics(
+    state: &RigidBodyState,
+    element: &AeroElement,
+    environment: &AeroEnvironment,
+) -> SectionKinematics {
+    let air_relative_velocity_world_mps =
+        state.linear_velocity_world_mps - environment.wind_velocity_world_mps;
+    let air_relative_velocity_body_at_cg_mps = world_to_body(
+        &state.orientation_world_from_body,
+        &air_relative_velocity_world_mps,
+    );
+    let rotational_velocity_body_mps = state
+        .angular_velocity_body_radps
+        .cross(&element.position_body_m);
+    let air_relative_velocity_body_at_element_mps =
+        air_relative_velocity_body_at_cg_mps + rotational_velocity_body_mps;
+    let air_relative_velocity_element_mps = element
+        .orientation_body_from_element
+        .inverse_transform_vector(&air_relative_velocity_body_at_element_mps);
+
+    let u_mps = air_relative_velocity_element_mps.x;
+    let spanwise_mps = air_relative_velocity_element_mps.y;
+    let w_mps = air_relative_velocity_element_mps.z;
+    let section_speed_squared_mps2 = u_mps.mul_add(u_mps, w_mps * w_mps);
+    let section_airspeed_mps = section_speed_squared_mps2.sqrt();
+    let beta_rad = spanwise_mps.atan2(section_airspeed_mps);
+
+    if section_airspeed_mps < MIN_SECTION_AIRSPEED_MPS {
+        return SectionKinematics {
+            air_relative_velocity_element_mps,
+            section_airspeed_mps,
+            alpha_rad: 0.0,
+            beta_rad,
+            dynamic_pressure_pa: 0.0,
+        };
+    }
+
+    let alpha_rad = w_mps.atan2(u_mps);
+    let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3 * section_speed_squared_mps2;
+
+    SectionKinematics {
+        air_relative_velocity_element_mps,
+        section_airspeed_mps,
+        alpha_rad,
+        beta_rad,
+        dynamic_pressure_pa,
+    }
+}
+
 /// Evaluates one Reynolds-aware quasi-2D element from its local RK4-stage velocity.
 #[must_use]
 pub fn evaluate_reynolds_aero_element<'a>(

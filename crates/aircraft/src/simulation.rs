@@ -1,10 +1,13 @@
 use crate::AircraftSimulationConfig;
-use model::{AircraftModel, ControlActuator, RuntimeAeroElement, RuntimeAeroPolarBinding};
+use model::{
+    AircraftModel, ControlActuator, RuntimeAeroElement, RuntimeAeroPolarBinding, RuntimeAeroSurface,
+};
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
-    PilotInput, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
-    Rk4Integrator, StateError, advance_controls, evaluate_aero_element, evaluate_derivative,
-    evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
+    PilotInput, PolarCoefficients, PropulsionOutput, ReynoldsAeroElementOutput,
+    RigidBodyDerivative, RigidBodyState, Rk4Integrator, SectionKinematics, StateError,
+    advance_controls, calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
+    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -366,6 +369,12 @@ pub fn evaluate_aircraft_instantaneous(
 }
 
 /// Aggregates every S4 element wrench, preserving the model's declaration order.
+///
+/// When the model has finite-wing surfaces (schema v5), each surface is solved
+/// independently for a common induced angle of attack using deterministic bracketed
+/// bisection. Members assigned to surfaces receive finite-wing corrections (effective
+/// alpha for polar sampling, induced drag added to profile drag). Unassigned elements
+/// and models with no surfaces follow the exact legacy quasi-2D path.
 #[must_use]
 pub fn evaluate_aerodynamic_wrench(
     stage_state: &RigidBodyState,
@@ -374,6 +383,64 @@ pub fn evaluate_aerodynamic_wrench(
     environment: &sim_core::AeroEnvironment,
 ) -> BodyWrench {
     assert_eq!(effective_aero_elements.len(), model.aero_elements().len());
+    let surfaces = model.aero_surfaces();
+
+    if surfaces.is_empty() {
+        return evaluate_legacy_wrench(stage_state, effective_aero_elements, model, environment);
+    }
+
+    let mut assigned = vec![false; effective_aero_elements.len()];
+    for surface in surfaces {
+        for &idx in surface.element_indices() {
+            assigned[idx] = true;
+        }
+    }
+
+    let mut total_wrench = BodyWrench::zero();
+
+    for surface in surfaces {
+        let wrench = evaluate_surface_wrench(
+            surface,
+            stage_state,
+            effective_aero_elements,
+            model,
+            environment,
+        );
+        total_wrench.force_body_n += wrench.force_body_n;
+        total_wrench.moment_body_nm += wrench.moment_body_nm;
+    }
+
+    for (idx, (effective_element, runtime_element)) in effective_aero_elements
+        .iter()
+        .zip(model.aero_elements())
+        .enumerate()
+    {
+        if assigned[idx] {
+            continue;
+        }
+        let output = evaluate_aircraft_aero_element(
+            stage_state,
+            effective_element,
+            runtime_element,
+            model,
+            environment,
+        );
+        let output = output.aero();
+        total_wrench.force_body_n += output.wrench_body.force_body_n;
+        total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+    }
+
+    total_wrench
+}
+
+/// Legacy path: every element evaluated independently through the quasi-2D polar path.
+/// Used when the model has no finite-wing surfaces (schema v0-v4, or v5 with surfaces=[]).
+fn evaluate_legacy_wrench(
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+) -> BodyWrench {
     let mut total_wrench = BodyWrench::zero();
     for (effective_element, runtime_element) in
         effective_aero_elements.iter().zip(model.aero_elements())
@@ -390,6 +457,259 @@ pub fn evaluate_aerodynamic_wrench(
         total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
     }
     total_wrench
+}
+
+/// Number of deterministic bisection iterations for the induced-angle solver.
+const INDUCED_ALPHA_BISECTION_ITERATIONS: usize = 40;
+
+/// Samples the CL coefficient for one surface member at a given alpha, without allocation.
+fn sample_member_cl(
+    runtime_element: &RuntimeAeroElement,
+    model: &AircraftModel,
+    section_airspeed: f64,
+    chord: f64,
+    alpha_rad: f64,
+) -> f64 {
+    match runtime_element.polar_binding() {
+        RuntimeAeroPolarBinding::Polar { polar_index } => {
+            model.aero_polars()[polar_index]
+                .table()
+                .sample_clamped(alpha_rad)
+                .cl
+        }
+        RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+            let viscosity = model
+                .kinematic_viscosity_m2_s()
+                .expect("Reynolds-family bindings require schema v3+ with explicit viscosity");
+            let re = calculate_reynolds_number(section_airspeed, chord, viscosity).unwrap_or(0.0);
+            model.aero_polar_families()[family_index]
+                .family()
+                .sample(re, alpha_rad)
+                .coefficients
+                .cl
+        }
+    }
+}
+
+/// Finds the maximum absolute CL reachable by any sample in a member's polar binding.
+fn max_abs_cl_member(runtime_element: &RuntimeAeroElement, model: &AircraftModel) -> f64 {
+    match runtime_element.polar_binding() {
+        RuntimeAeroPolarBinding::Polar { polar_index } => model.aero_polars()[polar_index]
+            .table()
+            .samples()
+            .iter()
+            .map(|s| s.cl.abs())
+            .fold(0.0_f64, f64::max),
+        RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+            let family = model.aero_polar_families()[family_index].family();
+            family
+                .nodes()
+                .iter()
+                .flat_map(|node| node.table().samples().iter().map(|s| s.cl.abs()))
+                .fold(0.0_f64, f64::max)
+        }
+    }
+}
+
+/// Solves for the common induced angle of attack of one finite-wing surface using
+/// deterministic bracketed bisection.
+///
+/// The bracket is derived from the maximum absolute CL reachable by any member polar:
+/// `alpha_bound = CL_abs_max / (PI * AR * e)`.
+///
+/// Returns `(alpha_i, CL_surface, CDi_surface)`.
+fn solve_surface_induced_alpha(
+    surface: &RuntimeAeroSurface,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+) -> (f64, f64, f64) {
+    let ar = surface.aspect_ratio();
+    let e = surface.span_efficiency_factor();
+    let pi_ar_e = std::f64::consts::PI * ar * e;
+
+    let member_indices = surface.element_indices();
+
+    let kinematics: Vec<SectionKinematics> = member_indices
+        .iter()
+        .map(|&idx| {
+            compute_section_kinematics(stage_state, &effective_aero_elements[idx], environment)
+        })
+        .collect();
+
+    let cl_abs_max = member_indices
+        .iter()
+        .map(|&idx| max_abs_cl_member(&model.aero_elements()[idx], model))
+        .fold(0.0_f64, f64::max);
+
+    if cl_abs_max == 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let alpha_bound = cl_abs_max / pi_ar_e;
+    let mut lo = -alpha_bound;
+    let mut hi = alpha_bound;
+
+    for _ in 0..INDUCED_ALPHA_BISECTION_ITERATIONS {
+        let mid = 0.5 * (lo + hi);
+        let mut weighted_cl_sum = 0.0;
+        let mut weight_sum = 0.0;
+
+        for (i, &member_idx) in member_indices.iter().enumerate() {
+            let kin = &kinematics[i];
+            if kin.dynamic_pressure_pa == 0.0 {
+                continue;
+            }
+            let w = kin.dynamic_pressure_pa * effective_aero_elements[member_idx].area_m2();
+            let alpha_eff = kin.alpha_rad - mid;
+            let cl = sample_member_cl(
+                &model.aero_elements()[member_idx],
+                model,
+                kin.section_airspeed_mps,
+                effective_aero_elements[member_idx].chord_m(),
+                alpha_eff,
+            );
+            weighted_cl_sum += w * cl;
+            weight_sum += w;
+        }
+
+        let cl_surface = if weight_sum > 0.0 {
+            weighted_cl_sum / weight_sum
+        } else {
+            0.0
+        };
+        let g = mid - cl_surface / pi_ar_e;
+
+        if g == 0.0 {
+            let cdi = cl_surface * cl_surface / pi_ar_e;
+            return (mid, cl_surface, cdi);
+        } else if g > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    let alpha_i = 0.5 * (lo + hi);
+    let mut weighted_cl_sum = 0.0;
+    let mut weight_sum = 0.0;
+    for (i, &member_idx) in member_indices.iter().enumerate() {
+        let kin = &kinematics[i];
+        if kin.dynamic_pressure_pa == 0.0 {
+            continue;
+        }
+        let w = kin.dynamic_pressure_pa * effective_aero_elements[member_idx].area_m2();
+        let alpha_eff = kin.alpha_rad - alpha_i;
+        let cl = sample_member_cl(
+            &model.aero_elements()[member_idx],
+            model,
+            kin.section_airspeed_mps,
+            effective_aero_elements[member_idx].chord_m(),
+            alpha_eff,
+        );
+        weighted_cl_sum += w * cl;
+        weight_sum += w;
+    }
+    let cl_surface = if weight_sum > 0.0 {
+        weighted_cl_sum / weight_sum
+    } else {
+        0.0
+    };
+    let cdi = cl_surface * cl_surface / pi_ar_e;
+    (alpha_i, cl_surface, cdi)
+}
+
+/// Evaluates the total wrench for one finite-wing surface, including induced drag.
+///
+/// For each member:
+/// - Polar is sampled at `alpha_geom - alpha_i` (effective alpha)
+/// - `CDi_surface` is added to the profile drag coefficient
+/// - Force directions come from the ACTUAL local section flow (not rotated)
+fn evaluate_surface_wrench(
+    surface: &RuntimeAeroSurface,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+) -> BodyWrench {
+    let (alpha_i, _cl_surface, cdi_surface) = solve_surface_induced_alpha(
+        surface,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+    );
+
+    let mut wrench = BodyWrench::zero();
+
+    for &member_idx in surface.element_indices() {
+        let effective_element = &effective_aero_elements[member_idx];
+        let runtime_element = &model.aero_elements()[member_idx];
+
+        let kin = compute_section_kinematics(stage_state, effective_element, environment);
+        if kin.dynamic_pressure_pa == 0.0 {
+            continue;
+        }
+
+        let alpha_eff = kin.alpha_rad - alpha_i;
+        let coeffs = match runtime_element.polar_binding() {
+            RuntimeAeroPolarBinding::Polar { polar_index } => model.aero_polars()[polar_index]
+                .table()
+                .sample_clamped(alpha_eff),
+            RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+                let viscosity = model.kinematic_viscosity_m2_s().unwrap();
+                let re = calculate_reynolds_number(
+                    kin.section_airspeed_mps,
+                    effective_element.chord_m(),
+                    viscosity,
+                )
+                .unwrap_or(0.0);
+                model.aero_polar_families()[family_index]
+                    .family()
+                    .sample(re, alpha_eff)
+                    .coefficients
+            }
+        };
+
+        let cd_total = coeffs.cd + cdi_surface;
+        let adjusted = PolarCoefficients {
+            cl: coeffs.cl,
+            cd: cd_total,
+            cm: coeffs.cm,
+        };
+
+        let velocity_hat_section = if kin.section_airspeed_mps > 0.0 {
+            Vec3::new(
+                kin.air_relative_velocity_element_mps.x / kin.section_airspeed_mps,
+                0.0,
+                kin.air_relative_velocity_element_mps.z / kin.section_airspeed_mps,
+            )
+        } else {
+            Vec3::zeros()
+        };
+        let drag_direction = -velocity_hat_section;
+        let lift_direction = Vec3::y().cross(&velocity_hat_section);
+
+        let q = kin.dynamic_pressure_pa;
+        let s = effective_element.area_m2();
+        let lift_n = q * s * adjusted.cl;
+        let drag_n = q * s * adjusted.cd;
+        let force_element = lift_direction * lift_n + drag_direction * drag_n;
+        let force_body = effective_element
+            .orientation_body_from_element()
+            .transform_vector(&force_element);
+
+        let moment_element_nm = q * s * effective_element.chord_m() * adjusted.cm;
+        let intrinsic_moment_body = effective_element
+            .orientation_body_from_element()
+            .transform_vector(&Vec3::new(0.0, moment_element_nm, 0.0));
+
+        wrench.add_force_at_body_point(force_body, *effective_element.position_body_m());
+        wrench.add_moment_body(intrinsic_moment_body);
+    }
+
+    wrench
 }
 
 /// Evaluates one resolved model element and exposes Reynolds diagnostics when applicable.
