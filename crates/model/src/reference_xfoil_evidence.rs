@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use crate::reference_aerodynamics::validate_stable_id;
-use crate::{ConvergenceStatus, XfoilPolarImport};
+use crate::{AerodynamicEvidenceClass, ConvergenceStatus, XfoilPolarImport};
 
 /// A deterministic off-runtime evidence dataset bridging an XFOIL polar
 /// import to the `reference_aircraft_aerodynamic_evidence_v0` schema.
@@ -42,9 +42,9 @@ impl XfoilEvidenceDataset {
         &self.method_id
     }
 
-    /// Evidence class — always `generated_solver`.
-    pub const fn evidence_class(&self) -> ConvergenceStatus {
-        self.convergence_status
+    /// Evidence class — always `GeneratedSolver`.
+    pub const fn evidence_class(&self) -> AerodynamicEvidenceClass {
+        AerodynamicEvidenceClass::GeneratedSolver
     }
 
     /// Explicit convergence status supplied by the caller.
@@ -212,6 +212,10 @@ impl XfoilEvidenceDatasetBuilder {
 
     /// Validate all fields and build the evidence dataset.
     pub fn build(self) -> Result<XfoilEvidenceDataset, XfoilEvidenceBridgeError> {
+        if self.convergence_status == ConvergenceStatus::NotApplicablePublished {
+            return Err(XfoilEvidenceBridgeError::InvalidGeneratedSolverConvergenceStatus);
+        }
+
         validate_stable_id("dataset", &self.dataset_id)
             .map_err(|_| XfoilEvidenceBridgeError::InvalidDatasetId(self.dataset_id.clone()))?;
         validate_stable_id("method", &self.method_id)
@@ -260,6 +264,9 @@ pub enum XfoilEvidenceBridgeError {
 
     #[error("source ID list must not be empty")]
     EmptySourceIds,
+
+    #[error("generated-solver dataset does not accept NotApplicablePublished convergence status")]
+    InvalidGeneratedSolverConvergenceStatus,
 }
 
 #[cfg(test)]
@@ -311,8 +318,56 @@ mod tests {
     #[test]
     fn generated_solver_class_fixed() {
         let dataset = valid_builder().build().unwrap();
+        assert_eq!(
+            dataset.evidence_class(),
+            AerodynamicEvidenceClass::GeneratedSolver
+        );
         let json = dataset.to_json_value();
         assert_eq!(json["evidence_class"], "generated_solver");
+    }
+
+    #[test]
+    fn not_applicable_published_rejected_by_builder() {
+        let builder = XfoilEvidenceDatasetBuilder::new(
+            import_with_metadata(),
+            "ds-nap",
+            "m-01",
+            ConvergenceStatus::NotApplicablePublished,
+            vec!["synthetic-src".to_owned()],
+        );
+        let err = builder.build().unwrap_err();
+        assert!(matches!(
+            err,
+            XfoilEvidenceBridgeError::InvalidGeneratedSolverConvergenceStatus
+        ));
+    }
+
+    #[test]
+    fn all_accepted_statuses_serialize_generated_solver() {
+        for status in [
+            ConvergenceStatus::Converged,
+            ConvergenceStatus::Unresolved,
+            ConvergenceStatus::Failed,
+        ] {
+            let builder = XfoilEvidenceDatasetBuilder::new(
+                import_with_metadata(),
+                "ds-status",
+                "m-01",
+                status,
+                vec!["synthetic-src".to_owned()],
+            );
+            let dataset = builder.build().unwrap();
+            assert_eq!(
+                dataset.evidence_class(),
+                AerodynamicEvidenceClass::GeneratedSolver
+            );
+            let json = dataset.to_json_value();
+            assert_eq!(json["evidence_class"], "generated_solver");
+            assert_ne!(
+                json["method"]["convergence_status"],
+                "not_applicable_published"
+            );
+        }
     }
 
     #[test]
