@@ -230,3 +230,39 @@ fixture-level invariant the M2.5 and M2.6A tests assert; the constraint is
 re-asserted in M2.6B's
 `synthetic_fixture_remains_synthetic_test_and_is_not_promoted` test to make
 the invariant explicit at the M2.6B boundary.
+
+## M2.6B.1 report-contract hardening
+
+M2.6B.1 hardens the existing application/report boundary without changing
+flight physics, trim mathematics, solver configuration, or the report schema
+version. It is not M2.6C domain qualification.
+
+The process exit-code contract is covered by direct subprocess integration
+tests against the compiled `rcsim-app` binary:
+
+- exit `0`: validation completed and every trim-sweep point is `Success`;
+- exit `1`: CLI, input, model, filesystem, or other operational failure;
+- exit `2`: validation completed with at least one non-`Success` point.
+
+When validation completes with exit `2`, the reports are still emitted before
+the process exits, provided report construction and writing succeeded. The only
+canonical artifacts are exactly:
+
+- `trim_sweep.json`
+- `trim_sweep.md`
+
+Report decoding fails closed unless `schema_version` is exactly
+`TRIM_SWEEP_REPORT_SCHEMA_VERSION` (currently `1`). Malformed JSON, unknown
+fields, invalid enum values, and numerically unsupported schema versions are
+rejected.
+
+Identical model bytes, CLI inputs, and deterministic validation environment
+produce byte-identical JSON and Markdown artifacts. Subprocess tests compare
+the raw bytes produced in separate output directories; output paths and other
+run-specific identifiers are not serialized.
+
+Both report payloads are fully rendered and the generated JSON is decoded
+through the strict current-schema path before either canonical file is written.
+The two independent filesystem writes are not pair-atomic: an I/O failure on
+the second write can leave the first file present. Cross-platform atomic
+replacement of two files is outside the M2.6B.1 scope.

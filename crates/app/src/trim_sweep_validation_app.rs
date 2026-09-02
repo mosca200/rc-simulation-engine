@@ -10,7 +10,11 @@ use model::{AircraftModel, ModelLoadError, load_aircraft_model};
 use serde::{Deserialize, Serialize};
 use sim_core::{AeroEnvironment, DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ};
 use sim_math::Vec3;
-use std::{fmt::Write as _, fs, io, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    fs, io,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 pub const TRIM_SWEEP_REPORT_SCHEMA_VERSION: u32 = 1;
@@ -55,7 +59,7 @@ impl TrimSweepValidationOptions {
     }
 
     #[must_use]
-    pub fn model_path(&self) -> &PathBuf {
+    pub fn model_path(&self) -> &Path {
         &self.model_path
     }
     #[must_use]
@@ -63,7 +67,7 @@ impl TrimSweepValidationOptions {
         &self.speeds_mps
     }
     #[must_use]
-    pub fn output_dir(&self) -> &PathBuf {
+    pub fn output_dir(&self) -> &Path {
         &self.output_dir
     }
     #[must_use]
@@ -296,6 +300,12 @@ pub enum TrimSweepValidationError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to serialize trim-sweep report: {0}")]
+    SerializeReport(#[source] serde_json::Error),
+    #[error("failed to deserialize trim-sweep report: {0}")]
+    DeserializeReport(#[source] serde_json::Error),
+    #[error("unsupported trim-sweep report schema version {found}; expected {expected}")]
+    UnsupportedReportSchemaVersion { found: u32, expected: u32 },
     /// Dedicated non-PASS outcome. Reports are written before this variant is constructed.
     #[error(
         "trim-sweep validation completed with FAIL: {non_success_points} of {total_points} point(s) are not Success"
@@ -311,7 +321,7 @@ pub fn run_trim_sweep_validation(
 ) -> Result<(), TrimSweepValidationError> {
     let model = load_aircraft_model(options.model_path()).map_err(|source| {
         TrimSweepValidationError::ModelLoad {
-            path: options.model_path.clone(),
+            path: options.model_path().to_path_buf(),
             source,
         }
     })?;
@@ -691,17 +701,19 @@ fn fingerprint_hex(model: &AircraftModel) -> String {
 
 impl TrimSweepReport {
     fn to_json_pretty(&self) -> Result<String, TrimSweepValidationError> {
-        serde_json::to_string_pretty(self).map_err(|error| TrimSweepValidationError::Write {
-            path: PathBuf::from("<json-serialization>"),
-            source: io::Error::new(io::ErrorKind::InvalidData, error),
-        })
+        serde_json::to_string_pretty(self).map_err(TrimSweepValidationError::SerializeReport)
     }
 
     fn from_json(json: &str) -> Result<Self, TrimSweepValidationError> {
-        serde_json::from_str(json).map_err(|error| TrimSweepValidationError::Write {
-            path: PathBuf::from("<json-deserialization>"),
-            source: io::Error::new(io::ErrorKind::InvalidData, error),
-        })
+        let report: Self =
+            serde_json::from_str(json).map_err(TrimSweepValidationError::DeserializeReport)?;
+        if report.schema_version != TRIM_SWEEP_REPORT_SCHEMA_VERSION {
+            return Err(TrimSweepValidationError::UnsupportedReportSchemaVersion {
+                found: report.schema_version,
+                expected: TRIM_SWEEP_REPORT_SCHEMA_VERSION,
+            });
+        }
+        Ok(report)
     }
 
     fn to_markdown(&self) -> String {
@@ -710,24 +722,25 @@ impl TrimSweepReport {
 }
 
 fn write_reports(
-    output_dir: &PathBuf,
+    output_dir: &Path,
     report: &TrimSweepReport,
 ) -> Result<(), TrimSweepValidationError> {
+    let json = report.to_json_pretty()?;
+    TrimSweepReport::from_json(&json)?;
+    let markdown = report.to_markdown();
+
     fs::create_dir_all(output_dir).map_err(|source| {
         TrimSweepValidationError::CreateOutputDirectory {
-            path: output_dir.clone(),
+            path: output_dir.to_path_buf(),
             source,
         }
     })?;
     let json_path = output_dir.join(TRIM_SWEEP_JSON_NAME);
     let markdown_path = output_dir.join(TRIM_SWEEP_MARKDOWN_NAME);
-    let json = report.to_json_pretty()?;
-    TrimSweepReport::from_json(&json)?;
     fs::write(&json_path, json).map_err(|source| TrimSweepValidationError::Write {
         path: json_path,
         source,
     })?;
-    let markdown = report.to_markdown();
     fs::write(&markdown_path, markdown).map_err(|source| TrimSweepValidationError::Write {
         path: markdown_path,
         source,
@@ -1082,6 +1095,11 @@ mod tests {
         let sweep = solve_longitudinal_trim_sweep(&model, &config, &request).unwrap();
         let report = build_report(&model, options, &sweep, &config, environment);
         (report, config, environment)
+    }
+
+    fn synthetic_report_json() -> String {
+        let options = base_template(vec![15.0, 18.0, 21.0]);
+        run_synthetic_sweep(&options).0.to_json_pretty().unwrap()
     }
 
     // ---- 1. Repeated --speed-mps preserves order exactly ----
@@ -1558,21 +1576,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // ---- JSON round-trip is strict and versioned ----
+    // ---- JSON decoding is strict and versioned ----
 
     #[test]
-    fn json_roundtrip_is_strict_and_versioned() {
+    fn current_report_schema_version_is_accepted() {
+        let json = synthetic_report_json();
+        let report = TrimSweepReport::from_json(&json).unwrap();
+        assert_eq!(report.schema_version, TRIM_SWEEP_REPORT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn unsupported_report_schema_versions_fail_closed() {
+        let json = synthetic_report_json();
+        for found in [0, 2, 999] {
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["schema_version"] = serde_json::json!(found);
+            match TrimSweepReport::from_json(&value.to_string()) {
+                Err(TrimSweepValidationError::UnsupportedReportSchemaVersion {
+                    found: actual,
+                    expected,
+                }) => {
+                    assert_eq!(actual, found);
+                    assert_eq!(expected, TRIM_SWEEP_REPORT_SCHEMA_VERSION);
+                }
+                other => panic!("expected unsupported schema version {found}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_report_json_is_rejected_as_a_decode_error() {
+        match TrimSweepReport::from_json("{") {
+            Err(TrimSweepValidationError::DeserializeReport(_)) => {}
+            other => panic!("expected report decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_report_root_field_is_rejected() {
+        let json = synthetic_report_json();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["unknown_field"] = serde_json::json!(true);
+        match TrimSweepReport::from_json(&value.to_string()) {
+            Err(TrimSweepValidationError::DeserializeReport(_)) => {}
+            other => panic!("expected unknown-field decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_report_outcome_enum_is_rejected() {
+        let json = synthetic_report_json();
+        let mut bad_outcome: serde_json::Value = serde_json::from_str(&json).unwrap();
+        bad_outcome["points"][0]["outcome"] = serde_json::json!("bogus");
+        match TrimSweepReport::from_json(&bad_outcome.to_string()) {
+            Err(TrimSweepValidationError::DeserializeReport(_)) => {}
+            other => panic!("expected invalid-outcome decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_report_round_trip_remains_exact() {
         let options = base_template(vec![15.0, 18.0, 21.0]);
-        let (report, _, _) = run_synthetic_sweep(&options);
+        let report = run_synthetic_sweep(&options).0;
         let json = report.to_json_pretty().unwrap();
         let decoded = TrimSweepReport::from_json(&json).unwrap();
         assert_eq!(decoded, report);
-        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["unknown_field"] = serde_json::json!(true);
-        assert!(TrimSweepReport::from_json(&value.to_string()).is_err());
-        let mut bad_outcome: serde_json::Value = serde_json::from_str(&json).unwrap();
-        bad_outcome["points"][0]["outcome"] = serde_json::json!("bogus");
-        assert!(TrimSweepReport::from_json(&bad_outcome.to_string()).is_err());
     }
 
     // ---- source file forbids runtime nondeterminism APIs ----
