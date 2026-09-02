@@ -7,6 +7,7 @@ mod render_app;
 mod render_snapshot;
 mod replay_app;
 mod telemetry_app;
+mod trim_sweep_validation_app;
 mod validation_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
@@ -74,6 +75,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 run_first_slice_validation(FirstSliceOptions::parse(arguments)?)?;
                 Ok(())
             }
+            Some("trim-sweep") => {
+                let options =
+                    trim_sweep_validation_app::TrimSweepValidationOptions::parse(arguments)?;
+                match trim_sweep_validation_app::run_trim_sweep_validation(options) {
+                    Ok(()) => Ok(()),
+                    Err(trim_sweep_validation_app::TrimSweepValidationError::ValidationFailure {
+                        total_points,
+                        non_success_points,
+                    }) => {
+                        eprintln!(
+                            "trim sweep validation completed with FAIL: {non_success_points} of {total_points} point(s) are not Success; see report.md"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => Err(Box::new(error) as Box<dyn Error>),
+                }
+            }
             Some(validation_target) => {
                 run_validation(ValidationOptions::parse(
                     std::iter::once(validation_target.to_owned()).chain(arguments),
@@ -81,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(())
             }
             None => Err(
-                "missing validation target; expected `acro-electric-01` or `first-slice`".into(),
+                "missing validation target; expected `acro-electric-01`, `first-slice`, or `trim-sweep`".into(),
             ),
         },
         Some(command) if command == "aircraft" => run_aircraft(AircraftOptions::parse(arguments)?),
@@ -349,6 +367,9 @@ fn print_usage() {
     println!("  rcsim-app telemetry analyze --input PATH");
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
     println!("  rcsim-app validate first-slice --output-dir PATH");
+    println!(
+        "  rcsim-app validate trim-sweep --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --output-dir PATH"
+    );
 }
 
 fn parse_value<T>(flag: &str, value: Option<String>) -> Result<T, String>
