@@ -7,6 +7,7 @@ mod reference_aerodynamics;
 mod reference_mass_properties;
 mod reference_propulsion;
 mod reference_survey;
+mod reference_xfoil;
 mod runtime;
 pub mod v0;
 pub mod v1;
@@ -42,6 +43,10 @@ pub use reference_survey::{
     BilateralMeasurementSummary, CrossVariantComparison, CrossVariantStatus, DerivedSurveyValue,
     MeasurementSummary, PhysicalSurvey, PhysicalSurveyLoader, ReferenceSurveyError,
     SurveyClassification, SurveyEvaluation, load_reference_survey,
+};
+pub use reference_xfoil::{
+    InvalidMetadataReason, MetadataBuilder, XfoilPolarImport, XfoilPolarImportError,
+    XfoilPolarSample, XfoilSolverMetadata, parse_xfoil_polar,
 };
 pub use runtime::{
     AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationMetadata,
