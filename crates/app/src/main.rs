@@ -7,6 +7,7 @@ mod render_app;
 mod render_snapshot;
 mod replay_app;
 mod telemetry_app;
+mod trim_characterization_app;
 mod trim_sweep_validation_app;
 mod validation_app;
 
@@ -70,6 +71,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_render(RenderOptions::parse(arguments)?)?;
             Ok(())
         }
+        Some(command) if command == "analyze" => match arguments.next().as_deref() {
+            Some("trim-characterization") => {
+                let options =
+                    trim_characterization_app::TrimCharacterizationOptions::parse(arguments)?;
+                trim_characterization_app::run_trim_characterization(options)?;
+                Ok(())
+            }
+            Some(analysis_target) => Err(format!("unknown analysis target: {analysis_target}").into()),
+            None => Err("missing analysis target; expected `trim-characterization`".into()),
+        },
         Some(command) if command == "validate" => match arguments.next().as_deref() {
             Some("first-slice") => {
                 run_first_slice_validation(FirstSliceOptions::parse(arguments)?)?;
@@ -367,6 +378,9 @@ fn print_usage() {
     println!("  rcsim-app telemetry analyze --input PATH");
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
     println!("  rcsim-app validate first-slice --output-dir PATH");
+    println!(
+        "  rcsim-app analyze trim-characterization --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --alpha-step-rad A --elevator-step E --output-dir PATH"
+    );
     println!(
         "  rcsim-app validate trim-sweep --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --output-dir PATH"
     );
