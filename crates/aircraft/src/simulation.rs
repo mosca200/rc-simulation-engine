@@ -5,9 +5,10 @@ use model::{
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
     PilotInput, PolarCoefficients, PropulsionOutput, ReynoldsAeroElementOutput,
-    RigidBodyDerivative, RigidBodyState, Rk4Integrator, SectionKinematics, StateError,
-    advance_controls, calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
-    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
+    RigidBodyDerivative, RigidBodyState, Rk4Integrator, StateError, advance_controls,
+    assemble_aero_element_wrench, calculate_reynolds_number, compute_section_kinematics,
+    evaluate_aero_element, evaluate_derivative, evaluate_electric_propulsion_with_source,
+    evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -389,13 +390,6 @@ pub fn evaluate_aerodynamic_wrench(
         return evaluate_legacy_wrench(stage_state, effective_aero_elements, model, environment);
     }
 
-    let mut assigned = vec![false; effective_aero_elements.len()];
-    for surface in surfaces {
-        for &idx in surface.element_indices() {
-            assigned[idx] = true;
-        }
-    }
-
     let mut total_wrench = BodyWrench::zero();
 
     for surface in surfaces {
@@ -415,7 +409,7 @@ pub fn evaluate_aerodynamic_wrench(
         .zip(model.aero_elements())
         .enumerate()
     {
-        if assigned[idx] {
+        if is_element_assigned_to_any_surface(surfaces, idx) {
             continue;
         }
         let output = evaluate_aircraft_aero_element(
@@ -431,6 +425,13 @@ pub fn evaluate_aerodynamic_wrench(
     }
 
     total_wrench
+}
+
+/// Allocation-free check: is element at `index` assigned to any surface?
+fn is_element_assigned_to_any_surface(surfaces: &[RuntimeAeroSurface], index: usize) -> bool {
+    surfaces
+        .iter()
+        .any(|s| s.element_indices().contains(&index))
 }
 
 /// Legacy path: every element evaluated independently through the quasi-2D polar path.
@@ -531,13 +532,6 @@ fn solve_surface_induced_alpha(
 
     let member_indices = surface.element_indices();
 
-    let kinematics: Vec<SectionKinematics> = member_indices
-        .iter()
-        .map(|&idx| {
-            compute_section_kinematics(stage_state, &effective_aero_elements[idx], environment)
-        })
-        .collect();
-
     let cl_abs_max = member_indices
         .iter()
         .map(|&idx| max_abs_cl_member(&model.aero_elements()[idx], model))
@@ -556,8 +550,12 @@ fn solve_surface_induced_alpha(
         let mut weighted_cl_sum = 0.0;
         let mut weight_sum = 0.0;
 
-        for (i, &member_idx) in member_indices.iter().enumerate() {
-            let kin = &kinematics[i];
+        for &member_idx in member_indices {
+            let kin = compute_section_kinematics(
+                stage_state,
+                &effective_aero_elements[member_idx],
+                environment,
+            );
             if kin.dynamic_pressure_pa == 0.0 {
                 continue;
             }
@@ -594,8 +592,12 @@ fn solve_surface_induced_alpha(
     let alpha_i = 0.5 * (lo + hi);
     let mut weighted_cl_sum = 0.0;
     let mut weight_sum = 0.0;
-    for (i, &member_idx) in member_indices.iter().enumerate() {
-        let kin = &kinematics[i];
+    for &member_idx in member_indices {
+        let kin = compute_section_kinematics(
+            stage_state,
+            &effective_aero_elements[member_idx],
+            environment,
+        );
         if kin.dynamic_pressure_pa == 0.0 {
             continue;
         }
@@ -679,34 +681,9 @@ fn evaluate_surface_wrench(
             cm: coeffs.cm,
         };
 
-        let velocity_hat_section = if kin.section_airspeed_mps > 0.0 {
-            Vec3::new(
-                kin.air_relative_velocity_element_mps.x / kin.section_airspeed_mps,
-                0.0,
-                kin.air_relative_velocity_element_mps.z / kin.section_airspeed_mps,
-            )
-        } else {
-            Vec3::zeros()
-        };
-        let drag_direction = -velocity_hat_section;
-        let lift_direction = Vec3::y().cross(&velocity_hat_section);
-
-        let q = kin.dynamic_pressure_pa;
-        let s = effective_element.area_m2();
-        let lift_n = q * s * adjusted.cl;
-        let drag_n = q * s * adjusted.cd;
-        let force_element = lift_direction * lift_n + drag_direction * drag_n;
-        let force_body = effective_element
-            .orientation_body_from_element()
-            .transform_vector(&force_element);
-
-        let moment_element_nm = q * s * effective_element.chord_m() * adjusted.cm;
-        let intrinsic_moment_body = effective_element
-            .orientation_body_from_element()
-            .transform_vector(&Vec3::new(0.0, moment_element_nm, 0.0));
-
-        wrench.add_force_at_body_point(force_body, *effective_element.position_body_m());
-        wrench.add_moment_body(intrinsic_moment_body);
+        let member_wrench = assemble_aero_element_wrench(effective_element, &kin, &adjusted);
+        wrench.force_body_n += member_wrench.force_body_n;
+        wrench.moment_body_nm += member_wrench.moment_body_nm;
     }
 
     wrench
