@@ -125,6 +125,8 @@ fn main() {
         }
     }
 
+    let elapsed = start.elapsed();
+
     // Post-timing state sanity: verify the timed simulation remains valid.
     let final_state = sim.state().rigid_body();
     assert!(
@@ -148,8 +150,6 @@ fn main() {
         final_state.validate().is_ok(),
         "benchmark: invalid rigid-body state after timed run"
     );
-
-    let elapsed = start.elapsed();
     let elapsed_s = elapsed.as_secs_f64();
     let mean_step_s = elapsed_s / step_count as f64;
     let steps_per_second = step_count as f64 / elapsed_s;
