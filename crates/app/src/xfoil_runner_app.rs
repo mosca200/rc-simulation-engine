@@ -221,7 +221,7 @@ pub enum XfoilRunnerError {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutionManifest {
+pub(crate) struct ExecutionManifest {
     schema_version: u32,
     campaign_id: String,
     airfoil_file: String,
@@ -231,30 +231,30 @@ struct ExecutionManifest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RunSpec {
-    dataset_id: String,
-    reynolds: f64,
-    mach: f64,
-    alpha_start_deg: f64,
-    alpha_end_deg: f64,
-    alpha_step_deg: f64,
-    maximum_iterations: u32,
-    ncrit: f64,
+pub(crate) struct RunSpec {
+    pub(crate) dataset_id: String,
+    pub(crate) reynolds: f64,
+    pub(crate) mach: f64,
+    pub(crate) alpha_start_deg: f64,
+    pub(crate) alpha_end_deg: f64,
+    pub(crate) alpha_step_deg: f64,
+    pub(crate) maximum_iterations: u32,
+    pub(crate) ncrit: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CoverageRequestSpec {
-    required_reynolds_min: f64,
-    required_reynolds_max: f64,
-    required_alpha_min_rad: f64,
-    required_alpha_max_rad: f64,
-    require_converged: bool,
+pub(crate) struct CoverageRequestSpec {
+    pub(crate) required_reynolds_min: f64,
+    pub(crate) required_reynolds_max: f64,
+    pub(crate) required_alpha_min_rad: f64,
+    pub(crate) required_alpha_max_rad: f64,
+    pub(crate) require_converged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ExecutionStatus {
+pub(crate) enum ExecutionStatus {
     CompletedParseable,
     ProcessFailed,
     TimedOut,
@@ -264,69 +264,69 @@ enum ExecutionStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CampaignExecutionStatus {
+pub(crate) enum CampaignExecutionStatus {
     Completed,
     Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutionReport {
-    schema_version: u32,
-    generated_by: String,
-    campaign_id: String,
-    airfoil_file: String,
-    run_count: usize,
-    completed_run_count: usize,
-    status: CampaignExecutionStatus,
-    runs: Vec<RunReport>,
+pub(crate) struct ExecutionReport {
+    pub(crate) schema_version: u32,
+    pub(crate) generated_by: String,
+    pub(crate) campaign_id: String,
+    pub(crate) airfoil_file: String,
+    pub(crate) run_count: usize,
+    pub(crate) completed_run_count: usize,
+    pub(crate) status: CampaignExecutionStatus,
+    pub(crate) runs: Vec<RunReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RunReport {
-    index: usize,
-    dataset_id: String,
-    reynolds: f64,
-    mach: f64,
-    alpha_start_deg: f64,
-    alpha_end_deg: f64,
-    alpha_step_deg: f64,
-    maximum_iterations: u32,
-    ncrit: f64,
-    polar_file: String,
-    execution_status: ExecutionStatus,
-    process_exit_code: Option<i32>,
-    parsed_sample_count: Option<usize>,
+pub(crate) struct RunReport {
+    pub(crate) index: usize,
+    pub(crate) dataset_id: String,
+    pub(crate) reynolds: f64,
+    pub(crate) mach: f64,
+    pub(crate) alpha_start_deg: f64,
+    pub(crate) alpha_end_deg: f64,
+    pub(crate) alpha_step_deg: f64,
+    pub(crate) maximum_iterations: u32,
+    pub(crate) ncrit: f64,
+    pub(crate) polar_file: String,
+    pub(crate) execution_status: ExecutionStatus,
+    pub(crate) process_exit_code: Option<i32>,
+    pub(crate) parsed_sample_count: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ValidationManifest<'a> {
-    schema_version: u32,
-    campaign_id: &'a str,
-    datasets: Vec<ValidationDataset<'a>>,
-    coverage_request: CoverageRequestSpec,
+pub(crate) struct ValidationManifest {
+    pub(crate) schema_version: u32,
+    pub(crate) campaign_id: String,
+    pub(crate) datasets: Vec<ValidationDataset>,
+    pub(crate) coverage_request: CoverageRequestSpec,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ValidationDataset<'a> {
-    polar_file: String,
-    dataset_id: &'a str,
-    method_id: String,
-    convergence_status: &'static str,
-    source_ids: Vec<String>,
-    notes: &'static str,
-    reynolds: f64,
-    mach: f64,
-    solver_name: &'static str,
-    solver_version: Option<&'static str>,
-    command_or_config: String,
-    transition_assumptions: String,
-    ncrit: f64,
-    forced_transition_upper_x_over_c: Option<f64>,
-    forced_transition_lower_x_over_c: Option<f64>,
+pub(crate) struct ValidationDataset {
+    pub(crate) polar_file: String,
+    pub(crate) dataset_id: String,
+    pub(crate) method_id: String,
+    pub(crate) convergence_status: String,
+    pub(crate) source_ids: Vec<String>,
+    pub(crate) notes: String,
+    pub(crate) reynolds: f64,
+    pub(crate) mach: f64,
+    pub(crate) solver_name: String,
+    pub(crate) solver_version: Option<String>,
+    pub(crate) command_or_config: String,
+    pub(crate) transition_assumptions: String,
+    pub(crate) ncrit: f64,
+    pub(crate) forced_transition_upper_x_over_c: Option<f64>,
+    pub(crate) forced_transition_lower_x_over_c: Option<f64>,
 }
 
 struct ProcessOutcome {
@@ -850,7 +850,7 @@ fn transition_assumptions(ncrit: f64) -> String {
     )
 }
 
-fn polar_filename(index: usize) -> String {
+pub(crate) fn polar_filename(index: usize) -> String {
     format!("{index:04}.polar")
 }
 
@@ -879,14 +879,14 @@ fn write_validation_manifest(
         .enumerate()
         .map(|(index, run)| ValidationDataset {
             polar_file: format!("{POLARS_DIRECTORY}/{}", polar_filename(index)),
-            dataset_id: &run.dataset_id,
+            dataset_id: run.dataset_id.clone(),
             method_id: format!("xfoil-run-{index:04}"),
-            convergence_status: "unresolved",
+            convergence_status: "unresolved".to_owned(),
             source_ids: vec![format!("xfoil-run-{index:04}-input")],
-            notes: "Generated by M2.9E; aerodynamic convergence remains unresolved.",
+            notes: "Generated by M2.9E; aerodynamic convergence remains unresolved.".to_owned(),
             reynolds: run.reynolds,
             mach: run.mach,
-            solver_name: "XFOIL",
+            solver_name: "XFOIL".to_owned(),
             solver_version: None,
             command_or_config: build_command_script(run),
             transition_assumptions: transition_assumptions(run.ncrit),
@@ -897,7 +897,7 @@ fn write_validation_manifest(
         .collect();
     let validation = ValidationManifest {
         schema_version: 1,
-        campaign_id: &manifest.campaign_id,
+        campaign_id: manifest.campaign_id.clone(),
         datasets,
         coverage_request: manifest.coverage_request,
     };

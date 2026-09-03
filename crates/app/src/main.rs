@@ -11,6 +11,7 @@ mod trim_characterization_app;
 mod trim_sweep_validation_app;
 mod validation_app;
 mod xfoil_campaign_app;
+mod xfoil_evidence_bundle_app;
 mod xfoil_runner_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
@@ -90,8 +91,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            Some("build-evidence-bundle") => {
+                let options =
+                    xfoil_evidence_bundle_app::XfoilEvidenceBundleOptions::parse(arguments)?;
+                match xfoil_evidence_bundle_app::run_xfoil_evidence_bundle(options) {
+                    Ok(xfoil_evidence_bundle_app::XfoilEvidenceBundleStatus::Built) => Ok(()),
+                    Ok(xfoil_evidence_bundle_app::XfoilEvidenceBundleStatus::NotPromotable) => {
+                        eprintln!(
+                            "XFOIL execution output is not promotable to an evidence bundle"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             Some(command) => Err(format!("unknown XFOIL command: {command}").into()),
-            None => Err("missing XFOIL command; expected `run-campaign`".into()),
+            None => Err(
+                "missing XFOIL command; expected `run-campaign` or `build-evidence-bundle`"
+                    .into(),
+            ),
         },
         Some(command) if command == "analyze" => match arguments.next().as_deref() {
             Some("trim-characterization") => {
@@ -420,6 +441,7 @@ fn print_usage() {
     println!(
         "  rcsim-app xfoil run-campaign --manifest PATH --xfoil-executable PATH --output-dir PATH [--timeout-seconds N]"
     );
+    println!("  rcsim-app xfoil build-evidence-bundle --execution-dir PATH --output-dir PATH");
     println!(
         "  rcsim-app analyze trim-characterization --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --alpha-step-rad A --elevator-step E --output-dir PATH"
     );
