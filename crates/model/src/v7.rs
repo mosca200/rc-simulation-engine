@@ -1,7 +1,8 @@
 //! Serializable authoring representation for aircraft-model schema version 7.
 //!
 //! Version 7 preserves v6 finite-wing and downwash semantics and adds explicit,
-//! one-way propeller-slipstream interactions targeting resolved aerodynamic elements.
+//! one-way propeller-slipstream interactions targeting resolved aerodynamic elements,
+//! including an optional M2.8E rotational-wake factor that defaults to zero.
 
 use crate::{
     v0::{ControlsFileV0, PresentationFileV0, RigidBodyFileV0},
@@ -37,4 +38,9 @@ pub struct PropellerSlipstreamInteractionFileV7 {
     pub id: String,
     pub target_element_ids: Vec<String>,
     pub slipstream_velocity_factor: f64,
+    /// Optional tangential wake speed as a multiple of actuator-disk induced velocity.
+    ///
+    /// The default preserves the original M2.8D schema-v7 axial-only behavior.
+    #[serde(default)]
+    pub swirl_velocity_factor: f64,
 }

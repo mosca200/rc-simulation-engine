@@ -4,9 +4,9 @@ use model::{
 };
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
-    MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients, PropulsionOutput,
-    ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState, Rk4Integrator,
-    SectionKinematics, StateError, advance_controls, assemble_aero_element_wrench,
+    MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients, PropellerSpinDirection,
+    PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
+    Rk4Integrator, SectionKinematics, StateError, advance_controls, assemble_aero_element_wrench,
     calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
     evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
 };
@@ -438,7 +438,7 @@ pub fn propeller_slipstream(
     }
 }
 
-fn slipstream_velocity_factor(element_index: usize, model: &AircraftModel) -> f64 {
+fn slipstream_velocity_factors(element_index: usize, model: &AircraftModel) -> (f64, f64) {
     model
         .propeller_slipstream_interactions()
         .iter()
@@ -447,10 +447,20 @@ fn slipstream_velocity_factor(element_index: usize, model: &AircraftModel) -> f6
                 .target_element_indices()
                 .contains(&element_index)
         })
-        .map_or(0.0, |interaction| interaction.slipstream_velocity_factor())
+        .map_or((0.0, 0.0), |interaction| {
+            (
+                interaction.slipstream_velocity_factor(),
+                interaction.swirl_velocity_factor(),
+            )
+        })
 }
 
-/// Canonical physical section flow after the per-element propeller wake increment.
+/// Canonical physical section flow after axial slipstream and rotational propwash.
+///
+/// Positive propeller spin follows the right-hand rule about propeller local `+X`.
+/// For an off-axis target, the tangential direction is
+/// `spin_sign * normalize(axis_body cross radial_body)`. An on-axis target has no
+/// well-defined tangent and therefore receives zero swirl.
 pub(crate) fn physical_section_kinematics(
     element_index: usize,
     stage_state: &RigidBodyState,
@@ -460,15 +470,38 @@ pub(crate) fn physical_section_kinematics(
     slipstream: PropellerSlipstream,
 ) -> SectionKinematics {
     let base = compute_section_kinematics(stage_state, effective_element, environment);
-    let factor = slipstream_velocity_factor(element_index, model);
-    if factor == 0.0 || slipstream.induced_velocity_mps == 0.0 {
+    let (axial_factor, swirl_factor) = slipstream_velocity_factors(element_index, model);
+    if (axial_factor == 0.0 && swirl_factor == 0.0) || slipstream.induced_velocity_mps == 0.0 {
         return base;
     }
-    let increment_mps = factor * slipstream.induced_velocity_mps;
-    if !increment_mps.is_finite() {
+    let axial_increment_mps = axial_factor * slipstream.induced_velocity_mps;
+    let swirl_increment_mps = swirl_factor * slipstream.induced_velocity_mps;
+    if !axial_increment_mps.is_finite() || !swirl_increment_mps.is_finite() {
         return base;
     }
-    let wake_body_mps = slipstream.axis_body * increment_mps;
+    let mut wake_body_mps = slipstream.axis_body * axial_increment_mps;
+    if swirl_increment_mps != 0.0 {
+        let propeller = model
+            .propulsion()
+            .expect("validated slipstream interactions require propulsion")
+            .config()
+            .propeller();
+        let offset_body_m = effective_element.position_body_m() - propeller.position_body_m();
+        let radial_body_m =
+            offset_body_m - slipstream.axis_body * offset_body_m.dot(&slipstream.axis_body);
+        let radial_norm_m = radial_body_m.norm();
+        if radial_norm_m.is_finite() && radial_norm_m > 0.0 {
+            let spin_sign = match propeller.spin_direction() {
+                PropellerSpinDirection::PositiveAboutLocalX => 1.0,
+                PropellerSpinDirection::NegativeAboutLocalX => -1.0,
+            };
+            let tangent_body = slipstream.axis_body.cross(&radial_body_m) / radial_norm_m;
+            wake_body_mps += tangent_body * (spin_sign * swirl_increment_mps);
+        }
+    }
+    if !wake_body_mps.iter().all(|component| component.is_finite()) {
+        return base;
+    }
     let wake_element_mps = effective_element
         .orientation_body_from_element()
         .inverse_transform_vector(&wake_body_mps);
@@ -666,7 +699,7 @@ fn evaluate_independent_element_wrench(
     environment: &sim_core::AeroEnvironment,
     slipstream: PropellerSlipstream,
 ) -> BodyWrench {
-    if slipstream_velocity_factor(element_index, model) == 0.0
+    if slipstream_velocity_factors(element_index, model) == (0.0, 0.0)
         || slipstream.induced_velocity_mps == 0.0
     {
         return evaluate_aircraft_aero_element(
