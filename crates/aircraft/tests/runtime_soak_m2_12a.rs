@@ -47,6 +47,13 @@ fn initial_state() -> RigidBodyState {
 /// Deterministic non-trivial input schedule with integer step boundaries.
 /// Each entry: (PilotInput, step_count).
 /// Total = 30 000 steps = 60 s at 500 Hz.
+///
+/// The test fixture (`synthetic_non_reference_trim_v4`) binds only the
+/// elevator aerodynamic control.  Therefore:
+/// - Elevator and throttle phases exercise full aircraft physics
+///   (aerodynamics + propulsion + rigid-body dynamics).
+/// - Aileron and rudder phases exercise control-system state only
+///   (actuator deflections change, but aerodynamic geometry is unaffected).
 fn input_schedule() -> Vec<(PilotInput, u64)> {
     vec![
         (PilotInput::new(0.0, 0.0, 0.0, 0.50), 5000), // 10 s: neutral, half throttle
@@ -71,7 +78,7 @@ fn assert_schedule_total() {
     );
 }
 
-fn validate_state(snap: &aircraft::AircraftSnapshot, step: u64) {
+fn validate_state(snap: &aircraft::AircraftSnapshot, step: u64, dt_s: f64) {
     let rb = snap.rigid_body_state();
     let q = rb.orientation_world_from_body.quaternion();
 
@@ -110,15 +117,15 @@ fn validate_state(snap: &aircraft::AircraftSnapshot, step: u64) {
     );
 
     assert_eq!(snap.step_index(), step + 1);
-    let expected_time = (step + 1) as f64 * config().dt_s();
+    let expected_time = (step + 1) as f64 * dt_s;
     assert!(
         (snap.sim_time_s() - expected_time).abs() < 1.0e-9,
         "step {step}: sim_time mismatch"
     );
 }
 
-fn to_sim_snapshot(snap: &aircraft::AircraftSnapshot) -> SimSnapshot {
-    SimSnapshot::from_state(snap.step_index(), config().dt_s(), snap.rigid_body_state())
+fn to_sim_snapshot(snap: &aircraft::AircraftSnapshot, dt_s: f64) -> SimSnapshot {
+    SimSnapshot::from_state(snap.step_index(), dt_s, snap.rigid_body_state())
 }
 
 // ---------------------------------------------------------------------------
@@ -134,12 +141,13 @@ fn long_deterministic_soak_state_validity() {
     let mut sim = AircraftSimulation::new(model, config, initial_state()).unwrap();
 
     let schedule = input_schedule();
+    let dt_s = config.dt_s();
     let mut global_step = 0_u64;
 
     for (input, steps) in &schedule {
         for _ in 0..*steps {
             let snap = sim.step(input);
-            validate_state(&snap, global_step);
+            validate_state(&snap, global_step, dt_s);
             global_step += 1;
         }
     }
@@ -187,17 +195,22 @@ fn full_aircraft_step_allocates_nothing_after_warmup() {
     let config = config();
     let mut sim = AircraftSimulation::new(model, config, initial_state()).unwrap();
 
-    let input = PilotInput::new(0.05, -0.03, 0.02, 0.55);
-
-    // Warm-up: let any lazy initialization complete.
-    for _ in 0..100 {
-        std::hint::black_box(sim.step(&input));
+    // Warm-up: run the full input schedule once so that any lazy
+    // initialisation triggered by varying aerodynamic conditions completes
+    // before the measurement region.
+    let schedule = input_schedule();
+    for (input, steps) in &schedule {
+        for _ in 0..*steps {
+            std::hint::black_box(sim.step(std::hint::black_box(input)));
+        }
     }
 
-    // Measure allocations over repeated step calls.
+    // Measure allocations over a second pass of the identical schedule.
     let allocations = allocation_counter::measure(|| {
-        for _ in 0..1000 {
-            std::hint::black_box(sim.step(std::hint::black_box(&input)));
+        for (input, steps) in &schedule {
+            for _ in 0..*steps {
+                std::hint::black_box(sim.step(std::hint::black_box(input)));
+            }
         }
     });
 
@@ -233,8 +246,8 @@ fn state_hash_consistency_across_identical_runs() {
             global_step += 1;
 
             if global_step.is_multiple_of(checkpoint_interval) {
-                let hash_a = to_sim_snapshot(&snap_a).state_hash();
-                let hash_b = to_sim_snapshot(&snap_b).state_hash();
+                let hash_a = to_sim_snapshot(&snap_a, dt).state_hash();
+                let hash_b = to_sim_snapshot(&snap_b, dt).state_hash();
                 assert_eq!(hash_a, hash_b, "state hash mismatch at step {global_step}");
             }
         }

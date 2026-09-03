@@ -39,6 +39,10 @@ fn initial_state() -> RigidBodyState {
     }
 }
 
+/// The test fixture (`synthetic_non_reference_trim_v4`) binds only the
+/// elevator aerodynamic control.  Elevator and throttle phases exercise
+/// full aircraft physics; aileron and rudder phases exercise control-system
+/// state only (actuator deflections change, aerodynamic geometry does not).
 fn input_schedule() -> Vec<(PilotInput, u64)> {
     vec![
         (PilotInput::new(0.0, 0.0, 0.0, 0.50), 5000),
@@ -55,7 +59,7 @@ fn input_schedule() -> Vec<(PilotInput, u64)> {
     ]
 }
 
-/// Diagnostic entry point: `cargo run --release --bench aircraft_runtime_soak`
+/// Run with: `cargo bench -p aircraft --bench aircraft_runtime_soak`
 ///
 /// Prints a human-readable performance report to stdout.
 /// This is NOT a criterion benchmark — it's a standalone diagnostic.
@@ -76,6 +80,33 @@ fn main() {
         }
     }
 
+    // Post-warmup state sanity: verify the simulation has not diverged.
+    let post_warmup_state = sim.state().rigid_body();
+    assert!(
+        post_warmup_state
+            .position_world_m
+            .iter()
+            .all(|v| v.is_finite())
+            && post_warmup_state
+                .linear_velocity_world_mps
+                .iter()
+                .all(|v| v.is_finite())
+            && post_warmup_state
+                .angular_velocity_body_radps
+                .iter()
+                .all(|v| v.is_finite()),
+        "benchmark: non-finite rigid-body state after warm-up"
+    );
+    let q = post_warmup_state.orientation_world_from_body.quaternion();
+    assert!(
+        [q.w, q.i, q.j, q.k].iter().all(|v| v.is_finite()),
+        "benchmark: non-finite quaternion after warm-up"
+    );
+    assert!(
+        post_warmup_state.validate().is_ok(),
+        "benchmark: invalid rigid-body state after warm-up"
+    );
+
     // Re-create for the timed run to ensure identical initial conditions.
     let mut sim = AircraftSimulation::new(
         AircraftModelLoader::from_json_str(FIXTURE).unwrap(),
@@ -93,6 +124,30 @@ fn main() {
             step_count += 1;
         }
     }
+
+    // Post-timing state sanity: verify the timed simulation remains valid.
+    let final_state = sim.state().rigid_body();
+    assert!(
+        final_state.position_world_m.iter().all(|v| v.is_finite())
+            && final_state
+                .linear_velocity_world_mps
+                .iter()
+                .all(|v| v.is_finite())
+            && final_state
+                .angular_velocity_body_radps
+                .iter()
+                .all(|v| v.is_finite()),
+        "benchmark: non-finite rigid-body state after timed run"
+    );
+    let q_f = final_state.orientation_world_from_body.quaternion();
+    assert!(
+        [q_f.w, q_f.i, q_f.j, q_f.k].iter().all(|v| v.is_finite()),
+        "benchmark: non-finite quaternion after timed run"
+    );
+    assert!(
+        final_state.validate().is_ok(),
+        "benchmark: invalid rigid-body state after timed run"
+    );
 
     let elapsed = start.elapsed();
     let elapsed_s = elapsed.as_secs_f64();
