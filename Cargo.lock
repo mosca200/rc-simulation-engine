@@ -2012,6 +2012,7 @@ dependencies = [
  "replay",
  "serde",
  "serde_json",
+ "sha2",
  "sim_core",
  "sim_math",
  "telemetry",
