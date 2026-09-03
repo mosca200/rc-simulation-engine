@@ -10,7 +10,9 @@ mod mesh;
 mod pose;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
-pub use camera::ChaseCamera;
+pub use camera::{
+    ChaseCamera, RENDER_WORLD_UP, exponential_fog_factor, sun_alignment, view_elevation,
+};
 pub use glb::{GlbLoadError, load_glb_mesh};
 pub use gpu::{RendererError, SKY_CLEAR_COLOR, SurfaceError, WgpuRenderer};
 pub use math::{Mat4, ProjectionError, matrix_to_wgsl_columns, webgpu_perspective};
