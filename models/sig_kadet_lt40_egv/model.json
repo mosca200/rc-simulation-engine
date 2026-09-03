@@ -1,0 +1,416 @@
+{
+  "schema_version": 7,
+  "model_id": "sig-kadet-lt40-egv",
+  "display_name": "SIG Kadet LT-40 EGV",
+  "classification": "reference_aircraft",
+  "reference_aircraft": {
+    "identity": {
+      "manufacturer": "SIG Manufacturing",
+      "aircraft_name": "Kadet LT-40",
+      "variant": "EGV ARF",
+      "stable_reference_id": "sig-kadet-lt40-egv",
+      "notes": "First reference trainer-class aircraft. Geometry from validated plan reconstruction; mass, CG, and polars are provisional pending physical measurement and XFOIL execution."
+    },
+    "physical_specification": {
+      "wingspan_m": {
+        "value": 1.778,
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-egv-arf-product"]
+      },
+      "reference_wing_area_m2": {
+        "value": 0.580644,
+        "status": "derived",
+        "source_ids": ["sig-lt40-egv-arf-product"]
+      },
+      "aircraft_length_m": {
+        "value": 1.447,
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-egv-arf-product"]
+      },
+      "mass": {
+        "status": "estimated",
+        "source_ids": ["sig-lt40-egv-arf-product"]
+      },
+      "cg_location": {
+        "position_m_from_reference": [0.0889, 0.0, 0.0],
+        "reference": {
+          "kind": "wing_root_leading_edge",
+          "description": "Beginner CG position, 3.5 in aft of wing root leading edge"
+        },
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-build-manual"]
+      },
+      "aerodynamic_reference_chord_m": {
+        "value": 0.325952,
+        "status": "derived",
+        "source_ids": ["lt40-geometry-v0"]
+      },
+      "wing_incidence_rad": {
+        "value": 0.02617993877991494,
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-kit-product"]
+      },
+      "horizontal_tail_incidence_rad": {
+        "value": 0.0,
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-kit-product"]
+      },
+      "wing_dihedral_rad": {
+        "value": 0.05235987755982989,
+        "status": "manufacturer_spec",
+        "source_ids": ["sig-lt40-kit-product"]
+      },
+      "control_surface_travel_limits": [
+        {
+          "control_surface_binding_id": "aileron-left",
+          "status": "manufacturer_spec",
+          "source_ids": ["sig-lt40-kit-product"]
+        },
+        {
+          "control_surface_binding_id": "aileron-right",
+          "status": "manufacturer_spec",
+          "source_ids": ["sig-lt40-kit-product"]
+        },
+        {
+          "control_surface_binding_id": "elevator",
+          "status": "manufacturer_spec",
+          "source_ids": ["sig-lt40-kit-product"]
+        },
+        {
+          "control_surface_binding_id": "rudder",
+          "status": "manufacturer_spec",
+          "source_ids": ["sig-lt40-kit-product"]
+        }
+      ]
+    },
+    "provenance_sources": [
+      {
+        "id": "sig-lt40-egv-arf-product",
+        "source_type": "manufacturer_documentation",
+        "title": "SIG KADET LT-40 EGV ARF product specification",
+        "url": "https://sigmfg.com/collections/sig-arfs-almost-ready-to-fly/products/sig-kadet-lt40-egv-arf",
+        "bibliographic_reference": null,
+        "notes": "Target EGV ARF variant identity, span, area, length, weight range, and power recommendation",
+        "publication_date": null,
+        "retrieval_date": "2026-08-31",
+        "confidence": "high"
+      },
+      {
+        "id": "sig-lt40-kit-product",
+        "source_type": "manufacturer_documentation",
+        "title": "SIG LT-40 Trainer Kit",
+        "url": "https://sigmfg.com/products/sig-lt-40-trainer-kit",
+        "bibliographic_reference": null,
+        "notes": "Original kit legacy geometry: incidence, dihedral, control travel",
+        "publication_date": null,
+        "retrieval_date": "2026-08-31",
+        "confidence": "high"
+      },
+      {
+        "id": "sig-lt40-build-manual",
+        "source_type": "manufacturer_documentation",
+        "title": "SIG KADET LT-40 assembly manual",
+        "url": "https://cdn.shopify.com/s/files/1/2281/6393/files/sigrc67kadetlt40.pdf",
+        "bibliographic_reference": null,
+        "notes": "CG positions and construction geometry",
+        "publication_date": null,
+        "retrieval_date": "2026-08-31",
+        "confidence": "high"
+      },
+      {
+        "id": "lt40-geometry-v0",
+        "source_type": "derived",
+        "title": "SIG KADET LT-40 geometry reconstruction v0",
+        "url": null,
+        "bibliographic_reference": "docs/reference_aircraft/sig_kadet_lt40_egv_geometry_reconstruction.md",
+        "notes": "Validated plan reconstruction of wing, tail, and control surface geometry",
+        "publication_date": null,
+        "retrieval_date": null,
+        "confidence": "medium"
+      },
+      {
+        "id": "himax-hc3528-1000",
+        "source_type": "manufacturer_documentation",
+        "title": "Himax HC3528-1000 operating manual",
+        "url": "https://www.manuallib.com/download/HIMAX-BRUSHLESS-OUTRUNNER-MOTOR-HC3528-1000.PDF",
+        "bibliographic_reference": null,
+        "notes": "Historical candidate motor specifications",
+        "publication_date": null,
+        "retrieval_date": "2026-08-31",
+        "confidence": "medium"
+      },
+      {
+        "id": "apc-11x7e-performance",
+        "source_type": "manufacturer_documentation",
+        "title": "APC 11x7E performance data",
+        "url": "https://www.apcprop.com/files/PER3_11x7E.dat",
+        "bibliographic_reference": null,
+        "notes": "Manufacturer propeller performance coefficients",
+        "publication_date": null,
+        "retrieval_date": "2026-09-01",
+        "confidence": "high"
+      }
+    ]
+  },
+  "rigid_body": {
+    "mass_kg": 2.778,
+    "inertia_body_kg_m2": [
+      [0.30, 0.0, 0.0],
+      [0.0, 0.35, 0.0],
+      [0.0, 0.0, 0.55]
+    ]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [],
+    "polar_families": [
+      {
+        "id": "wing-clark-y-provisional",
+        "nodes": [
+          {
+            "reynolds_number": 200000.0,
+            "samples": [
+              {"alpha_rad": -0.20, "cl": -0.60, "cd": 0.050, "cm": -0.02},
+              {"alpha_rad": -0.10, "cl": -0.40, "cd": 0.025, "cm": -0.02},
+              {"alpha_rad": 0.00, "cl": 0.00, "cd": 0.012, "cm": -0.02},
+              {"alpha_rad": 0.10, "cl": 0.40, "cd": 0.025, "cm": -0.02},
+              {"alpha_rad": 0.20, "cl": 0.60, "cd": 0.050, "cm": -0.02}
+            ]
+          },
+          {
+            "reynolds_number": 300000.0,
+            "samples": [
+              {"alpha_rad": -0.20, "cl": -0.75, "cd": 0.040, "cm": -0.02},
+              {"alpha_rad": -0.10, "cl": -0.50, "cd": 0.018, "cm": -0.02},
+              {"alpha_rad": 0.00, "cl": 0.00, "cd": 0.008, "cm": -0.02},
+              {"alpha_rad": 0.10, "cl": 0.50, "cd": 0.018, "cm": -0.02},
+              {"alpha_rad": 0.20, "cl": 0.75, "cd": 0.040, "cm": -0.02}
+            ]
+          },
+          {
+            "reynolds_number": 500000.0,
+            "samples": [
+              {"alpha_rad": -0.20, "cl": -0.90, "cd": 0.030, "cm": -0.02},
+              {"alpha_rad": -0.10, "cl": -0.55, "cd": 0.014, "cm": -0.02},
+              {"alpha_rad": 0.00, "cl": 0.00, "cd": 0.006, "cm": -0.02},
+              {"alpha_rad": 0.10, "cl": 0.55, "cd": 0.014, "cm": -0.02},
+              {"alpha_rad": 0.20, "cl": 0.90, "cd": 0.030, "cm": -0.02}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "tail-symmetric-provisional",
+        "nodes": [
+          {
+            "reynolds_number": 150000.0,
+            "samples": [
+              {"alpha_rad": -0.25, "cl": -0.55, "cd": 0.035, "cm": 0.0},
+              {"alpha_rad": -0.10, "cl": -0.30, "cd": 0.015, "cm": 0.0},
+              {"alpha_rad": 0.00, "cl": 0.00, "cd": 0.008, "cm": 0.0},
+              {"alpha_rad": 0.10, "cl": 0.30, "cd": 0.015, "cm": 0.0},
+              {"alpha_rad": 0.25, "cl": 0.55, "cd": 0.035, "cm": 0.0}
+            ]
+          },
+          {
+            "reynolds_number": 300000.0,
+            "samples": [
+              {"alpha_rad": -0.25, "cl": -0.70, "cd": 0.025, "cm": 0.0},
+              {"alpha_rad": -0.10, "cl": -0.35, "cd": 0.010, "cm": 0.0},
+              {"alpha_rad": 0.00, "cl": 0.00, "cd": 0.006, "cm": 0.0},
+              {"alpha_rad": 0.10, "cl": 0.35, "cd": 0.010, "cm": 0.0},
+              {"alpha_rad": 0.25, "cl": 0.70, "cd": 0.025, "cm": 0.0}
+            ]
+          }
+        ]
+      }
+    ],
+    "elements": [
+      {
+        "id": "wing-left-fixed",
+        "position_body_m": [-0.0584, -0.4305, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.25805,
+        "chord_m": 0.326,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "wing-clark-y-provisional"}
+      },
+      {
+        "id": "wing-left-aileron",
+        "position_body_m": [-0.2227, -0.4524, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.0280,
+        "chord_m": 0.038,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "wing-clark-y-provisional"}
+      },
+      {
+        "id": "wing-right-fixed",
+        "position_body_m": [-0.0584, 0.4305, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.25805,
+        "chord_m": 0.326,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "wing-clark-y-provisional"}
+      },
+      {
+        "id": "wing-right-aileron",
+        "position_body_m": [-0.2227, 0.4524, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.0280,
+        "chord_m": 0.038,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "wing-clark-y-provisional"}
+      },
+      {
+        "id": "horizontal-tail-fixed",
+        "position_body_m": [-1.0111, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.10248,
+        "chord_m": 0.202,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "tail-symmetric-provisional"}
+      },
+      {
+        "id": "elevator",
+        "position_body_m": [-1.1386, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.03484,
+        "chord_m": 0.0508,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "tail-symmetric-provisional"}
+      },
+      {
+        "id": "vertical-tail-fixed",
+        "position_body_m": [-1.0311, 0.0, -0.10],
+        "orientation_body_from_element_wxyz": [0.7071067811865476, -0.7071067811865476, 0.0, 0.0],
+        "area_m2": 0.03778,
+        "chord_m": 0.243,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "tail-symmetric-provisional"}
+      },
+      {
+        "id": "rudder",
+        "position_body_m": [-1.1892, 0.0, -0.1099],
+        "orientation_body_from_element_wxyz": [0.7071067811865476, -0.7071067811865476, 0.0, 0.0],
+        "area_m2": 0.01586,
+        "chord_m": 0.076,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "tail-symmetric-provisional"}
+      }
+    ],
+    "surfaces": [
+      {
+        "id": "main-wing",
+        "element_ids": ["wing-left-fixed", "wing-left-aileron", "wing-right-fixed", "wing-right-aileron"],
+        "span_axis_body": [0.0, 1.0, 0.0],
+        "span_m": 1.778,
+        "span_efficiency_factor": 0.85
+      },
+      {
+        "id": "horizontal-tail",
+        "element_ids": ["horizontal-tail-fixed", "elevator"],
+        "span_axis_body": [0.0, 1.0, 0.0],
+        "span_m": 0.6858,
+        "span_efficiency_factor": 0.80
+      },
+      {
+        "id": "vertical-tail",
+        "element_ids": ["vertical-tail-fixed", "rudder"],
+        "span_axis_body": [0.0, 0.0, -1.0],
+        "span_m": 0.226568,
+        "span_efficiency_factor": 0.75
+      }
+    ]
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 0.70, "expo": 0.20},
+      "pitch": {"rate": 0.65, "expo": 0.20},
+      "yaw": {"rate": 0.55, "expo": 0.15}
+    },
+    "servos": {
+      "aileron": {
+        "min_angle_rad": -0.35,
+        "neutral_angle_rad": 0.0,
+        "max_angle_rad": 0.35,
+        "max_speed_rad_s": 4.0,
+        "reversed": false
+      },
+      "elevator": {
+        "min_angle_rad": -0.44,
+        "neutral_angle_rad": 0.0,
+        "max_angle_rad": 0.44,
+        "max_speed_rad_s": 4.0,
+        "reversed": false
+      },
+      "rudder": {
+        "min_angle_rad": -0.52,
+        "neutral_angle_rad": 0.0,
+        "max_angle_rad": 0.52,
+        "max_speed_rad_s": 3.5,
+        "reversed": true
+      }
+    }
+  },
+  "control_surface_bindings": [
+    {
+      "id": "aileron-left",
+      "element_id": "wing-left-aileron",
+      "actuator": "aileron",
+      "deflection_gain": 1.0
+    },
+    {
+      "id": "aileron-right",
+      "element_id": "wing-right-aileron",
+      "actuator": "aileron",
+      "deflection_gain": -1.0
+    },
+    {
+      "id": "elevator",
+      "element_id": "elevator",
+      "actuator": "elevator",
+      "deflection_gain": -1.0
+    },
+    {
+      "id": "rudder",
+      "element_id": "rudder",
+      "actuator": "rudder",
+      "deflection_gain": -1.0
+    }
+  ],
+  "aero_downwash_interactions": [
+    {
+      "id": "wing-to-horizontal-tail",
+      "source_surface_id": "main-wing",
+      "target_surface_id": "horizontal-tail",
+      "downwash_factor": 0.6
+    }
+  ],
+  "propeller_slipstream_interactions": [],
+  "propulsion": {
+    "battery": {
+      "open_circuit_voltage_v": 12.6,
+      "internal_resistance_ohm": 0.028
+    },
+    "esc": {
+      "series_resistance_ohm": 0.010
+    },
+    "motor": {
+      "kv_rpm_per_v": 1000.0,
+      "winding_resistance_ohm": 0.020,
+      "no_load_current_a": 2.6
+    },
+    "propeller": {
+      "position_body_m": [0.30, 0.0, 0.0],
+      "orientation_body_from_prop_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "diameter_m": 0.2794,
+      "spin_direction": "positive_about_local_x"
+    },
+    "coefficient_source": {
+      "kind": "fixed_table",
+      "samples": [
+        {"advance_ratio_j": -0.25, "ct": 0.120, "cq": 0.00875},
+        {"advance_ratio_j": 0.00, "ct": 0.1097, "cq": 0.00848},
+        {"advance_ratio_j": 0.25, "ct": 0.0943, "cq": 0.00897},
+        {"advance_ratio_j": 0.50, "ct": 0.0525, "cq": 0.00737},
+        {"advance_ratio_j": 0.75, "ct": 0.0213, "cq": 0.00520},
+        {"advance_ratio_j": 1.00, "ct": 0.005, "cq": 0.00300},
+        {"advance_ratio_j": 1.50, "ct": 0.000, "cq": 0.00150}
+      ]
+    }
+  },
+  "presentation": null
+}
