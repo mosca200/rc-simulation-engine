@@ -1,7 +1,7 @@
 {
-  "schema_version": 5,
-  "model_id": "synthetic_finite_wing_v5",
-  "display_name": "Synthetic Finite-Wing V5 Fixture",
+  "schema_version": 4,
+  "model_id": "synthetic_fixed_table_narrow_j_v4",
+  "display_name": "Synthetic Fixed-Table Narrow J Range Fixture",
   "classification": "synthetic_test",
   "reference_aircraft": null,
   "rigid_body": {
@@ -29,7 +29,7 @@
             "samples": [
               {"alpha_rad": -0.35, "cl": -1.05, "cd": 0.095, "cm": -0.040},
               {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.040, "cm": -0.040},
-              {"alpha_rad":  0.10, "cl":  0.30, "cd": 0.050, "cm": -0.030}
+              {"alpha_rad":  0.35, "cl":  1.05, "cd": 0.095, "cm": -0.040}
             ]
           },
           {
@@ -37,7 +37,7 @@
             "samples": [
               {"alpha_rad": -0.35, "cl": -1.40, "cd": 0.070, "cm": -0.028},
               {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.022, "cm": -0.028},
-              {"alpha_rad":  0.10, "cl":  0.40, "cd": 0.035, "cm": -0.020}
+              {"alpha_rad":  0.35, "cl":  1.40, "cd": 0.070, "cm": -0.028}
             ]
           }
         ]
@@ -59,15 +59,6 @@
         "area_m2": 0.10,
         "chord_m": 0.18,
         "polar_binding": {"kind": "polar", "polar_id": "synthetic-tail-polar"}
-      }
-    ],
-    "surfaces": [
-      {
-        "id": "synthetic-wing-surface",
-        "element_ids": ["synthetic-wing"],
-        "span_axis_body": [0.0, 1.0, 0.0],
-        "span_m": 0.60,
-        "span_efficiency_factor": 0.90
       }
     ]
   },
@@ -102,24 +93,11 @@
       "spin_direction": "positive_about_local_x"
     },
     "coefficient_source": {
-      "kind": "shaft_speed_map",
-      "nodes": [
-        {
-          "shaft_speed_rad_s": 250.0,
-          "samples": [
-            {"advance_ratio_j": 0.0, "ct": 0.108, "cq": 0.0158},
-            {"advance_ratio_j": 0.7, "ct": 0.052, "cq": 0.0090},
-            {"advance_ratio_j": 1.3, "ct": 0.005, "cq": 0.0030}
-          ]
-        },
-        {
-          "shaft_speed_rad_s": 800.0,
-          "samples": [
-            {"advance_ratio_j": 0.0, "ct": 0.128, "cq": 0.0190},
-            {"advance_ratio_j": 0.6, "ct": 0.078, "cq": 0.0122},
-            {"advance_ratio_j": 1.2, "ct": 0.012, "cq": 0.0042}
-          ]
-        }
+      "kind": "fixed_table",
+      "samples": [
+        {"advance_ratio_j": 0.0, "ct": 0.108, "cq": 0.0158},
+        {"advance_ratio_j": 0.15, "ct": 0.080, "cq": 0.0120},
+        {"advance_ratio_j": 0.30, "ct": 0.052, "cq": 0.0090}
       ]
     }
   },

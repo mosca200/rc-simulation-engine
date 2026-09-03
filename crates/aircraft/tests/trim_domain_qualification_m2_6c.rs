@@ -1,9 +1,13 @@
 //! M2.6C — Deterministic longitudinal trim domain qualification tests.
+//!
+//! Every proof test asserts its target operating condition UNCONDITIONALLY.
+//! If a fixture does not produce the intended operating point, the test FAILS.
 
 use aircraft::{
     AircraftSimulationConfig, LongitudinalTrimQualificationLimits, LongitudinalTrimRequest,
-    LongitudinalTrimTolerances, LongitudinalTrimVariables, PropulsionDomainAudit,
-    QualificationBlocker, RangeStatus, TrimBounds, effective_aero_elements_for_positions,
+    LongitudinalTrimSolution, LongitudinalTrimTolerances, LongitudinalTrimVariables,
+    PropulsionDomainAudit, QualificationBlocker, RangeStatus, TrimBounds,
+    effective_aero_elements_for_positions, evaluate_longitudinal_trim_candidate,
     qualify_longitudinal_trim_solution, solve_longitudinal_trim,
 };
 use model::AircraftModelLoader;
@@ -20,6 +24,8 @@ const NO_PROPULSION_FIXTURE: &str =
     include_str!("../../../tests/fixtures/synthetic_no_propulsion_trim_v4.json");
 const FIXED_TABLE_FIXTURE: &str =
     include_str!("../../../tests/fixtures/synthetic_fixed_table_trim_v4.json");
+const FIXED_TABLE_NARROW_J_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/synthetic_fixed_table_narrow_j_v4.json");
 const NARROW_POLAR_FIXTURE: &str =
     include_str!("../../../tests/fixtures/synthetic_narrow_polar_trim_v4.json");
 const REYNOLDS_ASYMMETRIC_FIXTURE: &str =
@@ -28,6 +34,8 @@ const DUAL_J_RANGE_FIXTURE: &str =
     include_str!("../../../tests/fixtures/synthetic_dual_j_range_v4.json");
 const FINITE_WING_FIXTURE: &str =
     include_str!("../../../tests/fixtures/synthetic_finite_wing_v5.json");
+const SHAFT_SPEED_NARROW_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/synthetic_shaft_speed_narrow_v4.json");
 
 fn trim_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(TRIM_FIXTURE).unwrap()
@@ -37,6 +45,9 @@ fn no_propulsion_model() -> model::AircraftModel {
 }
 fn fixed_table_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(FIXED_TABLE_FIXTURE).unwrap()
+}
+fn fixed_table_narrow_j_model() -> model::AircraftModel {
+    AircraftModelLoader::from_json_str(FIXED_TABLE_NARROW_J_FIXTURE).unwrap()
 }
 fn narrow_polar_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(NARROW_POLAR_FIXTURE).unwrap()
@@ -49,6 +60,9 @@ fn dual_j_range_model() -> model::AircraftModel {
 }
 fn finite_wing_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(FINITE_WING_FIXTURE).unwrap()
+}
+fn shaft_speed_narrow_model() -> model::AircraftModel {
+    AircraftModelLoader::from_json_str(SHAFT_SPEED_NARROW_FIXTURE).unwrap()
 }
 
 fn sim_config() -> AircraftSimulationConfig {
@@ -86,8 +100,47 @@ fn solve_trim(
     solve_longitudinal_trim(model, config, &request).unwrap()
 }
 
+fn extract_aero_audits(
+    outcome: &aircraft::LongitudinalTrimQualificationOutcome,
+) -> &Vec<aircraft::AerodynamicElementDomainAudit> {
+    match outcome {
+        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
+            aero_audits
+        }
+        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
+            aero_audits
+        }
+    }
+}
+
+fn extract_propulsion_audit(
+    outcome: &aircraft::LongitudinalTrimQualificationOutcome,
+) -> &PropulsionDomainAudit {
+    match outcome {
+        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
+            propulsion_audit, ..
+        } => propulsion_audit,
+        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
+            propulsion_audit, ..
+        } => propulsion_audit,
+    }
+}
+
+fn extract_residual_audit(
+    outcome: &aircraft::LongitudinalTrimQualificationOutcome,
+) -> &aircraft::FullResidualAudit {
+    match outcome {
+        aircraft::LongitudinalTrimQualificationOutcome::Qualified { residual_audit, .. } => {
+            residual_audit
+        }
+        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { residual_audit, .. } => {
+            residual_audit
+        }
+    }
+}
+
 // ===========================================================================
-// EXISTING VALID TESTS (preserved)
+// PRESERVED VALID TESTS
 // ===========================================================================
 
 #[test]
@@ -111,14 +164,7 @@ fn fixed_polar_alpha_audit_records_correct_bounds() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
+    let audits = extract_aero_audits(&point.outcome);
     let tail_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-elevator-tail")
@@ -236,16 +282,8 @@ fn propulsion_model_returns_present_audit() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
     assert!(matches!(
-        prop_audit,
+        extract_propulsion_audit(&point.outcome),
         aircraft::PropulsionDomainAudit::Present { .. }
     ));
 }
@@ -279,14 +317,7 @@ fn full_residual_audit_preserves_signed_values() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { residual_audit, .. } => {
-            residual_audit
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { residual_audit, .. } => {
-            residual_audit
-        }
-    };
+    let audit = extract_residual_audit(&point.outcome);
     assert!(audit.fx_body_n.is_finite());
     assert!(audit.fy_body_n.is_finite());
     assert!(audit.fz_body_n.is_finite());
@@ -314,14 +345,7 @@ fn aero_audits_are_in_model_order() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
+    let audits = extract_aero_audits(&point.outcome);
     assert_eq!(audits.len(), model.aero_elements().len());
     for (i, audit) in audits.iter().enumerate() {
         assert_eq!(audit.element_index, i);
@@ -335,14 +359,7 @@ fn reynolds_in_range_asserts_actual_expected_value() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
+    let audits = extract_aero_audits(&point.outcome);
     let wing_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-wing")
@@ -362,15 +379,7 @@ fn shaft_speed_map_in_range_has_some_domain() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present {
             shaft_speed_domain, ..
         } => {
@@ -421,14 +430,7 @@ fn runtime_wrench_bitwise_matches_solution_evaluation() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { residual_audit, .. } => {
-            residual_audit
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { residual_audit, .. } => {
-            residual_audit
-        }
-    };
+    let audit = extract_residual_audit(&point.outcome);
     assert_eq!(
         audit.fx_body_n.to_bits(),
         solution.evaluation.body_wrench.force_body_n.x.to_bits()
@@ -475,15 +477,7 @@ fn propulsion_audit_uses_accepted_throttle() {
     let accepted_throttle = solution.evaluation.control_surface_positions.throttle();
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present { throttle, .. } => {
             assert_eq!(
                 throttle.to_bits(),
@@ -514,73 +508,53 @@ fn re_evaluation_equality_check_passes_for_valid_solution() {
 }
 
 // ===========================================================================
-// TASK 2: FIXED POLAR OUT-OF-RANGE PROOF
+// TASK 2: FIXED POLAR OUT-OF-RANGE PROOF (unconditional)
 // ===========================================================================
 
 #[test]
 fn fixed_polar_out_of_range_emits_typed_alpha_blocker() {
     let model = narrow_polar_model();
     let config = sim_config();
-    // The wing uses a narrow fixed polar with alpha support [-0.05, 0.05].
-    // The trim solver converges using runtime clamping, but qualification
-    // sees the actual sampled alpha outside the evidence support.
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
+    let audits = extract_aero_audits(&point.outcome);
     let wing_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-wing")
         .unwrap();
 
-    // The wing alpha must be outside [-0.05, 0.05] for this proof to work.
-    // Runtime clamping allows evaluation; qualification distinguishes validity.
+    // UNCONDITIONAL: wing alpha_sample MUST be outside [-0.05, 0.05]
     assert!(
         wing_audit.alpha_sample_rad < -0.05 || wing_audit.alpha_sample_rad > 0.05,
-        "wing alpha_sample={} must be outside narrow polar [-0.05, 0.05] for this proof",
+        "wing alpha_sample={} must be outside narrow polar [-0.05, 0.05]",
         wing_audit.alpha_sample_rad
     );
 
-    // Typed blocker must be emitted
-    let has_alpha_blocker = point.outcome.blockers().iter().any(|b| {
-        matches!(
+    // UNCONDITIONAL: typed blocker must exist
+    assert!(
+        point.outcome.blockers().iter().any(|b| matches!(
             b,
             QualificationBlocker::AerodynamicAlphaBelowRange { .. }
                 | QualificationBlocker::AerodynamicAlphaAboveRange { .. }
-        )
-    });
-    assert!(
-        has_alpha_blocker,
+        )),
         "out-of-range alpha must emit typed alpha blocker, got: {:?}",
         point.outcome.blockers()
     );
 
-    // Qualification must reject
-    assert!(
-        !point.outcome.is_qualified(),
-        "out-of-range alpha must not qualify"
-    );
+    // UNCONDITIONAL: must not qualify
+    assert!(!point.outcome.is_qualified());
 }
 
 // ===========================================================================
-// TASK 3: FINITE-WING EFFECTIVE-ALPHA PROOF
+// TASK 3: FINITE-WING EFFECTIVE-ALPHA — MUST CHANGE DOMAIN DECISION
 // ===========================================================================
 
 #[test]
-fn finite_wing_effective_alpha_differs_from_geom() {
+fn finite_wing_effective_alpha_changes_domain_decision() {
     let model = finite_wing_model();
     let config = sim_config();
 
-    // The v5 fixture has a wing surface with span=0.6m, area=0.45m2 -> AR=0.8
-    // This produces significant induced alpha: alpha_i ~ CL / (PI * 0.8 * 0.9)
     assert!(
         !model.aero_surfaces().is_empty(),
         "v5 fixture must have aero surfaces"
@@ -589,52 +563,73 @@ fn finite_wing_effective_alpha_differs_from_geom() {
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
-
+    let audits = extract_aero_audits(&point.outcome);
     let wing_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-wing")
         .unwrap();
 
-    // alpha_geom != alpha_sample materially (induced alpha is non-negligible)
+    let alpha_upper = wing_audit.alpha_upper_rad;
+    let alpha_lower = wing_audit.alpha_lower_rad;
+
+    // UNCONDITIONAL: alpha_geom and alpha_sample must differ materially
     let alpha_diff = (wing_audit.alpha_geom_rad - wing_audit.alpha_sample_rad).abs();
     assert!(
         alpha_diff > 1e-6,
-        "finite-wing alpha_geom ({}) must differ from alpha_sample ({}) by more than 1e-6 rad, diff={}",
+        "alpha_geom ({}) must differ from alpha_sample ({}) by > 1e-6",
         wing_audit.alpha_geom_rad,
-        wing_audit.alpha_sample_rad,
-        alpha_diff
+        wing_audit.alpha_sample_rad
     );
 
-    // Qualification follows alpha_sample, not alpha_geom.
-    // The audit records both values, proving the implementation audits alpha_sample.
-    // If an implementation incorrectly audited alpha_geom, it would use the wrong value.
-    // We verify the audit's alpha_range_status is based on alpha_sample.
-    let wing_polar_lo = -0.35;
-    let wing_polar_hi = 0.35;
-    let expected_sample_status = if wing_audit.alpha_sample_rad < wing_polar_lo {
-        RangeStatus::BelowRange
-    } else if wing_audit.alpha_sample_rad > wing_polar_hi {
-        RangeStatus::AboveRange
-    } else {
-        RangeStatus::InRange
-    };
+    // UNCONDITIONAL: alpha_geom and alpha_sample must lie on opposite sides
+    // of at least one alpha evidence boundary.
+    // Either alpha_geom is outside while alpha_sample is inside, or vice versa.
+    let geom_in_range =
+        wing_audit.alpha_geom_rad >= alpha_lower && wing_audit.alpha_geom_rad <= alpha_upper;
+    let sample_in_range =
+        wing_audit.alpha_sample_rad >= alpha_lower && wing_audit.alpha_sample_rad <= alpha_upper;
+
+    assert!(
+        geom_in_range != sample_in_range,
+        "alpha_geom ({}) and alpha_sample ({}) must be on opposite sides of \
+         evidence boundary [{}, {}]: geom_in_range={}, sample_in_range={}",
+        wing_audit.alpha_geom_rad,
+        wing_audit.alpha_sample_rad,
+        alpha_lower,
+        alpha_upper,
+        geom_in_range,
+        sample_in_range
+    );
+
+    // UNCONDITIONAL: qualification follows alpha_sample
     assert_eq!(
-        wing_audit.alpha_range_status, expected_sample_status,
+        wing_audit.alpha_range_status,
+        if sample_in_range {
+            RangeStatus::InRange
+        } else if wing_audit.alpha_sample_rad < alpha_lower {
+            RangeStatus::BelowRange
+        } else {
+            RangeStatus::AboveRange
+        },
         "qualification must follow alpha_sample, not alpha_geom"
     );
+
+    // If alpha_sample is in range but alpha_geom is not, qualification must
+    // NOT emit an alpha blocker (proving alpha_geom auditing would be wrong).
+    if sample_in_range && !geom_in_range {
+        assert!(
+            !point.outcome.blockers().iter().any(|b| matches!(
+                b,
+                QualificationBlocker::AerodynamicAlphaBelowRange { .. }
+                    | QualificationBlocker::AerodynamicAlphaAboveRange { .. }
+            )),
+            "alpha_sample in range must not produce alpha blocker even though alpha_geom is out"
+        );
+    }
 }
 
 // ===========================================================================
-// TASK 4: REYNOLDS DUAL-NODE ALPHA SUPPORT
+// TASK 4: REYNOLDS DUAL-NODE ALPHA SUPPORT (unconditional)
 // ===========================================================================
 
 #[test]
@@ -642,83 +637,68 @@ fn reynolds_dual_node_alpha_blocker_when_upper_node_rejects() {
     let model = reynolds_asymmetric_model();
     let config = sim_config();
 
-    // Node 1 (Re=200000): alpha [-0.35, 0.35], CL_alpha ~ 1.0
-    // Node 2 (Re=500000): alpha [-0.20, 0.20], CL_alpha ~ 1.0
-    // At intermediate Re (between 200k and 500k), if alpha_sample > 0.20,
-    // node 1 supports it but node 2 does not.
-    // Qualification MUST emit the contributing-node alpha blocker.
-
-    // At 14 m/s: Re = 14 * 0.30 / 1.5e-5 = 280000 (intermediate)
-    // Required CL ~ 0.27, alpha ~ 0.27 rad > 0.20 (upper node bound)
     let solution = solve_trim(&model, &config, 14.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 14.0);
-
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
-
+    let audits = extract_aero_audits(&point.outcome);
     let wing_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-wing")
         .unwrap();
 
-    // Verify the wing has Reynolds family binding with asymmetric nodes
-    assert_eq!(wing_audit.polar_binding_kind, "reynolds_family");
-
-    // Check if the upper node alpha bounds are recorded
-    let upper_node_alpha_hi = wing_audit.reynolds_upper_node_alpha_upper_rad.unwrap();
-    assert_eq!(
-        upper_node_alpha_hi, 0.20,
-        "upper node alpha upper bound must be 0.20"
+    // UNCONDITIONAL: Reynolds number is strictly between the two nodes
+    let re = wing_audit.reynolds_number.unwrap();
+    assert!(
+        re > 200_000.0 && re < 500_000.0,
+        "Re={} must be strictly between 200000 and 500000",
+        re
     );
 
-    // If alpha_sample > 0.20, the upper node rejects it
-    if wing_audit.alpha_sample_rad > 0.20 {
-        let has_node_blocker = point.outcome.blockers().iter().any(|b| {
-            matches!(
-                b,
-                QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange { .. }
-            )
-        });
-        assert!(
-            has_node_blocker,
-            "alpha_sample={} > 0.20 must emit ReynoldsContributingNodeAlphaAboveRange, blockers: {:?}",
-            wing_audit.alpha_sample_rad,
-            point.outcome.blockers()
-        );
-    }
+    // UNCONDITIONAL: upper node alpha upper bound is 0.20
+    let upper_node_alpha_hi = wing_audit.reynolds_upper_node_alpha_upper_rad.unwrap();
+    assert_eq!(upper_node_alpha_hi, 0.20);
+
+    // UNCONDITIONAL: lower node supports alpha_sample
+    let lower_node_alpha_hi = wing_audit.reynolds_lower_node_alpha_upper_rad.unwrap();
+    assert!(
+        wing_audit.alpha_sample_rad <= lower_node_alpha_hi,
+        "alpha_sample={} must be <= lower node upper bound {}",
+        wing_audit.alpha_sample_rad,
+        lower_node_alpha_hi
+    );
+
+    // UNCONDITIONAL: upper node does NOT support alpha_sample
+    assert!(
+        wing_audit.alpha_sample_rad > upper_node_alpha_hi,
+        "alpha_sample={} must be > upper node upper bound {}",
+        wing_audit.alpha_sample_rad,
+        upper_node_alpha_hi
+    );
+
+    // UNCONDITIONAL: typed blocker must exist
+    assert!(
+        point.outcome.blockers().iter().any(|b| matches!(
+            b,
+            QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange { .. }
+        )),
+        "must emit ReynoldsContributingNodeAlphaAboveRange, blockers: {:?}",
+        point.outcome.blockers()
+    );
 }
 
 // ===========================================================================
-// TASK 5: FIXED PROPELLER TABLE J
+// TASK 5: FIXED PROPELLER TABLE — J IN RANGE (unconditional)
 // ===========================================================================
 
 #[test]
 fn fixed_propeller_table_j_in_domain_no_blocker() {
     let model = fixed_table_model();
     let config = sim_config();
-
-    // Fixed table has J range [0.0, 1.3]
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
 
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present {
             advance_ratio_j,
             j_lower,
@@ -727,27 +707,91 @@ fn fixed_propeller_table_j_in_domain_no_blocker() {
             shaft_speed_domain,
             ..
         } => {
+            // UNCONDITIONAL: J bounds
             assert_eq!(*j_lower, 0.0);
             assert_eq!(*j_upper, 1.3);
-            // If J is in domain, no J blocker
-            if *advance_ratio_j >= *j_lower && *advance_ratio_j <= *j_upper {
-                assert_eq!(*j_range_status, RangeStatus::InRange);
-                assert!(
-                    !point.outcome.blockers().iter().any(|b| {
-                        matches!(
-                            b,
-                            QualificationBlocker::PropellerAdvanceRatioBelowRange { .. }
-                                | QualificationBlocker::PropellerAdvanceRatioAboveRange { .. }
-                        )
-                    }),
-                    "J in domain must not produce J blocker"
-                );
-            }
-            // Fixed table has no shaft-speed map domain
+
+            // UNCONDITIONAL: J is inside the table support
             assert!(
-                shaft_speed_domain.is_none(),
-                "fixed table must have shaft_speed_domain = None"
+                *advance_ratio_j >= *j_lower && *advance_ratio_j <= *j_upper,
+                "J={} must be in [{}, {}]",
+                advance_ratio_j,
+                j_lower,
+                j_upper
             );
+
+            // UNCONDITIONAL: range status is InRange
+            assert_eq!(*j_range_status, RangeStatus::InRange);
+
+            // UNCONDITIONAL: no J blocker
+            assert!(
+                !point.outcome.blockers().iter().any(|b| matches!(
+                    b,
+                    QualificationBlocker::PropellerAdvanceRatioBelowRange { .. }
+                        | QualificationBlocker::PropellerAdvanceRatioAboveRange { .. }
+                )),
+                "J in domain must not produce J blocker"
+            );
+
+            // UNCONDITIONAL: fixed table has no shaft-speed domain
+            assert!(shaft_speed_domain.is_none());
+        }
+        PropulsionDomainAudit::NotPresent => panic!("fixture has propulsion"),
+    }
+}
+
+// ===========================================================================
+// TASK 5B: FIXED PROPELLER TABLE — J OUT OF RANGE (unconditional)
+// ===========================================================================
+
+#[test]
+fn fixed_propeller_table_j_out_of_range_emits_typed_blocker() {
+    let model = fixed_table_narrow_j_model();
+    let config = sim_config();
+    let solution = solve_trim(&model, &config, 18.0);
+    let point =
+        qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
+
+    match extract_propulsion_audit(&point.outcome) {
+        PropulsionDomainAudit::Present {
+            advance_ratio_j,
+            j_lower,
+            j_upper,
+            j_range_status,
+            shaft_speed_domain,
+            ..
+        } => {
+            // UNCONDITIONAL: fixed table has no shaft-speed domain
+            assert!(shaft_speed_domain.is_none());
+
+            // UNCONDITIONAL: J is outside the narrow table support
+            assert!(
+                *advance_ratio_j > *j_upper || *advance_ratio_j < *j_lower,
+                "J={} must be outside [{}, {}]",
+                advance_ratio_j,
+                j_lower,
+                j_upper
+            );
+
+            // UNCONDITIONAL: range status is not InRange
+            assert_ne!(*j_range_status, RangeStatus::InRange);
+
+            // UNCONDITIONAL: typed J blocker must exist
+            let has_j_blocker = point.outcome.blockers().iter().any(|b| {
+                matches!(
+                    b,
+                    QualificationBlocker::PropellerAdvanceRatioBelowRange { .. }
+                        | QualificationBlocker::PropellerAdvanceRatioAboveRange { .. }
+                )
+            });
+            assert!(
+                has_j_blocker,
+                "J out of range must emit typed J blocker, blockers: {:?}",
+                point.outcome.blockers()
+            );
+
+            // UNCONDITIONAL: must not qualify
+            assert!(!point.outcome.is_qualified());
         }
         PropulsionDomainAudit::NotPresent => panic!("fixture has propulsion"),
     }
@@ -761,22 +805,13 @@ fn fixed_propeller_table_shaft_speed_domain_is_none() {
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
 
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present {
             shaft_speed_domain, ..
         } => {
             assert!(
                 shaft_speed_domain.is_none(),
-                "fixed propeller table must have shaft_speed_domain = None, got: {shaft_speed_domain:?}"
+                "fixed table must have shaft_speed_domain = None"
             );
         }
         PropulsionDomainAudit::NotPresent => panic!("fixture has propulsion"),
@@ -784,135 +819,113 @@ fn fixed_propeller_table_shaft_speed_domain_is_none() {
 }
 
 // ===========================================================================
-// TASK 6: SHAFT-SPEED MAP OUT-OF-RANGE
+// TASK 6: SHAFT-SPEED MAP OUT-OF-RANGE (unconditional)
 // ===========================================================================
 
 #[test]
 fn shaft_speed_map_out_of_range_emits_typed_blocker() {
-    let model = trim_model();
+    let model = shaft_speed_narrow_model();
     let config = sim_config();
-
-    // The standard fixture has shaft-speed map with range [250, 800] rad/s.
-    // Solve at very low speed to try to get shaft speed below 250.
-    // At low speed, the trim needs high thrust, which means high throttle,
-    // which means high shaft speed. So instead, let's check the actual values.
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
 
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-
-    // Verify the audit records the exact shaft speed and range
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present {
             shaft_speed_rad_s,
             shaft_speed_domain,
             ..
         } => {
             let domain = shaft_speed_domain.as_ref().unwrap();
-            // Verify the range status matches the actual values
-            let expected_status = if *shaft_speed_rad_s < domain.shaft_speed_lower_rad_s {
-                RangeStatus::BelowRange
-            } else if *shaft_speed_rad_s > domain.shaft_speed_upper_rad_s {
-                RangeStatus::AboveRange
-            } else {
-                RangeStatus::InRange
-            };
-            assert_eq!(
-                domain.shaft_speed_range_status, expected_status,
-                "shaft speed range status must match actual values"
+
+            // UNCONDITIONAL: shaft speed is outside the narrow map range
+            assert!(
+                *shaft_speed_rad_s < domain.shaft_speed_lower_rad_s
+                    || *shaft_speed_rad_s > domain.shaft_speed_upper_rad_s,
+                "shaft_speed={} must be outside [{}, {}]",
+                shaft_speed_rad_s,
+                domain.shaft_speed_lower_rad_s,
+                domain.shaft_speed_upper_rad_s
             );
 
-            // If out of range, verify typed blocker
-            if expected_status == RangeStatus::BelowRange {
-                assert!(point.outcome.blockers().iter().any(|b| {
-                    matches!(
+            // UNCONDITIONAL: exact typed blocker
+            if *shaft_speed_rad_s < domain.shaft_speed_lower_rad_s {
+                assert!(
+                    point.outcome.blockers().iter().any(|b| matches!(
                         b,
                         QualificationBlocker::PropellerShaftSpeedBelowRange { .. }
-                    )
-                }));
-            } else if expected_status == RangeStatus::AboveRange {
-                assert!(point.outcome.blockers().iter().any(|b| {
-                    matches!(
+                    )),
+                    "shaft speed below range must emit PropellerShaftSpeedBelowRange"
+                );
+            } else {
+                assert!(
+                    point.outcome.blockers().iter().any(|b| matches!(
                         b,
                         QualificationBlocker::PropellerShaftSpeedAboveRange { .. }
-                    )
-                }));
+                    )),
+                    "shaft speed above range must emit PropellerShaftSpeedAboveRange"
+                );
             }
+
+            // UNCONDITIONAL: must not qualify
+            assert!(!point.outcome.is_qualified());
         }
         PropulsionDomainAudit::NotPresent => panic!("fixture has propulsion"),
     }
 }
 
 // ===========================================================================
-// TASK 7: DUAL-NODE J SUPPORT
+// TASK 7: DUAL-NODE J SUPPORT (unconditional)
 // ===========================================================================
 
 #[test]
 fn dual_node_j_blocker_when_one_node_rejects() {
     let model = dual_j_range_model();
     let config = sim_config();
-
-    // Node 1 (shaft_speed=250): J [0.0, 0.5]
-    // Node 2 (shaft_speed=800): J [0.0, 1.2]
-    // At intermediate shaft speed, intersected J range is [0.0, 0.5].
-    // If actual J > 0.5, the lower node rejects it.
-
     let solution = solve_trim(&model, &config, 18.0);
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
 
-    let prop_audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-            propulsion_audit, ..
-        } => propulsion_audit,
-    };
-
-    match prop_audit {
+    match extract_propulsion_audit(&point.outcome) {
         PropulsionDomainAudit::Present {
             advance_ratio_j,
             j_lower,
             j_upper,
+            j_range_status,
             ..
         } => {
-            // The intersected J range should be [0.0, 0.5]
+            // UNCONDITIONAL: intersected J range is [0.0, 0.5]
             assert_eq!(*j_lower, 0.0);
-            assert_eq!(
-                *j_upper, 0.5,
-                "intersected J upper must be min(0.5, 1.2) = 0.5"
+            assert_eq!(*j_upper, 0.5);
+
+            // UNCONDITIONAL: J is above the intersected range
+            assert!(
+                *advance_ratio_j > 0.5,
+                "J={} must be > 0.5 (intersected upper bound)",
+                advance_ratio_j
             );
 
-            // If J > 0.5, qualification must reject with J blocker
-            if *advance_ratio_j > 0.5 {
-                assert!(
-                    !point.outcome.is_qualified(),
-                    "J={} > 0.5 must not qualify",
-                    advance_ratio_j
-                );
-                assert!(point.outcome.blockers().iter().any(|b| {
-                    matches!(
-                        b,
-                        QualificationBlocker::PropellerAdvanceRatioAboveRange { .. }
-                    )
-                }));
-            }
+            // UNCONDITIONAL: range status is AboveRange
+            assert_eq!(*j_range_status, RangeStatus::AboveRange);
+
+            // UNCONDITIONAL: typed J blocker
+            assert!(
+                point.outcome.blockers().iter().any(|b| matches!(
+                    b,
+                    QualificationBlocker::PropellerAdvanceRatioAboveRange { .. }
+                )),
+                "J > intersected upper must emit PropellerAdvanceRatioAboveRange"
+            );
+
+            // UNCONDITIONAL: must not qualify
+            assert!(!point.outcome.is_qualified());
         }
         PropulsionDomainAudit::NotPresent => panic!("fixture has propulsion"),
     }
 }
 
 // ===========================================================================
-// TASK 8: NO PROPULSION
+// TASK 8: NO PROPULSION — NO SKIP (unconditional)
 // ===========================================================================
 
 #[test]
@@ -920,55 +933,48 @@ fn no_propulsion_returns_not_present() {
     let model = no_propulsion_model();
     let config = sim_config();
 
-    // Verify the model has no propulsion
-    assert!(
-        model.propulsion().is_none(),
-        "no-propulsion fixture must have no propulsion"
-    );
+    // UNCONDITIONAL: model has no propulsion
+    assert!(model.propulsion().is_none());
 
-    // Solve trim (without propulsion, the trim might not converge, but we can
-    // still test the qualification's propulsion audit)
-    // Actually, without propulsion, the trim solver might fail. Let's check.
+    // Without propulsion the Newton solver's Jacobian is singular (throttle
+    // has no effect), so we evaluate a single candidate directly.
     let request = LongitudinalTrimRequest::new(
         18.0,
         TrimBounds::new(-0.15, 0.30).unwrap(),
         TrimBounds::new(-0.9, 0.9).unwrap(),
-        TrimBounds::new(0.02, 1.0).unwrap(),
-        LongitudinalTrimVariables::new(0.08, 0.0, 0.45).unwrap(),
+        TrimBounds::new(0.0, 1.0).unwrap(),
+        LongitudinalTrimVariables::new(0.06, 0.0, 0.0).unwrap(),
         LongitudinalTrimTolerances::new(5.0, 2.0).unwrap(),
         50,
     )
     .unwrap();
 
-    // The trim might not converge without propulsion, but we test the qualification
-    // logic by checking the propulsion audit directly.
-    // If trim fails, we skip the full qualification test but verify the model structure.
-    if let Ok(solution) = solve_longitudinal_trim(&model, &config, &request) {
-        let point = qualify_longitudinal_trim_solution(
-            &model,
-            &config,
-            &solution,
-            &permissive_limits(),
-            18.0,
-        );
-        let prop_audit = match &point.outcome {
-            aircraft::LongitudinalTrimQualificationOutcome::Qualified {
-                propulsion_audit, ..
-            } => propulsion_audit,
-            aircraft::LongitudinalTrimQualificationOutcome::NotQualified {
-                propulsion_audit,
-                ..
-            } => propulsion_audit,
-        };
-        assert!(
-            matches!(prop_audit, PropulsionDomainAudit::NotPresent),
-            "no-propulsion model must produce NotPresent audit, got: {prop_audit:?}"
-        );
-    }
+    let evaluation = evaluate_longitudinal_trim_candidate(&model, &config, &request, {
+        LongitudinalTrimVariables::new(0.06, 0.0, 0.0).unwrap()
+    })
+    .expect("evaluation must succeed for no-propulsion candidate");
+
+    let solution = LongitudinalTrimSolution {
+        evaluation,
+        iteration_count: 0,
+    };
+
+    let point =
+        qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
+
+    // UNCONDITIONAL: propulsion audit is NotPresent
+    assert!(
+        matches!(
+            extract_propulsion_audit(&point.outcome),
+            PropulsionDomainAudit::NotPresent
+        ),
+        "no-propulsion model must produce NotPresent audit, got: {:?}",
+        extract_propulsion_audit(&point.outcome)
+    );
 }
 
 // ===========================================================================
-// TASK 9: CONTROL DEFLECTION PROOF (STRENGTHENED)
+// TASK 9: CONTROL DEFLECTION PROOF — FORCE NONZERO DEFLECTION
 // ===========================================================================
 
 #[test]
@@ -979,74 +985,63 @@ fn controlled_surface_deflection_changes_section_alpha() {
     let positions = &solution.evaluation.control_surface_positions;
     let state = &solution.evaluation.state;
 
-    // Get the effective (deflected) elements
     let effective_elements = effective_aero_elements_for_positions(&model, positions);
-
     let env = config.aero_environment();
 
-    // Find the tail element index
     let tail_idx = model
         .aero_elements()
         .iter()
         .position(|e| e.id() == "synthetic-elevator-tail")
         .unwrap();
 
-    // The base (undeflected) element is the model's original element
     let base_element = model.aero_elements()[tail_idx].element();
-    // Compute section kinematics for base (undeflected) tail
     let base_kin = compute_section_kinematics(state, base_element, env);
-    // Compute section kinematics for deflected tail
     let deflected_kin = compute_section_kinematics(state, &effective_elements[tail_idx], env);
 
     let elevator_deflection = -(positions.elevator_angle_rad() - 0.0);
 
-    // If the elevator deflection is nonzero, the section alpha MUST differ
-    if elevator_deflection.abs() > 1e-10 {
-        let alpha_diff = (base_kin.alpha_rad - deflected_kin.alpha_rad).abs();
-        assert!(
-            alpha_diff > 1e-10,
-            "nonzero elevator deflection ({}) must change section alpha: base={}, deflected={}",
-            elevator_deflection,
-            base_kin.alpha_rad,
-            deflected_kin.alpha_rad
-        );
-    }
+    // UNCONDITIONAL: elevator deflection is meaningful
+    assert!(
+        elevator_deflection.abs() > 1e-6,
+        "elevator deflection must be > 1e-6 rad, got {}",
+        elevator_deflection
+    );
 
-    // Now verify the qualification uses the DEFLECTED alpha
+    // UNCONDITIONAL: base alpha != deflected alpha
+    let alpha_diff = (base_kin.alpha_rad - deflected_kin.alpha_rad).abs();
+    assert!(
+        alpha_diff > 1e-10,
+        "base alpha ({}) must differ from deflected alpha ({})",
+        base_kin.alpha_rad,
+        deflected_kin.alpha_rad
+    );
+
+    // Qualification uses DEFLECTED alpha
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
-    let audits = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. } => {
-            aero_audits
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => {
-            aero_audits
-        }
-    };
+    let audits = extract_aero_audits(&point.outcome);
     let tail_audit = audits
         .iter()
         .find(|a| a.element_id == "synthetic-elevator-tail")
         .unwrap();
 
-    // The qualification's alpha_geom_rad must equal the DEFLECTED alpha
+    // UNCONDITIONAL: qualification alpha_geom_rad == deflected alpha
     assert_eq!(
         tail_audit.alpha_geom_rad.to_bits(),
         deflected_kin.alpha_rad.to_bits(),
-        "qualification alpha_geom_rad must equal the deflected section alpha, not the base alpha"
+        "qualification must use deflected alpha"
     );
 
-    // And must differ from the base alpha (if deflection is nonzero)
-    if elevator_deflection.abs() > 1e-10 {
-        assert_ne!(
-            tail_audit.alpha_geom_rad.to_bits(),
-            base_kin.alpha_rad.to_bits(),
-            "qualification alpha_geom_rad must differ from base (undeflected) alpha"
-        );
-    }
+    // UNCONDITIONAL: qualification alpha_geom_rad != base alpha
+    assert_ne!(
+        tail_audit.alpha_geom_rad.to_bits(),
+        base_kin.alpha_rad.to_bits(),
+        "qualification must differ from base alpha"
+    );
 }
 
 // ===========================================================================
-// TASK 10: OFF-AXIS STRICT TYPED BLOCKER (REPLACES WEAK ASSERTION)
+// TASK 10: OFF-AXIS TEST — GUARANTEE KNOWN BLOCKER
 // ===========================================================================
 
 #[test]
@@ -1054,106 +1049,74 @@ fn strict_off_axis_zero_limits_produce_exact_typed_blockers() {
     let model = trim_model();
     let config = sim_config();
     let solution = solve_trim(&model, &config, 18.0);
-
-    // Use zero limits to force residual failures for ANY nonzero off-axis quantity
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &strict_zero_limits(), 18.0);
 
-    let audit = match &point.outcome {
-        aircraft::LongitudinalTrimQualificationOutcome::Qualified { residual_audit, .. } => {
-            residual_audit
-        }
-        aircraft::LongitudinalTrimQualificationOutcome::NotQualified { residual_audit, .. } => {
-            residual_audit
-        }
-    };
+    let audit = extract_residual_audit(&point.outcome);
     let blockers = point.outcome.blockers();
 
-    // For EACH nonzero off-axis quantity, the EXACT typed blocker MUST be present.
-    // This is a strict test: not just "some blocker exists", but the exact typed blocker.
+    // UNCONDITIONAL: at least one off-axis quantity is nonzero
+    // (the trim is not perfectly symmetric in practice)
+    let fz_nonzero = audit.fz_body_n.abs() > 0.0;
+    let my_nonzero = audit.my_body_nm.abs() > 0.0;
 
+    // With zero limits, ANY nonzero residual triggers a blocker.
+    // We guarantee at least Fz or My is nonzero (trim residual forces).
+    assert!(
+        fz_nonzero || my_nonzero,
+        "trim must produce at least one nonzero residual for this proof"
+    );
+
+    // UNCONDITIONAL: with zero limits, qualification must reject
+    assert!(
+        !point.outcome.is_qualified(),
+        "zero limits with nonzero residuals must not qualify"
+    );
+
+    // Verify exact typed blockers for each nonzero quantity
     if audit.fy_body_n.abs() > 0.0 {
         assert!(
             blockers
                 .iter()
-                .any(|b| matches!(b, QualificationBlocker::SideForceLimitExceeded { .. })),
-            "nonzero Fy={} MUST produce SideForceLimitExceeded, blockers: {:?}",
-            audit.fy_body_n,
-            blockers
+                .any(|b| matches!(b, QualificationBlocker::SideForceLimitExceeded { .. }))
         );
     }
     if audit.mx_body_nm.abs() > 0.0 {
         assert!(
             blockers
                 .iter()
-                .any(|b| matches!(b, QualificationBlocker::RollMomentLimitExceeded { .. })),
-            "nonzero Mx={} MUST produce RollMomentLimitExceeded, blockers: {:?}",
-            audit.mx_body_nm,
-            blockers
+                .any(|b| matches!(b, QualificationBlocker::RollMomentLimitExceeded { .. }))
         );
     }
     if audit.mz_body_nm.abs() > 0.0 {
         assert!(
             blockers
                 .iter()
-                .any(|b| matches!(b, QualificationBlocker::YawMomentLimitExceeded { .. })),
-            "nonzero Mz={} MUST produce YawMomentLimitExceeded, blockers: {:?}",
-            audit.mz_body_nm,
-            blockers
+                .any(|b| matches!(b, QualificationBlocker::YawMomentLimitExceeded { .. }))
         );
     }
     if audit.linear_accel_world_y_mps2.abs() > 0.0 {
-        assert!(
-            blockers.iter().any(|b| matches!(
-                b,
-                QualificationBlocker::LateralAccelerationLimitExceeded { .. }
-            )),
-            "nonzero ay={} MUST produce LateralAccelerationLimitExceeded, blockers: {:?}",
-            audit.linear_accel_world_y_mps2,
-            blockers
-        );
+        assert!(blockers.iter().any(|b| matches!(
+            b,
+            QualificationBlocker::LateralAccelerationLimitExceeded { .. }
+        )));
     }
     if audit.angular_accel_body_x_rad_s2.abs() > 0.0 {
-        assert!(
-            blockers.iter().any(|b| matches!(
-                b,
-                QualificationBlocker::RollAngularAccelerationLimitExceeded { .. }
-            )),
-            "nonzero roll accel={} MUST produce RollAngularAccelerationLimitExceeded, blockers: {:?}",
-            audit.angular_accel_body_x_rad_s2,
-            blockers
-        );
+        assert!(blockers.iter().any(|b| matches!(
+            b,
+            QualificationBlocker::RollAngularAccelerationLimitExceeded { .. }
+        )));
     }
     if audit.angular_accel_body_z_rad_s2.abs() > 0.0 {
-        assert!(
-            blockers.iter().any(|b| matches!(
-                b,
-                QualificationBlocker::YawAngularAccelerationLimitExceeded { .. }
-            )),
-            "nonzero yaw accel={} MUST produce YawAngularAccelerationLimitExceeded, blockers: {:?}",
-            audit.angular_accel_body_z_rad_s2,
-            blockers
-        );
-    }
-
-    // At least one off-axis quantity should be nonzero for a meaningful test
-    let any_nonzero = audit.fy_body_n.abs() > 0.0
-        || audit.mx_body_nm.abs() > 0.0
-        || audit.mz_body_nm.abs() > 0.0
-        || audit.linear_accel_world_y_mps2.abs() > 0.0
-        || audit.angular_accel_body_x_rad_s2.abs() > 0.0
-        || audit.angular_accel_body_z_rad_s2.abs() > 0.0;
-
-    if any_nonzero {
-        assert!(
-            !point.outcome.is_qualified(),
-            "nonzero off-axis with zero limits must not qualify"
-        );
+        assert!(blockers.iter().any(|b| matches!(
+            b,
+            QualificationBlocker::YawAngularAccelerationLimitExceeded { .. }
+        )));
     }
 }
 
 // ===========================================================================
-// TASK 11: BLOCKER ORDER — EXPLICIT SEQUENCE
+// TASK 11: BLOCKER ORDER — EXPLICIT EXPECTED SEQUENCE
 // ===========================================================================
 
 #[test]
@@ -1178,7 +1141,7 @@ fn blocker_order_follows_explicit_aero_propulsion_residual_integrity_sequence() 
     let point =
         qualify_longitudinal_trim_solution(&model, &config, &solution, &strict_zero_limits(), 8.0);
     let blockers = point.outcome.blockers();
-    assert!(!blockers.is_empty(), "should have multiple blockers");
+    assert!(!blockers.is_empty(), "must have multiple blockers");
 
     // Classify each blocker into its phase
     fn blocker_phase(b: &QualificationBlocker) -> u8 {
@@ -1188,48 +1151,55 @@ fn blocker_order_follows_explicit_aero_propulsion_residual_integrity_sequence() 
             | QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange { .. }
             | QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange { .. }
             | QualificationBlocker::ReynoldsBelowRange { .. }
-            | QualificationBlocker::ReynoldsAboveRange { .. } => 0, // aero
+            | QualificationBlocker::ReynoldsAboveRange { .. } => 0,
             QualificationBlocker::PropellerShaftSpeedBelowRange { .. }
             | QualificationBlocker::PropellerShaftSpeedAboveRange { .. }
             | QualificationBlocker::PropellerAdvanceRatioBelowRange { .. }
-            | QualificationBlocker::PropellerAdvanceRatioAboveRange { .. } => 1, // propulsion
+            | QualificationBlocker::PropellerAdvanceRatioAboveRange { .. } => 1,
             QualificationBlocker::SideForceLimitExceeded { .. }
             | QualificationBlocker::RollMomentLimitExceeded { .. }
             | QualificationBlocker::YawMomentLimitExceeded { .. }
             | QualificationBlocker::LateralAccelerationLimitExceeded { .. }
             | QualificationBlocker::RollAngularAccelerationLimitExceeded { .. }
-            | QualificationBlocker::YawAngularAccelerationLimitExceeded { .. } => 2, // residual
+            | QualificationBlocker::YawAngularAccelerationLimitExceeded { .. } => 2,
             QualificationBlocker::NonFiniteAuditValue { .. }
-            | QualificationBlocker::ReEvaluationFailure => 3, // integrity
+            | QualificationBlocker::ReEvaluationFailure => 3,
         }
     }
 
-    // Verify strict non-decreasing phase ordering
+    // UNCONDITIONAL: strict non-decreasing phase ordering
     let phases: Vec<u8> = blockers.iter().map(blocker_phase).collect();
     for i in 1..phases.len() {
         assert!(
             phases[i] >= phases[i - 1],
-            "blocker order violation at index {i}: phase {} < phase {}, blockers: {:?}",
+            "blocker order violation at {i}: phase {} < {}, blockers: {:?}",
             phases[i],
             phases[i - 1],
             blockers
         );
     }
 
-    // Verify we have at least aero and residual phases represented
-    let has_aero = phases.contains(&0);
-    let has_residual = phases.contains(&2);
+    // UNCONDITIONAL: must have representatives from aero AND residual phases
     assert!(
-        has_aero && has_residual,
-        "test must have both aero and residual blockers for ordering proof, phases: {:?}",
-        phases
+        phases.contains(&0),
+        "must have aero blockers, phases: {:?}, blockers: {:?}",
+        phases,
+        blockers
+    );
+    assert!(
+        phases.contains(&2),
+        "must have residual blockers, phases: {:?}, blockers: {:?}",
+        phases,
+        blockers
+    );
+
+    // UNCONDITIONAL: verify specific expected blocker classes exist
+    let has_reynolds_blocker = blockers
+        .iter()
+        .any(|b| matches!(b, QualificationBlocker::ReynoldsBelowRange { .. }));
+    assert!(
+        has_reynolds_blocker,
+        "must have ReynoldsBelowRange at 8 m/s, blockers: {:?}",
+        blockers
     );
 }
-
-// ===========================================================================
-// TASK 12: RE-EVALUATION VALID EQUALITY (preserved)
-// ===========================================================================
-
-// The re_evaluation_equality_check_passes_for_valid_solution test above covers
-// the valid case. The ReEvaluationFailure path is exercised by the integrity
-// phase in the blocker ordering test when applicable.

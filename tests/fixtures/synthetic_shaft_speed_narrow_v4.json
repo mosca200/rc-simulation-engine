@@ -1,7 +1,7 @@
 {
-  "schema_version": 5,
-  "model_id": "synthetic_finite_wing_v5",
-  "display_name": "Synthetic Finite-Wing V5 Fixture",
+  "schema_version": 4,
+  "model_id": "synthetic_shaft_speed_narrow_v4",
+  "display_name": "Synthetic Narrow Shaft-Speed Map Fixture",
   "classification": "synthetic_test",
   "reference_aircraft": null,
   "rigid_body": {
@@ -29,7 +29,7 @@
             "samples": [
               {"alpha_rad": -0.35, "cl": -1.05, "cd": 0.095, "cm": -0.040},
               {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.040, "cm": -0.040},
-              {"alpha_rad":  0.10, "cl":  0.30, "cd": 0.050, "cm": -0.030}
+              {"alpha_rad":  0.35, "cl":  1.05, "cd": 0.095, "cm": -0.040}
             ]
           },
           {
@@ -37,7 +37,7 @@
             "samples": [
               {"alpha_rad": -0.35, "cl": -1.40, "cd": 0.070, "cm": -0.028},
               {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.022, "cm": -0.028},
-              {"alpha_rad":  0.10, "cl":  0.40, "cd": 0.035, "cm": -0.020}
+              {"alpha_rad":  0.35, "cl":  1.40, "cd": 0.070, "cm": -0.028}
             ]
           }
         ]
@@ -59,15 +59,6 @@
         "area_m2": 0.10,
         "chord_m": 0.18,
         "polar_binding": {"kind": "polar", "polar_id": "synthetic-tail-polar"}
-      }
-    ],
-    "surfaces": [
-      {
-        "id": "synthetic-wing-surface",
-        "element_ids": ["synthetic-wing"],
-        "span_axis_body": [0.0, 1.0, 0.0],
-        "span_m": 0.60,
-        "span_efficiency_factor": 0.90
       }
     ]
   },
@@ -105,7 +96,7 @@
       "kind": "shaft_speed_map",
       "nodes": [
         {
-          "shaft_speed_rad_s": 250.0,
+          "shaft_speed_rad_s": 100.0,
           "samples": [
             {"advance_ratio_j": 0.0, "ct": 0.108, "cq": 0.0158},
             {"advance_ratio_j": 0.7, "ct": 0.052, "cq": 0.0090},
@@ -113,7 +104,7 @@
           ]
         },
         {
-          "shaft_speed_rad_s": 800.0,
+          "shaft_speed_rad_s": 200.0,
           "samples": [
             {"advance_ratio_j": 0.0, "ct": 0.128, "cq": 0.0190},
             {"advance_ratio_j": 0.6, "ct": 0.078, "cq": 0.0122},
