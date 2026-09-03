@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "campaign_id": "clark-y-reference-v1",
+  "airfoil_file": "clarky.dat",
+  "runs": [
+    {
+      "dataset_id": "clark-y-re-100000",
+      "reynolds": 100000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    },
+    {
+      "dataset_id": "clark-y-re-150000",
+      "reynolds": 150000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    },
+    {
+      "dataset_id": "clark-y-re-200000",
+      "reynolds": 200000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    },
+    {
+      "dataset_id": "clark-y-re-300000",
+      "reynolds": 300000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    },
+    {
+      "dataset_id": "clark-y-re-500000",
+      "reynolds": 500000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    },
+    {
+      "dataset_id": "clark-y-re-750000",
+      "reynolds": 750000.0,
+      "mach": 0.0,
+      "alpha_start_deg": -12.0,
+      "alpha_end_deg": 18.0,
+      "alpha_step_deg": 0.5,
+      "maximum_iterations": 200,
+      "ncrit": 9.0
+    }
+  ],
+  "coverage_request": {
+    "required_reynolds_min": 100000.0,
+    "required_reynolds_max": 750000.0,
+    "required_alpha_min_rad": -0.20943951023931956,
+    "required_alpha_max_rad": 0.3141592653589793,
+    "require_converged": false
+  }
+}

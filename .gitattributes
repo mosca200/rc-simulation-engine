@@ -1,2 +1,5 @@
 # Preserve externally sourced manufacturer datasets byte-for-byte.
 docs/reference_aircraft/data/sources/*.dat binary
+
+# Preserve reference airfoil geometry byte-for-byte (SHA-256 provenance lock).
+reference/**/*.dat binary
