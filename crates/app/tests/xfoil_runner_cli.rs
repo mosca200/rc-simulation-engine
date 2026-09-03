@@ -47,6 +47,7 @@ impl Drop for TestDirectory {
 enum FakeMode {
     Valid,
     FailFirstRun,
+    OperationalAfterFirstRun,
     ProcessFailed,
     MissingPolar,
     MalformedPolar,
@@ -152,6 +153,7 @@ fn write_fake(root: &Path, mode: FakeMode) -> (PathBuf, PathBuf, PathBuf) {
             cwd_probe.display()
         ),
         FakeMode::FailFirstRun => "cat > captured.stdin\ntest -f airfoil.dat || exit 9\nif grep -q 'VISC 1.00000000000000000e5' captured.stdin; then exit 7; fi\ncat > polar.out <<'POLAR'\nalpha CL CD CM\n----- -- -- --\n-10 -0.8 0.03 -0.01\n0 0 0.01 -0.01\n10 0.8 0.03 -0.01\nPOLAR\nexit 0\n".to_owned(),
+        FakeMode::OperationalAfterFirstRun => "cat > captured.stdin\ntest -f airfoil.dat || exit 9\ncat > polar.out <<'POLAR'\nalpha CL CD CM\n----- -- -- --\n-10 -0.8 0.03 -0.01\n0 0 0.01 -0.01\n10 0.8 0.03 -0.01\nPOLAR\n: > ../0001\nexit 0\n".to_owned(),
         FakeMode::ProcessFailed => "cat > captured.stdin\ntest -f airfoil.dat || exit 9\necho synthetic failure >&2\nexit 7\n".to_owned(),
         FakeMode::MissingPolar => {
             "cat > captured.stdin\ntest -f airfoil.dat || exit 9\nexit 0\n".to_owned()
@@ -178,6 +180,7 @@ fn write_fake(root: &Path, mode: FakeMode) -> (PathBuf, PathBuf, PathBuf) {
             cwd_probe.display()
         ),
         FakeMode::FailFirstRun => "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\nfindstr /C:\"VISC 1.00000000000000000e5\" captured.stdin >nul\r\nif not errorlevel 1 exit /b 7\r\n(\r\necho alpha CL CD CM\r\necho ----- -- -- --\r\necho -10 -0.8 0.03 -0.01\r\necho 0 0 0.01 -0.01\r\necho 10 0.8 0.03 -0.01\r\n)>polar.out\r\nexit /b 0\r\n".to_owned(),
+        FakeMode::OperationalAfterFirstRun => "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\n(\r\necho alpha CL CD CM\r\necho ----- -- -- --\r\necho -10 -0.8 0.03 -0.01\r\necho 0 0 0.01 -0.01\r\necho 10 0.8 0.03 -0.01\r\n)>polar.out\r\ntype nul > ..\\0001\r\nexit /b 0\r\n".to_owned(),
         FakeMode::ProcessFailed => "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\necho synthetic failure 1>&2\r\nexit /b 7\r\n".to_owned(),
         FakeMode::MissingPolar => {
             "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\nexit /b 0\r\n"
@@ -232,6 +235,63 @@ fn valid_execution_uses_explicit_executable_isolated_cwd_and_manifest_relative_a
     assert_eq!(report["status"], "completed");
     assert_eq!(report["completed_run_count"], 2);
     assert_eq!(report["runs"][0]["parsed_sample_count"], 3);
+}
+
+#[test]
+fn repeated_output_directory_removes_polars_from_a_larger_previous_campaign() {
+    let root = TestDirectory::new("shrinking-campaign");
+    let mut manifest = execution_manifest(false);
+    let manifest_path = write_manifest(root.path(), &manifest);
+    let (executable, _, _) = write_fake(root.path(), FakeMode::Valid);
+    let output_dir = root.path().join("output");
+
+    assert_eq!(
+        run_runner(&manifest_path, &executable, &output_dir, 5)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert!(output_dir.join("polars/0000.polar").is_file());
+    assert!(output_dir.join("polars/0001.polar").is_file());
+
+    manifest["runs"] = json!([run_spec("synthetic-low", 100_000.0)]);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        run_runner(&manifest_path, &executable, &output_dir, 5)
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let polar_names = fs::read_dir(output_dir.join("polars"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(polar_names, ["0000.polar"]);
+}
+
+#[test]
+fn operational_failure_after_a_successful_run_removes_final_artifacts() {
+    let root = TestDirectory::new("fail-clean");
+    let manifest_path = write_manifest(root.path(), &execution_manifest(false));
+    let (executable, _, _) = write_fake(root.path(), FakeMode::OperationalAfterFirstRun);
+    let output_dir = root.path().join("output");
+
+    let output = run_runner(&manifest_path, &executable, &output_dir, 5);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output_dir.join(EXECUTION_JSON).exists());
+    assert!(!output_dir.join(EXECUTION_MARKDOWN).exists());
+    assert!(!output_dir.join(VALIDATION_MANIFEST).exists());
+    assert!(!output_dir.join("polars").exists());
 }
 
 #[test]
@@ -366,6 +426,8 @@ fn solver_level_failures_are_typed_data_and_timeout_returns_after_reaping() {
         let output_dir = root.path().join("output");
         let output = run_runner(&path, &executable, &output_dir, 3);
         assert_eq!(output.status.code(), Some(2), "case {expected}");
+        assert!(output_dir.join(EXECUTION_JSON).is_file());
+        assert!(output_dir.join(EXECUTION_MARKDOWN).is_file());
         let report = read_json(output_dir.join(EXECUTION_JSON));
         assert_eq!(report["status"], "incomplete");
         assert_eq!(report["runs"][0]["execution_status"], expected);
@@ -473,33 +535,32 @@ fn deterministic_fake_produces_byte_identical_path_free_timestamp_free_artifacts
     let root = TestDirectory::new("determinism");
     let path = write_manifest(root.path(), &execution_manifest(false));
     let (executable, _, _) = write_fake(root.path(), FakeMode::Valid);
-    let first = root.path().join("first");
-    let second = root.path().join("second");
+    let output_dir = root.path().join("output");
     assert_eq!(
-        run_runner(&path, &executable, &first, 5).status.code(),
+        run_runner(&path, &executable, &output_dir, 5).status.code(),
         Some(0)
     );
-    assert_eq!(
-        run_runner(&path, &executable, &second, 5).status.code(),
-        Some(0)
-    );
-    for relative in [
+    let relative_paths = [
         EXECUTION_JSON,
         EXECUTION_MARKDOWN,
         VALIDATION_MANIFEST,
         "polars/0000.polar",
         "polars/0001.polar",
-    ] {
-        assert_eq!(
-            fs::read(first.join(relative)).unwrap(),
-            fs::read(second.join(relative)).unwrap()
-        );
+    ];
+    let first_artifacts =
+        relative_paths.map(|relative| fs::read(output_dir.join(relative)).unwrap());
+    assert_eq!(
+        run_runner(&path, &executable, &output_dir, 5).status.code(),
+        Some(0)
+    );
+    for (relative, first_bytes) in relative_paths.into_iter().zip(first_artifacts) {
+        assert_eq!(first_bytes, fs::read(output_dir.join(relative)).unwrap());
     }
     let primary = format!(
         "{}\n{}\n{}",
-        fs::read_to_string(first.join(EXECUTION_JSON)).unwrap(),
-        fs::read_to_string(first.join(EXECUTION_MARKDOWN)).unwrap(),
-        fs::read_to_string(first.join(VALIDATION_MANIFEST)).unwrap()
+        fs::read_to_string(output_dir.join(EXECUTION_JSON)).unwrap(),
+        fs::read_to_string(output_dir.join(EXECUTION_MARKDOWN)).unwrap(),
+        fs::read_to_string(output_dir.join(VALIDATION_MANIFEST)).unwrap()
     );
     for forbidden in [".xfoil-staging-", "timestamp", "generated_at"] {
         assert!(!primary.contains(forbidden));

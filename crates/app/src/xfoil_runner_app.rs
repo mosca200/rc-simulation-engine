@@ -373,64 +373,73 @@ pub fn run_xfoil_campaign(
     }
 
     let executable = resolve_executable_path(&options.xfoil_executable)?;
-    prepare_output_directory(&options.output_dir, manifest.runs.len())?;
-    let staging_root = options
-        .output_dir
-        .join(format!(".xfoil-staging-{}", std::process::id()));
-    if staging_root.exists() {
-        return Err(XfoilRunnerError::CreateStagingDirectory {
+    prepare_output_directory(&options.output_dir)?;
+    let result = (|| {
+        let staging_root = options
+            .output_dir
+            .join(format!(".xfoil-staging-{}", std::process::id()));
+        if staging_root.exists() {
+            return Err(XfoilRunnerError::CreateStagingDirectory {
+                path: staging_root,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "staging directory already exists",
+                ),
+            });
+        }
+        fs::create_dir(&staging_root).map_err(|source| {
+            XfoilRunnerError::CreateStagingDirectory {
+                path: staging_root.clone(),
+                source,
+            }
+        })?;
+
+        let execution_result = execute_runs(
+            &manifest,
+            &airfoil_text,
+            &executable,
+            &options.output_dir,
+            &staging_root,
+            options.timeout,
+        );
+        fs::remove_dir_all(&staging_root).map_err(|source| XfoilRunnerError::CleanupStaging {
             path: staging_root,
-            source: std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "staging directory already exists",
-            ),
-        });
-    }
-    fs::create_dir(&staging_root).map_err(|source| XfoilRunnerError::CreateStagingDirectory {
-        path: staging_root.clone(),
-        source,
-    })?;
+            source,
+        })?;
+        let runs = execution_result?;
 
-    let execution_result = execute_runs(
-        &manifest,
-        &airfoil_text,
-        &executable,
-        &options.output_dir,
-        &staging_root,
-        options.timeout,
-    );
-    fs::remove_dir_all(&staging_root).map_err(|source| XfoilRunnerError::CleanupStaging {
-        path: staging_root,
-        source,
-    })?;
-    let runs = execution_result?;
-
-    let completed_run_count = runs
-        .iter()
-        .filter(|run| run.execution_status == ExecutionStatus::CompletedParseable)
-        .count();
-    let completed = completed_run_count == manifest.runs.len();
-    let report = ExecutionReport {
-        schema_version: REPORT_SCHEMA_VERSION,
-        generated_by: GENERATED_BY.to_owned(),
-        campaign_id: manifest.campaign_id.clone(),
-        airfoil_file: manifest.airfoil_file.clone(),
-        run_count: manifest.runs.len(),
-        completed_run_count,
-        status: if completed {
-            CampaignExecutionStatus::Completed
+        let completed_run_count = runs
+            .iter()
+            .filter(|run| run.execution_status == ExecutionStatus::CompletedParseable)
+            .count();
+        let completed = completed_run_count == manifest.runs.len();
+        let report = ExecutionReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            generated_by: GENERATED_BY.to_owned(),
+            campaign_id: manifest.campaign_id.clone(),
+            airfoil_file: manifest.airfoil_file.clone(),
+            run_count: manifest.runs.len(),
+            completed_run_count,
+            status: if completed {
+                CampaignExecutionStatus::Completed
+            } else {
+                CampaignExecutionStatus::Incomplete
+            },
+            runs,
+        };
+        write_execution_artifacts(&options.output_dir, &report)?;
+        if completed {
+            write_validation_manifest(&options.output_dir, &manifest)?;
+            Ok(XfoilRunnerStatus::Completed)
         } else {
-            CampaignExecutionStatus::Incomplete
-        },
-        runs,
-    };
-    write_execution_artifacts(&options.output_dir, &report)?;
-    if completed {
-        write_validation_manifest(&options.output_dir, &manifest)?;
-        Ok(XfoilRunnerStatus::Completed)
-    } else {
-        Ok(XfoilRunnerStatus::Incomplete)
+            Ok(XfoilRunnerStatus::Incomplete)
+        }
+    })();
+
+    if result.is_err() {
+        remove_final_artifacts(&options.output_dir)?;
     }
+    result
 }
 
 fn validate_manifest(manifest: &ExecutionManifest) -> Result<(), XfoilRunnerError> {
@@ -543,16 +552,21 @@ fn resolve_executable_path(path: &Path) -> Result<PathBuf, XfoilRunnerError> {
     })
 }
 
-fn prepare_output_directory(output_dir: &Path, run_count: usize) -> Result<(), XfoilRunnerError> {
+fn prepare_output_directory(output_dir: &Path) -> Result<(), XfoilRunnerError> {
     fs::create_dir_all(output_dir).map_err(|source| XfoilRunnerError::CreateOutputDirectory {
         path: output_dir.to_owned(),
         source,
     })?;
+    remove_final_artifacts(output_dir)?;
     let polars = output_dir.join(POLARS_DIRECTORY);
-    fs::create_dir_all(&polars).map_err(|source| XfoilRunnerError::CreateOutputDirectory {
+    fs::create_dir(&polars).map_err(|source| XfoilRunnerError::CreateOutputDirectory {
         path: polars.clone(),
         source,
     })?;
+    Ok(())
+}
+
+fn remove_final_artifacts(output_dir: &Path) -> Result<(), XfoilRunnerError> {
     for path in [
         output_dir.join(EXECUTION_JSON),
         output_dir.join(EXECUTION_MARKDOWN),
@@ -560,14 +574,23 @@ fn prepare_output_directory(output_dir: &Path, run_count: usize) -> Result<(), X
     ] {
         remove_file_if_present(&path)?;
     }
-    for index in 0..run_count {
-        remove_file_if_present(&polars.join(polar_filename(index)))?;
-    }
+    remove_directory_if_present(&output_dir.join(POLARS_DIRECTORY))?;
     Ok(())
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), XfoilRunnerError> {
     match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(XfoilRunnerError::PrepareOutput {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn remove_directory_if_present(path: &Path) -> Result<(), XfoilRunnerError> {
+    match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(XfoilRunnerError::PrepareOutput {
