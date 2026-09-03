@@ -194,6 +194,8 @@ pub enum ModelLoadError {
         #[source]
         source: PropellerConfigError,
     },
+    #[error("propeller_rotational_inertia_kg_m2 must be finite and non-negative, got {value:?}")]
+    InvalidPropellerRotationalInertia { value: f64 },
     #[error("invalid propulsion coefficient table: {source}")]
     InvalidPropellerCoefficientTable {
         #[source]
@@ -1245,6 +1247,7 @@ fn resolve_aero_surfaces(
 fn resolve_propulsion_v4(
     file: PropulsionFileV4,
 ) -> Result<RuntimeElectricPropulsion, ModelLoadError> {
+    validate_propeller_rotational_inertia(file.propeller.propeller_rotational_inertia_kg_m2)?;
     let battery = BatteryConfig::new(
         file.battery.open_circuit_voltage_v,
         file.battery.internal_resistance_ohm,
@@ -1303,7 +1306,15 @@ fn resolve_propulsion_v4(
     Ok(RuntimeElectricPropulsion::new(
         ElectricPropulsionConfig::new_with_esc(battery, esc, motor, propeller),
         coefficient_source,
-    ))
+    )
+    .with_propeller_rotational_inertia(file.propeller.propeller_rotational_inertia_kg_m2))
+}
+
+fn validate_propeller_rotational_inertia(value: f64) -> Result<(), ModelLoadError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(ModelLoadError::InvalidPropellerRotationalInertia { value });
+    }
+    Ok(())
 }
 
 fn resolve_propeller_table(
@@ -1426,6 +1437,9 @@ fn resolve_common(
     let propulsion = file
         .propulsion
         .map(|propulsion_file| {
+            validate_propeller_rotational_inertia(
+                propulsion_file.propeller.propeller_rotational_inertia_kg_m2,
+            )?;
             let battery = BatteryConfig::new(
                 propulsion_file.battery.open_circuit_voltage_v,
                 propulsion_file.battery.internal_resistance_ohm,
@@ -1467,6 +1481,9 @@ fn resolve_common(
             Ok(RuntimeElectricPropulsion::new_legacy(
                 ElectricPropulsionConfig::new(battery, motor, propeller),
                 coefficient_table,
+            )
+            .with_propeller_rotational_inertia(
+                propulsion_file.propeller.propeller_rotational_inertia_kg_m2,
             ))
         })
         .transpose()?;
