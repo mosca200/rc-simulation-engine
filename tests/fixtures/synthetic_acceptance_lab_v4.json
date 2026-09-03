@@ -41,7 +41,7 @@
       {
         "id": "lab-tail",
         "position_body_m": [-0.80, 0.0, 0.0],
-        "orientation_body_from_element_wxyz": [0.9987502603949663, 0.0, -0.04997916927067831, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
         "area_m2": 0.12,
         "chord_m": 0.18,
         "polar_binding": {"kind": "polar", "polar_id": "lab-tail-polar"}
