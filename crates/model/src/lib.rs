@@ -11,6 +11,7 @@ mod reference_xfoil;
 mod reference_xfoil_campaign;
 mod reference_xfoil_convergence;
 mod reference_xfoil_evidence;
+mod reference_xfoil_evidence_json;
 mod reference_xfoil_runtime;
 mod runtime;
 pub mod v0;
@@ -65,6 +66,10 @@ pub use reference_xfoil_convergence::{
 };
 pub use reference_xfoil_evidence::{
     XfoilEvidenceBridgeError, XfoilEvidenceDataset, XfoilEvidenceDatasetBuilder,
+};
+pub use reference_xfoil_evidence_json::{
+    XfoilEvidenceJsonError, build_xfoil_reynolds_polar_family_from_json,
+    build_xfoil_reynolds_polar_family_from_json_str,
 };
 pub use reference_xfoil_runtime::{
     XfoilRuntimePolarFamily, XfoilRuntimePolarFamilyError, build_xfoil_reynolds_polar_family,

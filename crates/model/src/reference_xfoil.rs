@@ -29,6 +29,19 @@ pub struct XfoilPolarSample {
 }
 
 impl XfoilPolarSample {
+    /// Construct directly from validated components (crate-internal use only).
+    pub(crate) fn from_parts(alpha_rad: f64, cl: f64, cd: f64, cm: f64) -> Self {
+        Self {
+            alpha_rad,
+            cl,
+            cd,
+            cm,
+            cd_pressure: None,
+            top_xtr: None,
+            bot_xtr: None,
+        }
+    }
+
     /// Angle of attack in radians, converted from XFOIL output degrees.
     pub const fn alpha_rad(&self) -> f64 {
         self.alpha_rad
@@ -235,6 +248,14 @@ pub struct XfoilPolarImport {
 }
 
 impl XfoilPolarImport {
+    /// Construct directly from validated metadata and samples (crate-internal).
+    pub(crate) fn from_parts(
+        metadata: XfoilSolverMetadata,
+        samples: Vec<XfoilPolarSample>,
+    ) -> Self {
+        Self { metadata, samples }
+    }
+
     /// Validated solver metadata for this import.
     pub fn metadata(&self) -> &XfoilSolverMetadata {
         &self.metadata
