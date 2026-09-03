@@ -1,10 +1,18 @@
 use bytemuck::{Pod, Zeroable};
 
+/// Deterministic fallback normal for degenerate or unlit geometry.
+pub const SAFE_NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// Deterministic fallback UV when texture coordinates are absent.
+pub const SAFE_UV: [f32; 2] = [0.0, 0.0];
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
+    pub normal: [f32; 3],
     pub color: [f32; 3],
+    pub uv: [f32; 2],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,7 +33,9 @@ impl AircraftMesh {
             vertex
                 .position
                 .into_iter()
+                .chain(vertex.normal)
                 .chain(vertex.color)
+                .chain(vertex.uv)
                 .all(f32::is_finite)
         }) {
             return Err(MeshError::NonFiniteVertex);
@@ -153,22 +163,31 @@ pub fn ground_plane() -> AircraftMesh {
 #[must_use]
 pub fn ground_plane_at(ground_y_render_m: f32) -> AircraftMesh {
     debug_assert!(ground_y_render_m.is_finite());
+    let up = [0.0_f32, 1.0, 0.0];
     let vertices = vec![
         Vertex {
             position: [-2_000.0, ground_y_render_m, -2_000.0],
+            normal: up,
             color: [0.12, 0.30, 0.10],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [2_000.0, ground_y_render_m, -2_000.0],
+            normal: up,
             color: [0.12, 0.30, 0.10],
+            uv: [1.0, 0.0],
         },
         Vertex {
             position: [2_000.0, ground_y_render_m, 2_000.0],
+            normal: up,
             color: [0.18, 0.38, 0.14],
+            uv: [1.0, 1.0],
         },
         Vertex {
             position: [-2_000.0, ground_y_render_m, 2_000.0],
+            normal: up,
             color: [0.18, 0.38, 0.14],
+            uv: [0.0, 1.0],
         },
     ];
     AircraftMesh::new(vertices, vec![0, 2, 1, 0, 3, 2]).expect("static ground mesh is valid")
@@ -197,19 +216,27 @@ pub fn reference_grid_and_axes_at(grid_y_render_m: f32) -> LineMesh {
         };
         vertices.push(Vertex {
             position: [-EXTENT_M as f32, grid_y_render_m, coordinate],
+            normal: SAFE_NORMAL,
             color,
+            uv: SAFE_UV,
         });
         vertices.push(Vertex {
             position: [EXTENT_M as f32, grid_y_render_m, coordinate],
+            normal: SAFE_NORMAL,
             color,
+            uv: SAFE_UV,
         });
         vertices.push(Vertex {
             position: [coordinate, grid_y_render_m, -EXTENT_M as f32],
+            normal: SAFE_NORMAL,
             color,
+            uv: SAFE_UV,
         });
         vertices.push(Vertex {
             position: [coordinate, grid_y_render_m, EXTENT_M as f32],
+            normal: SAFE_NORMAL,
             color,
+            uv: SAFE_UV,
         });
     }
 
@@ -238,11 +265,15 @@ pub fn reference_grid_and_axes_at(grid_y_render_m: f32) -> LineMesh {
 fn add_line(vertices: &mut Vec<Vertex>, start: [f32; 3], end: [f32; 3], color: [f32; 3]) {
     vertices.push(Vertex {
         position: start,
+        normal: SAFE_NORMAL,
         color,
+        uv: SAFE_UV,
     });
     vertices.push(Vertex {
         position: end,
+        normal: SAFE_NORMAL,
         color,
+        uv: SAFE_UV,
     });
 }
 
@@ -265,7 +296,7 @@ fn add_box(
         [maximum_x, minimum_y, maximum_z],
         [maximum_x, maximum_y, maximum_z],
     ];
-    let faces = [
+    let faces: [[usize; 4]; 6] = [
         [4, 5, 7, 6],
         [2, 3, 1, 0],
         [1, 3, 7, 5],
@@ -273,13 +304,25 @@ fn add_box(
         [2, 6, 7, 3],
         [4, 0, 1, 5],
     ];
-    for face in faces {
+    let face_normals = [
+        [1.0_f32, 0.0, 0.0],
+        [-1.0_f32, 0.0, 0.0],
+        [0.0_f32, 1.0, 0.0],
+        [0.0_f32, -1.0, 0.0],
+        [0.0_f32, 0.0, 1.0],
+        [0.0_f32, 0.0, -1.0],
+    ];
+    for (face, face_normal) in faces.iter().zip(face_normals.iter()) {
         debug_assert!(vertices.len() <= u32::MAX as usize - 4);
         let base_index = vertices.len() as u32;
-        vertices.extend(face.map(|corner_index| Vertex {
-            position: corners[corner_index],
-            color,
-        }));
+        for &corner_index in face {
+            vertices.push(Vertex {
+                position: corners[corner_index],
+                normal: *face_normal,
+                color,
+                uv: SAFE_UV,
+            });
+        }
         indices.extend_from_slice(&[
             base_index,
             base_index + 1,
@@ -304,7 +347,9 @@ mod tests {
             vertex
                 .position
                 .into_iter()
+                .chain(vertex.normal)
                 .chain(vertex.color)
+                .chain(vertex.uv)
                 .all(f32::is_finite)
         }));
 
@@ -339,6 +384,22 @@ mod tests {
     }
 
     #[test]
+    fn procedural_aircraft_normals_are_unit_length() {
+        let mesh = aircraft_mesh();
+        for vertex in mesh.vertices() {
+            let length =
+                (vertex.normal[0].powi(2) + vertex.normal[1].powi(2) + vertex.normal[2].powi(2))
+                    .sqrt();
+            assert!(
+                (length - 1.0).abs() < 1.0e-5,
+                "normal {0:?} has length {1}",
+                vertex.normal,
+                length
+            );
+        }
+    }
+
+    #[test]
     fn reference_grid_and_axes_are_finite_line_pairs() {
         let mesh = reference_grid_and_axes();
         assert!(!mesh.vertices().is_empty());
@@ -347,7 +408,9 @@ mod tests {
             vertex
                 .position
                 .into_iter()
+                .chain(vertex.normal)
                 .chain(vertex.color)
+                .chain(vertex.uv)
                 .all(f32::is_finite)
         }));
         assert!(
@@ -396,9 +459,20 @@ mod tests {
                 .all(|vertex| vertex.position[1] < -30.0)
         );
         assert!(
+            mesh.vertices()
+                .iter()
+                .all(|vertex| vertex.normal == [0.0, 1.0, 0.0])
+        );
+        assert!(
             mesh.indices()
                 .iter()
                 .all(|index| (*index as usize) < mesh.vertices().len())
         );
+    }
+
+    #[test]
+    fn vertex_layout_has_expected_size_and_alignment() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 44);
+        assert_eq!(std::mem::align_of::<Vertex>(), 4);
     }
 }

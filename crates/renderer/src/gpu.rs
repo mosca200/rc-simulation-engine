@@ -20,6 +20,15 @@ const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
 const GPU_ERROR_OTHER: u8 = 2;
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
+/// Deterministic directional light defaults.
+///
+/// Light direction: from above (+Y), slightly right (+X), slightly forward (-Z).
+/// Intensity: 0.80 — leaves headroom for the ambient term.
+/// Ambient: 0.30 — keeps shadowed faces visible without washing out the lit side.
+const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
+const DEFAULT_LIGHT_INTENSITY: f32 = 0.80;
+const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.30, 0.30, 0.30];
+
 #[derive(Debug, Error)]
 pub enum RendererError {
     #[error("failed to create the wgpu surface: {0}")]
@@ -67,6 +76,45 @@ impl MatrixUniform {
     }
 }
 
+/// GPU light uniform matching the WGSL `LightUniform` struct.
+///
+/// `direction.xyz` is the normalized world-space direction TOWARD the light.
+/// `direction.w` is the directional light intensity.
+/// `ambient.xyz` is the ambient light color.
+/// `ambient.w` is reserved/padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct LightUniform {
+    direction: [f32; 4],
+    ambient: [f32; 4],
+}
+
+impl LightUniform {
+    fn default_lit() -> Self {
+        let dir = DEFAULT_LIGHT_DIRECTION;
+        let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let normalized = if length > f32::EPSILON {
+            [dir[0] / length, dir[1] / length, dir[2] / length]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        Self {
+            direction: [
+                normalized[0],
+                normalized[1],
+                normalized[2],
+                DEFAULT_LIGHT_INTENSITY,
+            ],
+            ambient: [
+                DEFAULT_AMBIENT_RGB[0],
+                DEFAULT_AMBIENT_RGB[1],
+                DEFAULT_AMBIENT_RGB[2],
+                0.0,
+            ],
+        }
+    }
+}
+
 struct DepthTarget {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -95,6 +143,7 @@ pub struct WgpuRenderer {
     camera_bind_group: wgpu::BindGroup,
     aircraft_object_bind_group: wgpu::BindGroup,
     reference_object_bind_group: wgpu::BindGroup,
+    light_bind_group: wgpu::BindGroup,
     depth_target: DepthTarget,
     camera: ChaseCamera,
     asynchronous_gpu_error: Arc<AtomicU8>,
@@ -125,7 +174,7 @@ impl WgpuRenderer {
             .map_err(|error| RendererError::AdapterNotFound(error.to_string()))?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("RC Simulation Engine S7 device"),
+                label: Some("RC Simulation Engine G1A device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -179,41 +228,57 @@ impl WgpuRenderer {
         }
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("S7 vertex-color shader"),
+            label: Some("G1A material+lighting shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
+
         let camera_bind_group_layout = matrix_bind_group_layout(&device, "camera layout");
         let object_bind_group_layout = matrix_bind_group_layout(&device, "object layout");
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("S7 pipeline layout"),
+        let light_bind_group_layout = light_bind_group_layout(&device, "light layout");
+
+        let lit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("G1A lit pipeline layout"),
             bind_group_layouts: &[
                 Some(&camera_bind_group_layout),
                 Some(&object_bind_group_layout),
+                Some(&light_bind_group_layout),
             ],
             immediate_size: 0,
         });
+        let unlit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("G1A unlit pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+
         let triangle_pipeline = create_pipeline(
             &device,
             &shader,
-            &pipeline_layout,
+            &lit_pipeline_layout,
             format,
             PipelineSpec {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: Some(wgpu::Face::Back),
                 depth_write_enabled: true,
-                label: "aircraft triangle pipeline",
+                label: "G1A lit triangle pipeline",
+                fragment_entry_point: "fs_lit",
             },
         );
         let line_pipeline = create_pipeline(
             &device,
             &shader,
-            &pipeline_layout,
+            &unlit_pipeline_layout,
             format,
             PipelineSpec {
                 topology: wgpu::PrimitiveTopology::LineList,
                 cull_mode: None,
                 depth_write_enabled: false,
-                label: "reference line pipeline",
+                label: "G1A unlit line pipeline",
+                fragment_entry_point: "fs_unlit",
             },
         );
 
@@ -255,6 +320,9 @@ impl WgpuRenderer {
             &identity_uniform,
             false,
         );
+        let default_light = LightUniform::default_lit();
+        let light_buffer = light_buffer(&device, "light uniform", &default_light);
+
         let camera_bind_group = matrix_bind_group(
             &device,
             &camera_bind_group_layout,
@@ -273,6 +341,13 @@ impl WgpuRenderer {
             &reference_object_buffer,
             "reference object bind group",
         );
+        let light_bind_group = create_light_bind_group(
+            &device,
+            &light_bind_group_layout,
+            &light_buffer,
+            "light bind group",
+        );
+
         let depth_target = create_depth_target(
             &device,
             surface_configuration.width,
@@ -301,6 +376,7 @@ impl WgpuRenderer {
             camera_bind_group,
             aircraft_object_bind_group,
             reference_object_bind_group,
+            light_bind_group,
             depth_target,
             camera: ChaseCamera::new(size.width, size.height),
             asynchronous_gpu_error,
@@ -362,7 +438,7 @@ impl WgpuRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("S7 frame encoder"),
+                label: Some("G1A frame encoder"),
             });
         {
             let color_attachment = wgpu::RenderPassColorAttachment {
@@ -388,7 +464,7 @@ impl WgpuRenderer {
                 stencil_ops: None,
             };
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("S7 scene pass"),
+                label: Some("G1A scene pass"),
                 color_attachments: &[Some(color_attachment)],
                 depth_stencil_attachment: Some(depth_attachment),
                 timestamp_writes: None,
@@ -399,6 +475,7 @@ impl WgpuRenderer {
 
             render_pass.set_pipeline(&self.triangle_pipeline);
             render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.ground_vertex_buffer.slice(..));
             render_pass.set_index_buffer(
                 self.ground_index_buffer.slice(..),
@@ -413,6 +490,7 @@ impl WgpuRenderer {
 
             render_pass.set_pipeline(&self.triangle_pipeline);
             render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.aircraft_vertex_buffer.slice(..));
             render_pass.set_index_buffer(
                 self.aircraft_index_buffer.slice(..),
@@ -456,6 +534,22 @@ fn matrix_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGro
     })
 }
 
+fn light_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
 fn matrix_buffer(
     device: &wgpu::Device,
     label: &str,
@@ -473,7 +567,31 @@ fn matrix_buffer(
     })
 }
 
+fn light_buffer(device: &wgpu::Device, label: &str, value: &LightUniform) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::bytes_of(value),
+        usage: wgpu::BufferUsages::UNIFORM,
+    })
+}
+
 fn matrix_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    })
+}
+
+fn create_light_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     buffer: &wgpu::Buffer,
@@ -494,6 +612,7 @@ struct PipelineSpec<'a> {
     cull_mode: Option<wgpu::Face>,
     depth_write_enabled: bool,
     label: &'a str,
+    fragment_entry_point: &'a str,
 }
 
 fn create_pipeline(
@@ -503,8 +622,12 @@ fn create_pipeline(
     surface_format: wgpu::TextureFormat,
     specification: PipelineSpec<'_>,
 ) -> wgpu::RenderPipeline {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x3,
+        2 => Float32x3,
+        3 => Float32x2
+    ];
     let vertex_layout = wgpu::VertexBufferLayout {
         array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -542,7 +665,7 @@ fn create_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(specification.fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
@@ -557,7 +680,7 @@ fn create_pipeline(
 
 fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("S7 depth texture"),
+        label: Some("G1A depth texture"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
