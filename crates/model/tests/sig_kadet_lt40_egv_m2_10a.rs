@@ -1,8 +1,8 @@
-//! M2.10A — SIG Kadet LT-40 EGV loadable reference aircraft model.
+//! M2.10A.1 — SIG Kadet LT-40 EGV provisional runtime demonstrator.
 //!
-//! Validates that the first real reference aircraft model loads, has the expected
-//! classification and metadata, exposes documented geometry, and produces a
-//! deterministic physics fingerprint.
+//! Validates that the provisional LT-40 demonstrator loads as a synthetic_test
+//! model (NOT a validated reference aircraft), exposes LT-40-derived geometry,
+//! and produces a deterministic physics fingerprint.
 
 use model::{
     AircraftClassification, AircraftModelLoader, ControlActuator, RuntimeAeroPolarBinding,
@@ -17,65 +17,41 @@ fn model_path() -> std::path::PathBuf {
 }
 
 fn load_lt40() -> model::AircraftModel {
-    load_aircraft_model(model_path()).expect("SIG Kadet LT-40 EGV model must load")
+    load_aircraft_model(model_path()).expect("LT-40 provisional demonstrator must load")
 }
 
 #[test]
-fn lt40_model_loads_successfully() {
+fn lt40_provisional_loads_successfully() {
     let model = load_lt40();
     assert_eq!(model.schema_version(), 7);
-    assert_eq!(model.model_id(), "sig-kadet-lt40-egv");
-    assert_eq!(model.display_name(), "SIG Kadet LT-40 EGV");
+    assert_eq!(model.model_id(), "sig-kadet-lt40-egv-provisional");
+    assert_eq!(
+        model.display_name(),
+        "SIG Kadet LT-40 EGV — Provisional Runtime Demonstrator"
+    );
 }
 
 #[test]
-fn lt40_classification_and_reference_metadata() {
+fn lt40_provisional_is_not_reference_aircraft() {
     let model = load_lt40();
     assert_eq!(
         model.classification(),
-        AircraftClassification::ReferenceAircraft
+        AircraftClassification::SyntheticTest
     );
-    let reference = model
-        .reference_aircraft()
-        .expect("reference_aircraft must be present for reference_aircraft classification");
-    assert_eq!(
-        reference.identity().manufacturer(),
-        Some("SIG Manufacturing")
-    );
-    assert_eq!(reference.identity().aircraft_name(), Some("Kadet LT-40"));
-    assert_eq!(reference.identity().variant(), Some("EGV ARF"));
-    assert_eq!(
-        reference.identity().stable_reference_id(),
-        Some("sig-kadet-lt40-egv")
+    assert!(
+        model.reference_aircraft().is_none(),
+        "provisional demonstrator must NOT carry reference_aircraft metadata"
     );
 }
 
 #[test]
-fn lt40_reference_physical_specification() {
-    let model = load_lt40();
-    let reference = model.reference_aircraft().unwrap();
-    let spec = reference.physical_specification();
-
-    let wingspan = spec.wingspan_m().expect("wingspan must be present");
-    assert!((wingspan.value() - 1.778).abs() < 1e-10);
-
-    let area = spec
-        .reference_wing_area_m2()
-        .expect("wing area must be present");
-    assert!((area.value() - 0.580644).abs() < 1e-10);
-
-    let length = spec
-        .aircraft_length_m()
-        .expect("aircraft length must be present");
-    assert!((length.value() - 1.447).abs() < 1e-10);
-}
-
-#[test]
-fn lt40_rigid_body_mass_and_inertia() {
+fn lt40_provisional_rigid_body_has_placeholder_mass() {
     let model = load_lt40();
     let rb = model.rigid_body();
+    // 2.778 kg is a provisional midpoint, NOT a measured operational mass
     assert!((rb.mass_kg() - 2.778).abs() < 1e-10);
     let inertia = rb.inertia_body_kg_m2();
+    // Inertia values are provisional estimates, not measurements
     assert!((inertia[(0, 0)] - 0.30).abs() < 1e-10);
     assert!((inertia[(1, 1)] - 0.35).abs() < 1e-10);
     assert!((inertia[(2, 2)] - 0.55).abs() < 1e-10);
@@ -85,7 +61,7 @@ fn lt40_rigid_body_mass_and_inertia() {
 }
 
 #[test]
-fn lt40_aero_element_count_and_ids() {
+fn lt40_provisional_aero_element_count_and_ids() {
     let model = load_lt40();
     let elements = model.aero_elements();
     assert_eq!(elements.len(), 8);
@@ -106,7 +82,7 @@ fn lt40_aero_element_count_and_ids() {
 }
 
 #[test]
-fn lt40_reynolds_family_bindings() {
+fn lt40_provisional_reynolds_family_bindings() {
     let model = load_lt40();
     let families = model.aero_polar_families();
     assert_eq!(families.len(), 2);
@@ -133,7 +109,7 @@ fn lt40_reynolds_family_bindings() {
 }
 
 #[test]
-fn lt40_aero_surfaces() {
+fn lt40_provisional_aero_surfaces() {
     let model = load_lt40();
     let surfaces = model.aero_surfaces();
     assert_eq!(surfaces.len(), 3);
@@ -151,7 +127,7 @@ fn lt40_aero_surfaces() {
 }
 
 #[test]
-fn lt40_wing_geometry_matches_evidence() {
+fn lt40_provisional_wing_geometry_derived_from_lt40_plan() {
     let model = load_lt40();
     let elements = model.aero_elements();
 
@@ -177,7 +153,7 @@ fn lt40_wing_geometry_matches_evidence() {
 }
 
 #[test]
-fn lt40_tail_geometry_matches_evidence() {
+fn lt40_provisional_tail_geometry_derived_from_lt40_plan() {
     let model = load_lt40();
     let elements = model.aero_elements();
 
@@ -201,7 +177,7 @@ fn lt40_tail_geometry_matches_evidence() {
 }
 
 #[test]
-fn lt40_control_surface_bindings() {
+fn lt40_provisional_control_surface_bindings() {
     let model = load_lt40();
     let bindings = model.control_surface_bindings();
     assert_eq!(bindings.len(), 4);
@@ -221,16 +197,19 @@ fn lt40_control_surface_bindings() {
 }
 
 #[test]
-fn lt40_propulsion_present() {
+fn lt40_provisional_propulsion_uses_historical_component_data() {
     let model = load_lt40();
     let propulsion = model.propulsion().expect("propulsion must be present");
     let config = propulsion.config();
 
-    assert!((config.battery().open_circuit_voltage_v() - 12.6).abs() < 1e-10);
+    // Motor values from Himax HC3528-1000 historical documentation
     assert!((config.motor().kv_rpm_per_v() - 1000.0).abs() < 1e-10);
     assert!((config.motor().winding_resistance_ohm() - 0.020).abs() < 1e-10);
     assert!((config.motor().no_load_current_a() - 2.6).abs() < 1e-10);
+    // Propeller from APC 11x7E historical documentation
     assert!((config.propeller().diameter_m() - 0.2794).abs() < 1e-10);
+    // Battery and ESC values are provisional placeholders
+    assert!((config.battery().open_circuit_voltage_v() - 12.6).abs() < 1e-10);
 
     let coeff_samples = propulsion.coefficient_table().samples();
     assert!(coeff_samples.len() >= 5);
@@ -239,22 +218,23 @@ fn lt40_propulsion_present() {
 }
 
 #[test]
-fn lt40_downwash_interaction() {
+fn lt40_provisional_downwash_interaction() {
     let model = load_lt40();
     let downwash = model.aero_downwash_interactions();
     assert_eq!(downwash.len(), 1);
     assert_eq!(downwash[0].id(), "wing-to-horizontal-tail");
+    // Downwash factor is a provisional placeholder
     assert!((downwash[0].downwash_factor() - 0.6).abs() < 1e-10);
 }
 
 #[test]
-fn lt40_kinematic_viscosity() {
+fn lt40_provisional_kinematic_viscosity() {
     let model = load_lt40();
     assert_eq!(model.kinematic_viscosity_m2_s(), Some(0.000015));
 }
 
 #[test]
-fn lt40_deterministic_fingerprint() {
+fn lt40_provisional_deterministic_fingerprint() {
     let first = load_lt40();
     let second = load_lt40();
     assert_eq!(first.physics_fingerprint(), second.physics_fingerprint());
@@ -262,7 +242,7 @@ fn lt40_deterministic_fingerprint() {
 }
 
 #[test]
-fn lt40_json_round_trip_deterministic() {
+fn lt40_provisional_json_round_trip_deterministic() {
     let json = std::fs::read_to_string(model_path()).expect("read model JSON");
     let first = AircraftModelLoader::from_json_str(&json).expect("first parse must succeed");
     let second = AircraftModelLoader::from_json_str(&json).expect("second parse must succeed");

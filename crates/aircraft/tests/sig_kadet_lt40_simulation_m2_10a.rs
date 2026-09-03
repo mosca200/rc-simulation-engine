@@ -1,11 +1,14 @@
-//! M2.10A — SIG Kadet LT-40 EGV simulation integration tests.
+//! M2.10A.1 — SIG Kadet LT-40 EGV provisional demonstrator simulation tests.
 //!
-//! Validates that the LT-40 reference model can be simulated:
+//! Validates that the provisional LT-40 demonstrator (classified as synthetic_test,
+//! NOT a validated reference aircraft) can be simulated:
 //! - AircraftSimulation initializes
 //! - Simulation advances finite state for several seconds at 500 Hz
 //! - No NaN/Inf in state
 //! - Reynolds-family aero path is exercised
 //! - Propulsion initializes
+//!
+//! Successful simulation does NOT constitute LT-40 flight-fidelity validation.
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
 use model::load_aircraft_model;
