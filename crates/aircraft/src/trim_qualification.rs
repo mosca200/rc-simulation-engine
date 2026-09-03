@@ -19,13 +19,20 @@
 //! # Physical Reynolds
 //!
 //! Reynolds numbers use the PHYSICAL section airspeed, not any effective-alpha-modified velocity.
+//!
+//! # Accepted trim operating point
+//!
+//! Qualification audits the EXACT accepted trim operating point:
+//! - Aero elements are built through `effective_aero_elements_for_positions` using the
+//!   solution's `control_surface_positions` (deflected geometry, not base geometry).
+//! - Propulsion is evaluated with `control_surface_positions.throttle()` (the accepted
+//!   control output throttle, not the raw trim variable).
+//! - Re-evaluation must match the solver-cached evaluation exactly (M2.6A precedent).
 
 use crate::{
     AircraftSimulationConfig,
     simulation::solve_surface_induced_alpha,
-    trim::{
-        LongitudinalTrimSolution, LongitudinalTrimVariables, evaluate_longitudinal_trim_candidate,
-    },
+    trim::{LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate},
 };
 use model::AircraftModel;
 use sim_core::{
@@ -51,6 +58,12 @@ pub enum RangeStatus {
 // ---------------------------------------------------------------------------
 
 /// Typed reason a trim point is not qualified.
+///
+/// Blocker ordering follows the documented contract:
+/// 1. Aero elements in model order (alpha first, Reynolds second per element)
+/// 2. Propulsion (shaft-speed first, J second)
+/// 3. Residual limits (Fy, Mx, Mz, lateral accel, roll accel, yaw accel)
+/// 4. Integrity / non-finite / re-evaluation
 #[derive(Debug, Clone, PartialEq)]
 pub enum QualificationBlocker {
     // Aero alpha
@@ -67,19 +80,7 @@ pub enum QualificationBlocker {
         alpha_upper_rad: f64,
     },
 
-    // Reynolds
-    ReynoldsBelowRange {
-        element_index: usize,
-        element_id: String,
-        reynolds_number: f64,
-        reynolds_lower: f64,
-    },
-    ReynoldsAboveRange {
-        element_index: usize,
-        element_id: String,
-        reynolds_number: f64,
-        reynolds_upper: f64,
-    },
+    // Reynolds contributing node alpha (emitted before element Reynolds range)
     ReynoldsContributingNodeAlphaBelowRange {
         element_index: usize,
         element_id: String,
@@ -95,14 +96,18 @@ pub enum QualificationBlocker {
         alpha_upper_rad: f64,
     },
 
-    // Propulsion J
-    PropellerAdvanceRatioBelowRange {
-        advance_ratio_j: f64,
-        j_lower: f64,
+    // Reynolds range
+    ReynoldsBelowRange {
+        element_index: usize,
+        element_id: String,
+        reynolds_number: f64,
+        reynolds_lower: f64,
     },
-    PropellerAdvanceRatioAboveRange {
-        advance_ratio_j: f64,
-        j_upper: f64,
+    ReynoldsAboveRange {
+        element_index: usize,
+        element_id: String,
+        reynolds_number: f64,
+        reynolds_upper: f64,
     },
 
     // Propulsion shaft speed
@@ -113,6 +118,16 @@ pub enum QualificationBlocker {
     PropellerShaftSpeedAboveRange {
         shaft_speed_rad_s: f64,
         shaft_speed_upper_rad_s: f64,
+    },
+
+    // Propulsion J
+    PropellerAdvanceRatioBelowRange {
+        advance_ratio_j: f64,
+        j_lower: f64,
+    },
+    PropellerAdvanceRatioAboveRange {
+        advance_ratio_j: f64,
+        j_upper: f64,
     },
 
     // Off-axis residual limits
@@ -141,7 +156,7 @@ pub enum QualificationBlocker {
         limit_rad_s2: f64,
     },
 
-    // Integrity
+    // Integrity (always last)
     NonFiniteAuditValue {
         field: &'static str,
     },
@@ -302,11 +317,23 @@ pub struct AerodynamicElementDomainAudit {
 // Propulsion domain audit
 // ---------------------------------------------------------------------------
 
+/// Shaft-speed domain sub-audit. Only present when the coefficient source has a
+/// shaft-speed map. Fixed propeller tables have no shaft-speed domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShaftSpeedDomainAudit {
+    pub shaft_speed_lower_rad_s: f64,
+    pub shaft_speed_upper_rad_s: f64,
+    pub shaft_speed_range_status: RangeStatus,
+}
+
 /// Propulsion operating-point audit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PropulsionDomainAudit {
+    /// No propulsion system configured on this aircraft.
     NotPresent,
+    /// Propulsion system present and audited.
     Present {
+        /// Accepted control-output throttle (from `control_surface_positions.throttle()`).
         throttle: f64,
         axial_airspeed_mps: f64,
         shaft_speed_rad_s: f64,
@@ -315,9 +342,9 @@ pub enum PropulsionDomainAudit {
         j_lower: f64,
         j_upper: f64,
         j_range_status: RangeStatus,
-        shaft_speed_lower_rad_s: f64,
-        shaft_speed_upper_rad_s: f64,
-        shaft_speed_range_status: RangeStatus,
+        /// Shaft-speed domain audit. `None` for fixed propeller tables (no shaft-speed
+        /// map domain exists). `Some` for shaft-speed maps.
+        shaft_speed_domain: Option<ShaftSpeedDomainAudit>,
     },
 }
 
@@ -407,13 +434,13 @@ impl LongitudinalTrimQualification {
 }
 
 // ---------------------------------------------------------------------------
-// Alpha range helper
+// Range-status helper
 // ---------------------------------------------------------------------------
 
-fn alpha_range_status(alpha: f64, lower: f64, upper: f64) -> RangeStatus {
-    if alpha < lower {
+fn range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
+    if value < lower {
         RangeStatus::BelowRange
-    } else if alpha > upper {
+    } else if value > upper {
         RangeStatus::AboveRange
     } else {
         RangeStatus::InRange
@@ -440,9 +467,10 @@ pub fn qualify_longitudinal_trim_solution(
 ) -> LongitudinalTrimQualificationPoint {
     let eval = &solution.evaluation;
     let state = &eval.state;
-    let variables = &eval.variables;
+    let positions = &eval.control_surface_positions;
 
-    // Re-evaluate to verify deterministic reproducibility
+    // FIX 3: Re-evaluate to verify deterministic reproducibility (M2.6A precedent).
+    let variables = &eval.variables;
     let request_check = crate::trim::LongitudinalTrimRequest::new(
         target_airspeed_mps,
         crate::trim::TrimBounds::new(variables.alpha_rad - 0.5, variables.alpha_rad + 0.5)
@@ -454,22 +482,20 @@ pub fn qualify_longitudinal_trim_solution(
         1,
     );
 
-    let re_eval = match &request_check {
-        Ok(req) => evaluate_longitudinal_trim_candidate(model, config, req, *variables),
-        Err(_) => None,
+    let re_eval_matches = match &request_check {
+        Ok(req) => match evaluate_longitudinal_trim_candidate(model, config, req, *variables) {
+            Some(independent) => independent == *eval,
+            None => false,
+        },
+        Err(_) => false,
     };
 
-    let mut blockers = Vec::new();
-    let mut all_finite = true;
+    // FIX 1: Build effective aero elements from the ACCEPTED control surface positions.
+    // This audits the deflected geometry actually evaluated by the trim solver,
+    // not the base geometry.
+    let effective = crate::effective_aero_elements_for_positions(model, positions);
 
-    // Build effective aero elements
-    let effective = model
-        .aero_elements()
-        .iter()
-        .map(|re| *re.element())
-        .collect::<Vec<_>>();
-
-    // Compute per-surface alpha_i values
+    // Compute per-surface alpha_i values using the deflected elements
     let surfaces = model.aero_surfaces();
     let mut surface_alpha_i = vec![0.0f64; surfaces.len()];
     let mut element_surface_map = vec![None; model.aero_elements().len()];
@@ -487,8 +513,12 @@ pub fn qualify_longitudinal_trim_solution(
         }
     }
 
-    // Audit each aero element
+    // -----------------------------------------------------------------------
+    // Phase 1: Aero element blockers (in model order)
+    // -----------------------------------------------------------------------
+    let mut aero_blockers = Vec::new();
     let mut aero_audits = Vec::with_capacity(model.aero_elements().len());
+
     for (elem_idx, runtime_elem) in model.aero_elements().iter().enumerate() {
         let eff_elem = &effective[elem_idx];
         let kin = compute_section_kinematics(state, eff_elem, config.aero_environment());
@@ -502,19 +532,33 @@ pub fn qualify_longitudinal_trim_solution(
         let (audit, elem_blockers) = audit_aero_element(
             elem_idx,
             runtime_elem,
+            eff_elem,
             model,
             alpha_geom,
             alpha_sample,
             kin.section_airspeed_mps,
         );
         aero_audits.push(audit);
-        blockers.extend(elem_blockers);
+        aero_blockers.extend(elem_blockers);
     }
 
-    // Propulsion audit
-    let propulsion_audit = audit_propulsion(model, config, state, variables, &mut blockers);
+    // -----------------------------------------------------------------------
+    // Phase 2: Propulsion blockers (shaft-speed first, then J)
+    // -----------------------------------------------------------------------
+    // FIX 2: Use the accepted control-output throttle, not the raw trim variable.
+    let accepted_throttle = positions.throttle();
+    let mut propulsion_blockers = Vec::new();
+    let propulsion_audit = audit_propulsion(
+        model,
+        config,
+        state,
+        accepted_throttle,
+        &mut propulsion_blockers,
+    );
 
-    // Full residual audit
+    // -----------------------------------------------------------------------
+    // Phase 3: Full residual audit and off-axis limit blockers
+    // -----------------------------------------------------------------------
     let body_wrench = &eval.body_wrench;
     let derivative = &eval.derivative;
     let residual_audit = FullResidualAudit {
@@ -535,67 +579,27 @@ pub fn qualify_longitudinal_trim_solution(
         pitch_moment_nm: eval.residuals.pitch_moment_nm,
     };
 
-    // Check finiteness
-    let audit_values = [
-        ("fx_body_n", residual_audit.fx_body_n),
-        ("fy_body_n", residual_audit.fy_body_n),
-        ("fz_body_n", residual_audit.fz_body_n),
-        ("mx_body_nm", residual_audit.mx_body_nm),
-        ("my_body_nm", residual_audit.my_body_nm),
-        ("mz_body_nm", residual_audit.mz_body_nm),
-        (
-            "linear_accel_world_x",
-            residual_audit.linear_accel_world_x_mps2,
-        ),
-        (
-            "linear_accel_world_y",
-            residual_audit.linear_accel_world_y_mps2,
-        ),
-        (
-            "linear_accel_world_z",
-            residual_audit.linear_accel_world_z_mps2,
-        ),
-        (
-            "angular_accel_body_x",
-            residual_audit.angular_accel_body_x_rad_s2,
-        ),
-        (
-            "angular_accel_body_y",
-            residual_audit.angular_accel_body_y_rad_s2,
-        ),
-        (
-            "angular_accel_body_z",
-            residual_audit.angular_accel_body_z_rad_s2,
-        ),
-    ];
-    for &(field, value) in &audit_values {
-        if !value.is_finite() {
-            all_finite = false;
-            blockers.push(QualificationBlocker::NonFiniteAuditValue { field });
-        }
-    }
-
-    // Check off-axis limits
+    let mut residual_limit_blockers = Vec::new();
     if residual_audit.fy_body_n.abs() > limits.max_side_force_n {
-        blockers.push(QualificationBlocker::SideForceLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::SideForceLimitExceeded {
             fy_body_n: residual_audit.fy_body_n,
             limit_n: limits.max_side_force_n,
         });
     }
     if residual_audit.mx_body_nm.abs() > limits.max_roll_moment_nm {
-        blockers.push(QualificationBlocker::RollMomentLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::RollMomentLimitExceeded {
             mx_body_nm: residual_audit.mx_body_nm,
             limit_nm: limits.max_roll_moment_nm,
         });
     }
     if residual_audit.mz_body_nm.abs() > limits.max_yaw_moment_nm {
-        blockers.push(QualificationBlocker::YawMomentLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::YawMomentLimitExceeded {
             mz_body_nm: residual_audit.mz_body_nm,
             limit_nm: limits.max_yaw_moment_nm,
         });
     }
     if residual_audit.linear_accel_world_y_mps2.abs() > limits.max_lateral_acceleration_mps2 {
-        blockers.push(QualificationBlocker::LateralAccelerationLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::LateralAccelerationLimitExceeded {
             ay_world_mps2: residual_audit.linear_accel_world_y_mps2,
             limit_mps2: limits.max_lateral_acceleration_mps2,
         });
@@ -603,25 +607,231 @@ pub fn qualify_longitudinal_trim_solution(
     if residual_audit.angular_accel_body_x_rad_s2.abs()
         > limits.max_roll_angular_acceleration_rad_s2
     {
-        blockers.push(QualificationBlocker::RollAngularAccelerationLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::RollAngularAccelerationLimitExceeded {
             angular_accel_body_x_rad_s2: residual_audit.angular_accel_body_x_rad_s2,
             limit_rad_s2: limits.max_roll_angular_acceleration_rad_s2,
         });
     }
     if residual_audit.angular_accel_body_z_rad_s2.abs() > limits.max_yaw_angular_acceleration_rad_s2
     {
-        blockers.push(QualificationBlocker::YawAngularAccelerationLimitExceeded {
+        residual_limit_blockers.push(QualificationBlocker::YawAngularAccelerationLimitExceeded {
             angular_accel_body_z_rad_s2: residual_audit.angular_accel_body_z_rad_s2,
             limit_rad_s2: limits.max_yaw_angular_acceleration_rad_s2,
         });
     }
 
-    // Re-evaluation check
-    if re_eval.is_none() {
-        blockers.push(QualificationBlocker::ReEvaluationFailure);
+    // -----------------------------------------------------------------------
+    // Phase 4: Integrity blockers (non-finite audit values, re-evaluation)
+    // -----------------------------------------------------------------------
+    let mut integrity_blockers = Vec::new();
+
+    // FIX 4: Check finiteness of ALL audit values in deterministic order.
+
+    // Aero audit values (in element order)
+    for audit in &aero_audits {
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_geom_rad",
+            audit.alpha_geom_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_sample_rad",
+            audit.alpha_sample_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_lower_rad",
+            audit.alpha_lower_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_upper_rad",
+            audit.alpha_upper_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "section_airspeed_mps",
+            audit.section_airspeed_mps,
+        );
+        if let Some(re) = audit.reynolds_number {
+            check_finite_field(&mut integrity_blockers, "reynolds_number", re);
+        }
+        if let Some(re_lo) = audit.reynolds_lower {
+            check_finite_field(&mut integrity_blockers, "reynolds_lower", re_lo);
+        }
+        if let Some(re_hi) = audit.reynolds_upper {
+            check_finite_field(&mut integrity_blockers, "reynolds_upper", re_hi);
+        }
+        if let Some(ln_alpha_lo) = audit.reynolds_lower_node_alpha_lower_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_lower_node_alpha_lower_rad",
+                ln_alpha_lo,
+            );
+        }
+        if let Some(ln_alpha_hi) = audit.reynolds_lower_node_alpha_upper_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_lower_node_alpha_upper_rad",
+                ln_alpha_hi,
+            );
+        }
+        if let Some(un_alpha_lo) = audit.reynolds_upper_node_alpha_lower_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_upper_node_alpha_lower_rad",
+                un_alpha_lo,
+            );
+        }
+        if let Some(un_alpha_hi) = audit.reynolds_upper_node_alpha_upper_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_upper_node_alpha_upper_rad",
+                un_alpha_hi,
+            );
+        }
     }
 
-    let outcome = if blockers.is_empty() && all_finite {
+    // Propulsion audit values
+    if let PropulsionDomainAudit::Present {
+        throttle,
+        axial_airspeed_mps,
+        shaft_speed_rad_s,
+        shaft_speed_rpm,
+        advance_ratio_j,
+        j_lower,
+        j_upper,
+        j_range_status: _,
+        shaft_speed_domain,
+    } = &propulsion_audit
+    {
+        check_finite_field(&mut integrity_blockers, "throttle", *throttle);
+        check_finite_field(
+            &mut integrity_blockers,
+            "axial_airspeed_mps",
+            *axial_airspeed_mps,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "shaft_speed_rad_s",
+            *shaft_speed_rad_s,
+        );
+        check_finite_field(&mut integrity_blockers, "shaft_speed_rpm", *shaft_speed_rpm);
+        check_finite_field(&mut integrity_blockers, "advance_ratio_j", *advance_ratio_j);
+        check_finite_field(&mut integrity_blockers, "j_lower", *j_lower);
+        check_finite_field(&mut integrity_blockers, "j_upper", *j_upper);
+        if let Some(ss_domain) = shaft_speed_domain {
+            check_finite_field(
+                &mut integrity_blockers,
+                "shaft_speed_lower_rad_s",
+                ss_domain.shaft_speed_lower_rad_s,
+            );
+            check_finite_field(
+                &mut integrity_blockers,
+                "shaft_speed_upper_rad_s",
+                ss_domain.shaft_speed_upper_rad_s,
+            );
+        }
+    }
+
+    // Residual audit values
+    check_finite_field(
+        &mut integrity_blockers,
+        "fx_body_n",
+        residual_audit.fx_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "fy_body_n",
+        residual_audit.fy_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "fz_body_n",
+        residual_audit.fz_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "mx_body_nm",
+        residual_audit.mx_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "my_body_nm",
+        residual_audit.my_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "mz_body_nm",
+        residual_audit.mz_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_x",
+        residual_audit.linear_accel_world_x_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_y",
+        residual_audit.linear_accel_world_y_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_z",
+        residual_audit.linear_accel_world_z_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_x",
+        residual_audit.angular_accel_body_x_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_y",
+        residual_audit.angular_accel_body_y_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_z",
+        residual_audit.angular_accel_body_z_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "longitudinal_force_n",
+        residual_audit.longitudinal_force_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "vertical_force_n",
+        residual_audit.vertical_force_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "pitch_moment_nm",
+        residual_audit.pitch_moment_nm,
+    );
+
+    // Re-evaluation integrity
+    if !re_eval_matches {
+        integrity_blockers.push(QualificationBlocker::ReEvaluationFailure);
+    }
+
+    // -----------------------------------------------------------------------
+    // Assemble final blocker list in documented order
+    // -----------------------------------------------------------------------
+    let mut blockers = Vec::with_capacity(
+        aero_blockers.len()
+            + propulsion_blockers.len()
+            + residual_limit_blockers.len()
+            + integrity_blockers.len(),
+    );
+    blockers.extend(aero_blockers);
+    blockers.extend(propulsion_blockers);
+    blockers.extend(residual_limit_blockers);
+    blockers.extend(integrity_blockers);
+
+    let outcome = if blockers.is_empty() {
         LongitudinalTrimQualificationOutcome::Qualified {
             residual_audit,
             aero_audits,
@@ -642,6 +852,12 @@ pub fn qualify_longitudinal_trim_solution(
     }
 }
 
+fn check_finite_field(blockers: &mut Vec<QualificationBlocker>, field: &'static str, value: f64) {
+    if !value.is_finite() {
+        blockers.push(QualificationBlocker::NonFiniteAuditValue { field });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aero element audit
 // ---------------------------------------------------------------------------
@@ -649,19 +865,19 @@ pub fn qualify_longitudinal_trim_solution(
 fn audit_aero_element(
     elem_idx: usize,
     runtime_elem: &model::RuntimeAeroElement,
+    eff_elem: &sim_core::AeroElement,
     model: &AircraftModel,
     alpha_geom: f64,
     alpha_sample: f64,
     section_airspeed: f64,
 ) -> (AerodynamicElementDomainAudit, Vec<QualificationBlocker>) {
     let mut blockers = Vec::new();
-    let eff_elem = runtime_elem.element();
 
     match runtime_elem.polar_binding() {
         model::RuntimeAeroPolarBinding::Polar { polar_index } => {
             let table = &model.aero_polars()[polar_index].table();
             let (alpha_lo, alpha_hi) = polar_alpha_bounds(table);
-            let status = alpha_range_status(alpha_sample, alpha_lo, alpha_hi);
+            let status = range_status(alpha_sample, alpha_lo, alpha_hi);
 
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::AerodynamicAlphaBelowRange {
@@ -709,31 +925,9 @@ fn audit_aero_element(
             let nodes = family.nodes();
             let re_lo = nodes[0].reynolds_number();
             let re_hi = nodes[nodes.len() - 1].reynolds_number();
-            let re_status = if re < re_lo {
-                RangeStatus::BelowRange
-            } else if re > re_hi {
-                RangeStatus::AboveRange
-            } else {
-                RangeStatus::InRange
-            };
+            let re_status = range_status(re, re_lo, re_hi);
 
-            if re_status == RangeStatus::BelowRange {
-                blockers.push(QualificationBlocker::ReynoldsBelowRange {
-                    element_index: elem_idx,
-                    element_id: runtime_elem.id().to_owned(),
-                    reynolds_number: re,
-                    reynolds_lower: re_lo,
-                });
-            } else if re_status == RangeStatus::AboveRange {
-                blockers.push(QualificationBlocker::ReynoldsAboveRange {
-                    element_index: elem_idx,
-                    element_id: runtime_elem.id().to_owned(),
-                    reynolds_number: re,
-                    reynolds_upper: re_hi,
-                });
-            }
-
-            // Determine contributing nodes and audit their alpha domains
+            // Contributing-node alpha blockers come BEFORE Reynolds range blockers
             let (lower_node, upper_node, _fraction) = find_reynolds_bracket(family, re);
 
             let mut ln_node_alpha_lo = None;
@@ -745,7 +939,6 @@ fn audit_aero_element(
                 let (lo, hi) = polar_alpha_bounds(ln.table());
                 ln_node_alpha_lo = Some(lo);
                 ln_node_alpha_hi = Some(hi);
-                // Check alpha in lower node
                 if alpha_sample < lo {
                     blockers.push(
                         QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
@@ -772,7 +965,6 @@ fn audit_aero_element(
                 let (lo, hi) = polar_alpha_bounds(un.table());
                 un_node_alpha_lo = Some(lo);
                 un_node_alpha_hi = Some(hi);
-                // Only check upper node if it's different from lower
                 if upper_node.map(|n| n.reynolds_number())
                     != lower_node.map(|n| n.reynolds_number())
                 {
@@ -800,7 +992,23 @@ fn audit_aero_element(
                 }
             }
 
-            // For alpha range status, use the intersection of contributing node domains
+            // Reynolds range blockers come AFTER contributing-node alpha blockers
+            if re_status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::ReynoldsBelowRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    reynolds_number: re,
+                    reynolds_lower: re_lo,
+                });
+            } else if re_status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::ReynoldsAboveRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    reynolds_number: re,
+                    reynolds_upper: re_hi,
+                });
+            }
+
             let alpha_lo = ln_node_alpha_lo
                 .unwrap_or(0.0)
                 .max(un_node_alpha_lo.unwrap_or(0.0));
@@ -809,14 +1017,13 @@ fn audit_aero_element(
                 .min(un_node_alpha_hi.unwrap_or(0.0));
             let alpha_status = if let (Some(ln), Some(un)) = (lower_node, upper_node) {
                 if ln.reynolds_number() == un.reynolds_number() {
-                    // Exact node match: use that single node's domain
                     let (lo, hi) = polar_alpha_bounds(ln.table());
-                    alpha_range_status(alpha_sample, lo, hi)
+                    range_status(alpha_sample, lo, hi)
                 } else {
-                    alpha_range_status(alpha_sample, alpha_lo, alpha_hi)
+                    range_status(alpha_sample, alpha_lo, alpha_hi)
                 }
             } else {
-                alpha_range_status(alpha_sample, alpha_lo, alpha_hi)
+                range_status(alpha_sample, alpha_lo, alpha_hi)
             };
 
             let audit = AerodynamicElementDomainAudit {
@@ -843,9 +1050,6 @@ fn audit_aero_element(
     }
 }
 
-/// Find the bracketing Reynolds nodes for a given Reynolds number.
-/// Returns (lower_node, upper_node, interpolation_fraction).
-/// For exact match or out-of-range, both point to the same node.
 fn find_reynolds_bracket(
     family: &sim_core::ReynoldsPolarFamily,
     re: f64,
@@ -887,7 +1091,7 @@ fn audit_propulsion(
     model: &AircraftModel,
     config: &AircraftSimulationConfig,
     state: &RigidBodyState,
-    variables: &LongitudinalTrimVariables,
+    accepted_throttle: f64,
     blockers: &mut Vec<QualificationBlocker>,
 ) -> PropulsionDomainAudit {
     let Some(runtime_prop) = model.propulsion() else {
@@ -896,7 +1100,7 @@ fn audit_propulsion(
 
     let prop_output = evaluate_electric_propulsion_with_source(
         state,
-        variables.throttle,
+        accepted_throttle,
         runtime_prop.config(),
         config.aero_environment(),
         runtime_prop.coefficient_source(),
@@ -905,12 +1109,12 @@ fn audit_propulsion(
     let j = prop_output.advance_ratio_j;
     let shaft_speed = prop_output.shaft_speed_rad_s;
 
-    let (j_lo, j_hi, j_status, ss_lo, ss_hi, ss_status) = match runtime_prop.coefficient_source() {
+    match runtime_prop.coefficient_source() {
         PropellerCoefficientSource::FixedTable(table) => {
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let j_stat = alpha_range_status(j, j_lo, j_hi);
+            let j_stat = range_status(j, j_lo, j_hi);
             if j_stat == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -922,8 +1126,18 @@ fn audit_propulsion(
                     j_upper: j_hi,
                 });
             }
-            // Fixed table: shaft speed is always "in range" (no map)
-            (j_lo, j_hi, j_stat, 0.0, 0.0, RangeStatus::InRange)
+            // FIX 6: Fixed table has no shaft-speed map domain -> None.
+            PropulsionDomainAudit::Present {
+                throttle: accepted_throttle,
+                axial_airspeed_mps: prop_output.axial_airspeed_mps,
+                shaft_speed_rad_s: shaft_speed,
+                shaft_speed_rpm: prop_output.shaft_speed_rpm,
+                advance_ratio_j: j,
+                j_lower: j_lo,
+                j_upper: j_hi,
+                j_range_status: j_stat,
+                shaft_speed_domain: None,
+            }
         }
         PropellerCoefficientSource::ShaftSpeedMap(map) => {
             let nodes = map.nodes();
@@ -934,6 +1148,7 @@ fn audit_propulsion(
                 ShaftSpeedRangeStatus::AboveRange => RangeStatus::AboveRange,
                 ShaftSpeedRangeStatus::ExactOrInRange => RangeStatus::InRange,
             };
+            // Shaft-speed blockers BEFORE J blockers (documented order).
             if ss_stat == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerShaftSpeedBelowRange {
                     shaft_speed_rad_s: shaft_speed,
@@ -946,28 +1161,26 @@ fn audit_propulsion(
                 });
             }
 
-            // J domain: check against contributing node tables
             let (j_lo, j_hi, j_stat) = audit_map_j_domain(map, shaft_speed, j, blockers);
-            (j_lo, j_hi, j_stat, ss_lo, ss_hi, ss_stat)
+            PropulsionDomainAudit::Present {
+                throttle: accepted_throttle,
+                axial_airspeed_mps: prop_output.axial_airspeed_mps,
+                shaft_speed_rad_s: shaft_speed,
+                shaft_speed_rpm: prop_output.shaft_speed_rpm,
+                advance_ratio_j: j,
+                j_lower: j_lo,
+                j_upper: j_hi,
+                j_range_status: j_stat,
+                shaft_speed_domain: Some(ShaftSpeedDomainAudit {
+                    shaft_speed_lower_rad_s: ss_lo,
+                    shaft_speed_upper_rad_s: ss_hi,
+                    shaft_speed_range_status: ss_stat,
+                }),
+            }
         }
-    };
-
-    PropulsionDomainAudit::Present {
-        throttle: variables.throttle,
-        axial_airspeed_mps: prop_output.axial_airspeed_mps,
-        shaft_speed_rad_s: shaft_speed,
-        shaft_speed_rpm: prop_output.shaft_speed_rpm,
-        advance_ratio_j: j,
-        j_lower: j_lo,
-        j_upper: j_hi,
-        j_range_status: j_status,
-        shaft_speed_lower_rad_s: ss_lo,
-        shaft_speed_upper_rad_s: ss_hi,
-        shaft_speed_range_status: ss_status,
     }
 }
 
-/// Audit J domain for a shaft-speed map. Returns (j_lo, j_hi, j_status).
 fn audit_map_j_domain(
     map: &PropellerCoefficientMap,
     shaft_speed: f64,
@@ -980,7 +1193,7 @@ fn audit_map_j_domain(
         let samples = table.samples();
         let j_lo = samples[0].advance_ratio_j;
         let j_hi = samples[samples.len() - 1].advance_ratio_j;
-        let status = alpha_range_status(j, j_lo, j_hi);
+        let status = range_status(j, j_lo, j_hi);
         if status == RangeStatus::BelowRange {
             blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                 advance_ratio_j: j,
@@ -995,15 +1208,13 @@ fn audit_map_j_domain(
         return (j_lo, j_hi, status);
     }
 
-    // Find bracket
     match nodes.binary_search_by(|n| n.shaft_speed_rad_s().total_cmp(&shaft_speed)) {
         Ok(idx) => {
-            // Exact match: check only that node
             let table = nodes[idx].table();
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = alpha_range_status(j, j_lo, j_hi);
+            let status = range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1022,7 +1233,7 @@ fn audit_map_j_domain(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = alpha_range_status(j, j_lo, j_hi);
+            let status = range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1042,7 +1253,7 @@ fn audit_map_j_domain(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = alpha_range_status(j, j_lo, j_hi);
+            let status = range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1067,14 +1278,12 @@ fn audit_map_j_domain(
             let j_lo_upper = u_samples[0].advance_ratio_j;
             let j_hi_upper = u_samples[u_samples.len() - 1].advance_ratio_j;
 
-            // J must be inside BOTH contributing tables
             let j_lo = j_lo_lower.max(j_lo_upper);
             let j_hi = j_hi_lower.min(j_hi_upper);
-            let status = alpha_range_status(j, j_lo, j_hi);
+            let status = range_status(j, j_lo, j_hi);
 
-            // Also check each individual table
-            let j_in_lower = alpha_range_status(j, j_lo_lower, j_hi_lower);
-            let j_in_upper = alpha_range_status(j, j_lo_upper, j_hi_upper);
+            let j_in_lower = range_status(j, j_lo_lower, j_hi_lower);
+            let j_in_upper = range_status(j, j_lo_upper, j_hi_upper);
 
             if j_in_lower == RangeStatus::BelowRange || j_in_upper == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
@@ -1094,7 +1303,6 @@ fn audit_map_j_domain(
     }
 }
 
-// Helper to convert ShaftSpeedRangeStatus
 trait ShaftSpeedStatusExt {
     fn from_re(shaft_speed: f64, lo: f64, hi: f64) -> ShaftSpeedRangeStatus;
 }
