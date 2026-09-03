@@ -18,7 +18,9 @@
 //!
 //! # Physical Reynolds
 //!
-//! Reynolds numbers use the PHYSICAL section airspeed, not any effective-alpha-modified velocity.
+//! Reynolds numbers use the PHYSICAL section airspeed, including an explicitly authored schema-v7
+//! propeller slipstream increment and excluding any effective-alpha-only modification. M2.8C
+//! downwash then rotates that physical flow without changing its speed.
 //!
 //! # Accepted trim operating point
 //!
@@ -32,14 +34,15 @@
 use crate::{
     AircraftSimulationConfig,
     simulation::{
-        downwashed_section_kinematics, solve_surface_induced_alpha_with_downwash, surface_downwash,
+        downwashed_section_kinematics, physical_section_kinematics, propeller_slipstream,
+        solve_surface_induced_alpha_with_physical_flow, surface_downwash_with_slipstream,
     },
     trim::{LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate},
 };
 use model::AircraftModel;
 use sim_core::{
-    PolarTable, PropellerCoefficientMap, PropellerCoefficientSource, RigidBodyState,
-    ShaftSpeedRangeStatus, compute_section_kinematics, evaluate_electric_propulsion_with_source,
+    PolarTable, PropellerCoefficientMap, PropellerCoefficientSource, PropulsionOutput,
+    ShaftSpeedRangeStatus, evaluate_electric_propulsion_with_source,
 };
 use thiserror::Error;
 
@@ -505,26 +508,44 @@ pub fn qualify_longitudinal_trim_solution(
     // not the base geometry.
     let effective = crate::effective_aero_elements_for_positions(model, positions);
 
+    // Use the exact accepted same-stage propulsion output for both slipstream and its audit.
+    let accepted_throttle = positions.throttle();
+    let propulsion_output = model.propulsion().map(|runtime_propulsion| {
+        evaluate_electric_propulsion_with_source(
+            state,
+            accepted_throttle,
+            runtime_propulsion.config(),
+            config.aero_environment(),
+            runtime_propulsion.coefficient_source(),
+        )
+    });
+    let slipstream = propulsion_output
+        .as_ref()
+        .map(|output| propeller_slipstream(model, config.aero_environment(), output))
+        .unwrap_or_default();
+
     // Compute per-surface alpha_i values using the deflected elements
     let surfaces = model.aero_surfaces();
     let mut surface_alpha_i = vec![0.0f64; surfaces.len()];
     let mut surface_downwash_angles = vec![0.0f64; surfaces.len()];
     let mut element_surface_map = vec![None; model.aero_elements().len()];
     for (surf_idx, surface) in surfaces.iter().enumerate() {
-        let downwash = surface_downwash(
+        let downwash = surface_downwash_with_slipstream(
             surf_idx,
             state,
             &effective,
             model,
             config.aero_environment(),
+            slipstream,
         );
-        let (alpha_i, _, _) = solve_surface_induced_alpha_with_downwash(
+        let (alpha_i, _, _) = solve_surface_induced_alpha_with_physical_flow(
             surface,
             state,
             &effective,
             model,
             config.aero_environment(),
             downwash.downwash_angle_rad,
+            slipstream,
         );
         surface_alpha_i[surf_idx] = alpha_i;
         surface_downwash_angles[surf_idx] = downwash.downwash_angle_rad;
@@ -541,16 +562,22 @@ pub fn qualify_longitudinal_trim_solution(
 
     for (elem_idx, runtime_elem) in model.aero_elements().iter().enumerate() {
         let eff_elem = &effective[elem_idx];
-        let undisturbed_kinematics =
-            compute_section_kinematics(state, eff_elem, config.aero_environment());
+        let slipstream_kinematics = physical_section_kinematics(
+            elem_idx,
+            state,
+            eff_elem,
+            model,
+            config.aero_environment(),
+            slipstream,
+        );
         let kin = element_surface_map[elem_idx]
             .map(|surface_index| {
                 downwashed_section_kinematics(
-                    undisturbed_kinematics,
+                    slipstream_kinematics,
                     surface_downwash_angles[surface_index],
                 )
             })
-            .unwrap_or(undisturbed_kinematics);
+            .unwrap_or(slipstream_kinematics);
 
         let alpha_geom = kin.alpha_rad;
         let alpha_i = element_surface_map[elem_idx]
@@ -575,13 +602,11 @@ pub fn qualify_longitudinal_trim_solution(
     // Phase 2: Propulsion blockers (shaft-speed first, then J)
     // -----------------------------------------------------------------------
     // FIX 2: Use the accepted control-output throttle, not the raw trim variable.
-    let accepted_throttle = positions.throttle();
     let mut propulsion_blockers = Vec::new();
     let propulsion_audit = audit_propulsion(
         model,
-        config,
-        state,
         accepted_throttle,
+        propulsion_output.as_ref(),
         &mut propulsion_blockers,
     );
 
@@ -1118,22 +1143,16 @@ fn find_reynolds_bracket(
 
 fn audit_propulsion(
     model: &AircraftModel,
-    config: &AircraftSimulationConfig,
-    state: &RigidBodyState,
     accepted_throttle: f64,
+    propulsion_output: Option<&PropulsionOutput>,
     blockers: &mut Vec<QualificationBlocker>,
 ) -> PropulsionDomainAudit {
     let Some(runtime_prop) = model.propulsion() else {
         return PropulsionDomainAudit::NotPresent;
     };
 
-    let prop_output = evaluate_electric_propulsion_with_source(
-        state,
-        accepted_throttle,
-        runtime_prop.config(),
-        config.aero_environment(),
-        runtime_prop.coefficient_source(),
-    );
+    let prop_output =
+        propulsion_output.expect("a propulsion model has a same-stage qualification output");
 
     let j = prop_output.advance_ratio_j;
     let shaft_speed = prop_output.shaft_speed_rad_s;
