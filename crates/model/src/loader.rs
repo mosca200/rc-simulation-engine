@@ -2,7 +2,7 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V6,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -12,7 +12,8 @@ use crate::{
     runtime::{
         AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroDownwashInteraction,
         RuntimeAeroElement, RuntimeAeroSurface, RuntimeControlSurfaceBinding,
-        RuntimeElectricPropulsion, RuntimePolar, RuntimeReynoldsPolarFamily,
+        RuntimeElectricPropulsion, RuntimePolar, RuntimePropellerSlipstreamInteraction,
+        RuntimeReynoldsPolarFamily,
     },
     v0::{
         AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
@@ -30,6 +31,7 @@ use crate::{
     v4::{AircraftModelFileV4, PropellerCoefficientSourceFileV4, PropulsionFileV4},
     v5::{AeroSurfaceFileV5, AircraftModelFileV5},
     v6::{AeroDownwashInteractionFileV6, AircraftModelFileV6},
+    v7::{AircraftModelFileV7, PropellerSlipstreamInteractionFileV7},
 };
 use serde::Deserialize;
 use sim_core::{
@@ -374,6 +376,57 @@ pub enum ModelLoadError {
         "aerodynamic downwash graph is chained: surface {surface_id:?} is both a source and a target"
     )]
     ChainedDownwashSurface { surface_id: Box<str> },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has no target elements"
+    )]
+    EmptySlipstreamTargets {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has invalid slipstream_velocity_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidSlipstreamVelocityFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} requires propulsion"
+    )]
+    SlipstreamInteractionWithoutPropulsion {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} references unknown target element {element_id:?} at target index {target_index}"
+    )]
+    UnresolvedSlipstreamTargetElement {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        target_index: usize,
+        element_id: Box<str>,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} repeats target element {element_id:?} at target index {duplicate_target_index}; first declared at target index {first_target_index}"
+    )]
+    DuplicateSlipstreamTargetWithinInteraction {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        element_id: Box<str>,
+        first_target_index: usize,
+        duplicate_target_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} targets element {element_id:?}, already targeted by interaction {first_interaction_id:?} at index {first_interaction_index}"
+    )]
+    DuplicateSlipstreamTarget {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        element_id: Box<str>,
+        first_interaction_id: Box<str>,
+        first_interaction_index: usize,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -426,6 +479,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V6);
                 resolve_v6(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V7) => {
+                let file: AircraftModelFileV7 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V7);
+                resolve_v7(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -780,6 +839,13 @@ fn resolve_v5_fields(
 }
 
 fn resolve_v6(file: AircraftModelFileV6) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v6_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V6)
+}
+
+fn resolve_v6_fields(
+    file: AircraftModelFileV6,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
     let AircraftModelFileV6 {
         schema_version,
         model_id,
@@ -807,9 +873,129 @@ fn resolve_v6(file: AircraftModelFileV6) -> Result<AircraftModel, ModelLoadError
         propulsion,
         presentation,
     };
-    let model = resolve_v5_fields(v5_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V6)?;
+    let model = resolve_v5_fields(v5_file, runtime_schema_version)?;
     let interactions = resolve_aero_downwash_interactions(&model, aero_downwash_interactions)?;
     Ok(model.with_aero_downwash_interactions(interactions))
+}
+
+fn resolve_v7(file: AircraftModelFileV7) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV7 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propeller_slipstream_interactions,
+        propulsion,
+        presentation,
+    } = file;
+    let v6_file = AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v6_fields(v6_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V7)?;
+    let interactions =
+        resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
+    Ok(model.with_propeller_slipstream_interactions(interactions))
+}
+
+fn resolve_propeller_slipstream_interactions(
+    model: &AircraftModel,
+    interaction_files: Vec<PropellerSlipstreamInteractionFileV7>,
+) -> Result<Vec<RuntimePropellerSlipstreamInteraction>, ModelLoadError> {
+    let mut interactions = Vec::with_capacity(interaction_files.len());
+    for (interaction_index, file) in interaction_files.into_iter().enumerate() {
+        validate_unique_id(
+            "propeller slipstream interaction",
+            interaction_index,
+            &file.id,
+            interactions
+                .iter()
+                .map(RuntimePropellerSlipstreamInteraction::id),
+        )?;
+        if !file.slipstream_velocity_factor.is_finite() || file.slipstream_velocity_factor < 0.0 {
+            return Err(ModelLoadError::InvalidSlipstreamVelocityFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.slipstream_velocity_factor,
+            });
+        }
+        if model.propulsion().is_none() {
+            return Err(ModelLoadError::SlipstreamInteractionWithoutPropulsion {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+            });
+        }
+        if file.target_element_ids.is_empty() {
+            return Err(ModelLoadError::EmptySlipstreamTargets {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+            });
+        }
+
+        let mut target_element_indices = Vec::with_capacity(file.target_element_ids.len());
+        for (target_index, element_id) in file.target_element_ids.iter().enumerate() {
+            let element_index = model
+                .aero_elements()
+                .iter()
+                .position(|element| element.id() == element_id)
+                .ok_or_else(|| ModelLoadError::UnresolvedSlipstreamTargetElement {
+                    interaction_id: file.id.clone().into_boxed_str(),
+                    interaction_index,
+                    target_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                })?;
+            if let Some(first_target_index) = target_element_indices
+                .iter()
+                .position(|&index| index == element_index)
+            {
+                return Err(ModelLoadError::DuplicateSlipstreamTargetWithinInteraction {
+                    interaction_id: file.id.into_boxed_str(),
+                    interaction_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                    first_target_index,
+                    duplicate_target_index: target_index,
+                });
+            }
+            if let Some((first_interaction_index, first)) =
+                interactions.iter().enumerate().find(|(_, interaction)| {
+                    interaction
+                        .target_element_indices()
+                        .contains(&element_index)
+                })
+            {
+                return Err(ModelLoadError::DuplicateSlipstreamTarget {
+                    interaction_id: file.id.into_boxed_str(),
+                    interaction_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                    first_interaction_id: first.id().into(),
+                    first_interaction_index,
+                });
+            }
+            target_element_indices.push(element_index);
+        }
+        interactions.push(RuntimePropellerSlipstreamInteraction::new(
+            file.id,
+            target_element_indices,
+            file.slipstream_velocity_factor,
+        ));
+    }
+    Ok(interactions)
 }
 
 fn resolve_aero_downwash_interactions(

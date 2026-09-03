@@ -2,7 +2,8 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AircraftClassification, ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7, AircraftClassification,
+    ReferenceAircraftMetadata,
 };
 use sim_core::{
     AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
@@ -24,6 +25,7 @@ pub struct AircraftModel {
     aero_elements: Vec<RuntimeAeroElement>,
     aero_surfaces: Vec<RuntimeAeroSurface>,
     aero_downwash_interactions: Vec<RuntimeAeroDownwashInteraction>,
+    propeller_slipstream_interactions: Vec<RuntimePropellerSlipstreamInteraction>,
     kinematic_viscosity_m2_s: Option<f64>,
     controls: ControlSystemConfig,
     control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
@@ -57,6 +59,7 @@ impl AircraftModel {
             aero_elements,
             aero_surfaces: Vec::new(),
             aero_downwash_interactions: Vec::new(),
+            propeller_slipstream_interactions: Vec::new(),
             kinematic_viscosity_m2_s: None,
             controls,
             control_surface_bindings,
@@ -110,6 +113,14 @@ impl AircraftModel {
         interactions: Vec<RuntimeAeroDownwashInteraction>,
     ) -> Self {
         self.aero_downwash_interactions = interactions;
+        self
+    }
+
+    pub(crate) fn with_propeller_slipstream_interactions(
+        mut self,
+        interactions: Vec<RuntimePropellerSlipstreamInteraction>,
+    ) -> Self {
+        self.propeller_slipstream_interactions = interactions;
         self
     }
 
@@ -168,6 +179,12 @@ impl AircraftModel {
     #[must_use]
     pub fn aero_downwash_interactions(&self) -> &[RuntimeAeroDownwashInteraction] {
         &self.aero_downwash_interactions
+    }
+
+    /// Ordered, initialization-resolved propeller-slipstream interactions.
+    #[must_use]
+    pub fn propeller_slipstream_interactions(&self) -> &[RuntimePropellerSlipstreamInteraction] {
+        &self.propeller_slipstream_interactions
     }
 
     /// Explicit model-authoritative viscosity for schema-v3+ Reynolds aerodynamics.
@@ -503,6 +520,43 @@ impl RuntimeAeroDownwashInteraction {
     }
 }
 
+/// Immutable one-way propeller-slipstream coupling with resolved element handles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimePropellerSlipstreamInteraction {
+    id: String,
+    target_element_indices: Vec<usize>,
+    slipstream_velocity_factor: f64,
+}
+
+impl RuntimePropellerSlipstreamInteraction {
+    pub(crate) fn new(
+        id: String,
+        target_element_indices: Vec<usize>,
+        slipstream_velocity_factor: f64,
+    ) -> Self {
+        Self {
+            id,
+            target_element_indices,
+            slipstream_velocity_factor,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn target_element_indices(&self) -> &[usize] {
+        &self.target_element_indices
+    }
+
+    #[must_use]
+    pub const fn slipstream_velocity_factor(&self) -> f64 {
+        self.slipstream_velocity_factor
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeElectricPropulsion {
     config: ElectricPropulsionConfig,
@@ -601,6 +655,10 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v6");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V6
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V7 => {
+                hasher.update(b"rcsim:aircraft-model:v7");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -629,6 +687,7 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
         ) {
             update_f64(
                 &mut hasher,
@@ -670,6 +729,7 @@ impl AircraftModelFingerprint {
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                     ) {
                         hasher.update(&[0]);
                     }
@@ -682,6 +742,7 @@ impl AircraftModelFingerprint {
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                     ));
                     hasher.update(&[1]);
                     update_len(&mut hasher, family_index);
@@ -722,6 +783,7 @@ impl AircraftModelFingerprint {
                     AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                         | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                         | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                 ) {
                     hasher.update(b"esc:series-resistance:v1");
                     update_f64(&mut hasher, config.esc().series_resistance_ohm());
@@ -749,6 +811,7 @@ impl AircraftModelFingerprint {
                             AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                         ) {
                             hasher
                                 .update(b"propeller-coefficients:fixed-table:j-linear-clamped:v1");
@@ -766,6 +829,7 @@ impl AircraftModelFingerprint {
                             AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                         ));
                         hasher.update(
                             b"propeller-coefficients:shaft-speed-linear:j-linear-clamped:v1",
@@ -793,6 +857,7 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
@@ -809,7 +874,9 @@ impl AircraftModelFingerprint {
 
         if matches!(
             model.schema_version,
-            AIRCRAFT_MODEL_SCHEMA_VERSION_V5 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
         ) {
             hasher.update(b"aero-surfaces:v1");
             update_len(&mut hasher, model.aero_surfaces.len());
@@ -826,13 +893,28 @@ impl AircraftModelFingerprint {
             }
         }
 
-        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V6 {
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V6 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+        ) {
             hasher.update(b"aero-downwash-interactions:v1");
             update_len(&mut hasher, model.aero_downwash_interactions.len());
             for interaction in &model.aero_downwash_interactions {
                 update_len(&mut hasher, interaction.source_surface_index);
                 update_len(&mut hasher, interaction.target_surface_index);
                 update_f64(&mut hasher, interaction.downwash_factor);
+            }
+        }
+
+        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V7 {
+            hasher.update(b"propeller-slipstream-interactions:v1");
+            update_len(&mut hasher, model.propeller_slipstream_interactions.len());
+            for interaction in &model.propeller_slipstream_interactions {
+                update_len(&mut hasher, interaction.target_element_indices.len());
+                for &element_index in &interaction.target_element_indices {
+                    update_len(&mut hasher, element_index);
+                }
+                update_f64(&mut hasher, interaction.slipstream_velocity_factor);
             }
         }
 

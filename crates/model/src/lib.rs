@@ -19,6 +19,7 @@ pub mod v3;
 pub mod v4;
 pub mod v5;
 pub mod v6;
+pub mod v7;
 
 pub use loader::{AircraftModelLoader, ModelLoadError, load_aircraft_model};
 pub use reference::{
@@ -67,7 +68,7 @@ pub use runtime::{
     AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationMetadata,
     RuntimeAeroDownwashInteraction, RuntimeAeroElement, RuntimeAeroPolarBinding,
     RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
-    RuntimeReynoldsPolarFamily,
+    RuntimePropellerSlipstreamInteraction, RuntimeReynoldsPolarFamily,
 };
 
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V0: u32 = 0;
@@ -77,6 +78,7 @@ pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V3: u32 = 3;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V4: u32 = 4;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V5: u32 = 5;
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V6: u32 = 6;
+pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V7: u32 = 7;
 pub const REFERENCE_AERODYNAMIC_EVIDENCE_SCHEMA_V0: &str =
     "reference_aircraft_aerodynamic_evidence_v0";
 pub const REFERENCE_MASS_PROPERTIES_SCHEMA_V0: &str = "reference_aircraft_mass_properties_v0";
