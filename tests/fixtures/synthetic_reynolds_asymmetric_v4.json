@@ -1,0 +1,118 @@
+{
+  "schema_version": 4,
+  "model_id": "synthetic_reynolds_asymmetric_v4",
+  "display_name": "Synthetic Reynolds Asymmetric Alpha Fixture",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 1.5,
+    "inertia_body_kg_m2": [[0.16, 0.0, 0.0], [0.0, 0.23, 0.0], [0.0, 0.0, 0.30]]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [
+      {
+        "id": "synthetic-tail-polar",
+        "samples": [
+          {"alpha_rad": -0.40, "cl": -1.20, "cd": 0.080, "cm": 0.0},
+          {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.018, "cm": 0.0},
+          {"alpha_rad":  0.40, "cl":  1.20, "cd": 0.080, "cm": 0.0}
+        ]
+      }
+    ],
+    "polar_families": [
+      {
+        "id": "synthetic-wing-reynolds-family",
+        "nodes": [
+          {
+            "reynolds_number": 200000.0,
+            "samples": [
+              {"alpha_rad": -0.35, "cl": -0.35, "cd": 0.095, "cm": -0.040},
+              {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.040, "cm": -0.040},
+              {"alpha_rad":  0.35, "cl":  0.35, "cd": 0.095, "cm": -0.040}
+            ]
+          },
+          {
+            "reynolds_number": 500000.0,
+            "samples": [
+              {"alpha_rad": -0.20, "cl": -0.20, "cd": 0.050, "cm": -0.020},
+              {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.022, "cm": -0.020},
+              {"alpha_rad":  0.20, "cl":  0.20, "cd": 0.050, "cm": -0.020}
+            ]
+          }
+        ]
+      }
+    ],
+    "elements": [
+      {
+        "id": "synthetic-wing",
+        "position_body_m": [0.0, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.45,
+        "chord_m": 0.30,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "synthetic-wing-reynolds-family"}
+      },
+      {
+        "id": "synthetic-elevator-tail",
+        "position_body_m": [-0.75, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.10,
+        "chord_m": 0.18,
+        "polar_binding": {"kind": "polar", "polar_id": "synthetic-tail-polar"}
+      }
+    ]
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 1.0, "expo": 0.0},
+      "pitch": {"rate": 1.0, "expo": 0.0},
+      "yaw": {"rate": 1.0, "expo": 0.0}
+    },
+    "servos": {
+      "aileron": {"min_angle_rad": -0.35, "neutral_angle_rad": 0.0, "max_angle_rad": 0.35, "max_speed_rad_s": 8.0, "reversed": false},
+      "elevator": {"min_angle_rad": -0.40, "neutral_angle_rad": 0.0, "max_angle_rad": 0.40, "max_speed_rad_s": 8.0, "reversed": false},
+      "rudder": {"min_angle_rad": -0.35, "neutral_angle_rad": 0.0, "max_angle_rad": 0.35, "max_speed_rad_s": 8.0, "reversed": false}
+    }
+  },
+  "control_surface_bindings": [
+    {
+      "id": "synthetic-elevator-binding",
+      "element_id": "synthetic-elevator-tail",
+      "actuator": "elevator",
+      "deflection_gain": -1.0
+    }
+  ],
+  "propulsion": {
+    "battery": {"open_circuit_voltage_v": 14.1, "internal_resistance_ohm": 0.028},
+    "esc": {"series_resistance_ohm": 0.010},
+    "motor": {"kv_rpm_per_v": 810.0, "winding_resistance_ohm": 0.052, "no_load_current_a": 0.75},
+    "propeller": {
+      "position_body_m": [0.24, 0.0, 0.0],
+      "orientation_body_from_prop_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "diameter_m": 0.276,
+      "spin_direction": "positive_about_local_x"
+    },
+    "coefficient_source": {
+      "kind": "shaft_speed_map",
+      "nodes": [
+        {
+          "shaft_speed_rad_s": 250.0,
+          "samples": [
+            {"advance_ratio_j": 0.0, "ct": 0.108, "cq": 0.0158},
+            {"advance_ratio_j": 0.7, "ct": 0.052, "cq": 0.0090},
+            {"advance_ratio_j": 1.3, "ct": 0.005, "cq": 0.0030}
+          ]
+        },
+        {
+          "shaft_speed_rad_s": 800.0,
+          "samples": [
+            {"advance_ratio_j": 0.0, "ct": 0.128, "cq": 0.0190},
+            {"advance_ratio_j": 0.6, "ct": 0.078, "cq": 0.0122},
+            {"advance_ratio_j": 1.2, "ct": 0.012, "cq": 0.0042}
+          ]
+        }
+      ]
+    }
+  },
+  "presentation": null
+}

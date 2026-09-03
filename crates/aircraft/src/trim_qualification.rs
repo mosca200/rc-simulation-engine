@@ -46,8 +46,13 @@ use thiserror::Error;
 // ---------------------------------------------------------------------------
 
 /// Whether a value lies inside, below, or above its evidence support.
+///
+/// `NonFinite` is a fail-closed sentinel: NaN / ±Infinity inputs cannot be classified
+/// as `InRange`. Qualification remains `NotQualified` through the `NonFiniteAuditValue`
+/// integrity blocker when any audited value is non-finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeStatus {
+    NonFinite,
     BelowRange,
     InRange,
     AboveRange,
@@ -438,6 +443,9 @@ impl LongitudinalTrimQualification {
 // ---------------------------------------------------------------------------
 
 fn range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
+    if !value.is_finite() {
+        return RangeStatus::NonFinite;
+    }
     if value < lower {
         RangeStatus::BelowRange
     } else if value > upper {
@@ -1315,5 +1323,44 @@ impl ShaftSpeedStatusExt for ShaftSpeedRangeStatus {
         } else {
             Self::ExactOrInRange
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for private helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_status_nan_is_non_finite() {
+        assert_eq!(
+            range_status(f64::NAN, -1.0, 1.0),
+            RangeStatus::NonFinite,
+            "NaN must NOT classify as InRange"
+        );
+    }
+
+    #[test]
+    fn range_status_infinity_is_non_finite() {
+        assert_eq!(
+            range_status(f64::INFINITY, -1.0, 1.0),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            range_status(f64::NEG_INFINITY, -1.0, 1.0),
+            RangeStatus::NonFinite
+        );
+    }
+
+    #[test]
+    fn range_status_finite_values_classify_correctly() {
+        assert_eq!(range_status(0.0, -1.0, 1.0), RangeStatus::InRange);
+        assert_eq!(range_status(-1.0, -1.0, 1.0), RangeStatus::InRange);
+        assert_eq!(range_status(1.0, -1.0, 1.0), RangeStatus::InRange);
+        assert_eq!(range_status(-2.0, -1.0, 1.0), RangeStatus::BelowRange);
+        assert_eq!(range_status(2.0, -1.0, 1.0), RangeStatus::AboveRange);
     }
 }
