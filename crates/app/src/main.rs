@@ -11,6 +11,7 @@ mod trim_characterization_app;
 mod trim_sweep_validation_app;
 mod validation_app;
 mod xfoil_campaign_app;
+mod xfoil_runner_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
 use benchmark_app::{AircraftBenchmarkOptions, run_aircraft_benchmark};
@@ -72,6 +73,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_render(RenderOptions::parse(arguments)?)?;
             Ok(())
         }
+        Some(command) if command == "xfoil" => match arguments.next().as_deref() {
+            Some("run-campaign") => {
+                let options = xfoil_runner_app::XfoilRunnerOptions::parse(arguments)?;
+                match xfoil_runner_app::run_xfoil_campaign(options) {
+                    Ok(xfoil_runner_app::XfoilRunnerStatus::Completed) => Ok(()),
+                    Ok(xfoil_runner_app::XfoilRunnerStatus::Incomplete) => {
+                        eprintln!(
+                            "XFOIL campaign execution is incomplete; see xfoil_execution.md"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(command) => Err(format!("unknown XFOIL command: {command}").into()),
+            None => Err("missing XFOIL command; expected `run-campaign`".into()),
+        },
         Some(command) if command == "analyze" => match arguments.next().as_deref() {
             Some("trim-characterization") => {
                 let options =
@@ -396,6 +417,9 @@ fn print_usage() {
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
     println!("  rcsim-app validate first-slice --output-dir PATH");
     println!("  rcsim-app validate xfoil-campaign --manifest PATH --output-dir PATH");
+    println!(
+        "  rcsim-app xfoil run-campaign --manifest PATH --xfoil-executable PATH --output-dir PATH [--timeout-seconds N]"
+    );
     println!(
         "  rcsim-app analyze trim-characterization --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --alpha-step-rad A --elevator-step E --output-dir PATH"
     );
