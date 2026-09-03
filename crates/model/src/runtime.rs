@@ -219,6 +219,26 @@ impl AircraftModel {
     pub fn physics_fingerprint(&self) -> AircraftModelFingerprint {
         AircraftModelFingerprint::from_model(self)
     }
+
+    /// Find a Reynolds polar family by ID and return its index.
+    pub(crate) fn find_reynolds_family_index(&self, family_id: &str) -> Option<usize> {
+        self.aero_polar_families
+            .iter()
+            .position(|f| f.id() == family_id)
+    }
+
+    /// Replace the Reynolds polar family at `index` in-place, preserving the family ID.
+    ///
+    /// This keeps the family index stable so existing aero-element bindings
+    /// (`RuntimeAeroPolarBinding::ReynoldsFamily { family_index }`) remain valid.
+    pub(crate) fn replace_reynolds_polar_family_at(
+        &mut self,
+        index: usize,
+        family: ReynoldsPolarFamily,
+    ) {
+        let id = self.aero_polar_families[index].id().to_owned();
+        self.aero_polar_families[index] = RuntimeReynoldsPolarFamily::new(id, family);
+    }
 }
 
 /// The conventional S5A servo selected by a schema-v1 surface binding.
