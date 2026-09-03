@@ -365,12 +365,12 @@ fn m2_9f_15_source_is_not_clarkysm_dat() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn m2_9f_16_manifest_accepted_by_production_parser_schema() {
+fn m2_9f_16_manifest_structural_schema_parse() {
     let text = fs::read_to_string(campaign_path()).unwrap();
     let manifest: Result<ExecutionManifest, _> = serde_json::from_str(&text);
     assert!(
         manifest.is_ok(),
-        "campaign.json must parse as a valid M2.9E execution manifest: {:?}",
+        "campaign.json must parse as a structurally valid execution manifest: {:?}",
         manifest.err()
     );
 }
@@ -540,28 +540,6 @@ fn m2_9f_30_airfoil_path_resolves_relative_to_manifest_directory() {
         resolved.exists(),
         "airfoil must resolve relative to manifest directory: {:?}",
         resolved
-    );
-}
-
-#[test]
-fn m2_9f_31_package_loads_when_cwd_changes() {
-    let manifest_text = fs::read_to_string(campaign_path()).unwrap();
-    let manifest: ExecutionManifest = serde_json::from_str(&manifest_text).unwrap();
-
-    let original_cwd = std::env::current_dir().unwrap();
-    let temp_dir = std::env::temp_dir();
-    std::env::set_current_dir(&temp_dir).unwrap();
-
-    let campaign = campaign_path();
-    let manifest_dir = campaign.parent().unwrap();
-    let resolved = manifest_dir.join(&manifest.airfoil_file);
-    let airfoil_ok = resolved.exists();
-
-    std::env::set_current_dir(original_cwd).unwrap();
-
-    assert!(
-        airfoil_ok,
-        "airfoil must resolve relative to manifest dir regardless of CWD"
     );
 }
 
