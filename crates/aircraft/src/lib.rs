@@ -5,6 +5,7 @@ mod config;
 mod simulation;
 mod trim;
 mod trim_characterization;
+mod trim_qualification;
 mod trim_sweep;
 
 pub use config::AircraftSimulationConfig;
@@ -26,6 +27,12 @@ pub use trim_characterization::{
     LongitudinalTrimCharacterizationError, LongitudinalTrimCharacterizationPoint,
     LongitudinalTrimCharacterizationPointOutcome, LongitudinalTrimCharacterizationSteps,
     PerturbationSide, characterize_longitudinal_trim_sweep,
+};
+pub use trim_qualification::{
+    AerodynamicElementDomainAudit, FullResidualAudit, LongitudinalTrimQualification,
+    LongitudinalTrimQualificationLimits, LongitudinalTrimQualificationOutcome,
+    LongitudinalTrimQualificationPoint, PropulsionDomainAudit, QualificationBlocker,
+    QualificationLimitsError, RangeStatus, qualify_longitudinal_trim_solution,
 };
 pub use trim_sweep::{
     LongitudinalTrimSweep, LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome,
