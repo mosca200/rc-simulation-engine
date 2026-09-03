@@ -15,6 +15,8 @@ use telemetry::{
 };
 use thiserror::Error;
 
+use crate::telemetry_experiment::{ExperimentOptions, TelemetryExperimentError, run_experiment};
+
 const DEFAULT_MODEL_PATH: &str = "models/acro_electric_01/model.json";
 const DEFAULT_THROTTLE: f64 = 0.55;
 const DEFAULT_STEPS: u64 = 2_000;
@@ -24,6 +26,7 @@ pub enum TelemetryOptions {
     Run(RunOptions),
     FromReplay(FromReplayOptions),
     Analyze(AnalyzeOptions),
+    Experiment(ExperimentOptions),
 }
 
 impl TelemetryOptions {
@@ -32,9 +35,11 @@ impl TelemetryOptions {
             Some("run") => Ok(Self::Run(RunOptions::parse(arguments)?)),
             Some("from-replay") => Ok(Self::FromReplay(FromReplayOptions::parse(arguments)?)),
             Some("analyze") => Ok(Self::Analyze(AnalyzeOptions::parse(arguments)?)),
+            Some("experiment") => Ok(Self::Experiment(ExperimentOptions::parse(arguments)?)),
             Some(command) => Err(format!("unknown telemetry command: {command}")),
             None => Err(
-                "missing telemetry command; expected `run`, `from-replay`, or `analyze`".to_owned(),
+                "missing telemetry command; expected `run`, `from-replay`, `analyze`, or `experiment`"
+                    .to_owned(),
             ),
         }
     }
@@ -181,6 +186,8 @@ pub enum TelemetryAppError {
     Replay(#[from] AircraftReplayError),
     #[error(transparent)]
     Telemetry(#[from] TelemetryCaptureError),
+    #[error(transparent)]
+    Experiment(#[from] TelemetryExperimentError),
     #[error("step count {0} cannot fit in memory on this platform")]
     StepCountTooLarge(u64),
     #[error("verified replay unexpectedly ended before frame {0}")]
@@ -205,6 +212,7 @@ pub fn run_telemetry(options: TelemetryOptions) -> Result<(), TelemetryAppError>
         TelemetryOptions::Run(options) => run(options),
         TelemetryOptions::FromReplay(options) => from_replay(options),
         TelemetryOptions::Analyze(options) => analyze(options),
+        TelemetryOptions::Experiment(options) => run_experiment(options).map_err(Into::into),
     }
 }
 

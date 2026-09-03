@@ -7,6 +7,7 @@ mod render_app;
 mod render_snapshot;
 mod replay_app;
 mod telemetry_app;
+mod telemetry_experiment;
 mod trim_characterization_app;
 mod trim_sweep_validation_app;
 mod validation_app;
@@ -435,6 +436,7 @@ fn print_usage() {
     );
     println!("  rcsim-app telemetry from-replay --model PATH --replay PATH --output PATH");
     println!("  rcsim-app telemetry analyze --input PATH");
+    println!("  rcsim-app telemetry experiment --model PATH --schedule PATH --output PATH");
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
     println!("  rcsim-app validate first-slice --output-dir PATH");
     println!("  rcsim-app validate xfoil-campaign --manifest PATH --output-dir PATH");
