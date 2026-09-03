@@ -22,6 +22,7 @@ pub mod v4;
 pub mod v5;
 pub mod v6;
 pub mod v7;
+mod xfoil_aircraft_family_binding;
 
 pub use loader::{AircraftModelLoader, ModelLoadError, load_aircraft_model};
 pub use reference::{
@@ -79,6 +80,9 @@ pub use runtime::{
     RuntimeAeroDownwashInteraction, RuntimeAeroElement, RuntimeAeroPolarBinding,
     RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
     RuntimePropellerSlipstreamInteraction, RuntimeReynoldsPolarFamily,
+};
+pub use xfoil_aircraft_family_binding::{
+    XfoilEvidenceBindingError, XfoilEvidenceBindingResult, bind_xfoil_evidence_to_reynolds_family,
 };
 
 pub const AIRCRAFT_MODEL_SCHEMA_VERSION_V0: u32 = 0;
