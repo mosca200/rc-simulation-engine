@@ -8,6 +8,7 @@ mod reference_mass_properties;
 mod reference_propulsion;
 mod reference_survey;
 mod reference_xfoil;
+mod reference_xfoil_campaign;
 mod reference_xfoil_evidence;
 mod runtime;
 pub mod v0;
@@ -48,6 +49,11 @@ pub use reference_survey::{
 pub use reference_xfoil::{
     InvalidMetadataReason, MetadataBuilder, XfoilPolarImport, XfoilPolarImportError,
     XfoilPolarSample, XfoilSolverMetadata, parse_xfoil_polar,
+};
+pub use reference_xfoil_campaign::{
+    XfoilCampaignCoverage, XfoilCampaignCoverageBlocker, XfoilCampaignCoverageRequest,
+    XfoilCampaignCoverageStatus, XfoilCampaignDatasetCoverage, XfoilEvidenceCampaign,
+    XfoilEvidenceCampaignBuilder, XfoilEvidenceCampaignError,
 };
 pub use reference_xfoil_evidence::{
     XfoilEvidenceBridgeError, XfoilEvidenceDataset, XfoilEvidenceDatasetBuilder,
