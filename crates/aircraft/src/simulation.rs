@@ -5,10 +5,10 @@ use model::{
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
     PilotInput, PolarCoefficients, PropulsionOutput, ReynoldsAeroElementOutput,
-    RigidBodyDerivative, RigidBodyState, Rk4Integrator, StateError, advance_controls,
-    assemble_aero_element_wrench, calculate_reynolds_number, compute_section_kinematics,
-    evaluate_aero_element, evaluate_derivative, evaluate_electric_propulsion_with_source,
-    evaluate_reynolds_aero_element,
+    RigidBodyDerivative, RigidBodyState, Rk4Integrator, SectionKinematics, StateError,
+    advance_controls, assemble_aero_element_wrench, calculate_reynolds_number,
+    compute_section_kinematics, evaluate_aero_element, evaluate_derivative,
+    evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -371,7 +371,7 @@ pub fn evaluate_aircraft_instantaneous(
 
 /// Aggregates every S4 element wrench, preserving the model's declaration order.
 ///
-/// When the model has finite-wing surfaces (schema v5), each surface is solved
+/// When the model has finite-wing surfaces (schema v5+), each surface is solved
 /// independently for a common induced angle of attack using deterministic bracketed
 /// bisection. Members assigned to surfaces receive finite-wing corrections (effective
 /// alpha for polar sampling, induced drag added to profile drag). Unassigned elements
@@ -392,8 +392,9 @@ pub fn evaluate_aerodynamic_wrench(
 
     let mut total_wrench = BodyWrench::zero();
 
-    for surface in surfaces {
+    for (surface_index, surface) in surfaces.iter().enumerate() {
         let wrench = evaluate_surface_wrench(
+            surface_index,
             surface,
             stage_state,
             effective_aero_elements,
@@ -435,7 +436,7 @@ fn is_element_assigned_to_any_surface(surfaces: &[RuntimeAeroSurface], index: us
 }
 
 /// Legacy path: every element evaluated independently through the quasi-2D polar path.
-/// Used when the model has no finite-wing surfaces (schema v0-v4, or v5 with surfaces=[]).
+/// Used when the model has no finite-wing surfaces (schema v0-v4, or v5+ with surfaces=[]).
 fn evaluate_legacy_wrench(
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
@@ -526,6 +527,26 @@ pub(crate) fn solve_surface_induced_alpha(
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
 ) -> (f64, f64, f64) {
+    solve_surface_induced_alpha_with_downwash(
+        surface,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        0.0,
+    )
+}
+
+/// Solves one surface using physical member flows already rotated by `downwash_angle_rad`.
+/// The zero-downwash path is bit-identical to the M2.8B solver.
+pub(crate) fn solve_surface_induced_alpha_with_downwash(
+    surface: &RuntimeAeroSurface,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    downwash_angle_rad: f64,
+) -> (f64, f64, f64) {
     let ar = surface.aspect_ratio();
     let e = surface.span_efficiency_factor();
     let pi_ar_e = std::f64::consts::PI * ar * e;
@@ -551,10 +572,13 @@ pub(crate) fn solve_surface_induced_alpha(
         let mut weight_sum = 0.0;
 
         for &member_idx in member_indices {
-            let kin = compute_section_kinematics(
-                stage_state,
-                &effective_aero_elements[member_idx],
-                environment,
+            let kin = downwashed_section_kinematics(
+                compute_section_kinematics(
+                    stage_state,
+                    &effective_aero_elements[member_idx],
+                    environment,
+                ),
+                downwash_angle_rad,
             );
             if kin.dynamic_pressure_pa == 0.0 {
                 continue;
@@ -593,10 +617,13 @@ pub(crate) fn solve_surface_induced_alpha(
     let mut weighted_cl_sum = 0.0;
     let mut weight_sum = 0.0;
     for &member_idx in member_indices {
-        let kin = compute_section_kinematics(
-            stage_state,
-            &effective_aero_elements[member_idx],
-            environment,
+        let kin = downwashed_section_kinematics(
+            compute_section_kinematics(
+                stage_state,
+                &effective_aero_elements[member_idx],
+                environment,
+            ),
+            downwash_angle_rad,
         );
         if kin.dynamic_pressure_pa == 0.0 {
             continue;
@@ -622,25 +649,99 @@ pub(crate) fn solve_surface_induced_alpha(
     (alpha_i, cl_surface, cdi)
 }
 
+/// Source induced angle and target wake rotation for one resolved target surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SurfaceDownwash {
+    pub source_alpha_i_rad: f64,
+    pub downwash_angle_rad: f64,
+}
+
+/// Resolves and evaluates one target's downwash without allocation or recursive propagation.
+pub(crate) fn surface_downwash(
+    target_surface_index: usize,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+) -> SurfaceDownwash {
+    let Some(interaction) = model
+        .aero_downwash_interactions()
+        .iter()
+        .find(|interaction| interaction.target_surface_index() == target_surface_index)
+    else {
+        return SurfaceDownwash {
+            source_alpha_i_rad: 0.0,
+            downwash_angle_rad: 0.0,
+        };
+    };
+    let source = &model.aero_surfaces()[interaction.source_surface_index()];
+    let (source_alpha_i_rad, _, _) = solve_surface_induced_alpha(
+        source,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+    );
+    SurfaceDownwash {
+        source_alpha_i_rad,
+        downwash_angle_rad: interaction.downwash_factor() * source_alpha_i_rad,
+    }
+}
+
+/// Rotates physical section-relative airflow about local +Y so that
+/// `alpha_after = alpha_before - downwash_angle_rad`.
+pub(crate) fn downwashed_section_kinematics(
+    kinematics: SectionKinematics,
+    downwash_angle_rad: f64,
+) -> SectionKinematics {
+    if downwash_angle_rad == 0.0 || kinematics.section_airspeed_mps == 0.0 {
+        return kinematics;
+    }
+    let (sin_epsilon, cos_epsilon) = downwash_angle_rad.sin_cos();
+    let velocity = kinematics.air_relative_velocity_element_mps;
+    let rotated = Vec3::new(
+        cos_epsilon.mul_add(velocity.x, sin_epsilon * velocity.z),
+        velocity.y,
+        (-sin_epsilon).mul_add(velocity.x, cos_epsilon * velocity.z),
+    );
+    SectionKinematics {
+        air_relative_velocity_element_mps: rotated,
+        section_airspeed_mps: kinematics.section_airspeed_mps,
+        alpha_rad: rotated.z.atan2(rotated.x),
+        beta_rad: kinematics.beta_rad,
+        dynamic_pressure_pa: kinematics.dynamic_pressure_pa,
+    }
+}
+
 /// Evaluates the total wrench for one finite-wing surface, including induced drag.
 ///
 /// For each member:
-/// - Polar is sampled at `alpha_geom - alpha_i` (effective alpha)
+/// - Downwash physically rotates target flow before any target finite-wing solve
+/// - Polar is sampled at `alpha_geom_downwashed - alpha_i` (effective alpha)
 /// - `CDi_surface` is added to the profile drag coefficient
-/// - Force directions come from the ACTUAL local section flow (not rotated)
+/// - Force directions come from the actual, possibly downwashed local section flow
 fn evaluate_surface_wrench(
+    surface_index: usize,
     surface: &RuntimeAeroSurface,
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
 ) -> BodyWrench {
-    let (alpha_i, _cl_surface, cdi_surface) = solve_surface_induced_alpha(
+    let downwash = surface_downwash(
+        surface_index,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+    );
+    let (alpha_i, _cl_surface, cdi_surface) = solve_surface_induced_alpha_with_downwash(
         surface,
         stage_state,
         effective_aero_elements,
         model,
         environment,
+        downwash.downwash_angle_rad,
     );
 
     let mut wrench = BodyWrench::zero();
@@ -649,7 +750,10 @@ fn evaluate_surface_wrench(
         let effective_element = &effective_aero_elements[member_idx];
         let runtime_element = &model.aero_elements()[member_idx];
 
-        let kin = compute_section_kinematics(stage_state, effective_element, environment);
+        let kin = downwashed_section_kinematics(
+            compute_section_kinematics(stage_state, effective_element, environment),
+            downwash.downwash_angle_rad,
+        );
         if kin.dynamic_pressure_pa == 0.0 {
             continue;
         }
@@ -710,7 +814,7 @@ pub fn evaluate_aircraft_aero_element<'a>(
         RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
             let viscosity = model
                 .kinematic_viscosity_m2_s()
-                .expect("Reynolds-family bindings exist only in schema-v3/v4 models");
+                .expect("Reynolds-family bindings require schema v3+ with explicit viscosity");
             AircraftAeroElementOutput::ReynoldsFamily(evaluate_reynolds_aero_element(
                 stage_state,
                 effective_element,
@@ -1655,5 +1759,121 @@ mod tests {
     fn rudder_fixture_local_y_is_body_vertical() {
         let orientation = Orientation::from_axis_angle(&Vec3::x_axis(), FRAC_PI_2);
         assert_vec_close(orientation.transform_vector(&Vec3::y()), Vec3::z(), 4.0e-16);
+    }
+
+    #[test]
+    fn m2_8c_downwash_rotation_obeys_sign_and_preserves_speed() {
+        let alpha = 0.2_f64;
+        let speed = 17.0_f64;
+        let original = SectionKinematics {
+            air_relative_velocity_element_mps: Vec3::new(
+                speed * alpha.cos(),
+                1.25,
+                speed * alpha.sin(),
+            ),
+            section_airspeed_mps: speed,
+            alpha_rad: alpha,
+            beta_rad: 1.25_f64.atan2(speed),
+            dynamic_pressure_pa: 123.0,
+        };
+        let epsilon = 0.075;
+        let downwashed = downwashed_section_kinematics(original, epsilon);
+        assert!((downwashed.alpha_rad - (alpha - epsilon)).abs() < 2.0e-16);
+        assert_eq!(
+            downwashed.section_airspeed_mps.to_bits(),
+            original.section_airspeed_mps.to_bits()
+        );
+        assert_eq!(
+            downwashed.dynamic_pressure_pa.to_bits(),
+            original.dynamic_pressure_pa.to_bits()
+        );
+        assert_eq!(
+            downwashed.air_relative_velocity_element_mps.y.to_bits(),
+            original.air_relative_velocity_element_mps.y.to_bits()
+        );
+        let rotated_section_speed = downwashed
+            .air_relative_velocity_element_mps
+            .x
+            .hypot(downwashed.air_relative_velocity_element_mps.z);
+        assert!((rotated_section_speed - speed).abs() < 4.0e-15);
+        let opposite = downwashed_section_kinematics(original, -epsilon);
+        assert!((opposite.alpha_rad - (alpha + epsilon)).abs() < 2.0e-16);
+        assert_eq!(downwashed_section_kinematics(original, 0.0), original);
+    }
+
+    #[test]
+    fn m2_8c_runtime_diagnostic_uses_source_solution_without_feedback() {
+        let fixture = include_str!("../../../tests/fixtures/synthetic_downwash_v6.json");
+        let model = AircraftModelLoader::from_json_str(fixture).unwrap();
+        let mut uncoupled_value: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        uncoupled_value["aero_downwash_interactions"] = serde_json::json!([]);
+        let uncoupled_model =
+            AircraftModelLoader::from_json_str(&serde_json::to_string(&uncoupled_value).unwrap())
+                .unwrap();
+        let alpha = 0.15_f64;
+        let speed = 18.0_f64;
+        let state = state_with_velocity(Vec3::new(speed * alpha.cos(), 0.0, speed * alpha.sin()));
+        let effective = model
+            .aero_elements()
+            .iter()
+            .map(|runtime| *runtime.element())
+            .collect::<Vec<_>>();
+        let uncoupled_effective = uncoupled_model
+            .aero_elements()
+            .iter()
+            .map(|runtime| *runtime.element())
+            .collect::<Vec<_>>();
+        let environment = AeroEnvironment::new(1.225, Vec3::zeros()).unwrap();
+        let diagnostic = surface_downwash(1, &state, &effective, &model, &environment);
+        assert!(diagnostic.source_alpha_i_rad > 0.0);
+        assert_eq!(
+            diagnostic.downwash_angle_rad,
+            1.5 * diagnostic.source_alpha_i_rad
+        );
+        let negative_state =
+            state_with_velocity(Vec3::new(speed * alpha.cos(), 0.0, -speed * alpha.sin()));
+        let negative_diagnostic =
+            surface_downwash(1, &negative_state, &effective, &model, &environment);
+        assert!(negative_diagnostic.source_alpha_i_rad < 0.0);
+        assert!(negative_diagnostic.downwash_angle_rad < 0.0);
+        assert_eq!(
+            negative_diagnostic.downwash_angle_rad,
+            1.5 * negative_diagnostic.source_alpha_i_rad
+        );
+
+        let source_coupled = evaluate_surface_wrench(
+            0,
+            &model.aero_surfaces()[0],
+            &state,
+            &effective,
+            &model,
+            &environment,
+        );
+        let target = evaluate_surface_wrench(
+            1,
+            &model.aero_surfaces()[1],
+            &state,
+            &effective,
+            &model,
+            &environment,
+        );
+        let source_uncoupled = evaluate_surface_wrench(
+            0,
+            &uncoupled_model.aero_surfaces()[0],
+            &state,
+            &uncoupled_effective,
+            &uncoupled_model,
+            &environment,
+        );
+        let target_uncoupled = evaluate_surface_wrench(
+            1,
+            &uncoupled_model.aero_surfaces()[1],
+            &state,
+            &uncoupled_effective,
+            &uncoupled_model,
+            &environment,
+        );
+        assert_eq!(source_coupled, source_uncoupled);
+        assert_ne!(target, target_uncoupled);
     }
 }

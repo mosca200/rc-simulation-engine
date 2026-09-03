@@ -27,9 +27,9 @@ fn malformed_json_is_a_parse_error() {
 }
 
 #[test]
-fn unsupported_v6_schema_is_rejected_before_structure_validation() {
+fn unsupported_v7_schema_is_rejected_before_structure_validation() {
     let mut value = valid_model_value();
-    value["schema_version"] = json!(6);
+    value["schema_version"] = json!(7);
     value
         .as_object_mut()
         .expect("root object")
@@ -37,7 +37,7 @@ fn unsupported_v6_schema_is_rejected_before_structure_validation() {
 
     assert!(matches!(
         load_value(&value),
-        Err(ModelLoadError::UnsupportedSchemaVersion { found: 6 })
+        Err(ModelLoadError::UnsupportedSchemaVersion { found: 7 })
     ));
 }
 

@@ -2,6 +2,7 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -9,9 +10,9 @@ use crate::{
         ReferenceParameterEvidence, ReferencePhysicalSpecification, ReferenceScalar,
     },
     runtime::{
-        AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroElement,
-        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
-        RuntimeReynoldsPolarFamily,
+        AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroDownwashInteraction,
+        RuntimeAeroElement, RuntimeAeroSurface, RuntimeControlSurfaceBinding,
+        RuntimeElectricPropulsion, RuntimePolar, RuntimeReynoldsPolarFamily,
     },
     v0::{
         AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
@@ -28,6 +29,7 @@ use crate::{
     v3::{AeroPolarBindingFileV3, AircraftModelFileV3},
     v4::{AircraftModelFileV4, PropellerCoefficientSourceFileV4, PropulsionFileV4},
     v5::{AeroSurfaceFileV5, AircraftModelFileV5},
+    v6::{AeroDownwashInteractionFileV6, AircraftModelFileV6},
 };
 use serde::Deserialize;
 use sim_core::{
@@ -326,6 +328,52 @@ pub enum ModelLoadError {
         surface_index: usize,
         value: f64,
     },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} references unknown source surface {surface_id:?}"
+    )]
+    UnresolvedDownwashSourceSurface {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} references unknown target surface {surface_id:?}"
+    )]
+    UnresolvedDownwashTargetSurface {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} uses surface {surface_id:?} as both source and target"
+    )]
+    DownwashSelfInteraction {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} has invalid downwash_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidDownwashFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} targets surface {surface_id:?}, already targeted by interaction {first_interaction_id:?} at index {first_interaction_index}"
+    )]
+    DuplicateDownwashTarget {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+        first_interaction_id: Box<str>,
+        first_interaction_index: usize,
+    },
+    #[error(
+        "aerodynamic downwash graph is chained: surface {surface_id:?} is both a source and a target"
+    )]
+    ChainedDownwashSurface { surface_id: Box<str> },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -372,6 +420,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V5);
                 resolve_v5(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V6) => {
+                let file: AircraftModelFileV6 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V6);
+                resolve_v6(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -679,6 +733,13 @@ fn resolve_v4(file: AircraftModelFileV4) -> Result<AircraftModel, ModelLoadError
 }
 
 fn resolve_v5(file: AircraftModelFileV5) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v5_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V5)
+}
+
+fn resolve_v5_fields(
+    file: AircraftModelFileV5,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
     let AircraftModelFileV5 {
         schema_version,
         model_id,
@@ -712,10 +773,125 @@ fn resolve_v5(file: AircraftModelFileV5) -> Result<AircraftModel, ModelLoadError
         propulsion: None,
         presentation,
     };
-    let model = resolve_v3_fields(v3_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V5)?
-        .with_propulsion(runtime_propulsion);
+    let model =
+        resolve_v3_fields(v3_file, runtime_schema_version)?.with_propulsion(runtime_propulsion);
     let runtime_surfaces = resolve_aero_surfaces(&model, surfaces)?;
     Ok(model.with_aero_surfaces(runtime_surfaces))
+}
+
+fn resolve_v6(file: AircraftModelFileV6) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    } = file;
+    let v5_file = AircraftModelFileV5 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v5_fields(v5_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V6)?;
+    let interactions = resolve_aero_downwash_interactions(&model, aero_downwash_interactions)?;
+    Ok(model.with_aero_downwash_interactions(interactions))
+}
+
+fn resolve_aero_downwash_interactions(
+    model: &AircraftModel,
+    interaction_files: Vec<AeroDownwashInteractionFileV6>,
+) -> Result<Vec<RuntimeAeroDownwashInteraction>, ModelLoadError> {
+    let mut interactions = Vec::with_capacity(interaction_files.len());
+    for (interaction_index, file) in interaction_files.into_iter().enumerate() {
+        validate_unique_id(
+            "aerodynamic downwash interaction",
+            interaction_index,
+            &file.id,
+            interactions.iter().map(RuntimeAeroDownwashInteraction::id),
+        )?;
+        if !file.downwash_factor.is_finite() || file.downwash_factor < 0.0 {
+            return Err(ModelLoadError::InvalidDownwashFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.downwash_factor,
+            });
+        }
+        let source_surface_index = model
+            .aero_surfaces()
+            .iter()
+            .position(|surface| surface.id() == file.source_surface_id)
+            .ok_or_else(|| ModelLoadError::UnresolvedDownwashSourceSurface {
+                interaction_id: file.id.clone().into_boxed_str(),
+                interaction_index,
+                surface_id: file.source_surface_id.clone().into_boxed_str(),
+            })?;
+        let target_surface_index = model
+            .aero_surfaces()
+            .iter()
+            .position(|surface| surface.id() == file.target_surface_id)
+            .ok_or_else(|| ModelLoadError::UnresolvedDownwashTargetSurface {
+                interaction_id: file.id.clone().into_boxed_str(),
+                interaction_index,
+                surface_id: file.target_surface_id.clone().into_boxed_str(),
+            })?;
+        if source_surface_index == target_surface_index {
+            return Err(ModelLoadError::DownwashSelfInteraction {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                surface_id: file.source_surface_id.into_boxed_str(),
+            });
+        }
+        if let Some((first_interaction_index, first)) = interactions
+            .iter()
+            .enumerate()
+            .find(|(_, interaction)| interaction.target_surface_index() == target_surface_index)
+        {
+            return Err(ModelLoadError::DuplicateDownwashTarget {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                surface_id: file.target_surface_id.into_boxed_str(),
+                first_interaction_id: first.id().into(),
+                first_interaction_index,
+            });
+        }
+        interactions.push(RuntimeAeroDownwashInteraction::new(
+            file.id,
+            source_surface_index,
+            target_surface_index,
+            file.downwash_factor,
+        ));
+    }
+
+    for (surface_index, surface) in model.aero_surfaces().iter().enumerate() {
+        let is_source = interactions
+            .iter()
+            .any(|interaction| interaction.source_surface_index() == surface_index);
+        let is_target = interactions
+            .iter()
+            .any(|interaction| interaction.target_surface_index() == surface_index);
+        if is_source && is_target {
+            return Err(ModelLoadError::ChainedDownwashSurface {
+                surface_id: surface.id().into(),
+            });
+        }
+    }
+
+    Ok(interactions)
 }
 
 fn resolve_propulsion_v5(

@@ -1,0 +1,128 @@
+{
+  "schema_version": 6,
+  "model_id": "synthetic_downwash_v6",
+  "display_name": "Synthetic Downwash V6 Fixture",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 2.0,
+    "inertia_body_kg_m2": [[0.25, 0.0, 0.0], [0.0, 0.35, 0.0], [0.0, 0.0, 0.45]]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [
+      {
+        "id": "source-linear",
+        "samples": [
+          {"alpha_rad": -0.6, "cl": -1.8, "cd": 0.01, "cm": 0.0},
+          {"alpha_rad":  0.0, "cl":  0.0, "cd": 0.01, "cm": 0.0},
+          {"alpha_rad":  0.6, "cl":  1.8, "cd": 0.01, "cm": 0.0}
+        ]
+      },
+      {
+        "id": "target-fixed-linear",
+        "samples": [
+          {"alpha_rad": -0.6, "cl": -1.2, "cd": 0.01, "cm": 0.0},
+          {"alpha_rad":  0.0, "cl":  0.0, "cd": 0.01, "cm": 0.0},
+          {"alpha_rad":  0.6, "cl":  1.2, "cd": 0.01, "cm": 0.0}
+        ]
+      },
+      {
+        "id": "unassigned-linear",
+        "samples": [
+          {"alpha_rad": -0.6, "cl": -0.9, "cd": 0.015, "cm": 0.0},
+          {"alpha_rad":  0.0, "cl":  0.0, "cd": 0.015, "cm": 0.0},
+          {"alpha_rad":  0.6, "cl":  0.9, "cd": 0.015, "cm": 0.0}
+        ]
+      }
+    ],
+    "polar_families": [
+      {
+        "id": "target-reynolds-linear",
+        "nodes": [
+          {
+            "reynolds_number": 200000.0,
+            "samples": [
+              {"alpha_rad": -0.6, "cl": -0.6, "cd": 0.012, "cm": 0.0},
+              {"alpha_rad":  0.0, "cl":  0.0, "cd": 0.012, "cm": 0.0},
+              {"alpha_rad":  0.6, "cl":  0.6, "cd": 0.012, "cm": 0.0}
+            ]
+          },
+          {
+            "reynolds_number": 400000.0,
+            "samples": [
+              {"alpha_rad": -0.6, "cl": -1.8, "cd": 0.008, "cm": 0.0},
+              {"alpha_rad":  0.0, "cl":  0.0, "cd": 0.008, "cm": 0.0},
+              {"alpha_rad":  0.6, "cl":  1.8, "cd": 0.008, "cm": 0.0}
+            ]
+          }
+        ]
+      }
+    ],
+    "elements": [
+      {
+        "id": "main-wing-element",
+        "position_body_m": [0.0, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 1.0,
+        "chord_m": 0.5,
+        "polar_binding": {"kind": "polar", "polar_id": "source-linear"}
+      },
+      {
+        "id": "horizontal-tail-element",
+        "position_body_m": [-1.0, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.4,
+        "chord_m": 0.25,
+        "polar_binding": {"kind": "reynolds_family", "family_id": "target-reynolds-linear"}
+      },
+      {
+        "id": "unassigned-element",
+        "position_body_m": [-0.4, 0.0, 0.2],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.2,
+        "chord_m": 0.2,
+        "polar_binding": {"kind": "polar", "polar_id": "unassigned-linear"}
+      }
+    ],
+    "surfaces": [
+      {
+        "id": "main-wing",
+        "element_ids": ["main-wing-element"],
+        "span_axis_body": [0.0, 1.0, 0.0],
+        "span_m": 2.0,
+        "span_efficiency_factor": 0.8
+      },
+      {
+        "id": "horizontal-tail",
+        "element_ids": ["horizontal-tail-element"],
+        "span_axis_body": [0.0, 1.0, 0.0],
+        "span_m": 0.8,
+        "span_efficiency_factor": 0.9
+      }
+    ]
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 1.0, "expo": 0.0},
+      "pitch": {"rate": 1.0, "expo": 0.0},
+      "yaw": {"rate": 1.0, "expo": 0.0}
+    },
+    "servos": {
+      "aileron": {"min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false},
+      "elevator": {"min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false},
+      "rudder": {"min_angle_rad": -0.5, "neutral_angle_rad": 0.0, "max_angle_rad": 0.5, "max_speed_rad_s": 10.0, "reversed": false}
+    }
+  },
+  "control_surface_bindings": [],
+  "aero_downwash_interactions": [
+    {
+      "id": "wing-to-tail",
+      "source_surface_id": "main-wing",
+      "target_surface_id": "horizontal-tail",
+      "downwash_factor": 1.5
+    }
+  ],
+  "propulsion": null,
+  "presentation": null
+}

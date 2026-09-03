@@ -14,6 +14,7 @@ thiserror.workspace = true
 [dev-dependencies]
 allocation-counter = "0.8"
 criterion.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "aircraft_s6_1"
