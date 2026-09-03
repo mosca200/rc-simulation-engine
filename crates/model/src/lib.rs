@@ -10,6 +10,7 @@ mod reference_survey;
 mod reference_xfoil;
 mod reference_xfoil_campaign;
 mod reference_xfoil_evidence;
+mod reference_xfoil_runtime;
 mod runtime;
 pub mod v0;
 pub mod v1;
@@ -57,6 +58,9 @@ pub use reference_xfoil_campaign::{
 };
 pub use reference_xfoil_evidence::{
     XfoilEvidenceBridgeError, XfoilEvidenceDataset, XfoilEvidenceDatasetBuilder,
+};
+pub use reference_xfoil_runtime::{
+    XfoilRuntimePolarFamily, XfoilRuntimePolarFamilyError, build_xfoil_reynolds_polar_family,
 };
 pub use runtime::{
     AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationMetadata,
