@@ -11,7 +11,7 @@ pub const SAFE_UV: [f32; 2] = [0.0, 0.0];
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    pub color: [f32; 3],
+    pub color: [f32; 4],
     pub uv: [f32; 2],
 }
 
@@ -168,25 +168,25 @@ pub fn ground_plane_at(ground_y_render_m: f32) -> AircraftMesh {
         Vertex {
             position: [-2_000.0, ground_y_render_m, -2_000.0],
             normal: up,
-            color: [0.12, 0.30, 0.10],
+            color: [0.12, 0.30, 0.10, 1.0],
             uv: [0.0, 0.0],
         },
         Vertex {
             position: [2_000.0, ground_y_render_m, -2_000.0],
             normal: up,
-            color: [0.12, 0.30, 0.10],
+            color: [0.12, 0.30, 0.10, 1.0],
             uv: [1.0, 0.0],
         },
         Vertex {
             position: [2_000.0, ground_y_render_m, 2_000.0],
             normal: up,
-            color: [0.18, 0.38, 0.14],
+            color: [0.18, 0.38, 0.14, 1.0],
             uv: [1.0, 1.0],
         },
         Vertex {
             position: [-2_000.0, ground_y_render_m, 2_000.0],
             normal: up,
-            color: [0.18, 0.38, 0.14],
+            color: [0.18, 0.38, 0.14, 1.0],
             uv: [0.0, 1.0],
         },
     ];
@@ -210,9 +210,9 @@ pub fn reference_grid_and_axes_at(grid_y_render_m: f32) -> LineMesh {
         let coordinate = coordinate as f32;
         let is_major = (coordinate as i32) % 100 == 0;
         let color = if is_major {
-            [0.78, 0.80, 0.68]
+            [0.78, 0.80, 0.68, 1.0]
         } else {
-            [0.36, 0.44, 0.31]
+            [0.36, 0.44, 0.31, 1.0]
         };
         vertices.push(Vertex {
             position: [-EXTENT_M as f32, grid_y_render_m, coordinate],
@@ -263,16 +263,17 @@ pub fn reference_grid_and_axes_at(grid_y_render_m: f32) -> LineMesh {
 }
 
 fn add_line(vertices: &mut Vec<Vertex>, start: [f32; 3], end: [f32; 3], color: [f32; 3]) {
+    let rgba = [color[0], color[1], color[2], 1.0];
     vertices.push(Vertex {
         position: start,
         normal: SAFE_NORMAL,
-        color,
+        color: rgba,
         uv: SAFE_UV,
     });
     vertices.push(Vertex {
         position: end,
         normal: SAFE_NORMAL,
-        color,
+        color: rgba,
         uv: SAFE_UV,
     });
 }
@@ -315,11 +316,12 @@ fn add_box(
     for (face, face_normal) in faces.iter().zip(face_normals.iter()) {
         debug_assert!(vertices.len() <= u32::MAX as usize - 4);
         let base_index = vertices.len() as u32;
+        let rgba = [color[0], color[1], color[2], 1.0];
         for &corner_index in face {
             vertices.push(Vertex {
                 position: corners[corner_index],
                 normal: *face_normal,
-                color,
+                color: rgba,
                 uv: SAFE_UV,
             });
         }
@@ -472,7 +474,7 @@ mod tests {
 
     #[test]
     fn vertex_layout_has_expected_size_and_alignment() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 44);
+        assert_eq!(std::mem::size_of::<Vertex>(), 48);
         assert_eq!(std::mem::align_of::<Vertex>(), 4);
     }
 }

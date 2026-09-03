@@ -625,7 +625,7 @@ fn create_pipeline(
     const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
-        2 => Float32x3,
+        2 => Float32x4,
         3 => Float32x2
     ];
     let vertex_layout = wgpu::VertexBufferLayout {

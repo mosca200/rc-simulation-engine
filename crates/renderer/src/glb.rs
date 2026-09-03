@@ -135,9 +135,9 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             .into_u32()
             .collect();
 
-        let colors: Option<Vec<[f32; 3]>> = reader
+        let colors: Option<Vec<[f32; 4]>> = reader
             .read_colors(0)
-            .map(|values| values.into_rgb_f32().collect());
+            .map(|values| values.into_rgba_f32().collect());
         if colors
             .as_ref()
             .is_some_and(|colors| colors.len() != positions.len())
@@ -179,28 +179,24 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             .map(|material| PrimitiveMaterial::from_gltf_material(&material))
             .unwrap_or_else(PrimitiveMaterial::default_color);
 
-        let normals = normals.unwrap_or_else(|| {
-            generate_area_weighted_vertex_normals(&positions, &primitive_indices)
-        });
+        let normals = match normals {
+            Some(explicit) => explicit.into_iter().map(normalize_or_safe).collect(),
+            None => generate_area_weighted_vertex_normals(&positions, &primitive_indices),
+        };
 
         let base = u32::try_from(vertices.len()).map_err(|_| GlbLoadError::TooManyVertices {
             path: path.to_path_buf(),
         })?;
 
-        let material_rgb = [
-            material.base_color[0],
-            material.base_color[1],
-            material.base_color[2],
-        ];
-
         vertices.extend(positions.into_iter().enumerate().map(|(index, position)| {
             let vertex_color = colors
                 .as_ref()
-                .map_or([1.0_f32, 1.0, 1.0], |colors| colors[index]);
+                .map_or([1.0_f32, 1.0, 1.0, 1.0], |colors| colors[index]);
             let combined_color = [
-                material_rgb[0] * vertex_color[0],
-                material_rgb[1] * vertex_color[1],
-                material_rgb[2] * vertex_color[2],
+                material.base_color[0] * vertex_color[0],
+                material.base_color[1] * vertex_color[1],
+                material.base_color[2] * vertex_color[2],
+                material.base_color[3] * vertex_color[3],
             ];
             Vertex {
                 position,
@@ -442,31 +438,74 @@ mod tests {
     }
 
     #[test]
-    fn color_combination_material_times_vertex_color() {
-        let material_rgb = [0.8_f32, 0.5, 0.2];
-        let vertex_color = [0.5_f32, 1.0, 0.0];
+    fn color_combination_material_times_vertex_color_rgba() {
+        let material = [0.8_f32, 0.5, 0.2, 0.9];
+        let vertex_color = [0.5_f32, 1.0, 0.0, 0.6];
         let combined = [
-            material_rgb[0] * vertex_color[0],
-            material_rgb[1] * vertex_color[1],
-            material_rgb[2] * vertex_color[2],
+            material[0] * vertex_color[0],
+            material[1] * vertex_color[1],
+            material[2] * vertex_color[2],
+            material[3] * vertex_color[3],
         ];
         assert!((combined[0] - 0.4).abs() < f32::EPSILON);
         assert!((combined[1] - 0.5).abs() < f32::EPSILON);
         assert!((combined[2] - 0.0).abs() < f32::EPSILON);
+        assert!((combined[3] - 0.54).abs() < 1.0e-6);
     }
 
     #[test]
-    fn missing_vertex_color_defaults_to_white_so_material_color_passes_through() {
-        let material_rgb = [0.8_f32, 0.5, 0.2];
-        let vertex_color = [1.0_f32, 1.0, 1.0];
+    fn missing_vertex_color_defaults_to_white_opaque_so_material_passes_through() {
+        let material = [0.8_f32, 0.5, 0.2, 0.7];
+        let vertex_color = [1.0_f32, 1.0, 1.0, 1.0];
         let combined = [
-            material_rgb[0] * vertex_color[0],
-            material_rgb[1] * vertex_color[1],
-            material_rgb[2] * vertex_color[2],
+            material[0] * vertex_color[0],
+            material[1] * vertex_color[1],
+            material[2] * vertex_color[2],
+            material[3] * vertex_color[3],
         ];
         assert!((combined[0] - 0.8).abs() < f32::EPSILON);
         assert!((combined[1] - 0.5).abs() < f32::EPSILON);
         assert!((combined[2] - 0.2).abs() < f32::EPSILON);
+        assert!((combined[3] - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn material_alpha_is_preserved_through_combination() {
+        let material = [1.0_f32, 1.0, 1.0, 0.42];
+        let vertex_color = [1.0_f32, 1.0, 1.0, 1.0];
+        let combined = [
+            material[0] * vertex_color[0],
+            material[1] * vertex_color[1],
+            material[2] * vertex_color[2],
+            material[3] * vertex_color[3],
+        ];
+        assert!((combined[3] - 0.42).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn explicit_non_unit_normal_is_normalized_to_unit_length() {
+        let result = normalize_or_safe([5.0, 0.0, 0.0]);
+        let length = (result[0].powi(2) + result[1].powi(2) + result[2].powi(2)).sqrt();
+        assert!((length - 1.0).abs() < 1.0e-6);
+        assert!((result[0] - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn explicit_zero_normal_falls_back_to_safe_normal() {
+        assert_eq!(normalize_or_safe([0.0, 0.0, 0.0]), SAFE_NORMAL);
+    }
+
+    #[test]
+    fn explicit_nan_normal_falls_back_to_safe_normal() {
+        assert_eq!(
+            normalize_or_safe([f32::NAN, f32::NAN, f32::NAN]),
+            SAFE_NORMAL
+        );
+    }
+
+    #[test]
+    fn explicit_inf_normal_falls_back_to_safe_normal() {
+        assert_eq!(normalize_or_safe([f32::INFINITY, 0.0, 0.0]), SAFE_NORMAL);
     }
 
     #[test]
