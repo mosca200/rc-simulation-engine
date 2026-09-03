@@ -47,6 +47,7 @@ dependencies = [
  "allocation-counter",
  "criterion",
  "model",
+ "serde_json",
  "sim_core",
  "sim_math",
  "thiserror 2.0.20",

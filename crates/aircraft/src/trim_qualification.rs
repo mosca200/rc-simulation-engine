@@ -31,7 +31,9 @@
 
 use crate::{
     AircraftSimulationConfig,
-    simulation::solve_surface_induced_alpha,
+    simulation::{
+        downwashed_section_kinematics, solve_surface_induced_alpha_with_downwash, surface_downwash,
+    },
     trim::{LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate},
 };
 use model::AircraftModel;
@@ -506,16 +508,26 @@ pub fn qualify_longitudinal_trim_solution(
     // Compute per-surface alpha_i values using the deflected elements
     let surfaces = model.aero_surfaces();
     let mut surface_alpha_i = vec![0.0f64; surfaces.len()];
+    let mut surface_downwash_angles = vec![0.0f64; surfaces.len()];
     let mut element_surface_map = vec![None; model.aero_elements().len()];
     for (surf_idx, surface) in surfaces.iter().enumerate() {
-        let (alpha_i, _, _) = solve_surface_induced_alpha(
-            surface,
+        let downwash = surface_downwash(
+            surf_idx,
             state,
             &effective,
             model,
             config.aero_environment(),
         );
+        let (alpha_i, _, _) = solve_surface_induced_alpha_with_downwash(
+            surface,
+            state,
+            &effective,
+            model,
+            config.aero_environment(),
+            downwash.downwash_angle_rad,
+        );
         surface_alpha_i[surf_idx] = alpha_i;
+        surface_downwash_angles[surf_idx] = downwash.downwash_angle_rad;
         for &elem_idx in surface.element_indices() {
             element_surface_map[elem_idx] = Some(surf_idx);
         }
@@ -529,7 +541,16 @@ pub fn qualify_longitudinal_trim_solution(
 
     for (elem_idx, runtime_elem) in model.aero_elements().iter().enumerate() {
         let eff_elem = &effective[elem_idx];
-        let kin = compute_section_kinematics(state, eff_elem, config.aero_environment());
+        let undisturbed_kinematics =
+            compute_section_kinematics(state, eff_elem, config.aero_environment());
+        let kin = element_surface_map[elem_idx]
+            .map(|surface_index| {
+                downwashed_section_kinematics(
+                    undisturbed_kinematics,
+                    surface_downwash_angles[surface_index],
+                )
+            })
+            .unwrap_or(undisturbed_kinematics);
 
         let alpha_geom = kin.alpha_rad;
         let alpha_i = element_surface_map[elem_idx]

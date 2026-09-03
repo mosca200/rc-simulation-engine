@@ -11,6 +11,7 @@ use aircraft::{
     qualify_longitudinal_trim_solution, solve_longitudinal_trim,
 };
 use model::AircraftModelLoader;
+use serde_json::{Value, json};
 use sim_core::{AeroEnvironment, compute_section_kinematics};
 use sim_math::Vec3;
 
@@ -60,6 +61,27 @@ fn dual_j_range_model() -> model::AircraftModel {
 }
 fn finite_wing_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(FINITE_WING_FIXTURE).unwrap()
+}
+fn downwash_model() -> model::AircraftModel {
+    let mut value: Value = serde_json::from_str(FINITE_WING_FIXTURE).unwrap();
+    value["schema_version"] = json!(6);
+    value["aerodynamics"]["surfaces"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": "synthetic-tail-surface",
+            "element_ids": ["synthetic-elevator-tail"],
+            "span_axis_body": [0.0, 1.0, 0.0],
+            "span_m": 0.35,
+            "span_efficiency_factor": 0.9
+        }));
+    value["aero_downwash_interactions"] = json!([{
+        "id": "synthetic-wing-to-tail",
+        "source_surface_id": "synthetic-wing-surface",
+        "target_surface_id": "synthetic-tail-surface",
+        "downwash_factor": 0.5
+    }]);
+    AircraftModelLoader::from_json_str(&serde_json::to_string(&value).unwrap()).unwrap()
 }
 fn shaft_speed_narrow_model() -> model::AircraftModel {
     AircraftModelLoader::from_json_str(SHAFT_SPEED_NARROW_FIXTURE).unwrap()
@@ -626,6 +648,38 @@ fn finite_wing_effective_alpha_changes_domain_decision() {
             "alpha_sample in range must not produce alpha blocker even though alpha_geom is out"
         );
     }
+}
+
+#[test]
+fn downwash_target_audit_uses_the_runtime_rotated_flow() {
+    let model = downwash_model();
+    let config = sim_config();
+    let solution = solve_trim(&model, &config, 18.0);
+    let point =
+        qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
+    assert!(
+        !point
+            .outcome
+            .blockers()
+            .iter()
+            .any(|blocker| matches!(blocker, QualificationBlocker::ReEvaluationFailure))
+    );
+
+    let effective = effective_aero_elements_for_positions(
+        &model,
+        &solution.evaluation.control_surface_positions,
+    );
+    let undisturbed = compute_section_kinematics(
+        &solution.evaluation.state,
+        &effective[1],
+        config.aero_environment(),
+    );
+    let tail_audit = extract_aero_audits(&point.outcome)
+        .iter()
+        .find(|audit| audit.element_id == "synthetic-elevator-tail")
+        .unwrap();
+    assert!(tail_audit.alpha_geom_rad < undisturbed.alpha_rad);
+    assert!(tail_audit.alpha_sample_rad < tail_audit.alpha_geom_rad);
 }
 
 // ===========================================================================
