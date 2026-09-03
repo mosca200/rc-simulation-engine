@@ -11,7 +11,8 @@ use std::{
 };
 
 use model::{
-    MetadataBuilder, XfoilCampaignCoverageRequest, XfoilPolarImportError, parse_xfoil_polar,
+    MetadataBuilder, SweepExpectation, XfoilCampaignCoverageRequest, XfoilPolarImportError,
+    parse_xfoil_polar, qualify_sweep_convergence,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -25,6 +26,19 @@ const EXECUTION_MARKDOWN: &str = "xfoil_execution.md";
 const VALIDATION_MANIFEST: &str = "xfoil_validation_manifest.json";
 const POLARS_DIRECTORY: &str = "polars";
 const MAX_CAPTURED_STREAM_BYTES: usize = 64 * 1024;
+
+/// Alpha match tolerance for M2.9I sweep convergence qualification (radians).
+///
+/// XFOIL serializes polar alpha values in degrees with finite decimal precision.
+/// The M2.9A parser converts degrees to radians via `degrees * PI / 180.0`.
+/// For XFOIL output with ≥6 decimal places in degrees, the combined
+/// serialization + conversion round-trip error is bounded by ~1.5e-8 radians.
+/// This tolerance (1e-7 rad ≈ 5.7e-6 deg) provides ~6.7× headroom above
+/// that bound while remaining tight enough to reject any genuinely incorrect
+/// alpha point.
+const XFOIL_ALPHA_MATCH_TOLERANCE_RAD: f64 = 1e-7;
+
+const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 
 #[derive(Debug, Clone)]
 pub struct XfoilRunnerOptions {
@@ -298,6 +312,7 @@ struct RunReport {
     execution_status: ExecutionStatus,
     process_exit_code: Option<i32>,
     parsed_sample_count: Option<usize>,
+    convergence_status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,9 +330,9 @@ struct ValidationDataset<'a> {
     polar_file: String,
     dataset_id: &'a str,
     method_id: String,
-    convergence_status: &'static str,
+    convergence_status: String,
     source_ids: Vec<String>,
-    notes: &'static str,
+    notes: String,
     reynolds: f64,
     mach: f64,
     solver_name: &'static str,
@@ -413,6 +428,9 @@ pub fn run_xfoil_campaign(
             .filter(|run| run.execution_status == ExecutionStatus::CompletedParseable)
             .count();
         let completed = completed_run_count == manifest.runs.len();
+        if completed {
+            write_validation_manifest(&options.output_dir, &manifest, &runs)?;
+        }
         let report = ExecutionReport {
             schema_version: REPORT_SCHEMA_VERSION,
             generated_by: GENERATED_BY.to_owned(),
@@ -429,7 +447,6 @@ pub fn run_xfoil_campaign(
         };
         write_execution_artifacts(&options.output_dir, &report)?;
         if completed {
-            write_validation_manifest(&options.output_dir, &manifest)?;
             Ok(XfoilRunnerStatus::Completed)
         } else {
             Ok(XfoilRunnerStatus::Incomplete)
@@ -639,12 +656,20 @@ fn execute_runs(
             .join(POLARS_DIRECTORY)
             .join(polar_filename(index));
 
-        let (execution_status, parsed_sample_count) = if outcome.timed_out {
-            (ExecutionStatus::TimedOut, None)
+        let (execution_status, parsed_sample_count, convergence_status) = if outcome.timed_out {
+            (ExecutionStatus::TimedOut, None, "unresolved".to_owned())
         } else if !outcome.exit_status.is_some_and(|status| status.success()) {
-            (ExecutionStatus::ProcessFailed, None)
+            (
+                ExecutionStatus::ProcessFailed,
+                None,
+                "unresolved".to_owned(),
+            )
         } else if !local_polar.is_file() {
-            (ExecutionStatus::MissingPolarOutput, None)
+            (
+                ExecutionStatus::MissingPolarOutput,
+                None,
+                "unresolved".to_owned(),
+            )
         } else {
             validate_and_copy_polar(&local_polar, &final_polar, run, index)?
         };
@@ -662,6 +687,7 @@ fn execute_runs(
             execution_status,
             process_exit_code: outcome.exit_status.and_then(|status| status.code()),
             parsed_sample_count,
+            convergence_status,
         });
     }
     Ok(reports)
@@ -791,16 +817,24 @@ fn validate_and_copy_polar(
     final_polar: &Path,
     run: &RunSpec,
     index: usize,
-) -> Result<(ExecutionStatus, Option<usize>), XfoilRunnerError> {
+) -> Result<(ExecutionStatus, Option<usize>, String), XfoilRunnerError> {
     let bytes = fs::read(local_polar).map_err(|source| XfoilRunnerError::ReadPolarOutput {
         path: local_polar.to_owned(),
         source,
     })?;
     let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok((ExecutionStatus::UnparseablePolarOutput, None));
+        return Ok((
+            ExecutionStatus::UnparseablePolarOutput,
+            None,
+            "unresolved".to_owned(),
+        ));
     };
     if text.trim().is_empty() {
-        return Ok((ExecutionStatus::UnparseablePolarOutput, None));
+        return Ok((
+            ExecutionStatus::UnparseablePolarOutput,
+            None,
+            "unresolved".to_owned(),
+        ));
     }
     let metadata = MetadataBuilder::new(run.reynolds, run.mach)
         .solver_name("XFOIL")
@@ -814,8 +848,15 @@ fn validate_and_copy_polar(
             source,
         })?;
     let Ok(import) = parse_xfoil_polar(text, metadata) else {
-        return Ok((ExecutionStatus::UnparseablePolarOutput, None));
+        return Ok((
+            ExecutionStatus::UnparseablePolarOutput,
+            None,
+            "unresolved".to_owned(),
+        ));
     };
+
+    let convergence_status = qualify_sweep(run, &import);
+
     fs::write(final_polar, &bytes).map_err(|source| XfoilRunnerError::WritePolarOutput {
         path: final_polar.to_owned(),
         source,
@@ -823,7 +864,28 @@ fn validate_and_copy_polar(
     Ok((
         ExecutionStatus::CompletedParseable,
         Some(import.sample_count()),
+        convergence_status,
     ))
+}
+
+/// Run M2.9I sweep convergence qualification for a parsed polar.
+///
+/// Returns `"converged"` when the polar contains every commanded alpha point,
+/// `"unresolved"` otherwise. Never returns `"failed"`.
+fn qualify_sweep(run: &RunSpec, import: &model::XfoilPolarImport) -> String {
+    let Ok(expectation) = SweepExpectation::new(
+        run.alpha_start_deg * DEG_TO_RAD,
+        run.alpha_end_deg * DEG_TO_RAD,
+        run.alpha_step_deg * DEG_TO_RAD,
+        XFOIL_ALPHA_MATCH_TOLERANCE_RAD,
+    ) else {
+        return "unresolved".to_owned();
+    };
+    if qualify_sweep_convergence(&expectation, import).is_converged() {
+        "converged".to_owned()
+    } else {
+        "unresolved".to_owned()
+    }
 }
 
 fn build_command_script(run: &RunSpec) -> String {
@@ -850,6 +912,15 @@ fn transition_assumptions(ncrit: f64) -> String {
     )
 }
 
+fn convergence_notes(status: &str) -> String {
+    match status {
+        "converged" => {
+            "Generated by M2.9E; M2.9I sweep convergence qualification passed.".to_owned()
+        }
+        _ => "Generated by M2.9E; aerodynamic convergence remains unresolved.".to_owned(),
+    }
+}
+
 fn polar_filename(index: usize) -> String {
     format!("{index:04}.polar")
 }
@@ -872,27 +943,34 @@ fn write_execution_artifacts(
 fn write_validation_manifest(
     output_dir: &Path,
     manifest: &ExecutionManifest,
+    runs: &[RunReport],
 ) -> Result<(), XfoilRunnerError> {
     let datasets = manifest
         .runs
         .iter()
         .enumerate()
-        .map(|(index, run)| ValidationDataset {
-            polar_file: format!("{POLARS_DIRECTORY}/{}", polar_filename(index)),
-            dataset_id: &run.dataset_id,
-            method_id: format!("xfoil-run-{index:04}"),
-            convergence_status: "unresolved",
-            source_ids: vec![format!("xfoil-run-{index:04}-input")],
-            notes: "Generated by M2.9E; aerodynamic convergence remains unresolved.",
-            reynolds: run.reynolds,
-            mach: run.mach,
-            solver_name: "XFOIL",
-            solver_version: None,
-            command_or_config: build_command_script(run),
-            transition_assumptions: transition_assumptions(run.ncrit),
-            ncrit: run.ncrit,
-            forced_transition_upper_x_over_c: None,
-            forced_transition_lower_x_over_c: None,
+        .map(|(index, run)| {
+            let convergence_status = runs
+                .get(index)
+                .map(|report| report.convergence_status.clone())
+                .unwrap_or_else(|| "unresolved".to_owned());
+            ValidationDataset {
+                polar_file: format!("{POLARS_DIRECTORY}/{}", polar_filename(index)),
+                dataset_id: &run.dataset_id,
+                method_id: format!("xfoil-run-{index:04}"),
+                convergence_status: convergence_status.clone(),
+                source_ids: vec![format!("xfoil-run-{index:04}-input")],
+                notes: convergence_notes(&convergence_status),
+                reynolds: run.reynolds,
+                mach: run.mach,
+                solver_name: "XFOIL",
+                solver_version: None,
+                command_or_config: build_command_script(run),
+                transition_assumptions: transition_assumptions(run.ncrit),
+                ncrit: run.ncrit,
+                forced_transition_upper_x_over_c: None,
+                forced_transition_lower_x_over_c: None,
+            }
         })
         .collect();
     let validation = ValidationManifest {
