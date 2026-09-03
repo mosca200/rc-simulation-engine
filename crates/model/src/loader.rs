@@ -392,6 +392,14 @@ pub enum ModelLoadError {
         value: f64,
     },
     #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has invalid swirl_velocity_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidSwirlVelocityFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
         "propeller slipstream interaction {interaction_id:?} at index {interaction_index} requires propulsion"
     )]
     SlipstreamInteractionWithoutPropulsion {
@@ -935,6 +943,13 @@ fn resolve_propeller_slipstream_interactions(
                 value: file.slipstream_velocity_factor,
             });
         }
+        if !file.swirl_velocity_factor.is_finite() || file.swirl_velocity_factor < 0.0 {
+            return Err(ModelLoadError::InvalidSwirlVelocityFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.swirl_velocity_factor,
+            });
+        }
         if model.propulsion().is_none() {
             return Err(ModelLoadError::SlipstreamInteractionWithoutPropulsion {
                 interaction_id: file.id.into_boxed_str(),
@@ -993,6 +1008,7 @@ fn resolve_propeller_slipstream_interactions(
             file.id,
             target_element_indices,
             file.slipstream_velocity_factor,
+            file.swirl_velocity_factor,
         ));
     }
     Ok(interactions)

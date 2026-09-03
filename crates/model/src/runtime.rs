@@ -526,6 +526,7 @@ pub struct RuntimePropellerSlipstreamInteraction {
     id: String,
     target_element_indices: Vec<usize>,
     slipstream_velocity_factor: f64,
+    swirl_velocity_factor: f64,
 }
 
 impl RuntimePropellerSlipstreamInteraction {
@@ -533,11 +534,13 @@ impl RuntimePropellerSlipstreamInteraction {
         id: String,
         target_element_indices: Vec<usize>,
         slipstream_velocity_factor: f64,
+        swirl_velocity_factor: f64,
     ) -> Self {
         Self {
             id,
             target_element_indices,
             slipstream_velocity_factor,
+            swirl_velocity_factor,
         }
     }
 
@@ -554,6 +557,12 @@ impl RuntimePropellerSlipstreamInteraction {
     #[must_use]
     pub const fn slipstream_velocity_factor(&self) -> f64 {
         self.slipstream_velocity_factor
+    }
+
+    /// Tangential wake speed as a multiple of actuator-disk induced velocity.
+    #[must_use]
+    pub const fn swirl_velocity_factor(&self) -> f64 {
+        self.swirl_velocity_factor
     }
 }
 
@@ -915,6 +924,16 @@ impl AircraftModelFingerprint {
                     update_len(&mut hasher, element_index);
                 }
                 update_f64(&mut hasher, interaction.slipstream_velocity_factor);
+            }
+            if model
+                .propeller_slipstream_interactions
+                .iter()
+                .any(|interaction| interaction.swirl_velocity_factor != 0.0)
+            {
+                hasher.update(b"propeller-swirl:v1");
+                for interaction in &model.propeller_slipstream_interactions {
+                    update_f64(&mut hasher, interaction.swirl_velocity_factor);
+                }
             }
         }
 
