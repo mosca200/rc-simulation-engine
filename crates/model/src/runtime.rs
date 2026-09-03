@@ -570,6 +570,7 @@ impl RuntimePropellerSlipstreamInteraction {
 pub struct RuntimeElectricPropulsion {
     config: ElectricPropulsionConfig,
     coefficient_source: PropellerCoefficientSource,
+    propeller_rotational_inertia_kg_m2: f64,
 }
 
 impl RuntimeElectricPropulsion {
@@ -580,7 +581,16 @@ impl RuntimeElectricPropulsion {
         Self {
             config,
             coefficient_source,
+            propeller_rotational_inertia_kg_m2: 0.0,
         }
+    }
+
+    pub(crate) const fn with_propeller_rotational_inertia(
+        mut self,
+        propeller_rotational_inertia_kg_m2: f64,
+    ) -> Self {
+        self.propeller_rotational_inertia_kg_m2 = propeller_rotational_inertia_kg_m2;
+        self
     }
 
     pub(crate) const fn new_legacy(
@@ -601,6 +611,12 @@ impl RuntimeElectricPropulsion {
     #[must_use]
     pub const fn coefficient_source(&self) -> &PropellerCoefficientSource {
         &self.coefficient_source
+    }
+
+    /// Rotor polar moment of inertia about the configured propeller axis.
+    #[must_use]
+    pub const fn propeller_rotational_inertia_kg_m2(&self) -> f64 {
+        self.propeller_rotational_inertia_kg_m2
     }
 
     /// Legacy fixed-table accessor. Schema-v4 map consumers should use `coefficient_source`.
@@ -813,6 +829,13 @@ impl AircraftModelFingerprint {
                     PropellerSpinDirection::NegativeAboutLocalX => 1,
                 };
                 hasher.update(&[spin_tag]);
+                if runtime_propulsion.propeller_rotational_inertia_kg_m2 != 0.0 {
+                    hasher.update(b"propeller-rotational-inertia:v1");
+                    update_f64(
+                        &mut hasher,
+                        runtime_propulsion.propeller_rotational_inertia_kg_m2,
+                    );
+                }
                 match runtime_propulsion.coefficient_source() {
                     PropellerCoefficientSource::FixedTable(table) => {
                         if matches!(

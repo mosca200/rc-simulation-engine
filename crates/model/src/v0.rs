@@ -125,6 +125,11 @@ pub struct PropellerFileV0 {
     pub orientation_body_from_prop_wxyz: [f64; 4],
     pub diameter_m: f64,
     pub spin_direction: PropellerSpinDirectionFileV0,
+    /// Rotor polar moment of inertia about propeller local `+X`.
+    ///
+    /// Absent values preserve the pre-M2.8F zero-inertia behavior.
+    #[serde(default)]
+    pub propeller_rotational_inertia_kg_m2: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

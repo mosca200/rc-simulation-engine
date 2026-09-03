@@ -1167,6 +1167,40 @@ struct StageEvaluation {
     propulsion: Option<PropulsionOutput>,
 }
 
+/// Gyroscopic reaction exerted by the constant-speed propeller rotor on the aircraft.
+///
+/// `H_body = spin_sign * I * shaft_speed * axis_body` and
+/// `M_gyro_body = H_body cross omega_body`. Rotor spin acceleration is intentionally
+/// excluded because shaft speed remains quasi-static.
+fn propeller_gyroscopic_moment_body(
+    stage_state: &RigidBodyState,
+    runtime_propulsion: &model::RuntimeElectricPropulsion,
+    output: &PropulsionOutput,
+) -> Vec3 {
+    let inertia = runtime_propulsion.propeller_rotational_inertia_kg_m2();
+    if inertia == 0.0
+        || output.shaft_speed_rad_s == 0.0
+        || stage_state.angular_velocity_body_radps == Vec3::zeros()
+    {
+        return Vec3::zeros();
+    }
+    let propeller = runtime_propulsion.config().propeller();
+    let spin_sign = match propeller.spin_direction() {
+        PropellerSpinDirection::PositiveAboutLocalX => 1.0,
+        PropellerSpinDirection::NegativeAboutLocalX => -1.0,
+    };
+    let axis_body = propeller
+        .orientation_body_from_prop()
+        .transform_vector(&Vec3::new(1.0, 0.0, 0.0));
+    let angular_momentum_body = axis_body * (spin_sign * inertia * output.shaft_speed_rad_s);
+    let moment_body = angular_momentum_body.cross(&stage_state.angular_velocity_body_radps);
+    if moment_body.iter().all(|component| component.is_finite()) {
+        moment_body
+    } else {
+        Vec3::zeros()
+    }
+}
+
 fn evaluate_stage(
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
@@ -1175,13 +1209,16 @@ fn evaluate_stage(
     environment: &sim_core::AeroEnvironment,
 ) -> StageEvaluation {
     let propulsion = model.propulsion().map(|runtime_propulsion| {
-        evaluate_electric_propulsion_with_source(
+        let mut output = evaluate_electric_propulsion_with_source(
             stage_state,
             throttle,
             runtime_propulsion.config(),
             environment,
             runtime_propulsion.coefficient_source(),
-        )
+        );
+        output.wrench_body.moment_body_nm +=
+            propeller_gyroscopic_moment_body(stage_state, runtime_propulsion, &output);
+        output
     });
     let mut total_wrench = evaluate_aerodynamic_wrench_with_propulsion(
         stage_state,
