@@ -9,6 +9,7 @@ mod reference_propulsion;
 mod reference_survey;
 mod reference_xfoil;
 mod reference_xfoil_campaign;
+mod reference_xfoil_convergence;
 mod reference_xfoil_evidence;
 mod reference_xfoil_runtime;
 mod runtime;
@@ -55,6 +56,10 @@ pub use reference_xfoil_campaign::{
     XfoilCampaignCoverage, XfoilCampaignCoverageBlocker, XfoilCampaignCoverageRequest,
     XfoilCampaignCoverageStatus, XfoilCampaignDatasetCoverage, XfoilEvidenceCampaign,
     XfoilEvidenceCampaignBuilder, XfoilEvidenceCampaignError,
+};
+pub use reference_xfoil_convergence::{
+    SweepConvergenceBlocker, SweepConvergenceStatus, SweepExpectation, SweepExpectationError,
+    XfoilSweepConvergenceQualification, qualify_sweep_convergence,
 };
 pub use reference_xfoil_evidence::{
     XfoilEvidenceBridgeError, XfoilEvidenceDataset, XfoilEvidenceDatasetBuilder,
