@@ -84,8 +84,6 @@ fn execution_manifest(require_converged: bool) -> Value {
     })
 }
 
-const FAKE_BODY: &str = "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\n(\r\necho alpha CL CD CM\r\necho ----- -- -- --\r\necho -10 -0.8 0.03 -0.01\r\necho 0 0 0.01 -0.01\r\necho 10 0.8 0.03 -0.01\r\n)>polar.out\r\nexit /b 0\r\n";
-
 fn write_manifest(root: &Path, value: &Value) -> PathBuf {
     let manifest_dir = root.join("manifest");
     fs::create_dir_all(manifest_dir.join("inputs")).unwrap();
@@ -99,7 +97,21 @@ fn write_manifest(root: &Path, value: &Value) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn write_fake(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = root.join("fake-xfoil");
+    let body = "cat > captured.stdin\ntest -f airfoil.dat || exit 9\ncat > polar.out <<'POLAR'\nalpha CL CD CM\n----- -- -- --\n-10 -0.8 0.03 -0.01\n0 0 0.01 -0.01\n10 0.8 0.03 -0.01\nPOLAR\nexit 0\n";
+    fs::write(&executable, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    executable
+}
+
+#[cfg(windows)]
+fn write_fake(root: &Path) -> PathBuf {
+    const FAKE_BODY: &str = "more > captured.stdin\r\nif not exist airfoil.dat exit /b 9\r\n(\r\necho alpha CL CD CM\r\necho ----- -- -- --\r\necho -10 -0.8 0.03 -0.01\r\necho 0 0 0.01 -0.01\r\necho 10 0.8 0.03 -0.01\r\n)>polar.out\r\nexit /b 0\r\n";
+
     let executable = root.join("fake-xfoil.cmd");
     fs::write(&executable, format!("@echo off\r\n{FAKE_BODY}")).unwrap();
     executable
