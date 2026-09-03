@@ -464,7 +464,7 @@ fn evaluate_legacy_wrench(
 const INDUCED_ALPHA_BISECTION_ITERATIONS: usize = 40;
 
 /// Samples the CL coefficient for one surface member at a given alpha, without allocation.
-fn sample_member_cl(
+pub(crate) fn sample_member_cl(
     runtime_element: &RuntimeAeroElement,
     model: &AircraftModel,
     section_airspeed: f64,
@@ -519,7 +519,7 @@ fn max_abs_cl_member(runtime_element: &RuntimeAeroElement, model: &AircraftModel
 /// `alpha_bound = CL_abs_max / (PI * AR * e)`.
 ///
 /// Returns `(alpha_i, CL_surface, CDi_surface)`.
-fn solve_surface_induced_alpha(
+pub(crate) fn solve_surface_induced_alpha(
     surface: &RuntimeAeroSurface,
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
