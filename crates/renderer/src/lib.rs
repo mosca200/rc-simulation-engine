@@ -18,14 +18,15 @@ mod gpu;
 mod math;
 mod mesh;
 mod pose;
-mod surfaces;
 pub mod scenery;
+mod surfaces;
 pub mod terrain;
 pub mod texture;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
 pub use camera::{
-    ChaseCamera, RENDER_WORLD_UP, exponential_fog_factor, sun_alignment, view_elevation,
+    CameraConfig, CameraMode, ChaseCamera, ChaseCameraConfig, PilotCamera, RENDER_WORLD_UP,
+    exponential_fog_factor, sun_alignment, view_elevation,
 };
 pub use glb::{
     GlbAsset, GlbLoadError, PrimitiveMaterial, RenderPrimitive, load_glb_asset, load_glb_mesh,
