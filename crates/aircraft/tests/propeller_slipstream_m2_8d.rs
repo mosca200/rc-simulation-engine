@@ -566,10 +566,15 @@ fn trim_qualification_audits_the_exact_runtime_slipstream_flow() {
             .blockers()
             .contains(&QualificationBlocker::ReEvaluationFailure)
     );
-    let audits = match &point.outcome {
-        LongitudinalTrimQualificationOutcome::Qualified { aero_audits, .. }
-        | LongitudinalTrimQualificationOutcome::NotQualified { aero_audits, .. } => aero_audits,
+    let diagnostics = match &point.outcome {
+        LongitudinalTrimQualificationOutcome::Qualified(diagnostics)
+        | LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(diagnostics)
+        | LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(diagnostics) => {
+            diagnostics
+        }
+        other => panic!("successful trim qualification must retain diagnostics, got {other:?}"),
     };
+    let audits = diagnostics.aero_audits();
     let evaluation = &solution.evaluation;
     let elements =
         effective_aero_elements_for_positions(&model, &evaluation.control_surface_positions);

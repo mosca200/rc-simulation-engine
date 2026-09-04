@@ -42,7 +42,7 @@ use crate::{
 use model::AircraftModel;
 use sim_core::{
     PolarTable, PropellerCoefficientMap, PropellerCoefficientSource, PropulsionOutput,
-    ShaftSpeedRangeStatus, evaluate_electric_propulsion_with_source,
+    evaluate_electric_propulsion_with_source,
 };
 use thiserror::Error;
 
@@ -52,24 +52,27 @@ use thiserror::Error;
 
 /// Whether a value lies inside, below, or above its evidence support.
 ///
-/// The five domain classifications are exhaustive for finite values:
+/// The five valid-domain classifications are exhaustive for a finite, ordered interval:
 /// - [`RangeStatus::BelowRange`] — strictly below the supported interval (NOT supported;
 ///   the runtime reaches this value only by clamping).
 /// - [`RangeStatus::AtLowerBound`] — bitwise-equal to the supported lower endpoint (supported).
-/// - [`RangeStatus::InRange`] — strictly inside the supported interval (supported).
+/// - [`RangeStatus::InRange`] — numerically inside the supported interval without being
+///   bitwise-identical to either endpoint (supported).
 /// - [`RangeStatus::AtUpperBound`] — bitwise-equal to the supported upper endpoint (supported).
 /// - [`RangeStatus::AboveRange`] — strictly above the supported interval (NOT supported;
 ///   the runtime reaches this value only by clamping).
 ///
-/// `NonFinite` is a fail-closed sentinel: NaN / ±Infinity inputs cannot be classified
-/// as `InRange`. Qualification remains `NotQualified` through the `NonFiniteAuditValue`
-/// integrity blocker when any audited value is non-finite.
+/// `NonFinite` and `InvalidRange` are fail-closed sentinels: NaN / ±Infinity inputs and
+/// inverted intervals cannot be classified as supported. Qualification remains
+/// `NotQualified` through the `NonFiniteAuditValue` integrity blocker when any audited
+/// value is non-finite; authored intervals are validated before reaching qualification.
 ///
 /// Boundaries use exact bitwise `f64` equality with the authored endpoint; no epsilon is
 /// introduced (an epsilon would invent support that the authored data does not declare).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeStatus {
     NonFinite,
+    InvalidRange,
     BelowRange,
     AtLowerBound,
     InRange,
@@ -79,23 +82,28 @@ pub enum RangeStatus {
 
 /// Classifies `value` against the closed authored support interval `[lower, upper]`.
 ///
-/// Boundary membership uses exact bitwise equality: `value == lower` yields
-/// [`RangeStatus::AtLowerBound`] and `value == upper` yields [`RangeStatus::AtUpperBound`].
+/// Boundary membership uses exact bitwise equality: `value.to_bits() == lower.to_bits()`
+/// yields [`RangeStatus::AtLowerBound`] and the analogous upper comparison yields
+/// [`RangeStatus::AtUpperBound`]. A numerically equivalent signed zero with different bits
+/// remains supported as [`RangeStatus::InRange`], but is not mislabeled as the authored endpoint.
 /// This function is pure, allocation-free, and deterministic; it is the single classifier
 /// used for polar alpha domains, Reynolds family domains, and propeller J domains.
 #[must_use]
 pub fn classify_range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
-    if !value.is_finite() {
+    if !value.is_finite() || !lower.is_finite() || !upper.is_finite() {
         return RangeStatus::NonFinite;
     }
-    if value < lower {
+    if lower > upper {
+        return RangeStatus::InvalidRange;
+    }
+    if value.to_bits() == lower.to_bits() {
+        RangeStatus::AtLowerBound
+    } else if value.to_bits() == upper.to_bits() {
+        RangeStatus::AtUpperBound
+    } else if value < lower {
         RangeStatus::BelowRange
     } else if value > upper {
         RangeStatus::AboveRange
-    } else if value == lower {
-        RangeStatus::AtLowerBound
-    } else if value == upper {
-        RangeStatus::AtUpperBound
     } else {
         RangeStatus::InRange
     }
@@ -536,12 +544,12 @@ pub enum QualificationUnavailableReason {
 /// Variant-selection precedence (documented, deterministic):
 /// 1. [`LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure`] — the point never
 ///    produced a trim solution; nothing is audited and NO diagnostics are fabricated.
-/// 2. [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] — for sweep points
-///    whose evaluation integrity was already broken (re-evaluation mismatch/unverifiable),
-///    NO diagnostics are fabricated.
+/// 2. [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] — whenever
+///    evaluation integrity is broken. Partially valid diagnostics are preserved for audited
+///    points; sweep mismatch/unverifiable points fabricate no diagnostics.
 /// 3. [`LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation`] — at least one
-///    authored-domain blocker exists. ALL blockers (including residual/integrity ones) are
-///    preserved in the diagnostics; nothing is dropped at the first violation.
+///    authored-domain blocker exists. ALL domain and residual blockers are preserved in the
+///    diagnostics; nothing is dropped at the first violation.
 /// 4. [`LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation`] — no domain
 ///    blockers, but at least one off-axis residual-limit blocker exists.
 /// 5. [`LongitudinalTrimQualificationOutcome::Qualified`] — trim succeeded, every applicable
@@ -1086,7 +1094,31 @@ pub fn qualify_longitudinal_trim_solution(
     blockers.extend(residual_limit_blockers);
     blockers.extend(integrity_blockers);
 
-    let outcome = if blockers
+    let integrity_reason = blockers.iter().find_map(|blocker| match blocker {
+        QualificationBlocker::NonFiniteAuditValue { field } => {
+            Some(QualificationUnavailableReason::NonFiniteAuditValue { field })
+        }
+        QualificationBlocker::ReEvaluationFailure => {
+            Some(QualificationUnavailableReason::ReEvaluationFailure)
+        }
+        _ => None,
+    });
+
+    let outcome = if let Some(reason) = integrity_reason {
+        // Any integrity failure makes the qualification result unavailable, even when
+        // domain or residual blockers are also present. Preserve every blocker and all
+        // partially valid diagnostics for audit instead of presenting an untrustworthy
+        // domain/residual verdict as authoritative.
+        LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+            reason,
+            diagnostics: Some(QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            }),
+        }
+    } else if blockers
         .iter()
         .any(|b| b.category() == QualificationBlockerCategory::Domain)
     {
@@ -1110,34 +1142,13 @@ pub fn qualify_longitudinal_trim_solution(
                 propulsion_audit,
             },
         )
-    } else if blockers.is_empty() {
+    } else {
         LongitudinalTrimQualificationOutcome::Qualified(QualificationDiagnostics {
             blockers,
             residual_audit,
             aero_audits,
             propulsion_audit,
         })
-    } else {
-        // Integrity-only failure: every blocker is an integrity blocker. Report WHY
-        // trustworthy qualification is unavailable, preserving the audited diagnostics.
-        let reason = blockers.iter().find_map(|b| match b {
-            QualificationBlocker::ReEvaluationFailure => {
-                Some(QualificationUnavailableReason::ReEvaluationFailure)
-            }
-            QualificationBlocker::NonFiniteAuditValue { field } => {
-                Some(QualificationUnavailableReason::NonFiniteAuditValue { field })
-            }
-            _ => None,
-        });
-        LongitudinalTrimQualificationOutcome::QualificationUnavailable {
-            reason: reason.expect("integrity-only blockers always map to a reason"),
-            diagnostics: Some(QualificationDiagnostics {
-                blockers,
-                residual_audit,
-                aero_audits,
-                propulsion_audit,
-            }),
-        }
     };
 
     LongitudinalTrimQualificationPoint {
@@ -1686,6 +1697,26 @@ mod tests {
             classify_range_status(f64::NEG_INFINITY, -1.0, 1.0),
             RangeStatus::NonFinite
         );
+        assert_eq!(
+            classify_range_status(0.0, f64::NEG_INFINITY, 1.0),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(0.0, -1.0, f64::INFINITY),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(0.0, f64::NAN, 1.0),
+            RangeStatus::NonFinite
+        );
+    }
+
+    #[test]
+    fn range_status_inverted_interval_is_invalid() {
+        assert_eq!(
+            classify_range_status(0.0, 1.0, -1.0),
+            RangeStatus::InvalidRange
+        );
     }
 
     #[test]
@@ -1750,5 +1781,19 @@ mod tests {
             classify_range_status(0.5 - f64::EPSILON, 0.5, 0.5),
             RangeStatus::BelowRange
         );
+    }
+
+    #[test]
+    fn range_status_boundary_identity_distinguishes_signed_zero_bits() {
+        assert_eq!(
+            classify_range_status(-0.0, -0.0, 1.0),
+            RangeStatus::AtLowerBound
+        );
+        assert_eq!(classify_range_status(0.0, -0.0, 1.0), RangeStatus::InRange);
+        assert_eq!(
+            classify_range_status(0.0, -1.0, 0.0),
+            RangeStatus::AtUpperBound
+        );
+        assert_eq!(classify_range_status(-0.0, -1.0, 0.0), RangeStatus::InRange);
     }
 }

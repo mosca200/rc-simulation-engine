@@ -26,14 +26,18 @@ polar alpha domains, Reynolds family domains, and propeller J domains:
 |---|---|---|
 | `BelowRange` | strictly below the authored interval | NO (clamped) |
 | `AtLowerBound` | bitwise-equal to the authored lower endpoint | YES |
-| `InRange` | strictly inside the authored interval | YES |
+| `InRange` | numerically inside the interval, but not bitwise-identical to an endpoint | YES |
 | `AtUpperBound` | bitwise-equal to the authored upper endpoint | YES |
 | `AboveRange` | strictly above the authored interval | NO (clamped) |
-| `NonFinite` | NaN / ±Infinity input | NO (fail-closed) |
+| `NonFinite` | value or bound is NaN / ±Infinity | NO (fail-closed) |
+| `InvalidRange` | finite lower bound is greater than upper bound | NO (fail-closed) |
 
-Boundary membership uses EXACT bitwise equality with the authored endpoint. No epsilon is
-introduced anywhere: an epsilon would invent support that the authored data does not
-declare. Runtime clamping is unchanged; qualification merely reveals when it is relied on.
+Boundary membership uses EXACT bitwise equality with the authored endpoint. Numerically
+equivalent signed zero with different bits remains supported as `InRange`, but is not
+mislabeled as the authored endpoint. Non-finite inputs and inverted intervals fail closed.
+No epsilon is introduced anywhere: an epsilon would invent support that the authored data
+does not declare. Runtime clamping is unchanged; qualification merely reveals when it is
+relied on.
 
 ## Geometric Alpha vs Finite-Wing Sampled Alpha
 
@@ -137,9 +141,9 @@ Every qualified point carries a typed outcome; no string status codes are used:
   (`SweepReEvaluationMismatch` / `SweepReEvaluationUnverifiable`; no diagnostics are
   fabricated for these).
 
-Variant-selection precedence is deterministic: Domain violation > Residual violation >
-Qualified; integrity-only failures map to `QualificationUnavailable` with the partially
-valid diagnostics preserved.
+Variant-selection precedence is deterministic: any Integrity failure > Domain violation >
+Residual violation > Qualified. Integrity failures map to `QualificationUnavailable` with
+all partially valid diagnostics and blockers preserved.
 
 Blocker categories are typed (`QualificationBlockerCategory::{Domain, Residual,
 Integrity}`) via `QualificationBlocker::category()`.
@@ -195,8 +199,12 @@ M2.6C does NOT change:
 - Propulsion equilibrium solver or propeller sampling
 - Controls/servo physics
 
-The only production-code change is exposing `solve_surface_induced_alpha` and `sample_member_cl` as `pub(crate)` so the offline qualification can reuse the exact same deterministic primitives.
+Qualification is an offline consumer of the same runtime primitives used by the integrated
+physics path: `propeller_slipstream`, `surface_downwash_with_slipstream`,
+`solve_surface_induced_alpha_with_physical_flow`, and `physical_section_kinematics`. It does
+not introduce an alternate aerodynamic or propulsion solver.
 
 ## 500 Hz Safety
 
-Qualification is offline infrastructure. No `Vec`, `String`, or report construction is added to the normal 500 Hz / RK4 hot path. The shared physics helpers (`solve_surface_induced_alpha`, `compute_section_kinematics`) remain allocation-free.
+Qualification is offline infrastructure. No `Vec`, `String`, or report construction is added
+to the normal 500 Hz / RK4 hot path. The shared runtime physics helpers remain allocation-free.

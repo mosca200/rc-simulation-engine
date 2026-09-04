@@ -7,10 +7,10 @@ use aircraft::{
     AircraftSimulationConfig, LongitudinalTrimQualificationLimits, LongitudinalTrimRequest,
     LongitudinalTrimSolution, LongitudinalTrimSweepRequest, LongitudinalTrimTolerances,
     LongitudinalTrimVariables, PropulsionDomainAudit, QualificationBlocker,
-    QualificationBlockerCategory, RangeStatus, RpmDomainStatus, TrimBounds, classify_range_status,
-    effective_aero_elements_for_positions, evaluate_longitudinal_trim_candidate,
-    qualify_longitudinal_trim_solution, qualify_longitudinal_trim_sweep, solve_longitudinal_trim,
-    solve_longitudinal_trim_sweep,
+    QualificationBlockerCategory, QualificationUnavailableReason, RangeStatus, RpmDomainStatus,
+    TrimBounds, classify_range_status, effective_aero_elements_for_positions,
+    evaluate_longitudinal_trim_candidate, qualify_longitudinal_trim_solution,
+    qualify_longitudinal_trim_sweep, solve_longitudinal_trim, solve_longitudinal_trim_sweep,
 };
 use model::AircraftModelLoader;
 use serde_json::{Value, json};
@@ -1379,11 +1379,11 @@ fn sweep_qualification_preserves_request_ordering() {
 }
 
 // ===========================================================================
-// SPEC CASE 14 (sweep level): REPEATED SWEEP QUALIFICATION IS BITWISE IDENTICAL
+// SPEC CASE 14 (sweep level): REPEATED SWEEP QUALIFICATION IS DETERMINISTICALLY EQUAL
 // ===========================================================================
 
 #[test]
-fn repeated_sweep_qualification_is_bitwise_identical_including_failures() {
+fn repeated_sweep_qualification_is_deterministically_equal_including_failures() {
     let model = trim_model();
     let config = sim_config();
 
@@ -1414,7 +1414,7 @@ fn repeated_sweep_qualification_is_bitwise_identical_including_failures() {
 
     let q1 = qualify_longitudinal_trim_sweep(&model, &config, &sweep, &permissive_limits());
     let q2 = qualify_longitudinal_trim_sweep(&model, &config, &sweep, &permissive_limits());
-    assert_eq!(q1, q2, "repeated qualification must be bitwise identical");
+    assert_eq!(q1, q2, "repeated qualification must be exactly equal");
     for (p1, p2) in q1.points().iter().zip(q2.points().iter()) {
         assert_eq!(
             p1.target_airspeed_mps.to_bits(),
@@ -1432,9 +1432,8 @@ fn repeated_sweep_qualification_is_bitwise_identical_including_failures() {
 // SPEC CASES 3/5/9 (boundary arms): EXACT-BOUNDARY VALUES ARE TYPED AND SUPPORTED
 // ===========================================================================
 
-/// End-to-end cross-check: qualification's per-element classification must agree with a
-/// DIRECT classification through the existing authored domain data (polar tables, family
-/// nodes) — no expected values are copied from the implementation under test.
+/// Plumbing cross-check: qualification's per-element status must agree with the public
+/// classifier when fed bounds read directly from authored polar tables and family nodes.
 #[test]
 fn audit_classification_matches_direct_authored_domain_data() {
     let model = trim_model();
@@ -1477,10 +1476,10 @@ fn audit_classification_matches_direct_authored_domain_data() {
     }
 }
 
-/// Exact-boundary values classify as supported AtLowerBound / AtUpperBound (never as
-/// InRange), using endpoint values taken directly from the authored fixture data.
+/// Classifier-level contract for exact endpoint values taken from the authored fixture data.
+/// End-to-end audit-path coverage is provided separately by the operating-point tests above.
 #[test]
-fn exact_boundary_values_are_supported_typed_statuses_not_silently_in_range() {
+fn classifier_exact_boundaries_are_supported_typed_statuses() {
     // Authored polar alpha endpoints of the synthetic tail polar: [-0.40, 0.40].
     assert_eq!(
         classify_range_status(-0.40, -0.40, 0.40),
@@ -1516,6 +1515,47 @@ fn exact_boundary_values_are_supported_typed_statuses_not_silently_in_range() {
     assert_eq!(
         classify_range_status(-0.40 - f64::EPSILON, -0.40, 0.40),
         RangeStatus::BelowRange
+    );
+}
+
+#[test]
+fn non_finite_residual_makes_mixed_audit_unavailable_and_preserves_blockers() {
+    let model = trim_model();
+    let config = sim_config();
+    let mut solution = solve_trim(&model, &config, 18.0);
+
+    // Corrupt the cached evaluation only. This deliberately creates a residual-limit
+    // blocker, a non-finite integrity blocker, and a re-evaluation mismatch together.
+    solution.evaluation.body_wrench.force_body_n.y = f64::INFINITY;
+
+    let point =
+        qualify_longitudinal_trim_solution(&model, &config, &solution, &permissive_limits(), 18.0);
+    let diagnostics = match &point.outcome {
+        aircraft::LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+            reason: QualificationUnavailableReason::NonFiniteAuditValue { field },
+            diagnostics: Some(diagnostics),
+        } => {
+            assert_eq!(*field, "fy_body_n");
+            diagnostics
+        }
+        other => panic!("mixed integrity failure must be unavailable, got {other:?}"),
+    };
+
+    assert!(
+        diagnostics
+            .blockers()
+            .iter()
+            .any(|blocker| matches!(blocker, QualificationBlocker::SideForceLimitExceeded { .. }))
+    );
+    assert!(diagnostics.blockers().iter().any(|blocker| matches!(
+        blocker,
+        QualificationBlocker::NonFiniteAuditValue { field: "fy_body_n" }
+    )));
+    assert!(
+        diagnostics
+            .blockers()
+            .iter()
+            .any(|blocker| matches!(blocker, QualificationBlocker::ReEvaluationFailure))
     );
 }
 
