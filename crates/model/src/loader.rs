@@ -10,14 +10,14 @@ use crate::{
         ReferenceParameterEvidence, ReferencePhysicalSpecification, ReferenceScalar,
     },
     runtime::{
-        AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroDownwashInteraction,
-        RuntimeAeroElement, RuntimeAeroSurface, RuntimeControlSurfaceBinding,
-        RuntimeElectricPropulsion, RuntimePolar, RuntimePropellerSlipstreamInteraction,
-        RuntimeReynoldsPolarFamily,
+        AircraftModel, ControlActuator, PresentationArticulatedSurface, PresentationMetadata,
+        PresentationSurface, RuntimeAeroDownwashInteraction, RuntimeAeroElement,
+        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
+        RuntimePropellerSlipstreamInteraction, RuntimeReynoldsPolarFamily,
     },
     v0::{
-        AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
-        ServoFileV0,
+        AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PresentationSurfaceFileV0,
+        PropellerSpinDirectionFileV0, ServoFileV0,
     },
     v1::{AircraftModelFileV1, ControlActuatorFileV1, ControlSurfaceBindingFileV1},
     v2::{
@@ -211,6 +211,32 @@ pub enum ModelLoadError {
         "invalid presentation GLB path {path:?}: expected a nonempty relative path without '..'"
     )]
     InvalidPresentationAssetPath { path: String },
+    #[error("invalid articulated presentation surface at index {index}: {requirement}")]
+    InvalidPresentationArticulation {
+        index: usize,
+        requirement: &'static str,
+    },
+    #[error(
+        "articulated presentation surface at index {duplicate_index} repeats GLB primitive {visual_primitive_index}, first mapped at index {first_index}"
+    )]
+    DuplicatePresentationVisualPrimitive {
+        duplicate_index: usize,
+        first_index: usize,
+        visual_primitive_index: usize,
+    },
+    #[error(
+        "articulated presentation surface at index {index} references unknown control-surface binding {binding_id:?}"
+    )]
+    UnresolvedPresentationControlSurfaceBinding { index: usize, binding_id: String },
+    #[error(
+        "articulated presentation surface at index {index} maps {surface:?} to incompatible {actuator:?} binding {binding_id:?}"
+    )]
+    PresentationBindingActuatorMismatch {
+        index: usize,
+        binding_id: String,
+        surface: PresentationSurface,
+        actuator: ControlActuator,
+    },
     #[error("synthetic_test model must not contain reference_aircraft metadata")]
     UnexpectedReferenceAircraftMetadata,
     #[error("reference_aircraft model requires a reference_aircraft metadata object")]
@@ -447,7 +473,7 @@ impl AircraftModelLoader {
         let version = serde_json::from_str::<VersionProbe>(json)
             .map_err(classify_probe_error)?
             .schema_version;
-        match version {
+        let model = match version {
             version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V0) => {
                 let file: AircraftModelFileV0 = serde_json::from_str(json)
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
@@ -497,7 +523,9 @@ impl AircraftModelLoader {
                 resolve_v7(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
-        }
+        }?;
+        validate_presentation_bindings(&model)?;
+        Ok(model)
     }
 }
 
@@ -1488,17 +1516,7 @@ fn resolve_common(
         })
         .transpose()?;
 
-    let presentation = file
-        .presentation
-        .map(|presentation_file| {
-            if !is_valid_relative_asset_path(&presentation_file.glb_path) {
-                return Err(ModelLoadError::InvalidPresentationAssetPath {
-                    path: presentation_file.glb_path,
-                });
-            }
-            Ok(PresentationMetadata::new(presentation_file.glb_path))
-        })
-        .transpose()?;
+    let presentation = file.presentation.map(resolve_presentation).transpose()?;
 
     Ok(AircraftModel::new(
         schema_version,
@@ -1512,6 +1530,147 @@ fn resolve_common(
         propulsion,
         presentation,
     ))
+}
+
+fn resolve_presentation(
+    presentation_file: crate::v0::PresentationFileV0,
+) -> Result<PresentationMetadata, ModelLoadError> {
+    if !is_valid_relative_asset_path(&presentation_file.glb_path) {
+        return Err(ModelLoadError::InvalidPresentationAssetPath {
+            path: presentation_file.glb_path,
+        });
+    }
+    let mut surfaces = Vec::with_capacity(presentation_file.articulated_surfaces.len());
+    for (index, file) in presentation_file
+        .articulated_surfaces
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(first_index) =
+            surfaces
+                .iter()
+                .position(|surface: &PresentationArticulatedSurface| {
+                    surface.visual_primitive_index() == file.visual_primitive_index
+                })
+        {
+            return Err(ModelLoadError::DuplicatePresentationVisualPrimitive {
+                duplicate_index: index,
+                first_index,
+                visual_primitive_index: file.visual_primitive_index,
+            });
+        }
+        if file.control_surface_binding_id.trim().is_empty() {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "control_surface_binding_id must be nonempty",
+            });
+        }
+        let Some(hinge_origin_render_body_m) = finite_f32_vector(file.hinge_origin_render_body_m)
+        else {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge origin must contain finite f32-representable values",
+            });
+        };
+        let Some(hinge_axis_render_body) = finite_f32_vector(file.hinge_axis_render_body) else {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge axis must contain finite f32-representable values",
+            });
+        };
+        let axis_norm_squared = hinge_axis_render_body
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f32>();
+        if !axis_norm_squared.is_finite() || axis_norm_squared <= 1.0e-18 {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge axis must be nonzero",
+            });
+        }
+        let visual_gain = file.visual_gain as f32;
+        if !file.visual_gain.is_finite() || !visual_gain.is_finite() {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "visual_gain must be finite and f32-representable",
+            });
+        }
+        let surface = match file.surface {
+            PresentationSurfaceFileV0::LeftAileron => PresentationSurface::LeftAileron,
+            PresentationSurfaceFileV0::RightAileron => PresentationSurface::RightAileron,
+            PresentationSurfaceFileV0::Elevator => PresentationSurface::Elevator,
+            PresentationSurfaceFileV0::Rudder => PresentationSurface::Rudder,
+        };
+        surfaces.push(PresentationArticulatedSurface::new(
+            file.visual_primitive_index,
+            surface,
+            file.control_surface_binding_id,
+            hinge_origin_render_body_m,
+            hinge_axis_render_body,
+            visual_gain,
+        ));
+    }
+    Ok(PresentationMetadata::new(
+        presentation_file.glb_path,
+        surfaces,
+    ))
+}
+
+fn finite_f32_vector(values: [f64; 3]) -> Option<[f32; 3]> {
+    let converted = values.map(|value| value as f32);
+    values
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some(converted)
+        .filter(|values| values.iter().copied().all(f32::is_finite))
+}
+
+fn validate_presentation_bindings(model: &AircraftModel) -> Result<(), ModelLoadError> {
+    let Some(presentation) = model.presentation() else {
+        return Ok(());
+    };
+    for (index, surface) in presentation.articulated_surfaces().iter().enumerate() {
+        let binding_id = surface.control_surface_binding_id();
+        if presentation.articulated_surfaces()[..index]
+            .iter()
+            .any(|previous| {
+                previous.surface() == surface.surface()
+                    && previous.control_surface_binding_id() != binding_id
+            })
+        {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "all primitives for one visual surface must reference the same binding",
+            });
+        }
+        let binding = model
+            .control_surface_bindings()
+            .iter()
+            .find(|binding| binding.id() == binding_id)
+            .ok_or_else(
+                || ModelLoadError::UnresolvedPresentationControlSurfaceBinding {
+                    index,
+                    binding_id: binding_id.to_owned(),
+                },
+            )?;
+        let compatible = matches!(
+            (surface.surface(), binding.actuator()),
+            (
+                PresentationSurface::LeftAileron | PresentationSurface::RightAileron,
+                ControlActuator::Aileron
+            ) | (PresentationSurface::Elevator, ControlActuator::Elevator)
+                | (PresentationSurface::Rudder, ControlActuator::Rudder)
+        );
+        if !compatible {
+            return Err(ModelLoadError::PresentationBindingActuatorMismatch {
+                index,
+                binding_id: binding_id.to_owned(),
+                surface: surface.surface(),
+                actuator: binding.actuator(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resolve_control_surface_bindings(

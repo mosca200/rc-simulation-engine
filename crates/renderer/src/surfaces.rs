@@ -161,6 +161,117 @@ impl Default for ControlSurfacePresentation {
     }
 }
 
+/// Explicit render role for one `GlbAsset::primitives` entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GlbPrimitivePart {
+    /// Primitive receives only the aircraft root transform.
+    Rigid,
+    /// Primitive receives `root * hinge(angle)` where the angle is the
+    /// simulated deflection for the bound `SurfaceId`.
+    Articulated {
+        surface: SurfaceId,
+        hinge: SurfaceHinge,
+    },
+}
+
+/// Explicit per-primitive plan for a GLB asset.
+///
+/// The production GLB path never infers roles from node names or vertex data.
+/// Unmapped primitive indices are rigid. Articulated primitives retain their
+/// original geometry and material and receive a persistent object uniform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlbArticulationPlan {
+    parts: Vec<GlbPrimitivePart>,
+}
+
+impl GlbArticulationPlan {
+    /// Build a startup-time plan from explicit `(primitive_index, hinge)` mappings.
+    pub fn from_mappings(
+        primitive_count: usize,
+        mappings: impl IntoIterator<Item = (usize, SurfaceHinge)>,
+    ) -> Result<Self, GlbArticulationError> {
+        let mut parts = vec![GlbPrimitivePart::Rigid; primitive_count];
+        for (primitive_index, hinge) in mappings {
+            if primitive_index >= primitive_count {
+                return Err(GlbArticulationError::PrimitiveOutOfRange {
+                    primitive_index,
+                    primitive_count,
+                });
+            }
+            if !matches!(parts[primitive_index], GlbPrimitivePart::Rigid) {
+                return Err(GlbArticulationError::DuplicatePrimitive(primitive_index));
+            }
+            let surface = hinge.surface();
+            if surface.index() >= CONTROL_SURFACE_COUNT {
+                return Err(GlbArticulationError::ReservedSlot(surface));
+            }
+            parts[primitive_index] = GlbPrimitivePart::Articulated { surface, hinge };
+        }
+        Ok(Self { parts })
+    }
+
+    /// Empty rigid plan.
+    #[must_use]
+    pub fn all_rigid(primitive_count: usize) -> Self {
+        Self {
+            parts: vec![GlbPrimitivePart::Rigid; primitive_count],
+        }
+    }
+
+    /// Returns the part for a given primitive index, or `Rigid` if the plan
+    /// does not cover that index.
+    #[must_use]
+    pub fn part(&self, primitive_index: usize) -> &GlbPrimitivePart {
+        self.parts
+            .get(primitive_index)
+            .unwrap_or(&GlbPrimitivePart::Rigid)
+    }
+
+    /// Number of primitives covered by this plan.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// True if the plan covers no primitives.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// Root-only for rigid parts, `root * local_hinge` for mapped parts.
+    #[must_use]
+    pub fn composed_matrix(
+        &self,
+        root: &Mat4,
+        primitive_index: usize,
+        presentation: &ControlSurfacePresentation,
+    ) -> Mat4 {
+        match self.part(primitive_index) {
+            GlbPrimitivePart::Rigid => *root,
+            GlbPrimitivePart::Articulated { surface, hinge } => {
+                *root * hinge.local_matrix(presentation.deflection(*surface))
+            }
+        }
+    }
+}
+
+/// Validation errors for an explicit GLB articulation plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GlbArticulationError {
+    #[error(
+        "articulation maps GLB primitive {primitive_index}, but the asset has {primitive_count} primitives"
+    )]
+    PrimitiveOutOfRange {
+        primitive_index: usize,
+        primitive_count: usize,
+    },
+    #[error("articulation maps GLB primitive {0} more than once")]
+    DuplicatePrimitive(usize),
+    #[error("articulation plan binds the reserved propeller slot, which has no GLB surface")]
+    ReservedSlot(SurfaceId),
+}
+
 /// Fixed binding table: one hinge per visual slot, `None` stays rigid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceBindingTable {

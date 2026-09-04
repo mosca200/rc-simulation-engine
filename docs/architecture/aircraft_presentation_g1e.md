@@ -1,67 +1,106 @@
-# G1E aircraft presentation — moving surfaces
+# G1E aircraft presentation - moving surfaces
 
 ## Scope
 
-Render-only milestone on top of G1C (`ffcc18e`). No physics, model-schema,
-aerodynamics, servo, or mixing changes. Production physics files are
-untouched.
+Render-only milestone on top of G1C (`ffcc18e`). No physics, aerodynamics,
+servo, or mixing changes. Production physics files are untouched.
 
 ## Visual binding architecture
 
 - `renderer::surfaces`: `SurfaceId` (left/right aileron, elevator, rudder,
   reserved propeller slot), `SurfaceHinge` (pivot + axis in render-body
   metres, visual gain), `ControlSurfacePresentation` (four deflection
-  angles + propeller angle per frame), `SurfaceBindingTable` (fixed
-  hinge-per-slot table, `None` stays rigid).
-- `renderer::mesh`: `articulated_aircraft_mesh()` (rigid airframe + four
-  separate synthetic panels) and `articulated_binding_table()` (spanwise-X
-  hinges for ailerons/elevator, vertical-Y hinge for rudder, unit gains).
-  The merged `aircraft_mesh()` and the production GLB are untouched; no GLB
-  is split.
+  angles + propeller angle per frame), `SurfaceBindingTable` (the procedural
+  fallback), and `GlbArticulationPlan` (explicit primitive-index-to-hinge
+  mapping; unmapped primitives stay rigid).
+- `renderer::mesh`: `articulated_aircraft_mesh()` and
+  `articulated_binding_table()` remain the procedural fallback and its CPU
+  test fixture. GLB geometry is never split or rebuilt by the renderer.
 - `renderer::pose`: `RenderFrame` carries the root `RenderPose` plus a
-  `ControlSurfacePresentation` (`RenderFrame::new` = neutral, rigid).
-- `app::render_snapshot`: explicit binding-ID metadata maps physics
-  bindings to visual slots (`aileron-left`, `aileron-right`, `elevator`,
-  `rudder` substrings; deterministic actuator-order fallback for unknown
-  IDs). Presentation metadata never touches the physics fingerprint (no
-  model-schema change at all).
+  `ControlSurfacePresentation` (`RenderFrame::new` is neutral and rigid).
+- `model::PresentationMetadata`: each optional `articulated_surfaces` entry
+  names a GLB `visual_primitive_index`, one visual surface slot, the exact
+  `control_surface_binding_id`, hinge origin/axis, and visual gain. Binding
+  IDs are resolved exactly and checked against the required actuator. There
+  is no substring, node-name, or declaration-order inference. Missing
+  metadata means every GLB part remains rigid.
+- `app::render_snapshot`: follows only those validated presentation entries
+  to read the corresponding production control-surface binding and committed
+  servo position. Presentation metadata remains outside the physics
+  fingerprint.
 
 ## Servo state to renderer
 
 `PilotInput -> servo/control system -> ControlSurfacePositions` (committed
 servo angles in `AircraftSnapshot`) `-> deflection_gain * (servo - neutral)`
-per resolved binding `-> [f32; 4]` visual deflections in
-`AircraftRenderSnapshot::post_step` `-> RenderFrame::with_surfaces` per
-render frame. No keyboard state is consulted; no second control system
-exists. Pose still interpolates in `f64`; deflections use the current
-committed servo state.
+for the explicitly referenced physics binding `-> [f32; 4]` visual
+deflections in `AircraftRenderSnapshot::post_step` `->
+RenderFrame::with_surfaces` per render frame. No keyboard state is consulted;
+no second control system exists. Pose still interpolates in `f64`;
+deflections use the current committed servo state.
 
 ## Surface transform implementation
 
 Per surface: `local = T(pivot) * R(axis, gain * deflection) * T(-pivot)`
-(Rodrigues, right-handed); zero deflection is exactly identity. Composed
-draw matrix is `root * local` where root is exactly
-`frame.aircraft_pose().model_matrix()` — the root never changes. The GPU
-path adds one persistent object uniform + bind group per surface batch at
-upload time (procedural fallback path only; GLB path keeps rigid batches
-and empty overlays). Per frame only `queue.write_buffer` updates run: no
-texture/bind-group/pipeline creation, no GLB parsing, no mesh rebuilds.
+(Rodrigues, right-handed); zero deflection is exactly identity. A mapped GLB
+primitive is removed from the root-only batch list and uploaded unchanged as
+an articulated batch. Its draw matrix is `root * local`; an unmapped GLB
+primitive receives exactly `root`. Both paths reuse the primitive's original
+vertex/index data and material index, including its base-color texture.
+
+The GLB is parsed once and all vertex/index buffers, textures, samplers,
+pipelines, object buffers, and bind groups are created once during renderer
+initialization. Per frame the renderer only updates the persistent root and
+articulated object uniforms with `queue.write_buffer`. There is no per-frame
+GLB parsing, mesh construction, pipeline construction, or bind-group creation.
+
+The current acro placeholder GLB contains one combined primitive, so its
+model intentionally has no articulation entries and remains rigid. An authored
+multi-primitive GLB can opt in without changing physics or requiring runtime
+vertex-subset hacks.
+
+## Presentation metadata example
+
+```json
+"presentation": {
+  "glb_path": "aircraft.glb",
+  "articulated_surfaces": [
+    {
+      "visual_primitive_index": 3,
+      "surface": "elevator",
+      "control_surface_binding_id": "pitch-surface-binding",
+      "hinge_origin_render_body_m": [0.0, 0.0, 0.65],
+      "hinge_axis_render_body": [1.0, 0.0, 0.0],
+      "visual_gain": 1.0
+    }
+  ]
+}
+```
+
+The primitive index is the stable order exposed by `GlbAsset::primitives`.
+An entry is accepted only when its binding exists and its surface agrees with
+the binding actuator. Duplicate and out-of-range primitive mappings fail
+closed. Metadata absence never triggers guessing.
 
 ## Propeller readiness
 
-`SurfaceId::Propeller` slot plus `propeller_angle_rad` exist in the state
-and binding table, but no propeller batch is uploaded or drawn in G1E and
-no RPM coupling is wired. A later slice can add a rotating node behind the
-same seam without renumbering the four surfaces.
+`SurfaceId::Propeller` plus `propeller_angle_rad` remain reserved, but no
+propeller batch is uploaded or drawn in G1E and no RPM coupling is wired.
 
 ## Tests
 
-- `renderer/tests/moving_surfaces_g1e.rs` (7 tests): neutral identity,
-  elevator +/- opposition + inverse-product identity, rudder vertical axis
-  + pivot fixed, differential ailerons opposite, root*local composition +
-  neutral root preservation, unbound-rigid + hinge validation, determinism.
-- `app::render_snapshot::presentation_comes_from_simulated_servo_state_not_keyboard`:
-  Acro model through the real servo pipeline (600 steps): roll gives
-  opposite aileron deflections, pitch moves elevator, yaw moves rudder,
-  neutral is ~zero, fingerprint unchanged.
-- Existing renderer/model suites: no regressions (see quality gates).
+- `renderer/tests/moving_surfaces_g1e.rs` (10 tests): neutral identity,
+  elevator opposition, rudder hinge, differential ailerons, root/local
+  composition, explicit mapping of all four GLB slots, unmapped-rigid
+  behavior, invalid primitive rejection, hinge validation, and determinism.
+- Renderer unit coverage proves switching a primitive to articulated changes
+  only its transform target and retains the same material index.
+- App tests use opaque binding IDs through the real servo pipeline (600
+  steps): roll gives opposite aileron deflections, pitch moves elevator, yaw
+  moves rudder, neutral is approximately zero, and metadata changes do not
+  affect the fingerprint.
+- Model validation tests cover exact binding resolution, actuator
+  compatibility, duplicate primitive rejection, finite hinges, and
+  fingerprint exclusion.
+- Existing renderer/model suites cover GLB textures, multi-material assets,
+  root pose, terrain, atmosphere, and deterministic physics boundaries.

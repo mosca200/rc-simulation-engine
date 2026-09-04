@@ -71,10 +71,14 @@ const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
 const DEFAULT_TERRAIN_EXTENT_M: f32 = 1000.0;
 const DEFAULT_TERRAIN_CELL_SPACING_M: f32 = 5.0;
 
-/// Presentation asset: either a full GLB with per-primitive materials,
-/// or a procedural merged mesh (fallback).
+/// Presentation asset: a rigid GLB, explicitly articulated GLB, or procedural fallback.
+#[derive(Clone, Copy)]
 pub enum PresentationAsset<'a> {
     Glb(&'a GlbAsset),
+    ArticulatedGlb {
+        asset: &'a GlbAsset,
+        articulation: &'a crate::GlbArticulationPlan,
+    },
     Procedural(&'a AircraftMesh),
 }
 
@@ -233,11 +237,33 @@ struct RenderBatch {
 /// G1E: one articulated surface draw reusing the lit pipeline/materials.
 struct SurfaceRenderBatch {
     surface: crate::SurfaceId,
+    hinge: crate::SurfaceHinge,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
     material_index: usize,
     object_buffer_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GlbBatchTarget {
+    material_index: usize,
+    hinge: Option<crate::SurfaceHinge>,
+}
+
+fn glb_batch_target(
+    plan: Option<&crate::GlbArticulationPlan>,
+    primitive_index: usize,
+    material_index: usize,
+) -> GlbBatchTarget {
+    let hinge = plan.and_then(|plan| match plan.part(primitive_index) {
+        crate::GlbPrimitivePart::Rigid => None,
+        crate::GlbPrimitivePart::Articulated { hinge, .. } => Some(*hinge),
+    });
+    GlbBatchTarget {
+        material_index,
+        hinge,
+    }
 }
 
 /// G1C: Terrain chunk GPU resources.
@@ -288,9 +314,8 @@ pub struct WgpuRenderer {
     // G1C: Aircraft batches (one per primitive).
     aircraft_batches: Vec<RenderBatch>,
 
-    // G1E: articulated overlays (procedural fallback path only).
+    // G1E: persistent articulated procedural or GLB batches.
     surface_batches: Vec<SurfaceRenderBatch>,
-    surface_binding_table: crate::SurfaceBindingTable,
     surface_object_buffers: Vec<wgpu::Buffer>,
     surface_object_bind_groups: Vec<wgpu::BindGroup>,
 
@@ -466,84 +491,113 @@ impl WgpuRenderer {
         let mut materials = vec![fallback_material];
         let fallback_material_index = 0;
 
-        // Upload aircraft batches from the presentation asset.
+        // Upload presentation geometry once. Explicitly mapped GLB primitives
+        // become articulated batches; every other GLB primitive remains rigid.
         let mut aircraft_batches = Vec::new();
-        match asset {
-            PresentationAsset::Glb(glb_asset) => {
-                for primitive in &glb_asset.primitives {
-                    let material_index =
-                        if let Some(texture) = &primitive.material.base_color_texture {
-                            // Upload texture material.
-                            let gpu_material = create_gpu_material(
-                                &device,
-                                &material_bind_group_layout,
-                                &queue,
-                                texture,
-                                &primitive.material.sampler_config,
-                            )?;
-                            let index = materials.len();
-                            materials.push(gpu_material);
-                            index
-                        } else {
-                            fallback_material_index
-                        };
+        let mut surface_batches = Vec::new();
+        let mut surface_object_buffers = Vec::new();
+        let mut surface_object_bind_groups = Vec::new();
 
-                    if !primitive.vertices.is_empty() {
-                        let vertex_buffer =
-                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("aircraft primitive vertices"),
-                                contents: bytemuck::cast_slice(&primitive.vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
-                        let index_buffer =
-                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("aircraft primitive indices"),
-                                contents: bytemuck::cast_slice(&primitive.indices),
-                                usage: wgpu::BufferUsages::INDEX,
-                            });
-                        aircraft_batches.push(RenderBatch {
-                            vertex_buffer,
-                            index_buffer,
-                            index_count: primitive.indices.len() as u32,
-                            material_index,
-                        });
-                    }
+        let glb_and_plan = match asset {
+            PresentationAsset::Glb(glb_asset) => Some((glb_asset, None)),
+            PresentationAsset::ArticulatedGlb {
+                asset: glb_asset,
+                articulation,
+            } => Some((glb_asset, Some(articulation))),
+            PresentationAsset::Procedural(_) => None,
+        };
+        if let Some((glb_asset, articulation)) = glb_and_plan {
+            for (primitive_index, primitive) in glb_asset.primitives.iter().enumerate() {
+                let material_index = if let Some(texture) = &primitive.material.base_color_texture {
+                    let gpu_material = create_gpu_material(
+                        &device,
+                        &material_bind_group_layout,
+                        &queue,
+                        texture,
+                        &primitive.material.sampler_config,
+                    )?;
+                    let index = materials.len();
+                    materials.push(gpu_material);
+                    index
+                } else {
+                    fallback_material_index
+                };
+                if primitive.vertices.is_empty() {
+                    continue;
                 }
-            }
-            PresentationAsset::Procedural(mesh) => {
-                if !mesh.vertices().is_empty() {
-                    let vertex_buffer =
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("aircraft primitive vertices"),
+                    contents: bytemuck::cast_slice(&primitive.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("aircraft primitive indices"),
+                    contents: bytemuck::cast_slice(&primitive.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                let target = glb_batch_target(articulation, primitive_index, material_index);
+                if let Some(hinge) = target.hinge {
+                    let object_buffer =
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("aircraft presentation vertices"),
-                            contents: bytemuck::cast_slice(mesh.vertices()),
-                            usage: wgpu::BufferUsages::VERTEX,
+                            label: Some("GLB articulated part object uniform"),
+                            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(
+                                &crate::Mat4::identity(),
+                            )),
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         });
-                    let index_buffer =
-                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("aircraft presentation indices"),
-                            contents: bytemuck::cast_slice(mesh.indices()),
-                            usage: wgpu::BufferUsages::INDEX,
-                        });
+                    let object_bind_group = matrix_bind_group(
+                        &device,
+                        &object_bind_group_layout,
+                        &object_buffer,
+                        "GLB articulated part object bind group",
+                    );
+                    surface_batches.push(SurfaceRenderBatch {
+                        surface: hinge.surface(),
+                        hinge,
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: primitive.indices.len() as u32,
+                        material_index: target.material_index,
+                        object_buffer_index: surface_object_buffers.len(),
+                    });
+                    surface_object_buffers.push(object_buffer);
+                    surface_object_bind_groups.push(object_bind_group);
+                } else {
                     aircraft_batches.push(RenderBatch {
                         vertex_buffer,
                         index_buffer,
-                        index_count: mesh.indices().len() as u32,
-                        material_index: fallback_material_index,
+                        index_count: primitive.indices.len() as u32,
+                        material_index: target.material_index,
                     });
                 }
             }
-        }
+        } else if let PresentationAsset::Procedural(mesh) = asset {
+            if !mesh.vertices().is_empty() {
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("aircraft presentation vertices"),
+                    contents: bytemuck::cast_slice(mesh.vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("aircraft presentation indices"),
+                    contents: bytemuck::cast_slice(mesh.indices()),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                aircraft_batches.push(RenderBatch {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: mesh.indices().len() as u32,
+                    material_index: fallback_material_index,
+                });
+            }
 
-        // G1E: articulated overlays share the procedural fallback geometry.
-        let mut surface_batches = Vec::new();
-        let mut surface_binding_table = crate::SurfaceBindingTable::empty();
-        let mut surface_object_buffers = Vec::new();
-        let mut surface_object_bind_groups = Vec::new();
-        if matches!(asset, PresentationAsset::Procedural(_)) {
             let articulated = crate::articulated_aircraft_mesh();
-            surface_binding_table = crate::articulated_binding_table();
+            let surface_binding_table = crate::articulated_binding_table();
             for surface in crate::SurfaceId::control_surfaces() {
                 let Some(mesh) = articulated.surface(surface) else {
+                    continue;
+                };
+                let Some(hinge) = surface_binding_table.hinge(surface).copied() else {
                     continue;
                 };
                 if mesh.vertices().is_empty() {
@@ -574,6 +628,7 @@ impl WgpuRenderer {
                 );
                 surface_batches.push(SurfaceRenderBatch {
                     surface,
+                    hinge,
                     vertex_buffer,
                     index_buffer,
                     index_count: mesh.indices().len() as u32,
@@ -725,7 +780,6 @@ impl WgpuRenderer {
             _fallback_material_index: fallback_material_index,
             aircraft_batches,
             surface_batches,
-            surface_binding_table,
             surface_object_buffers,
             surface_object_bind_groups,
             terrain_chunks,
@@ -835,11 +889,10 @@ impl WgpuRenderer {
 
         // G1E: articulated surface uniforms (`root * local hinge`).
         for batch in &self.surface_batches {
-            let composed = self.surface_binding_table.composed_matrix(
-                &aircraft_model_matrix,
-                batch.surface,
-                frame.surfaces(),
-            );
+            let composed = aircraft_model_matrix
+                * batch
+                    .hinge
+                    .local_matrix(frame.surfaces().deflection(batch.surface));
             let uniform = ObjectUniform::from_matrix(&composed);
             self.queue.write_buffer(
                 &self.surface_object_buffers[batch.object_buffer_index],
@@ -891,7 +944,7 @@ impl WgpuRenderer {
             // --- Sky pass (background) ---
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            // Sky uses identity object (group 1) — sky is at infinity.
+            // Sky uses identity object (group 1) â€” sky is at infinity.
             render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
@@ -1382,5 +1435,32 @@ fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthT
     DepthTarget {
         _texture: texture,
         view,
+    }
+}
+
+#[cfg(test)]
+mod glb_articulation_tests {
+    use super::*;
+
+    #[test]
+    fn articulation_changes_only_transform_target_and_preserves_material_index() {
+        let hinge =
+            crate::SurfaceHinge::new(crate::SurfaceId::Elevator, [0.0; 3], [1.0, 0.0, 0.0], 1.0)
+                .unwrap();
+        let plan = crate::GlbArticulationPlan::from_mappings(2, [(1, hinge)]).unwrap();
+        assert_eq!(
+            glb_batch_target(Some(&plan), 0, 23),
+            GlbBatchTarget {
+                material_index: 23,
+                hinge: None,
+            }
+        );
+        assert_eq!(
+            glb_batch_target(Some(&plan), 1, 41),
+            GlbBatchTarget {
+                material_index: 41,
+                hinge: Some(hinge),
+            }
+        );
     }
 }

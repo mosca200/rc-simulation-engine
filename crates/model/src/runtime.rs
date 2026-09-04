@@ -651,19 +651,101 @@ impl RuntimeElectricPropulsion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PresentationMetadata {
     glb_path: String,
+    articulated_surfaces: Vec<PresentationArticulatedSurface>,
 }
 
 impl PresentationMetadata {
-    pub(crate) fn new(glb_path: String) -> Self {
-        Self { glb_path }
+    pub(crate) fn new(
+        glb_path: String,
+        articulated_surfaces: Vec<PresentationArticulatedSurface>,
+    ) -> Self {
+        Self {
+            glb_path,
+            articulated_surfaces,
+        }
     }
 
     #[must_use]
     pub fn glb_path(&self) -> &str {
         &self.glb_path
+    }
+
+    #[must_use]
+    pub fn articulated_surfaces(&self) -> &[PresentationArticulatedSurface] {
+        &self.articulated_surfaces
+    }
+}
+
+/// Presentation-only identity for one conventional visual control surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationSurface {
+    LeftAileron,
+    RightAileron,
+    Elevator,
+    Rudder,
+}
+
+/// Validated non-physical mapping from a GLB primitive to a physics binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationArticulatedSurface {
+    visual_primitive_index: usize,
+    surface: PresentationSurface,
+    control_surface_binding_id: String,
+    hinge_origin_render_body_m: [f32; 3],
+    hinge_axis_render_body: [f32; 3],
+    visual_gain: f32,
+}
+
+impl PresentationArticulatedSurface {
+    pub(crate) fn new(
+        visual_primitive_index: usize,
+        surface: PresentationSurface,
+        control_surface_binding_id: String,
+        hinge_origin_render_body_m: [f32; 3],
+        hinge_axis_render_body: [f32; 3],
+        visual_gain: f32,
+    ) -> Self {
+        Self {
+            visual_primitive_index,
+            surface,
+            control_surface_binding_id,
+            hinge_origin_render_body_m,
+            hinge_axis_render_body,
+            visual_gain,
+        }
+    }
+
+    #[must_use]
+    pub const fn visual_primitive_index(&self) -> usize {
+        self.visual_primitive_index
+    }
+
+    #[must_use]
+    pub const fn surface(&self) -> PresentationSurface {
+        self.surface
+    }
+
+    #[must_use]
+    pub fn control_surface_binding_id(&self) -> &str {
+        &self.control_surface_binding_id
+    }
+
+    #[must_use]
+    pub const fn hinge_origin_render_body_m(&self) -> [f32; 3] {
+        self.hinge_origin_render_body_m
+    }
+
+    #[must_use]
+    pub const fn hinge_axis_render_body(&self) -> [f32; 3] {
+        self.hinge_axis_render_body
+    }
+
+    #[must_use]
+    pub const fn visual_gain(&self) -> f32 {
+        self.visual_gain
     }
 }
 

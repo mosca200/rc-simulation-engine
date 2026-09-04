@@ -1,9 +1,9 @@
 use aircraft::{AircraftSimulation, AircraftSimulationConfig, AircraftSnapshot};
-use model::{AircraftModel, ControlActuator, load_aircraft_model};
+use model::{AircraftModel, ControlActuator, PresentationSurface, load_aircraft_model};
 use platform::{InputSource, InputState, KeyboardKey};
 use renderer::{
     ControlSurfacePresentation, FixedStepAccumulator, RenderDataError, RenderFrame, RenderPose,
-    SurfaceId, world_ned_pose_to_render,
+    world_ned_pose_to_render,
 };
 use replay::AircraftSnapshotHash;
 use sim_core::{AeroEnvironment, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyState};
@@ -90,9 +90,15 @@ pub(crate) fn surface_deflections_from_simulation(
     let positions = snapshot.control_surface_positions();
     let actuators = model.controls().actuators();
     let mut out = [0.0f64; 4];
-    let mut fallback = [None, None];
-    let mut fallback_count = 0usize;
-    for binding in model.control_surface_bindings() {
+    let Some(presentation) = model.presentation() else {
+        return out.map(|value| value as f32);
+    };
+    for visual_surface in presentation.articulated_surfaces() {
+        let binding = model
+            .control_surface_bindings()
+            .iter()
+            .find(|binding| binding.id() == visual_surface.control_surface_binding_id())
+            .expect("model loading resolves every presentation binding");
         let (servo_angle_rad, neutral_rad) = match binding.actuator() {
             ControlActuator::Aileron => (
                 positions.aileron_angle_rad(),
@@ -111,52 +117,15 @@ pub(crate) fn surface_deflections_from_simulation(
         if !deflection_rad.is_finite() {
             continue;
         }
-        if let Some(slot) = explicit_surface_slot(binding.id()) {
-            out[slot] = deflection_rad;
-            continue;
-        }
-        match binding.actuator() {
-            ControlActuator::Aileron => {
-                if fallback_count < 2 {
-                    fallback[fallback_count] = Some(deflection_rad);
-                    fallback_count += 1;
-                }
-            }
-            ControlActuator::Elevator => out[2] = deflection_rad,
-            ControlActuator::Rudder => out[3] = deflection_rad,
-        }
+        let slot = match visual_surface.surface() {
+            PresentationSurface::LeftAileron => 0,
+            PresentationSurface::RightAileron => 1,
+            PresentationSurface::Elevator => 2,
+            PresentationSurface::Rudder => 3,
+        };
+        out[slot] = deflection_rad;
     }
-    let has_explicit_aileron = model
-        .control_surface_bindings()
-        .iter()
-        .any(|b| explicit_surface_slot(b.id()).is_some_and(|slot| slot < 2));
-    if !has_explicit_aileron {
-        if let Some(value) = fallback[0] {
-            out[0] = value;
-        }
-        if let Some(value) = fallback[1] {
-            out[1] = value;
-        }
-    }
-    let _ = SurfaceId::control_surfaces();
     out.map(|value| value as f32)
-}
-
-fn explicit_surface_slot(binding_id: &str) -> Option<usize> {
-    let normalized = binding_id.to_ascii_lowercase();
-    if normalized.contains("aileron") && normalized.contains("left") {
-        return Some(0);
-    }
-    if normalized.contains("aileron") && normalized.contains("right") {
-        return Some(1);
-    }
-    if normalized.contains("elevator") {
-        return Some(2);
-    }
-    if normalized.contains("rudder") {
-        return Some(3);
-    }
-    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -448,10 +417,53 @@ mod tests {
         AircraftRenderSnapshot::from_components(0, 0.0, position, orientation)
     }
 
-    fn acro_model() -> AircraftModel {
+    fn acro_model_with_explicit_presentation() -> (AircraftModel, AircraftModel) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../models/acro_electric_01/model.json");
-        load_aircraft_model(&path).expect("acro model must load")
+        let original = load_aircraft_model(&path).expect("acro model must load");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bindings = value["control_surface_bindings"].as_array_mut().unwrap();
+        let opaque_ids = ["v0", "v1", "v2", "v3"];
+        for (binding, id) in bindings.iter_mut().zip(opaque_ids) {
+            binding["id"] = serde_json::json!(id);
+        }
+        value["presentation"]["articulated_surfaces"] = serde_json::json!([
+            {
+                "visual_primitive_index": 0,
+                "surface": "left_aileron",
+                "control_surface_binding_id": "v0",
+                "hinge_origin_render_body_m": [0.0, 0.0, 0.0],
+                "hinge_axis_render_body": [1.0, 0.0, 0.0],
+                "visual_gain": 1.0
+            },
+            {
+                "visual_primitive_index": 1,
+                "surface": "right_aileron",
+                "control_surface_binding_id": "v1",
+                "hinge_origin_render_body_m": [0.0, 0.0, 0.0],
+                "hinge_axis_render_body": [1.0, 0.0, 0.0],
+                "visual_gain": 1.0
+            },
+            {
+                "visual_primitive_index": 2,
+                "surface": "elevator",
+                "control_surface_binding_id": "v2",
+                "hinge_origin_render_body_m": [0.0, 0.0, 0.0],
+                "hinge_axis_render_body": [1.0, 0.0, 0.0],
+                "visual_gain": 1.0
+            },
+            {
+                "visual_primitive_index": 3,
+                "surface": "rudder",
+                "control_surface_binding_id": "v3",
+                "hinge_origin_render_body_m": [0.0, 0.0, 0.0],
+                "hinge_axis_render_body": [0.0, 1.0, 0.0],
+                "visual_gain": 1.0
+            }
+        ]);
+        let explicit = model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap();
+        (original, explicit)
     }
 
     fn stepped_snapshot(
@@ -479,9 +491,9 @@ mod tests {
     }
 
     #[test]
-    fn presentation_comes_from_simulated_servo_state_not_keyboard() {
-        let model = acro_model();
-        let before = model.physics_fingerprint();
+    fn explicit_opaque_metadata_uses_simulated_servo_state_not_keyboard() {
+        let (original, model) = acro_model_with_explicit_presentation();
+        let before = original.physics_fingerprint();
         let snapshot = stepped_snapshot(&model, PilotInput::new(1.0, 0.0, 0.0, 0.5), 600);
         let deflections = surface_deflections_from_simulation(&model, &snapshot);
         assert!((deflections[0] + deflections[1]).abs() < 1.0e-4);
@@ -495,6 +507,16 @@ mod tests {
             assert!(value.abs() < 1.0e-6);
         }
         assert_eq!(model.physics_fingerprint(), before);
+    }
+
+    #[test]
+    fn absent_articulation_metadata_keeps_every_visual_surface_rigid() {
+        let (model, _) = acro_model_with_explicit_presentation();
+        let snapshot = stepped_snapshot(&model, PilotInput::new(1.0, 1.0, 1.0, 0.5), 600);
+        assert_eq!(
+            surface_deflections_from_simulation(&model, &snapshot),
+            [0.0; 4]
+        );
     }
 
     fn assert_quaternion_close(actual: [f64; 4], expected: [f64; 4]) {

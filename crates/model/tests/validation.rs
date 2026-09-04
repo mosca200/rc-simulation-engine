@@ -1,6 +1,6 @@
 mod common;
 
-use common::{load_value, minimal_model_value, set, valid_model_value};
+use common::{load_value, minimal_model_value, set, valid_model_value, valid_v1_model_value};
 use model::{AircraftModelLoader, ModelLoadError};
 use serde_json::{Value, json};
 use sim_core::{
@@ -521,6 +521,73 @@ fn valid_relative_presentation_path_is_preserved() {
         model.presentation().expect("presentation").glb_path(),
         "visual/aircraft-v0.glb"
     );
+}
+
+fn explicit_articulation() -> Value {
+    json!([{
+        "visual_primitive_index": 7,
+        "surface": "left_aileron",
+        "control_surface_binding_id": "aileron-first",
+        "hinge_origin_render_body_m": [0.1, 0.2, 0.3],
+        "hinge_axis_render_body": [2.0, 0.0, 0.0],
+        "visual_gain": -1.5
+    }])
+}
+
+#[test]
+fn explicit_presentation_metadata_is_validated_and_excluded_from_fingerprint() {
+    let without = valid_v1_model_value();
+    let baseline = load_value(&without).unwrap();
+    let mut with = without;
+    with["presentation"]["articulated_surfaces"] = explicit_articulation();
+    let presented = load_value(&with).unwrap();
+    let surface = &presented.presentation().unwrap().articulated_surfaces()[0];
+    assert_eq!(surface.visual_primitive_index(), 7);
+    assert_eq!(surface.control_surface_binding_id(), "aileron-first");
+    assert_eq!(surface.hinge_origin_render_body_m(), [0.1, 0.2, 0.3]);
+    assert_eq!(surface.hinge_axis_render_body(), [2.0, 0.0, 0.0]);
+    assert_eq!(surface.visual_gain(), -1.5);
+    assert_eq!(
+        baseline.physics_fingerprint(),
+        presented.physics_fingerprint()
+    );
+}
+
+#[test]
+fn invalid_or_implicit_presentation_bindings_fail_closed() {
+    let mut unknown = valid_v1_model_value();
+    unknown["presentation"]["articulated_surfaces"] = explicit_articulation();
+    unknown["presentation"]["articulated_surfaces"][0]["control_surface_binding_id"] =
+        json!("not-a-binding");
+    assert!(matches!(
+        load_value(&unknown),
+        Err(ModelLoadError::UnresolvedPresentationControlSurfaceBinding { .. })
+    ));
+
+    let mut wrong_actuator = valid_v1_model_value();
+    wrong_actuator["presentation"]["articulated_surfaces"] = explicit_articulation();
+    wrong_actuator["presentation"]["articulated_surfaces"][0]["surface"] = json!("rudder");
+    assert!(matches!(
+        load_value(&wrong_actuator),
+        Err(ModelLoadError::PresentationBindingActuatorMismatch { .. })
+    ));
+
+    let mut duplicate = valid_v1_model_value();
+    let mapping = explicit_articulation()[0].clone();
+    duplicate["presentation"]["articulated_surfaces"] = json!([mapping.clone(), mapping]);
+    assert!(matches!(
+        load_value(&duplicate),
+        Err(ModelLoadError::DuplicatePresentationVisualPrimitive { .. })
+    ));
+
+    let mut zero_axis = valid_v1_model_value();
+    zero_axis["presentation"]["articulated_surfaces"] = explicit_articulation();
+    zero_axis["presentation"]["articulated_surfaces"][0]["hinge_axis_render_body"] =
+        json!([0.0, 0.0, 0.0]);
+    assert!(matches!(
+        load_value(&zero_axis),
+        Err(ModelLoadError::InvalidPresentationArticulation { .. })
+    ));
 }
 
 #[test]
