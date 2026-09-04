@@ -35,8 +35,10 @@ or terrain authority. Normal airborne launches retain rolling visual terrain.
 
 ## Known limitations
 
-- The demo uses the rigid procedural aircraft presentation. Articulated
-  control-surface rendering belongs to the separate G1E feature.
+- The demo uses the production G1C GLB presentation path, including its
+  authored materials and textures. The current GLB remains rigid because its
+  geometry is not authored as separate movable primitives; G1E articulation
+  remains a separate integration step.
 - Wheels and suspension compression have no dedicated visual geometry.
 - Ground authority is one infinite flat plane; there is no runway material,
   height-field collision, obstacle collision, or deformable terrain.

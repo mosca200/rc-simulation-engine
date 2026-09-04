@@ -137,5 +137,7 @@
       "braked": true
     }
   ],
-  "presentation": null
+  "presentation": {
+    "glb_path": "aircraft.glb"
+  }
 }

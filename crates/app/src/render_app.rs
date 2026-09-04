@@ -847,12 +847,26 @@ mod tests {
     #[test]
     fn dedicated_ground_demo_starts_supported_on_the_physical_flat_plane() {
         let model_path = repository_model_path("models/acro_electric_ground_demo/model.json");
-        let model = load_aircraft_model(model_path).unwrap();
+        let model = load_aircraft_model(&model_path).unwrap();
         assert_eq!(
             model.classification(),
             model::AircraftClassification::SyntheticTest
         );
         assert!(model.reference_aircraft().is_none());
+        let presentation = resolve_presentation_model(
+            &model_path,
+            model.presentation().map(|value| value.glb_path()),
+        )
+        .unwrap();
+        match presentation {
+            PresentationModel::Glb(asset) => {
+                assert!(!asset.primitives.is_empty());
+                assert!(asset.total_vertex_count() > 0);
+            }
+            PresentationModel::Procedural(_) => {
+                panic!("dedicated ground demo must use the production GLB path");
+            }
+        }
 
         let initialized = supported_ground_start(&model).unwrap();
         assert!(initialized.state.validate().is_ok());
