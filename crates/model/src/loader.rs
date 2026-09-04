@@ -3,6 +3,7 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V8,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -12,8 +13,8 @@ use crate::{
     runtime::{
         AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroDownwashInteraction,
         RuntimeAeroElement, RuntimeAeroSurface, RuntimeControlSurfaceBinding,
-        RuntimeElectricPropulsion, RuntimePolar, RuntimePropellerSlipstreamInteraction,
-        RuntimeReynoldsPolarFamily,
+        RuntimeElectricPropulsion, RuntimeLandingGearContact, RuntimePolar,
+        RuntimePropellerSlipstreamInteraction, RuntimeReynoldsPolarFamily,
     },
     v0::{
         AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
@@ -32,17 +33,19 @@ use crate::{
     v5::{AeroSurfaceFileV5, AircraftModelFileV5},
     v6::{AeroDownwashInteractionFileV6, AircraftModelFileV6},
     v7::{AircraftModelFileV7, PropellerSlipstreamInteractionFileV7},
+    v8::{AircraftModelFileV8, LandingGearContactFileV8, SteeringSourceFileV8},
 };
 use serde::Deserialize;
 use sim_core::{
     AeroElement, AeroElementError, AxisResponseConfig, BatteryConfig, BatteryConfigError,
     ControlActuatorConfig, ControlConfigError, ControlResponseConfig, ControlSystemConfig,
-    ElectricPropulsionConfig, EscConfig, EscConfigError, MotorConfig, MotorConfigError,
-    ParameterError, PolarError, PolarSample, PolarTable, PropellerCoefficientError,
-    PropellerCoefficientMap, PropellerCoefficientMapError, PropellerCoefficientNode,
-    PropellerCoefficientSource, PropellerCoefficientTable, PropellerConfig, PropellerConfigError,
-    PropellerSample, PropellerSpinDirection, ReynoldsPolar, ReynoldsPolarFamily,
-    ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig,
+    ElectricPropulsionConfig, EscConfig, EscConfigError, GearContact, GroundConfigError,
+    MAX_GEAR_CONTACTS, MotorConfig, MotorConfigError, ParameterError, PolarError, PolarSample,
+    PolarTable, PropellerCoefficientError, PropellerCoefficientMap, PropellerCoefficientMapError,
+    PropellerCoefficientNode, PropellerCoefficientSource, PropellerCoefficientTable,
+    PropellerConfig, PropellerConfigError, PropellerSample, PropellerSpinDirection, ReynoldsPolar,
+    ReynoldsPolarFamily, ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig, SteeringSource,
+    validate_gear_contact,
 };
 use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use std::{fs, io, path::Path};
@@ -437,6 +440,15 @@ pub enum ModelLoadError {
         first_interaction_id: Box<str>,
         first_interaction_index: usize,
     },
+    #[error("landing gear declares {count} contacts; at most 16 are supported")]
+    TooManyLandingGearContacts { count: usize },
+    #[error("landing gear contact {contact_id:?} at index {contact_index} is invalid: {source}")]
+    InvalidLandingGearContact {
+        contact_id: Box<str>,
+        contact_index: usize,
+        #[source]
+        source: GroundConfigError,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -495,6 +507,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V7);
                 resolve_v7(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V8) => {
+                let file: AircraftModelFileV8 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V8);
+                resolve_v8(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }
@@ -922,6 +940,95 @@ fn resolve_v7(file: AircraftModelFileV7) -> Result<AircraftModel, ModelLoadError
     let interactions =
         resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
     Ok(model.with_propeller_slipstream_interactions(interactions))
+}
+
+fn resolve_v8(file: AircraftModelFileV8) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV8 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propeller_slipstream_interactions,
+        propulsion,
+        landing_gear,
+        presentation,
+    } = file;
+    let v6_file = AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v6_fields(v6_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V8)?;
+    let slipstream =
+        resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
+    let model = model.with_propeller_slipstream_interactions(slipstream);
+    let gear = resolve_landing_gear(landing_gear)?;
+    Ok(model.with_landing_gear(gear))
+}
+
+fn resolve_landing_gear(
+    files: Vec<LandingGearContactFileV8>,
+) -> Result<Vec<RuntimeLandingGearContact>, ModelLoadError> {
+    if files.len() > MAX_GEAR_CONTACTS {
+        return Err(ModelLoadError::TooManyLandingGearContacts { count: files.len() });
+    }
+    let mut contacts = Vec::with_capacity(files.len());
+    for (index, file) in files.into_iter().enumerate() {
+        validate_unique_id(
+            "landing gear contact",
+            index,
+            &file.id,
+            contacts
+                .iter()
+                .map(|contact: &RuntimeLandingGearContact| contact.id()),
+        )?;
+        let steering = match file.steering {
+            SteeringSourceFileV8::Fixed => SteeringSource::Fixed,
+            SteeringSourceFileV8::Rudder => SteeringSource::Rudder,
+        };
+        let contact = GearContact {
+            position_body_m: Vec3::new(
+                file.position_body_m[0],
+                file.position_body_m[1],
+                file.position_body_m[2],
+            ),
+            wheel_radius_m: file.wheel_radius_m,
+            stiffness_n_per_m: file.normal_stiffness_n_per_m,
+            damping_n_s_per_m: file.normal_damping_n_s_per_m,
+            long_mu: file.longitudinal_friction_coefficient,
+            lat_mu: file.lateral_friction_coefficient,
+            rolling_mu: file.rolling_resistance_coefficient,
+            brake_mu: file.max_brake_friction_coefficient,
+            steering,
+            max_steer_rad: file.max_steer_angle_rad,
+            steerable: file.steerable,
+            braked: file.braked,
+        };
+        validate_gear_contact(&contact).map_err(|source| {
+            ModelLoadError::InvalidLandingGearContact {
+                contact_id: file.id.clone().into_boxed_str(),
+                contact_index: index,
+                source,
+            }
+        })?;
+        contacts.push(RuntimeLandingGearContact::new(file.id, contact));
+    }
+    Ok(contacts)
 }
 
 fn resolve_propeller_slipstream_interactions(

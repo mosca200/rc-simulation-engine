@@ -4,6 +4,7 @@
 mod aero;
 mod controls;
 mod dynamics;
+mod ground;
 mod input;
 mod integrator;
 mod parameters;
@@ -27,6 +28,14 @@ pub use controls::{
     evaluate_steady_controls, mix_conventional, shape_pilot_input,
 };
 pub use dynamics::{BodyWrench, RigidBodyDerivative, evaluate_derivative};
+pub use ground::{
+    FRICTION_REGULARIZATION_SPEED_MPS, FlatGroundPlane, GearContact, GroundCommand,
+    GroundConfigError, GroundContactSolution, GroundEvaluation, GroundSurface, MAX_GEAR_CONTACTS,
+    MAX_NORMAL_DAMPING_N_S_PER_M, MAX_NORMAL_STIFFNESS_N_PER_M,
+    RECOMMENDED_MAX_NORMAL_DAMPING_N_S_PER_M, RECOMMENDED_MAX_NORMAL_STIFFNESS_N_PER_M,
+    SteeringSource, contact_point_velocity_world, evaluate_ground_wrench, steering_angle_rad,
+    validate_gear_contact,
+};
 pub use input::PilotInput;
 pub use integrator::Rk4Integrator;
 pub use parameters::{ParameterError, RigidBodyParams};

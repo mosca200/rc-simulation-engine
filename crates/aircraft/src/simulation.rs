@@ -4,11 +4,13 @@ use model::{
 };
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
+    FlatGroundPlane, GearContact, GroundCommand, GroundEvaluation, GroundSurface,
     MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients, PropellerSpinDirection,
     PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
     Rk4Integrator, SectionKinematics, StateError, advance_controls, assemble_aero_element_wrench,
     calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
-    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_reynolds_aero_element,
+    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_ground_wrench,
+    evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
 use thiserror::Error;
@@ -39,6 +41,20 @@ pub struct AircraftSnapshot {
     sim_time_s: f64,
     rigid_body_state: RigidBodyState,
     control_surface_positions: ControlSurfacePositions,
+    ground_contacts: usize,
+    total_ground_normal_force_n: f64,
+    total_ground_tangential_force_n: f64,
+    weight_on_wheels: bool,
+}
+
+/// Deterministic per-step ground diagnostic derived from the committed state.
+/// Kept separate from the replay-hashed core so existing recordings stay valid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AircraftGroundTelemetry {
+    pub active_contacts: usize,
+    pub total_normal_force_n: f64,
+    pub total_tangential_force_n: f64,
+    pub weight_on_wheels: bool,
 }
 
 /// Per-element aerodynamic output, preserving Reynolds diagnostics without hot-path allocation.
@@ -111,6 +127,36 @@ impl AircraftSnapshot {
     pub const fn control_surface_positions(&self) -> &ControlSurfacePositions {
         &self.control_surface_positions
     }
+
+    #[must_use]
+    pub const fn ground_contacts(&self) -> usize {
+        self.ground_contacts
+    }
+
+    #[must_use]
+    pub const fn total_ground_normal_force_n(&self) -> f64 {
+        self.total_ground_normal_force_n
+    }
+
+    #[must_use]
+    pub const fn total_ground_tangential_force_n(&self) -> f64 {
+        self.total_ground_tangential_force_n
+    }
+
+    #[must_use]
+    pub const fn weight_on_wheels(&self) -> bool {
+        self.weight_on_wheels
+    }
+
+    #[must_use]
+    pub const fn ground_telemetry(&self) -> AircraftGroundTelemetry {
+        AircraftGroundTelemetry {
+            active_contacts: self.ground_contacts,
+            total_normal_force_n: self.total_ground_normal_force_n,
+            total_tangential_force_n: self.total_ground_tangential_force_n,
+            weight_on_wheels: self.weight_on_wheels,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -128,6 +174,10 @@ pub struct AircraftSimulation {
     config: AircraftSimulationConfig,
     state: AircraftState,
     effective_aero_elements: Vec<AeroElement>,
+    gear_contacts: Vec<GearContact>,
+    ground_surface: GroundSurface,
+    brake_command: f64,
+    last_ground: GroundEvaluation,
     step_index: u64,
 }
 
@@ -159,6 +209,11 @@ impl AircraftSimulation {
             .iter()
             .map(|runtime_element| *runtime_element.element())
             .collect();
+        let gear_contacts: Vec<GearContact> = model
+            .landing_gear()
+            .iter()
+            .map(|contact| contact.contact())
+            .collect();
         let controls = ControlSystemState::neutral(model.controls());
         Ok(Self {
             model,
@@ -168,8 +223,49 @@ impl AircraftSimulation {
                 controls,
             },
             effective_aero_elements,
+            gear_contacts,
+            ground_surface: GroundSurface::Flat(FlatGroundPlane::default()),
+            brake_command: 0.0,
+            last_ground: GroundEvaluation::zero(),
             step_index: 0,
         })
+    }
+
+    /// Sets the normalized brake command in [0, 1] (non-finite clamps to 0).
+    /// No throttle or yaw channel is hijacked; the value is held across RK4 stages.
+    pub fn set_brake_command(&mut self, brake_command: f64) {
+        self.brake_command = if brake_command.is_finite() {
+            brake_command.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[must_use]
+    pub const fn brake_command(&self) -> f64 {
+        self.brake_command
+    }
+
+    /// Sets the flat ground plane height (NED down, metres). Default is 0.
+    pub fn set_ground_height_world_down_m(&mut self, height_m: f64) {
+        if let Ok(plane) = FlatGroundPlane::new(height_m) {
+            self.ground_surface = GroundSurface::Flat(plane);
+        }
+    }
+
+    #[must_use]
+    pub const fn ground_surface(&self) -> &GroundSurface {
+        &self.ground_surface
+    }
+
+    #[must_use]
+    pub fn gear_contacts(&self) -> &[GearContact] {
+        &self.gear_contacts
+    }
+
+    #[must_use]
+    pub const fn last_ground_evaluation(&self) -> &GroundEvaluation {
+        &self.last_ground
     }
 
     /// Advances controls once, holds actuators/throttle fixed, then evaluates all four RK4 stages.
@@ -231,15 +327,21 @@ impl AircraftSimulation {
         let initial_state = self.state.rigid_body;
         let model = &self.model;
         let effective_aero_elements = &self.effective_aero_elements;
+        let gear_contacts = &self.gear_contacts;
+        let ground_surface = &self.ground_surface;
         let throttle = control_surface_positions.throttle();
+        let ground_command = GroundCommand::new(input.yaw(), self.brake_command);
         self.state.rigid_body =
             Rk4Integrator::step(&initial_state, self.config.dt_s(), |stage_state| {
-                let evaluation = evaluate_aircraft_instantaneous(
+                let evaluation = evaluate_aircraft_instantaneous_with_ground(
                     stage_state,
                     effective_aero_elements,
                     model,
                     throttle,
                     &self.config,
+                    gear_contacts,
+                    ground_surface,
+                    &ground_command,
                 );
                 debug_assert_eq!(
                     evaluation.propulsion.is_some(),
@@ -251,11 +353,26 @@ impl AircraftSimulation {
         self.step_index += 1;
         debug_assert!(self.state.rigid_body.validate().is_ok());
 
+        // Committed-state ground diagnostic: re-evaluate at the post-step state.
+        // This is observation only; the integrated trajectory already includes
+        // stage-correct ground forces. Allocation-free (fixed array).
+        let committed_command = GroundCommand::new(input.yaw(), self.brake_command);
+        self.last_ground = evaluate_ground_wrench(
+            &self.state.rigid_body,
+            &self.gear_contacts,
+            &self.ground_surface,
+            &committed_command,
+        );
+
         AircraftSnapshot {
             step_index: self.step_index,
             sim_time_s: self.sim_time_s(),
             rigid_body_state: self.state.rigid_body,
             control_surface_positions,
+            ground_contacts: self.last_ground.active_contacts,
+            total_ground_normal_force_n: self.last_ground.total_normal_force_n,
+            total_ground_tangential_force_n: self.last_ground.total_tangential_force_n,
+            weight_on_wheels: self.last_ground.weight_on_wheels(),
         }
     }
 }
@@ -330,17 +447,67 @@ pub fn evaluate_aircraft_wrench(
     throttle: f64,
     environment: &sim_core::AeroEnvironment,
 ) -> BodyWrench {
+    evaluate_aircraft_wrench_with_ground(
+        stage_state,
+        effective_aero_elements,
+        model,
+        throttle,
+        environment,
+        &[],
+        &GroundSurface::default(),
+        &GroundCommand::new(0.0, 0.0),
+    )
+}
+
+/// Stage-local ground context bundled to keep stage arities reviewable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundStageContext<'a> {
+    pub gear: &'a [GearContact],
+    pub surface: &'a GroundSurface,
+    pub command: &'a GroundCommand,
+}
+
+impl<'a> GroundStageContext<'a> {
+    #[must_use]
+    pub const fn new(
+        gear: &'a [GearContact],
+        surface: &'a GroundSurface,
+        command: &'a GroundCommand,
+    ) -> Self {
+        Self {
+            gear,
+            surface,
+            command,
+        }
+    }
+}
+
+/// Re-evaluates the complete wrench (aero + propulsion + stage ground contact).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_aircraft_wrench_with_ground(
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    environment: &sim_core::AeroEnvironment,
+    gear: &[GearContact],
+    surface: &GroundSurface,
+    command: &GroundCommand,
+) -> BodyWrench {
     evaluate_stage(
         stage_state,
         effective_aero_elements,
         model,
         throttle,
         environment,
+        GroundStageContext::new(gear, surface, command),
     )
     .total_wrench
 }
 
 /// Evaluates wrench and rigid-body derivative without advancing controls or integrating time.
+/// Airborne path: no gear contact (preserves existing callers and tests exactly).
 #[must_use]
 pub fn evaluate_aircraft_instantaneous(
     state: &RigidBodyState,
@@ -349,12 +516,38 @@ pub fn evaluate_aircraft_instantaneous(
     throttle: f64,
     config: &AircraftSimulationConfig,
 ) -> AircraftInstantaneousEvaluation {
+    evaluate_aircraft_instantaneous_with_ground(
+        state,
+        effective_aero_elements,
+        model,
+        throttle,
+        config,
+        &[],
+        &GroundSurface::default(),
+        &GroundCommand::new(0.0, 0.0),
+    )
+}
+
+/// Evaluates wrench and derivative including stage ground contact.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_aircraft_instantaneous_with_ground(
+    state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    config: &AircraftSimulationConfig,
+    gear: &[GearContact],
+    surface: &GroundSurface,
+    command: &GroundCommand,
+) -> AircraftInstantaneousEvaluation {
     let stage = evaluate_stage(
         state,
         effective_aero_elements,
         model,
         throttle,
         config.aero_environment(),
+        GroundStageContext::new(gear, surface, command),
     );
     let derivative = evaluate_derivative(
         state,
@@ -1207,6 +1400,7 @@ fn evaluate_stage(
     model: &AircraftModel,
     throttle: f64,
     environment: &sim_core::AeroEnvironment,
+    ground: GroundStageContext<'_>,
 ) -> StageEvaluation {
     let propulsion = model.propulsion().map(|runtime_propulsion| {
         let mut output = evaluate_electric_propulsion_with_source(
@@ -1230,6 +1424,14 @@ fn evaluate_stage(
     if let Some(output) = propulsion {
         total_wrench.force_body_n += output.wrench_body.force_body_n;
         total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+    }
+    // Stage-correct compliant ground contact: recomputed from each RK4 stage
+    // state, never held constant across k1..k4. Empty gear short-circuits to zero.
+    if !ground.gear.is_empty() {
+        let contact =
+            evaluate_ground_wrench(stage_state, ground.gear, ground.surface, ground.command);
+        total_wrench.force_body_n += contact.force_body_n;
+        total_wrench.moment_body_nm += contact.moment_body_nm;
     }
 
     StageEvaluation {

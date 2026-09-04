@@ -2,13 +2,13 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7, AircraftClassification,
-    ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V8, AircraftClassification, ReferenceAircraftMetadata,
 };
 use sim_core::{
-    AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
+    AeroElement, ControlSystemConfig, ElectricPropulsionConfig, GearContact, PolarTable,
     PropellerCoefficientSource, PropellerCoefficientTable, PropellerSpinDirection,
-    ReynoldsPolarFamily, RigidBodyParams,
+    ReynoldsPolarFamily, RigidBodyParams, SteeringSource, validate_gear_contact,
 };
 
 /// Immutable validated aircraft configuration with all file references resolved.
@@ -30,6 +30,7 @@ pub struct AircraftModel {
     controls: ControlSystemConfig,
     control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
     propulsion: Option<RuntimeElectricPropulsion>,
+    landing_gear: Vec<RuntimeLandingGearContact>,
     presentation: Option<PresentationMetadata>,
 }
 
@@ -64,6 +65,7 @@ impl AircraftModel {
             controls,
             control_surface_bindings,
             propulsion,
+            landing_gear: Vec::new(),
             presentation,
         }
     }
@@ -121,6 +123,14 @@ impl AircraftModel {
         interactions: Vec<RuntimePropellerSlipstreamInteraction>,
     ) -> Self {
         self.propeller_slipstream_interactions = interactions;
+        self
+    }
+
+    pub(crate) fn with_landing_gear(
+        mut self,
+        landing_gear: Vec<RuntimeLandingGearContact>,
+    ) -> Self {
+        self.landing_gear = landing_gear;
         self
     }
 
@@ -207,6 +217,24 @@ impl AircraftModel {
     #[must_use]
     pub const fn propulsion(&self) -> Option<&RuntimeElectricPropulsion> {
         self.propulsion.as_ref()
+    }
+
+    /// Ordered, initialization-resolved landing-gear contacts (schema v8+).
+    /// Empty means "no gear configured": airborne/headless workflows are unchanged
+    /// and no invisible wheels are fabricated.
+    #[must_use]
+    pub fn landing_gear(&self) -> &[RuntimeLandingGearContact] {
+        &self.landing_gear
+    }
+
+    /// Copies validated gear contacts into hot-loop `GearContact` values.
+    /// No allocation beyond the caller's preallocated aircraft vector.
+    #[must_use]
+    pub fn gear_contacts(&self) -> Vec<GearContact> {
+        self.landing_gear
+            .iter()
+            .map(|contact| contact.contact())
+            .collect()
     }
 
     #[must_use]
@@ -667,6 +695,30 @@ impl PresentationMetadata {
     }
 }
 
+/// Immutable resolved landing-gear contact with stable ID and hot-loop params.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeLandingGearContact {
+    id: String,
+    contact: GearContact,
+}
+
+impl RuntimeLandingGearContact {
+    pub(crate) fn new(id: String, contact: GearContact) -> Self {
+        debug_assert!(validate_gear_contact(&contact).is_ok());
+        Self { id, contact }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn contact(&self) -> GearContact {
+        self.contact
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AircraftModelFingerprint([u8; 32]);
 
@@ -704,6 +756,10 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v7");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V7
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V8 => {
+                hasher.update(b"rcsim:aircraft-model:v8");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -733,6 +789,7 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             update_f64(
                 &mut hasher,
@@ -788,6 +845,7 @@ impl AircraftModelFingerprint {
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                     ));
                     hasher.update(&[1]);
                     update_len(&mut hasher, family_index);
@@ -829,6 +887,7 @@ impl AircraftModelFingerprint {
                         | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                         | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                         | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                 ) {
                     hasher.update(b"esc:series-resistance:v1");
                     update_f64(&mut hasher, config.esc().series_resistance_ohm());
@@ -864,6 +923,7 @@ impl AircraftModelFingerprint {
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                         ) {
                             hasher
                                 .update(b"propeller-coefficients:fixed-table:j-linear-clamped:v1");
@@ -882,6 +942,7 @@ impl AircraftModelFingerprint {
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                         ));
                         hasher.update(
                             b"propeller-coefficients:shaft-speed-linear:j-linear-clamped:v1",
@@ -910,6 +971,7 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
@@ -929,6 +991,7 @@ impl AircraftModelFingerprint {
             AIRCRAFT_MODEL_SCHEMA_VERSION_V5
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             hasher.update(b"aero-surfaces:v1");
             update_len(&mut hasher, model.aero_surfaces.len());
@@ -947,7 +1010,9 @@ impl AircraftModelFingerprint {
 
         if matches!(
             model.schema_version,
-            AIRCRAFT_MODEL_SCHEMA_VERSION_V6 | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             hasher.update(b"aero-downwash-interactions:v1");
             update_len(&mut hasher, model.aero_downwash_interactions.len());
@@ -958,7 +1023,10 @@ impl AircraftModelFingerprint {
             }
         }
 
-        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V7 {
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V7 | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+        ) {
             hasher.update(b"propeller-slipstream-interactions:v1");
             update_len(&mut hasher, model.propeller_slipstream_interactions.len());
             for interaction in &model.propeller_slipstream_interactions {
@@ -977,6 +1045,33 @@ impl AircraftModelFingerprint {
                 for interaction in &model.propeller_slipstream_interactions {
                     update_f64(&mut hasher, interaction.swirl_velocity_factor);
                 }
+            }
+        }
+
+        if model.schema_version >= AIRCRAFT_MODEL_SCHEMA_VERSION_V8 {
+            hasher.update(b"landing-gear:v1");
+            update_len(&mut hasher, model.landing_gear.len());
+            for contact in &model.landing_gear {
+                hasher.update(contact.id.as_bytes());
+                hasher.update(&[0u8]);
+                update_vector(&mut hasher, contact.contact.position_body_m.as_slice());
+                update_f64(&mut hasher, contact.contact.wheel_radius_m);
+                update_f64(&mut hasher, contact.contact.stiffness_n_per_m);
+                update_f64(&mut hasher, contact.contact.damping_n_s_per_m);
+                update_f64(&mut hasher, contact.contact.long_mu);
+                update_f64(&mut hasher, contact.contact.lat_mu);
+                update_f64(&mut hasher, contact.contact.rolling_mu);
+                update_f64(&mut hasher, contact.contact.brake_mu);
+                update_len(
+                    &mut hasher,
+                    match contact.contact.steering {
+                        SteeringSource::Fixed => 0,
+                        SteeringSource::Rudder => 1,
+                    },
+                );
+                update_f64(&mut hasher, contact.contact.max_steer_rad);
+                update_len(&mut hasher, usize::from(contact.contact.steerable));
+                update_len(&mut hasher, usize::from(contact.contact.braked));
             }
         }
 

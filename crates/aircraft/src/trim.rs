@@ -419,6 +419,8 @@ fn evaluate_candidate(
     let input = PilotInput::new(0.0, variables.elevator_command, 0.0, variables.throttle);
     let positions = evaluate_steady_controls(model.controls(), &input);
     let elements = effective_aero_elements_for_positions(model, &positions);
+    // Trim is an airborne equilibrium solve: gear contact is excluded so a
+    // runway-parked configuration cannot masquerade as a trimmed free-flight state.
     let instantaneous =
         evaluate_aircraft_instantaneous(&state, &elements, model, positions.throttle(), config);
     let derivative = *instantaneous.derivative();
