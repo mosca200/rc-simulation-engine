@@ -1,6 +1,9 @@
-use crate::{ControllerAxes, InputError};
-use gilrs::{Axis, EventType, GamepadId, Gilrs, GilrsBuilder};
+use crate::{
+    ControllerAxes, DeviceIdentity, HardwareAxis, InputError, RawControllerState, match_device,
+};
+use gilrs::{Axis, EventType, Gamepad, GamepadId, Gilrs, GilrsBuilder};
 
+/// Enumeration snapshot of one connected input device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDeviceInfo {
     id: usize,
@@ -35,12 +38,24 @@ impl InputDeviceInfo {
     pub const fn product_id(&self) -> Option<u16> {
         self.product_id
     }
+
+    /// Stable serializable identity derived from this snapshot.
+    #[must_use]
+    pub fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity::new(
+            self.name.clone(),
+            Some(self.uuid.clone()),
+            self.vendor_id,
+            self.product_id,
+        )
+    }
 }
 
 /// gilrs backend with deterministic lowest-ID selection and no implicit axis filters.
 pub struct GilrsInputBackend {
     gilrs: Gilrs,
     selected: Option<GamepadId>,
+    explicit: Option<usize>,
 }
 
 impl GilrsInputBackend {
@@ -53,6 +68,7 @@ impl GilrsInputBackend {
         let mut backend = Self {
             gilrs,
             selected: None,
+            explicit: None,
         };
         backend.select_lowest_connected();
         Ok(backend)
@@ -63,24 +79,14 @@ impl GilrsInputBackend {
         let mut devices: Vec<_> = self
             .gilrs
             .gamepads()
-            .map(|(id, gamepad)| InputDeviceInfo {
-                id: id.into(),
-                name: gamepad.name().to_owned(),
-                uuid: encode_uuid(gamepad.uuid()),
-                vendor_id: gamepad.vendor_id(),
-                product_id: gamepad.product_id(),
-            })
+            .map(|(id, gamepad)| device_info(id, gamepad))
             .collect();
         devices.sort_by_key(InputDeviceInfo::id);
         devices
     }
 
     pub fn poll_axes(&mut self) -> Option<ControllerAxes> {
-        let mut selection_may_have_changed = false;
-        while let Some(event) = self.gilrs.next_event() {
-            selection_may_have_changed |=
-                matches!(event.event, EventType::Connected | EventType::Disconnected);
-        }
+        let selection_may_have_changed = self.drain_events();
         if selection_may_have_changed
             || self
                 .selected
@@ -105,12 +111,107 @@ impl GilrsInputBackend {
         self.selected.map(Into::into)
     }
 
+    /// Explicitly selects the connected device matching `identity`.
+    ///
+    /// Matching follows [`crate::match_device`]: a usable profile UUID is
+    /// decisive, otherwise vendor ID + product ID + exact name, otherwise an
+    /// unambiguous exact name. Ambiguous or missing matches are rejected with
+    /// typed errors instead of falling back to another device.
+    pub fn select_device(
+        &mut self,
+        identity: &DeviceIdentity,
+    ) -> Result<InputDeviceInfo, InputError> {
+        self.drain_events();
+        let mut device_ids: Vec<GamepadId> = Vec::new();
+        let mut devices: Vec<InputDeviceInfo> = Vec::new();
+        let mut candidates: Vec<DeviceIdentity> = Vec::new();
+        for (id, gamepad) in self.gilrs.gamepads() {
+            let device = device_info(id, gamepad);
+            device_ids.push(id);
+            candidates.push(device.identity());
+            devices.push(device);
+        }
+        let index = match_device(identity, &candidates)?;
+        self.explicit = Some(device_ids[index].into());
+        Ok(devices[index].clone())
+    }
+
+    /// The explicitly selected device, while it remains connected.
+    #[must_use]
+    pub fn explicit_device(&self) -> Option<InputDeviceInfo> {
+        let selected = self.explicit?;
+        self.gilrs
+            .gamepads()
+            .find(|(id, _)| usize::from(*id) == selected)
+            .map(|(id, gamepad)| device_info(id, gamepad))
+    }
+
+    /// Polls raw axis state of the device selected by [`Self::select_device`].
+    ///
+    /// Returns `Ok(None)` when the requested device is no longer connected,
+    /// and [`InputError::RequestedDeviceNotFound`] when no device has been
+    /// selected. The returned state contains only axes the device actually
+    /// reports; an axis missing from the state is unavailable, not zero.
+    pub fn poll_raw_axes(&mut self) -> Result<Option<RawControllerState>, InputError> {
+        self.drain_events();
+        let Some(selected) = self.explicit else {
+            return Err(InputError::RequestedDeviceNotFound);
+        };
+        let Some((_, gamepad)) = self
+            .gilrs
+            .gamepads()
+            .find(|(id, _)| usize::from(*id) == selected)
+        else {
+            return Ok(None);
+        };
+        let mut state = RawControllerState::new();
+        for axis in HardwareAxis::ALL {
+            let gilrs_axis = gilrs_axis_of(axis);
+            if gamepad.axis_data(gilrs_axis).is_some() {
+                state.insert(axis, f64::from(gamepad.value(gilrs_axis)))?;
+            }
+        }
+        Ok(Some(state))
+    }
+
+    fn drain_events(&mut self) -> bool {
+        let mut selection_may_have_changed = false;
+        while let Some(event) = self.gilrs.next_event() {
+            selection_may_have_changed |=
+                matches!(event.event, EventType::Connected | EventType::Disconnected);
+        }
+        selection_may_have_changed
+    }
+
     fn select_lowest_connected(&mut self) {
         self.selected = self
             .gilrs
             .gamepads()
             .map(|(id, _)| id)
             .min_by_key(|id| usize::from(*id));
+    }
+}
+
+fn device_info(id: GamepadId, gamepad: Gamepad<'_>) -> InputDeviceInfo {
+    InputDeviceInfo {
+        id: id.into(),
+        name: gamepad.name().to_owned(),
+        uuid: encode_uuid(gamepad.uuid()),
+        vendor_id: gamepad.vendor_id(),
+        product_id: gamepad.product_id(),
+    }
+}
+
+fn gilrs_axis_of(axis: HardwareAxis) -> Axis {
+    match axis {
+        HardwareAxis::LeftStickX => Axis::LeftStickX,
+        HardwareAxis::LeftStickY => Axis::LeftStickY,
+        HardwareAxis::LeftZ => Axis::LeftZ,
+        HardwareAxis::RightStickX => Axis::RightStickX,
+        HardwareAxis::RightStickY => Axis::RightStickY,
+        HardwareAxis::RightZ => Axis::RightZ,
+        HardwareAxis::DPadX => Axis::DPadX,
+        HardwareAxis::DPadY => Axis::DPadY,
     }
 }
 
