@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use sim_core::PilotInput;
 
 use crate::{
@@ -173,12 +174,41 @@ fn centered_value(
 /// errors. `to_json` renders the stable pretty-printed format consumed by the
 /// application layer. The profile layer never reads or writes files; path
 /// policy belongs to the application.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ControllerProfile {
     #[serde(default)]
     schema_version: u32,
     device: DeviceIdentity,
     axes: ProfileAxes,
+}
+
+#[derive(Deserialize)]
+struct UnvalidatedControllerProfile {
+    #[serde(default)]
+    schema_version: u32,
+    device: DeviceIdentity,
+    axes: ProfileAxes,
+}
+
+impl UnvalidatedControllerProfile {
+    fn into_profile(self) -> ControllerProfile {
+        ControllerProfile {
+            schema_version: self.schema_version,
+            device: self.device,
+            axes: self.axes,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ControllerProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let profile = UnvalidatedControllerProfile::deserialize(deserializer)?.into_profile();
+        profile.validate().map_err(D::Error::custom)?;
+        Ok(profile)
+    }
 }
 
 impl ControllerProfile {
@@ -205,8 +235,9 @@ impl ControllerProfile {
 
     /// Decodes and validates a profile from JSON text.
     pub fn from_json(text: &str) -> Result<Self, InputError> {
-        let profile: Self = serde_json::from_str(text)
-            .map_err(|error| InputError::InvalidControllerProfile(error.to_string()))?;
+        let profile = serde_json::from_str::<UnvalidatedControllerProfile>(text)
+            .map_err(|error| InputError::InvalidControllerProfile(error.to_string()))?
+            .into_profile();
         profile.validate()?;
         Ok(profile)
     }

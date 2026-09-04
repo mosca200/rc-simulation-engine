@@ -241,6 +241,27 @@ fn invalid_calibration_inside_json_is_rejected_with_typed_errors() {
 }
 
 #[test]
+fn direct_serde_deserialization_cannot_bypass_profile_validation() {
+    let valid = sample_profile().to_json().unwrap();
+    let unsupported_schema =
+        valid.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1);
+    let invalid_calibration =
+        valid.replacen("\"raw_min\": -1.0", "\"raw_min\": 0.5", 1);
+    let duplicate_axis = valid.replacen(
+        "\"source\": \"right_stick_x\"",
+        "\"source\": \"left_stick_x\"",
+        1,
+    );
+
+    for json in [unsupported_schema, invalid_calibration, duplicate_axis] {
+        assert!(
+            serde_json::from_str::<ControllerProfile>(&json).is_err(),
+            "direct serde decode must enforce the ControllerProfile validation boundary"
+        );
+    }
+}
+
+#[test]
 fn malformed_profile_json_is_rejected_as_invalid_profile() {
     let cases = [
         "{",
