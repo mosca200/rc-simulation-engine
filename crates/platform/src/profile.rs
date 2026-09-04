@@ -10,7 +10,11 @@ use crate::{
 pub const CONTROLLER_PROFILE_SCHEMA_VERSION: u32 = 1;
 
 /// One centered control assigned to a hardware axis with its calibration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Decoding from JSON is intentionally unavailable on this type; profiles are
+/// only decoded through [`ControllerProfile::from_json`], which enforces the
+/// validation boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CenteredAxisProfile {
     source: HardwareAxis,
     #[serde(flatten)]
@@ -38,7 +42,11 @@ impl CenteredAxisProfile {
 }
 
 /// The throttle control assigned to a hardware axis with its endpoint calibration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Decoding from JSON is intentionally unavailable on this type; profiles are
+/// only decoded through [`ControllerProfile::from_json`], which enforces the
+/// validation boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ThrottleAxisProfile {
     source: HardwareAxis,
     #[serde(flatten)]
@@ -66,7 +74,18 @@ impl ThrottleAxisProfile {
 }
 
 /// The complete hardware-axis assignment of one controller profile.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Every public construction path only accepts already-validated
+/// calibrations. The type deliberately does not implement
+/// `serde::Deserialize`, so an assignment can never be decoded bypassing
+/// [`ControllerProfile::from_json`].
+///
+/// ```compile_fail
+/// use platform::ProfileAxes;
+///
+/// let axes: ProfileAxes = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProfileAxes {
     roll: CenteredAxisProfile,
     pitch: CenteredAxisProfile,
@@ -168,14 +187,23 @@ fn centered_value(
 
 /// Versioned, JSON-serializable controller profile.
 ///
-/// `from_json` is the only decode entry point and rejects unsupported schema
-/// versions, invalid calibrations, and duplicate axis assignments with typed
-/// errors. `to_json` renders the stable pretty-printed format consumed by the
-/// application layer. The profile layer never reads or writes files; path
+/// Every reachable instance is validated: [`Self::new`] validates the axis
+/// assignment and [`Self::from_json`] is the only JSON decode entry point,
+/// rejecting unsupported schema versions, invalid calibrations, and duplicate
+/// axis assignments with typed errors. The type deliberately does not
+/// implement `serde::Deserialize`, so decoding can never bypass the
+/// validation boundary; decoding happens once at load time, never in the
+/// frame loop. `to_json` renders the stable pretty-printed format consumed by
+/// the application layer. The profile layer never reads or writes files; path
 /// policy belongs to the application.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// ```compile_fail
+/// use platform::ControllerProfile;
+///
+/// let profile: ControllerProfile = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ControllerProfile {
-    #[serde(default)]
     schema_version: u32,
     device: DeviceIdentity,
     axes: ProfileAxes,
@@ -204,11 +232,35 @@ impl ControllerProfile {
     }
 
     /// Decodes and validates a profile from JSON text.
+    ///
+    /// This is the only JSON decode path: `ControllerProfile` does not
+    /// implement `serde::Deserialize`, so decoding cannot bypass validation.
+    /// Structural problems map to [`InputError::InvalidControllerProfile`],
+    /// unsupported schema versions and invalid assignments to their typed
+    /// variants.
     pub fn from_json(text: &str) -> Result<Self, InputError> {
-        let profile: Self = serde_json::from_str(text)
+        let wire: ProfileWire = serde_json::from_str(text)
             .map_err(|error| InputError::InvalidControllerProfile(error.to_string()))?;
-        profile.validate()?;
-        Ok(profile)
+        if wire.schema_version != CONTROLLER_PROFILE_SCHEMA_VERSION {
+            return Err(InputError::UnsupportedProfileVersion {
+                found: wire.schema_version,
+                supported: CONTROLLER_PROFILE_SCHEMA_VERSION,
+            });
+        }
+        let axes = ProfileAxes::new(
+            wire.axes.roll.into_profile(Control::Roll)?,
+            wire.axes.pitch.into_profile(Control::Pitch)?,
+            wire.axes.yaw.into_profile(Control::Yaw)?,
+            ThrottleAxisProfile::new(
+                wire.axes.throttle.source,
+                ThrottleCalibration::new(
+                    wire.axes.throttle.raw_min,
+                    wire.axes.throttle.raw_max,
+                    wire.axes.throttle.inverted,
+                )?,
+            ),
+        );
+        Self::new(wire.device, axes)
     }
 
     /// Encodes the profile as stable pretty-printed JSON text.
@@ -236,4 +288,60 @@ impl ControllerProfile {
     pub fn to_pilot_input(&self, state: &RawControllerState) -> Result<PilotInput, InputError> {
         self.axes.to_pilot_input(state)
     }
+}
+
+/// Private decode representation of the profile JSON schema.
+///
+/// The wire types mirror the schema field by field but carry no validation
+/// invariants and are never exposed. They exist only so
+/// [`ControllerProfile::from_json`] can decode text while keeping
+/// `serde::Deserialize` off every public profile type.
+#[derive(Deserialize)]
+struct ProfileWire {
+    #[serde(default)]
+    schema_version: u32,
+    device: DeviceIdentity,
+    axes: AxesWire,
+}
+
+#[derive(Deserialize)]
+struct AxesWire {
+    roll: CenteredAxisWire,
+    pitch: CenteredAxisWire,
+    yaw: CenteredAxisWire,
+    throttle: ThrottleAxisWire,
+}
+
+#[derive(Deserialize)]
+struct CenteredAxisWire {
+    source: HardwareAxis,
+    raw_min: f64,
+    raw_center: f64,
+    raw_max: f64,
+    inverted: bool,
+    deadzone: f64,
+}
+
+impl CenteredAxisWire {
+    fn into_profile(self, control: Control) -> Result<CenteredAxisProfile, InputError> {
+        Ok(CenteredAxisProfile::new(
+            self.source,
+            CenteredCalibration::new(
+                control,
+                self.raw_min,
+                self.raw_center,
+                self.raw_max,
+                self.inverted,
+                self.deadzone,
+            )?,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+struct ThrottleAxisWire {
+    source: HardwareAxis,
+    raw_min: f64,
+    raw_max: f64,
+    inverted: bool,
 }

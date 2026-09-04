@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{Control, InputError};
 
@@ -14,7 +14,18 @@ pub const MIN_CALIBRATION_SPAN: f64 = 1.0e-6;
 /// Maps `raw_min` to -1, `raw_center` to 0, and `raw_max` to +1. The two half
 /// spans are normalized independently, so asymmetric travel around the
 /// physical center is supported.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// Every instance is validated at construction. The type deliberately does not
+/// implement `serde::Deserialize`, so unvalidated values can never reach
+/// [`Self::apply`]; persisted calibrations are only decoded through
+/// `ControllerProfile::from_json`.
+///
+/// ```compile_fail
+/// use platform::CenteredCalibration;
+///
+/// let calibration: CenteredCalibration = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CenteredCalibration {
     raw_min: f64,
     raw_center: f64,
@@ -127,7 +138,18 @@ impl CenteredCalibration {
 /// Maps `raw_min` to 0 and `raw_max` to 1. No endpoint deadband is applied:
 /// at calibrated endpoints the physical stop is the authoritative reference,
 /// and a deadband would only mask endpoint calibration errors.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// Every instance is validated at construction. The type deliberately does not
+/// implement `serde::Deserialize`, so unvalidated values can never reach
+/// [`Self::apply`]; persisted calibrations are only decoded through
+/// `ControllerProfile::from_json`.
+///
+/// ```compile_fail
+/// use platform::ThrottleCalibration;
+///
+/// let calibration: ThrottleCalibration = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct ThrottleCalibration {
     raw_min: f64,
     raw_max: f64,

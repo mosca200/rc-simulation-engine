@@ -131,6 +131,10 @@ raw samples originate from f32 device values with a typical integer resolution o
 ```
 
 - `ControllerProfile::from_json` decodes and validates; `to_json` renders the stable format.
+- `ControllerProfile`, `ProfileAxes`, and both calibration types deliberately do not implement
+  `serde::Deserialize`. Decoding goes through private wire types inside `from_json`, so the
+  validation boundary cannot be bypassed by direct serde decoding; this is enforced at compile
+  time by `compile_fail` doc tests. Decoding happens once at load time, never in the frame loop.
 - Unsupported schema versions are rejected with `UnsupportedProfileVersion`.
 - Invalid calibrations, malformed JSON, unknown axis identifiers, and duplicate hardware-axis
   assignments (the same axis assigned to more than one of roll/pitch/yaw/throttle) are rejected
