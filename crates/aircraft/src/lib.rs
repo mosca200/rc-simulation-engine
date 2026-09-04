@@ -32,8 +32,9 @@ pub use trim_qualification::{
     AerodynamicElementDomainAudit, FullResidualAudit, LongitudinalTrimQualification,
     LongitudinalTrimQualificationLimits, LongitudinalTrimQualificationOutcome,
     LongitudinalTrimQualificationPoint, PropulsionDomainAudit, QualificationBlocker,
-    QualificationLimitsError, RangeStatus, ShaftSpeedDomainAudit,
-    qualify_longitudinal_trim_solution,
+    QualificationBlockerCategory, QualificationDiagnostics, QualificationLimitsError,
+    QualificationUnavailableReason, RangeStatus, RpmDomainStatus, ShaftSpeedDomainAudit,
+    classify_range_status, qualify_longitudinal_trim_solution, qualify_longitudinal_trim_sweep,
 };
 pub use trim_sweep::{
     LongitudinalTrimSweep, LongitudinalTrimSweepError, LongitudinalTrimSweepOutcome,

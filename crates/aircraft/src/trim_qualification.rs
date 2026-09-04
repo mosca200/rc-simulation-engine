@@ -37,7 +37,7 @@ use crate::{
 use model::AircraftModel;
 use sim_core::{
     PolarTable, PropellerCoefficientMap, PropellerCoefficientSource, RigidBodyState,
-    ShaftSpeedRangeStatus, compute_section_kinematics, evaluate_electric_propulsion_with_source,
+    compute_section_kinematics, evaluate_electric_propulsion_with_source,
 };
 use thiserror::Error;
 
@@ -47,15 +47,53 @@ use thiserror::Error;
 
 /// Whether a value lies inside, below, or above its evidence support.
 ///
+/// The five domain classifications are exhaustive for finite values:
+/// - [`RangeStatus::BelowRange`] — strictly below the supported interval (NOT supported;
+///   the runtime reaches this value only by clamping).
+/// - [`RangeStatus::AtLowerBound`] — bitwise-equal to the supported lower endpoint (supported).
+/// - [`RangeStatus::InRange`] — strictly inside the supported interval (supported).
+/// - [`RangeStatus::AtUpperBound`] — bitwise-equal to the supported upper endpoint (supported).
+/// - [`RangeStatus::AboveRange`] — strictly above the supported interval (NOT supported;
+///   the runtime reaches this value only by clamping).
+///
 /// `NonFinite` is a fail-closed sentinel: NaN / ±Infinity inputs cannot be classified
 /// as `InRange`. Qualification remains `NotQualified` through the `NonFiniteAuditValue`
 /// integrity blocker when any audited value is non-finite.
+///
+/// Boundaries use exact bitwise `f64` equality with the authored endpoint; no epsilon is
+/// introduced (an epsilon would invent support that the authored data does not declare).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeStatus {
     NonFinite,
     BelowRange,
+    AtLowerBound,
     InRange,
+    AtUpperBound,
     AboveRange,
+}
+
+/// Classifies `value` against the closed authored support interval `[lower, upper]`.
+///
+/// Boundary membership uses exact bitwise equality: `value == lower` yields
+/// [`RangeStatus::AtLowerBound`] and `value == upper` yields [`RangeStatus::AtUpperBound`].
+/// This function is pure, allocation-free, and deterministic; it is the single classifier
+/// used for polar alpha domains, Reynolds family domains, and propeller J domains.
+#[must_use]
+pub fn classify_range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
+    if !value.is_finite() {
+        return RangeStatus::NonFinite;
+    }
+    if value < lower {
+        RangeStatus::BelowRange
+    } else if value > upper {
+        RangeStatus::AboveRange
+    } else if value == lower {
+        RangeStatus::AtLowerBound
+    } else if value == upper {
+        RangeStatus::AtUpperBound
+    } else {
+        RangeStatus::InRange
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +369,25 @@ pub struct ShaftSpeedDomainAudit {
     pub shaft_speed_range_status: RangeStatus,
 }
 
+/// RPM support classification.
+///
+/// RPM is ONLY classified against a support range when the authored model/runtime data
+/// explicitly declares one. No RPM envelope is ever invented here: without an explicit
+/// authored RPM support range the audit reports [`RpmDomainStatus::NotDeclared`] while
+/// still recording the runtime RPM value itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RpmDomainStatus {
+    /// The authored model/runtime data declares no explicit RPM support range. The
+    /// runtime RPM value is recorded unclassified; no envelope is invented.
+    NotDeclared,
+    /// An explicit authored RPM support range exists and was classified against.
+    Declared {
+        lower_rpm: f64,
+        upper_rpm: f64,
+        status: RangeStatus,
+    },
+}
+
 /// Propulsion operating-point audit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PropulsionDomainAudit {
@@ -350,12 +407,99 @@ pub enum PropulsionDomainAudit {
         /// Shaft-speed domain audit. `None` for fixed propeller tables (no shaft-speed
         /// map domain exists). `Some` for shaft-speed maps.
         shaft_speed_domain: Option<ShaftSpeedDomainAudit>,
+        /// RPM support classification. `NotDeclared` unless the authored data explicitly
+        /// declares an RPM support range.
+        rpm_domain: RpmDomainStatus,
+        /// Thrust produced at the audited operating point [N].
+        thrust_n: f64,
+        /// Shaft torque produced at the audited operating point [N·m].
+        torque_n_m: f64,
     },
 }
 
 // ---------------------------------------------------------------------------
 // Qualification outcome
 // ---------------------------------------------------------------------------
+
+/// Categorization of a [`QualificationBlocker`], used to select the typed outcome variant.
+///
+/// The mapping is total and deterministic; no string codes are involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationBlockerCategory {
+    /// Authored-domain violation (aero alpha, Reynolds family, propulsion J/shaft speed).
+    Domain,
+    /// Off-axis residual-limit violation (caller-supplied limits).
+    Residual,
+    /// Integrity failure (non-finite audit value, failed deterministic re-evaluation).
+    Integrity,
+}
+
+impl QualificationBlocker {
+    /// Returns the deterministic category of this blocker.
+    #[must_use]
+    pub const fn category(&self) -> QualificationBlockerCategory {
+        match self {
+            Self::AerodynamicAlphaBelowRange { .. }
+            | Self::AerodynamicAlphaAboveRange { .. }
+            | Self::ReynoldsContributingNodeAlphaBelowRange { .. }
+            | Self::ReynoldsContributingNodeAlphaAboveRange { .. }
+            | Self::ReynoldsBelowRange { .. }
+            | Self::ReynoldsAboveRange { .. }
+            | Self::PropellerShaftSpeedBelowRange { .. }
+            | Self::PropellerShaftSpeedAboveRange { .. }
+            | Self::PropellerAdvanceRatioBelowRange { .. }
+            | Self::PropellerAdvanceRatioAboveRange { .. } => QualificationBlockerCategory::Domain,
+            Self::SideForceLimitExceeded { .. }
+            | Self::RollMomentLimitExceeded { .. }
+            | Self::YawMomentLimitExceeded { .. }
+            | Self::LateralAccelerationLimitExceeded { .. }
+            | Self::RollAngularAccelerationLimitExceeded { .. }
+            | Self::YawAngularAccelerationLimitExceeded { .. } => {
+                QualificationBlockerCategory::Residual
+            }
+            Self::NonFiniteAuditValue { .. } | Self::ReEvaluationFailure => {
+                QualificationBlockerCategory::Integrity
+            }
+        }
+    }
+}
+
+/// Complete diagnostics for one audited trim point (a point whose trim evaluation exists
+/// and was therefore fully audited). Nothing is zeroed, filtered, or truncated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualificationDiagnostics {
+    blockers: Vec<QualificationBlocker>,
+    residual_audit: FullResidualAudit,
+    aero_audits: Vec<AerodynamicElementDomainAudit>,
+    propulsion_audit: PropulsionDomainAudit,
+}
+
+impl QualificationDiagnostics {
+    /// All blockers in the documented deterministic order (aero elements in model order,
+    /// then propulsion, then residual limits, then integrity). ALL blockers are preserved.
+    #[must_use]
+    pub fn blockers(&self) -> &[QualificationBlocker] {
+        &self.blockers
+    }
+
+    /// Full signed residual audit.
+    #[must_use]
+    pub const fn residual_audit(&self) -> &FullResidualAudit {
+        &self.residual_audit
+    }
+
+    /// Per-element aerodynamic domain audits in model element order.
+    #[must_use]
+    pub fn aero_audits(&self) -> &[AerodynamicElementDomainAudit] {
+        &self.aero_audits
+    }
+
+    /// Propulsion domain audit.
+    #[must_use]
+    pub const fn propulsion_audit(&self) -> &PropulsionDomainAudit {
+        &self.propulsion_audit
+    }
+}
 
 /// Per-point qualification result.
 #[derive(Debug, Clone, PartialEq)]
@@ -364,33 +508,84 @@ pub struct LongitudinalTrimQualificationPoint {
     pub outcome: LongitudinalTrimQualificationOutcome,
 }
 
+/// Why qualification could not present trustworthy diagnostics for a point that DID
+/// produce a trim evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationUnavailableReason {
+    /// An audited value was NaN or ±Infinity; the offending field is named here and by
+    /// the matching `NonFiniteAuditValue` blocker in the preserved diagnostics.
+    NonFiniteAuditValue { field: &'static str },
+    /// The accepted trim evaluation could not be re-evaluated identically through the
+    /// authoritative runtime path, so its cached diagnostics cannot be trusted.
+    ReEvaluationFailure,
+    /// The M2.6A sweep flagged the point as a re-evaluation MISMATCH; the point is not
+    /// audited because its solver-cached evaluation is already known to be untrustworthy.
+    SweepReEvaluationMismatch,
+    /// The M2.6A sweep could not produce an independent re-evaluation for the point, so
+    /// there is no trustworthy evaluation to audit.
+    SweepReEvaluationUnverifiable,
+}
+
 /// Outcome of qualifying one trim point.
+///
+/// Variant-selection precedence (documented, deterministic):
+/// 1. [`LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure`] — the point never
+///    produced a trim solution; nothing is audited and NO diagnostics are fabricated.
+/// 2. [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] — for sweep points
+///    whose evaluation integrity was already broken (re-evaluation mismatch/unverifiable),
+///    NO diagnostics are fabricated.
+/// 3. [`LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation`] — at least one
+///    authored-domain blocker exists. ALL blockers (including residual/integrity ones) are
+///    preserved in the diagnostics; nothing is dropped at the first violation.
+/// 4. [`LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation`] — no domain
+///    blockers, but at least one off-axis residual-limit blocker exists.
+/// 5. [`LongitudinalTrimQualificationOutcome::Qualified`] — trim succeeded, every applicable
+///    authored domain is supported, and every off-axis residual limit passes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongitudinalTrimQualificationOutcome {
-    Qualified {
-        residual_audit: FullResidualAudit,
-        aero_audits: Vec<AerodynamicElementDomainAudit>,
-        propulsion_audit: PropulsionDomainAudit,
+    /// Trim succeeded and every applicable authored domain and off-axis limit is supported.
+    Qualified(QualificationDiagnostics),
+    /// The trim solver failed for this point. No aerodynamic or propulsion diagnostics
+    /// exist and none are fabricated.
+    NotQualifiedTrimFailure {
+        failure: crate::trim::LongitudinalTrimFailure,
     },
-    NotQualified {
-        blockers: Vec<QualificationBlocker>,
-        residual_audit: FullResidualAudit,
-        aero_audits: Vec<AerodynamicElementDomainAudit>,
-        propulsion_audit: PropulsionDomainAudit,
+    /// Trim succeeded, but the operating point relies on evidence outside the authored
+    /// domains (extrapolation-by-clamping). ALL blockers are preserved.
+    NotQualifiedDomainViolation(QualificationDiagnostics),
+    /// Trim succeeded, all authored domains are supported, but an off-axis residual
+    /// exceeds a caller-supplied limit. ALL blockers are preserved.
+    NotQualifiedResidualViolation(QualificationDiagnostics),
+    /// The point produced a trim evaluation but its diagnostics cannot be trusted or
+    /// presented (integrity failure). For integrity-failed audits the partially valid
+    /// diagnostics are preserved (`Some`); for already-untrusted sweep points nothing
+    /// is audited (`None`).
+    QualificationUnavailable {
+        reason: QualificationUnavailableReason,
+        diagnostics: Option<QualificationDiagnostics>,
     },
 }
 
 impl LongitudinalTrimQualificationOutcome {
     #[must_use]
     pub const fn is_qualified(&self) -> bool {
-        matches!(self, Self::Qualified { .. })
+        matches!(self, Self::Qualified(_))
     }
 
+    /// All preserved blockers for this outcome. Empty for `Qualified` and
+    /// `NotQualifiedTrimFailure`; for `QualificationUnavailable` the preserved
+    /// diagnostics' blockers are returned when present.
     #[must_use]
     pub fn blockers(&self) -> &[QualificationBlocker] {
         match self {
-            Self::Qualified { .. } => &[],
-            Self::NotQualified { blockers, .. } => blockers,
+            Self::Qualified(diagnostics) => diagnostics.blockers(),
+            Self::NotQualifiedTrimFailure { .. } => &[],
+            Self::NotQualifiedDomainViolation(diagnostics)
+            | Self::NotQualifiedResidualViolation(diagnostics) => diagnostics.blockers(),
+            Self::QualificationUnavailable { diagnostics, .. } => match diagnostics {
+                Some(preserved) => preserved.blockers(),
+                None => &[],
+            },
         }
     }
 }
@@ -406,6 +601,11 @@ pub struct LongitudinalTrimQualification {
 }
 
 impl LongitudinalTrimQualification {
+    /// Private constructor used only by the qualification entry points.
+    const fn from_points(points: Vec<LongitudinalTrimQualificationPoint>) -> Self {
+        Self { points }
+    }
+
     #[must_use]
     pub fn points(&self) -> &[LongitudinalTrimQualificationPoint] {
         &self.points
@@ -439,21 +639,8 @@ impl LongitudinalTrimQualification {
 }
 
 // ---------------------------------------------------------------------------
-// Range-status helper
+// (Range-status classification lives in the public `classify_range_status`.)
 // ---------------------------------------------------------------------------
-
-fn range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
-    if !value.is_finite() {
-        return RangeStatus::NonFinite;
-    }
-    if value < lower {
-        RangeStatus::BelowRange
-    } else if value > upper {
-        RangeStatus::AboveRange
-    } else {
-        RangeStatus::InRange
-    }
-}
 
 fn polar_alpha_bounds(table: &PolarTable) -> (f64, f64) {
     let samples = table.samples();
@@ -712,6 +899,9 @@ pub fn qualify_longitudinal_trim_solution(
         j_upper,
         j_range_status: _,
         shaft_speed_domain,
+        rpm_domain,
+        thrust_n,
+        torque_n_m,
     } = &propulsion_audit
     {
         check_finite_field(&mut integrity_blockers, "throttle", *throttle);
@@ -729,6 +919,8 @@ pub fn qualify_longitudinal_trim_solution(
         check_finite_field(&mut integrity_blockers, "advance_ratio_j", *advance_ratio_j);
         check_finite_field(&mut integrity_blockers, "j_lower", *j_lower);
         check_finite_field(&mut integrity_blockers, "j_upper", *j_upper);
+        check_finite_field(&mut integrity_blockers, "thrust_n", *thrust_n);
+        check_finite_field(&mut integrity_blockers, "torque_n_m", *torque_n_m);
         if let Some(ss_domain) = shaft_speed_domain {
             check_finite_field(
                 &mut integrity_blockers,
@@ -740,6 +932,15 @@ pub fn qualify_longitudinal_trim_solution(
                 "shaft_speed_upper_rad_s",
                 ss_domain.shaft_speed_upper_rad_s,
             );
+        }
+        if let RpmDomainStatus::Declared {
+            lower_rpm,
+            upper_rpm,
+            status: _,
+        } = rpm_domain
+        {
+            check_finite_field(&mut integrity_blockers, "rpm_lower", *lower_rpm);
+            check_finite_field(&mut integrity_blockers, "rpm_upper", *upper_rpm);
         }
     }
 
@@ -839,18 +1040,57 @@ pub fn qualify_longitudinal_trim_solution(
     blockers.extend(residual_limit_blockers);
     blockers.extend(integrity_blockers);
 
-    let outcome = if blockers.is_empty() {
-        LongitudinalTrimQualificationOutcome::Qualified {
-            residual_audit,
-            aero_audits,
-            propulsion_audit,
-        }
-    } else {
-        LongitudinalTrimQualificationOutcome::NotQualified {
+    let outcome = if blockers
+        .iter()
+        .any(|b| b.category() == QualificationBlockerCategory::Domain)
+    {
+        LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(
+            QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            },
+        )
+    } else if blockers
+        .iter()
+        .any(|b| b.category() == QualificationBlockerCategory::Residual)
+    {
+        LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(
+            QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            },
+        )
+    } else if blockers.is_empty() {
+        LongitudinalTrimQualificationOutcome::Qualified(QualificationDiagnostics {
             blockers,
             residual_audit,
             aero_audits,
             propulsion_audit,
+        })
+    } else {
+        // Integrity-only failure: every blocker is an integrity blocker. Report WHY
+        // trustworthy qualification is unavailable, preserving the audited diagnostics.
+        let reason = blockers.iter().find_map(|b| match b {
+            QualificationBlocker::ReEvaluationFailure => {
+                Some(QualificationUnavailableReason::ReEvaluationFailure)
+            }
+            QualificationBlocker::NonFiniteAuditValue { field } => {
+                Some(QualificationUnavailableReason::NonFiniteAuditValue { field })
+            }
+            _ => None,
+        });
+        LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+            reason: reason.expect("integrity-only blockers always map to a reason"),
+            diagnostics: Some(QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            }),
         }
     };
 
@@ -858,6 +1098,68 @@ pub fn qualify_longitudinal_trim_solution(
         target_airspeed_mps,
         outcome,
     }
+}
+
+/// Qualifies a whole longitudinal trim sweep, preserving the sweep's point order exactly.
+///
+/// The returned collection contains exactly one entry per sweep point, in the same order
+/// as the sweep's (and therefore the request's) target airspeeds. For every sweep point:
+///
+/// - `Success` points are fully audited through [`qualify_longitudinal_trim_solution`].
+/// - `TrimFailure` points map to
+///   [`LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure`] carrying the typed
+///   solver failure. NO element, propulsion, or residual diagnostics are fabricated.
+/// - `ReEvaluationMismatch` / `ReEvaluationUnverifiable` points map to
+///   [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] with NO
+///   diagnostics: the point's evaluation integrity was already broken at sweep level,
+///   so auditing its cached values would fabricate untrustworthy evidence.
+#[must_use]
+pub fn qualify_longitudinal_trim_sweep(
+    model: &AircraftModel,
+    config: &AircraftSimulationConfig,
+    sweep: &crate::trim_sweep::LongitudinalTrimSweep,
+    limits: &LongitudinalTrimQualificationLimits,
+) -> LongitudinalTrimQualification {
+    let points = sweep
+        .points()
+        .iter()
+        .map(|sweep_point| {
+            let outcome = match &sweep_point.outcome {
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::Success { solution } => {
+                    qualify_longitudinal_trim_solution(
+                        model,
+                        config,
+                        solution,
+                        limits,
+                        sweep_point.target_airspeed_mps,
+                    )
+                    .outcome
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::TrimFailure { failure } => {
+                    LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure {
+                        failure: failure.clone(),
+                    }
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::ReEvaluationMismatch(_) => {
+                    LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                        reason: QualificationUnavailableReason::SweepReEvaluationMismatch,
+                        diagnostics: None,
+                    }
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(_) => {
+                    LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                        reason: QualificationUnavailableReason::SweepReEvaluationUnverifiable,
+                        diagnostics: None,
+                    }
+                }
+            };
+            LongitudinalTrimQualificationPoint {
+                target_airspeed_mps: sweep_point.target_airspeed_mps,
+                outcome,
+            }
+        })
+        .collect();
+    LongitudinalTrimQualification::from_points(points)
 }
 
 fn check_finite_field(blockers: &mut Vec<QualificationBlocker>, field: &'static str, value: f64) {
@@ -885,7 +1187,7 @@ fn audit_aero_element(
         model::RuntimeAeroPolarBinding::Polar { polar_index } => {
             let table = &model.aero_polars()[polar_index].table();
             let (alpha_lo, alpha_hi) = polar_alpha_bounds(table);
-            let status = range_status(alpha_sample, alpha_lo, alpha_hi);
+            let status = classify_range_status(alpha_sample, alpha_lo, alpha_hi);
 
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::AerodynamicAlphaBelowRange {
@@ -933,7 +1235,7 @@ fn audit_aero_element(
             let nodes = family.nodes();
             let re_lo = nodes[0].reynolds_number();
             let re_hi = nodes[nodes.len() - 1].reynolds_number();
-            let re_status = range_status(re, re_lo, re_hi);
+            let re_status = classify_range_status(re, re_lo, re_hi);
 
             // Contributing-node alpha blockers come BEFORE Reynolds range blockers
             let (lower_node, upper_node, _fraction) = find_reynolds_bracket(family, re);
@@ -1026,12 +1328,12 @@ fn audit_aero_element(
             let alpha_status = if let (Some(ln), Some(un)) = (lower_node, upper_node) {
                 if ln.reynolds_number() == un.reynolds_number() {
                     let (lo, hi) = polar_alpha_bounds(ln.table());
-                    range_status(alpha_sample, lo, hi)
+                    classify_range_status(alpha_sample, lo, hi)
                 } else {
-                    range_status(alpha_sample, alpha_lo, alpha_hi)
+                    classify_range_status(alpha_sample, alpha_lo, alpha_hi)
                 }
             } else {
-                range_status(alpha_sample, alpha_lo, alpha_hi)
+                classify_range_status(alpha_sample, alpha_lo, alpha_hi)
             };
 
             let audit = AerodynamicElementDomainAudit {
@@ -1122,7 +1424,7 @@ fn audit_propulsion(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let j_stat = range_status(j, j_lo, j_hi);
+            let j_stat = classify_range_status(j, j_lo, j_hi);
             if j_stat == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1135,6 +1437,7 @@ fn audit_propulsion(
                 });
             }
             // FIX 6: Fixed table has no shaft-speed map domain -> None.
+            // No authored RPM support range exists in the model/runtime data -> NotDeclared.
             PropulsionDomainAudit::Present {
                 throttle: accepted_throttle,
                 axial_airspeed_mps: prop_output.axial_airspeed_mps,
@@ -1145,17 +1448,16 @@ fn audit_propulsion(
                 j_upper: j_hi,
                 j_range_status: j_stat,
                 shaft_speed_domain: None,
+                rpm_domain: RpmDomainStatus::NotDeclared,
+                thrust_n: prop_output.thrust_n,
+                torque_n_m: prop_output.motor_torque_nm,
             }
         }
         PropellerCoefficientSource::ShaftSpeedMap(map) => {
             let nodes = map.nodes();
             let ss_lo = nodes[0].shaft_speed_rad_s();
             let ss_hi = nodes[nodes.len() - 1].shaft_speed_rad_s();
-            let ss_stat = match ShaftSpeedRangeStatus::from_re(shaft_speed, ss_lo, ss_hi) {
-                ShaftSpeedRangeStatus::BelowRange => RangeStatus::BelowRange,
-                ShaftSpeedRangeStatus::AboveRange => RangeStatus::AboveRange,
-                ShaftSpeedRangeStatus::ExactOrInRange => RangeStatus::InRange,
-            };
+            let ss_stat = classify_range_status(shaft_speed, ss_lo, ss_hi);
             // Shaft-speed blockers BEFORE J blockers (documented order).
             if ss_stat == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerShaftSpeedBelowRange {
@@ -1184,6 +1486,12 @@ fn audit_propulsion(
                     shaft_speed_upper_rad_s: ss_hi,
                     shaft_speed_range_status: ss_stat,
                 }),
+                // No explicit authored RPM support range exists in the model/runtime
+                // data (the map's node range is an authored shaft-speed domain, not an
+                // RPM support range) -> NotDeclared. No RPM envelope is invented.
+                rpm_domain: RpmDomainStatus::NotDeclared,
+                thrust_n: prop_output.thrust_n,
+                torque_n_m: prop_output.motor_torque_nm,
             }
         }
     }
@@ -1201,7 +1509,7 @@ fn audit_map_j_domain(
         let samples = table.samples();
         let j_lo = samples[0].advance_ratio_j;
         let j_hi = samples[samples.len() - 1].advance_ratio_j;
-        let status = range_status(j, j_lo, j_hi);
+        let status = classify_range_status(j, j_lo, j_hi);
         if status == RangeStatus::BelowRange {
             blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                 advance_ratio_j: j,
@@ -1222,7 +1530,7 @@ fn audit_map_j_domain(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = range_status(j, j_lo, j_hi);
+            let status = classify_range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1241,7 +1549,7 @@ fn audit_map_j_domain(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = range_status(j, j_lo, j_hi);
+            let status = classify_range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1261,7 +1569,7 @@ fn audit_map_j_domain(
             let samples = table.samples();
             let j_lo = samples[0].advance_ratio_j;
             let j_hi = samples[samples.len() - 1].advance_ratio_j;
-            let status = range_status(j, j_lo, j_hi);
+            let status = classify_range_status(j, j_lo, j_hi);
             if status == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
                     advance_ratio_j: j,
@@ -1288,10 +1596,10 @@ fn audit_map_j_domain(
 
             let j_lo = j_lo_lower.max(j_lo_upper);
             let j_hi = j_hi_lower.min(j_hi_upper);
-            let status = range_status(j, j_lo, j_hi);
+            let status = classify_range_status(j, j_lo, j_hi);
 
-            let j_in_lower = range_status(j, j_lo_lower, j_hi_lower);
-            let j_in_upper = range_status(j, j_lo_upper, j_hi_upper);
+            let j_in_lower = classify_range_status(j, j_lo_lower, j_hi_lower);
+            let j_in_upper = classify_range_status(j, j_lo_upper, j_hi_upper);
 
             if j_in_lower == RangeStatus::BelowRange || j_in_upper == RangeStatus::BelowRange {
                 blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
@@ -1311,21 +1619,6 @@ fn audit_map_j_domain(
     }
 }
 
-trait ShaftSpeedStatusExt {
-    fn from_re(shaft_speed: f64, lo: f64, hi: f64) -> ShaftSpeedRangeStatus;
-}
-impl ShaftSpeedStatusExt for ShaftSpeedRangeStatus {
-    fn from_re(shaft_speed: f64, lo: f64, hi: f64) -> Self {
-        if shaft_speed < lo {
-            Self::BelowRange
-        } else if shaft_speed > hi {
-            Self::AboveRange
-        } else {
-            Self::ExactOrInRange
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests for private helpers
 // ---------------------------------------------------------------------------
@@ -1337,7 +1630,7 @@ mod tests {
     #[test]
     fn range_status_nan_is_non_finite() {
         assert_eq!(
-            range_status(f64::NAN, -1.0, 1.0),
+            classify_range_status(f64::NAN, -1.0, 1.0),
             RangeStatus::NonFinite,
             "NaN must NOT classify as InRange"
         );
@@ -1346,21 +1639,76 @@ mod tests {
     #[test]
     fn range_status_infinity_is_non_finite() {
         assert_eq!(
-            range_status(f64::INFINITY, -1.0, 1.0),
+            classify_range_status(f64::INFINITY, -1.0, 1.0),
             RangeStatus::NonFinite
         );
         assert_eq!(
-            range_status(f64::NEG_INFINITY, -1.0, 1.0),
+            classify_range_status(f64::NEG_INFINITY, -1.0, 1.0),
             RangeStatus::NonFinite
         );
     }
 
     #[test]
     fn range_status_finite_values_classify_correctly() {
-        assert_eq!(range_status(0.0, -1.0, 1.0), RangeStatus::InRange);
-        assert_eq!(range_status(-1.0, -1.0, 1.0), RangeStatus::InRange);
-        assert_eq!(range_status(1.0, -1.0, 1.0), RangeStatus::InRange);
-        assert_eq!(range_status(-2.0, -1.0, 1.0), RangeStatus::BelowRange);
-        assert_eq!(range_status(2.0, -1.0, 1.0), RangeStatus::AboveRange);
+        assert_eq!(classify_range_status(0.0, -1.0, 1.0), RangeStatus::InRange);
+        assert_eq!(
+            classify_range_status(-2.0, -1.0, 1.0),
+            RangeStatus::BelowRange
+        );
+        assert_eq!(
+            classify_range_status(2.0, -1.0, 1.0),
+            RangeStatus::AboveRange
+        );
+    }
+
+    #[test]
+    fn range_status_distinguishes_exact_bounds_from_interior() {
+        // Exact bitwise lower endpoint
+        assert_eq!(
+            classify_range_status(-1.0, -1.0, 1.0),
+            RangeStatus::AtLowerBound
+        );
+        // Exact bitwise upper endpoint
+        assert_eq!(
+            classify_range_status(1.0, -1.0, 1.0),
+            RangeStatus::AtUpperBound
+        );
+        // Strictly interior on both sides
+        assert_eq!(
+            classify_range_status(-1.0 + f64::EPSILON, -1.0, 1.0),
+            RangeStatus::InRange
+        );
+        assert_eq!(
+            classify_range_status(1.0 - f64::EPSILON, -1.0, 1.0),
+            RangeStatus::InRange
+        );
+        // Just outside is NOT a bound
+        assert_eq!(
+            classify_range_status(-1.0 - f64::EPSILON, -1.0, 1.0),
+            RangeStatus::BelowRange
+        );
+        assert_eq!(
+            classify_range_status(1.0 + f64::EPSILON, -1.0, 1.0),
+            RangeStatus::AboveRange
+        );
+    }
+
+    #[test]
+    fn range_status_degenerate_interval_only_admits_exact_endpoint() {
+        // Single-point support: only the exact value is inside the closed interval.
+        // Documented precedence: the lower endpoint is checked first, so the exact value
+        // of a degenerate interval classifies as AtLowerBound.
+        assert_eq!(
+            classify_range_status(0.5, 0.5, 0.5),
+            RangeStatus::AtLowerBound
+        );
+        assert_eq!(
+            classify_range_status(0.5 + f64::EPSILON, 0.5, 0.5),
+            RangeStatus::AboveRange
+        );
+        assert_eq!(
+            classify_range_status(0.5 - f64::EPSILON, 0.5, 0.5),
+            RangeStatus::BelowRange
+        );
     }
 }
