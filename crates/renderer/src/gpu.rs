@@ -230,6 +230,16 @@ struct RenderBatch {
     material_index: usize,
 }
 
+/// G1E: one articulated surface draw reusing the lit pipeline/materials.
+struct SurfaceRenderBatch {
+    surface: crate::SurfaceId,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    material_index: usize,
+    object_buffer_index: usize,
+}
+
 /// G1C: Terrain chunk GPU resources.
 struct GpuTerrainChunk {
     vertex_buffer: wgpu::Buffer,
@@ -277,6 +287,12 @@ pub struct WgpuRenderer {
 
     // G1C: Aircraft batches (one per primitive).
     aircraft_batches: Vec<RenderBatch>,
+
+    // G1E: articulated overlays (procedural fallback path only).
+    surface_batches: Vec<SurfaceRenderBatch>,
+    surface_binding_table: crate::SurfaceBindingTable,
+    surface_object_buffers: Vec<wgpu::Buffer>,
+    surface_object_bind_groups: Vec<wgpu::BindGroup>,
 
     // G1C: Terrain chunks.
     terrain_chunks: Vec<GpuTerrainChunk>,
@@ -518,6 +534,57 @@ impl WgpuRenderer {
             }
         }
 
+        // G1E: articulated overlays share the procedural fallback geometry.
+        let mut surface_batches = Vec::new();
+        let mut surface_binding_table = crate::SurfaceBindingTable::empty();
+        let mut surface_object_buffers = Vec::new();
+        let mut surface_object_bind_groups = Vec::new();
+        if matches!(asset, PresentationAsset::Procedural(_)) {
+            let articulated = crate::articulated_aircraft_mesh();
+            surface_binding_table = crate::articulated_binding_table();
+            for surface in crate::SurfaceId::control_surfaces() {
+                let Some(mesh) = articulated.surface(surface) else {
+                    continue;
+                };
+                if mesh.vertices().is_empty() {
+                    continue;
+                }
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("control surface vertices"),
+                    contents: bytemuck::cast_slice(mesh.vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("control surface indices"),
+                    contents: bytemuck::cast_slice(mesh.indices()),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("control surface object uniform"),
+                    contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(
+                        &crate::Mat4::identity(),
+                    )),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+                let object_bind_group = matrix_bind_group(
+                    &device,
+                    &object_bind_group_layout,
+                    &object_buffer,
+                    "control surface object bind group",
+                );
+                surface_batches.push(SurfaceRenderBatch {
+                    surface,
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: mesh.indices().len() as u32,
+                    material_index: fallback_material_index,
+                    object_buffer_index: surface_object_buffers.len(),
+                });
+                surface_object_buffers.push(object_buffer);
+                surface_object_bind_groups.push(object_bind_group);
+            }
+        }
+
         // FIX 3: Generate centered terrain (extends in both +X/-X and +Z/-Z).
         let terrain_height_field = crate::terrain::generate_rolling_terrain(
             (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
@@ -657,6 +724,10 @@ impl WgpuRenderer {
             materials,
             _fallback_material_index: fallback_material_index,
             aircraft_batches,
+            surface_batches,
+            surface_binding_table,
+            surface_object_buffers,
+            surface_object_bind_groups,
             terrain_chunks,
             terrain_material_index,
             line_vertex_buffer,
@@ -762,6 +833,21 @@ impl WgpuRenderer {
             bytemuck::bytes_of(&aircraft_object_uniform),
         );
 
+        // G1E: articulated surface uniforms (`root * local hinge`).
+        for batch in &self.surface_batches {
+            let composed = self.surface_binding_table.composed_matrix(
+                &aircraft_model_matrix,
+                batch.surface,
+                frame.surfaces(),
+            );
+            let uniform = ObjectUniform::from_matrix(&composed);
+            self.queue.write_buffer(
+                &self.surface_object_buffers[batch.object_buffer_index],
+                0,
+                bytemuck::bytes_of(&uniform),
+            );
+        }
+
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -839,6 +925,21 @@ impl WgpuRenderer {
             for batch in &self.aircraft_batches {
                 let material = &self.materials[batch.material_index];
                 render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+                render_pass.set_bind_group(3, &material.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+            }
+
+            // G1E: articulated overlays, each with its persistent object uniform.
+            for batch in &self.surface_batches {
+                let material = &self.materials[batch.material_index];
+                render_pass.set_bind_group(
+                    1,
+                    &self.surface_object_bind_groups[batch.object_buffer_index],
+                    &[],
+                );
                 render_pass.set_bind_group(3, &material.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
                 render_pass

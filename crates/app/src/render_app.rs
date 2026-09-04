@@ -11,8 +11,8 @@ use platform::{
 };
 use renderer::{
     AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderDataError, RenderFrame, RendererError, SurfaceError, WgpuRenderer,
-    aircraft_mesh, load_glb_asset,
+    PresentationAsset, RenderDataError, RendererError, SurfaceError, WgpuRenderer, aircraft_mesh,
+    load_glb_asset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -358,7 +358,10 @@ impl RenderApplication {
                     }
                 };
             self.render_snapshots
-                .push(AircraftRenderSnapshot::post_step(&snapshot));
+                .push(AircraftRenderSnapshot::post_step(
+                    &snapshot,
+                    self.simulation.model(),
+                ));
         }
         if step_plan.dropped_time_s() > 0.0 {
             warn!(
@@ -368,6 +371,7 @@ impl RenderApplication {
         }
 
         let alpha = interpolation_alpha(step_plan.remainder(), self.fixed_step.physics_dt());
+        let snapshot = self.render_snapshots.interpolated_snapshot(alpha);
         let pose = match self
             .render_snapshots
             .interpolated_pose(alpha, self.render_origin_world_ned_m)
@@ -378,7 +382,7 @@ impl RenderApplication {
                 return;
             }
         };
-        let frame = RenderFrame::new(pose);
+        let frame = snapshot.render_frame(pose);
         let render_result = self
             .renderer
             .as_mut()

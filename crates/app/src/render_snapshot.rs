@@ -1,7 +1,10 @@
 use aircraft::{AircraftSimulation, AircraftSimulationConfig, AircraftSnapshot};
-use model::{AircraftModel, load_aircraft_model};
+use model::{AircraftModel, ControlActuator, load_aircraft_model};
 use platform::{InputSource, InputState, KeyboardKey};
-use renderer::{FixedStepAccumulator, RenderDataError, RenderPose, world_ned_pose_to_render};
+use renderer::{
+    ControlSurfacePresentation, FixedStepAccumulator, RenderDataError, RenderFrame, RenderPose,
+    SurfaceId, world_ned_pose_to_render,
+};
 use replay::AircraftSnapshotHash;
 use sim_core::{AeroEnvironment, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyState};
 use sim_math::{Orientation, Vec3};
@@ -13,6 +16,7 @@ pub(crate) struct AircraftRenderSnapshot {
     sim_time_s: f64,
     position_world_ned_m: [f64; 3],
     orientation_world_from_body_wxyz: [f64; 4],
+    surfaces_rad: [f32; 4],
 }
 
 impl AircraftRenderSnapshot {
@@ -20,12 +24,14 @@ impl AircraftRenderSnapshot {
         Self::from_state(0, 0.0, state)
     }
 
-    pub(crate) fn post_step(snapshot: &AircraftSnapshot) -> Self {
-        Self::from_state(
+    pub(crate) fn post_step(snapshot: &AircraftSnapshot, model: &AircraftModel) -> Self {
+        let mut base = Self::from_state(
             snapshot.step_index(),
             snapshot.sim_time_s(),
             snapshot.rigid_body_state(),
-        )
+        );
+        base.surfaces_rad = surface_deflections_from_simulation(model, snapshot);
+        base
     }
 
     fn from_state(step_index: u64, sim_time_s: f64, state: &RigidBodyState) -> Self {
@@ -41,6 +47,7 @@ impl AircraftRenderSnapshot {
                 quaternion.j,
                 quaternion.k,
             ],
+            surfaces_rad: [0.0; 4],
         }
     }
 
@@ -55,8 +62,101 @@ impl AircraftRenderSnapshot {
             sim_time_s,
             position_world_ned_m,
             orientation_world_from_body_wxyz,
+            surfaces_rad: [0.0; 4],
         }
     }
+
+    pub(crate) fn surfaces(&self) -> ControlSurfacePresentation {
+        ControlSurfacePresentation::new(
+            self.surfaces_rad[0],
+            self.surfaces_rad[1],
+            self.surfaces_rad[2],
+            self.surfaces_rad[3],
+            0.0,
+        )
+        .expect("render snapshots only store finite simulated deflections")
+    }
+
+    pub(crate) fn render_frame(&self, pose: RenderPose) -> RenderFrame {
+        RenderFrame::with_surfaces(pose, self.surfaces())
+    }
+}
+
+/// Derives per-surface simulated deflections from committed servo state.
+pub(crate) fn surface_deflections_from_simulation(
+    model: &AircraftModel,
+    snapshot: &AircraftSnapshot,
+) -> [f32; 4] {
+    let positions = snapshot.control_surface_positions();
+    let actuators = model.controls().actuators();
+    let mut out = [0.0f64; 4];
+    let mut fallback = [None, None];
+    let mut fallback_count = 0usize;
+    for binding in model.control_surface_bindings() {
+        let (servo_angle_rad, neutral_rad) = match binding.actuator() {
+            ControlActuator::Aileron => (
+                positions.aileron_angle_rad(),
+                actuators.aileron().neutral_angle_rad(),
+            ),
+            ControlActuator::Elevator => (
+                positions.elevator_angle_rad(),
+                actuators.elevator().neutral_angle_rad(),
+            ),
+            ControlActuator::Rudder => (
+                positions.rudder_angle_rad(),
+                actuators.rudder().neutral_angle_rad(),
+            ),
+        };
+        let deflection_rad = binding.deflection_gain() * (servo_angle_rad - neutral_rad);
+        if !deflection_rad.is_finite() {
+            continue;
+        }
+        if let Some(slot) = explicit_surface_slot(binding.id()) {
+            out[slot] = deflection_rad;
+            continue;
+        }
+        match binding.actuator() {
+            ControlActuator::Aileron => {
+                if fallback_count < 2 {
+                    fallback[fallback_count] = Some(deflection_rad);
+                    fallback_count += 1;
+                }
+            }
+            ControlActuator::Elevator => out[2] = deflection_rad,
+            ControlActuator::Rudder => out[3] = deflection_rad,
+        }
+    }
+    let has_explicit_aileron = model
+        .control_surface_bindings()
+        .iter()
+        .any(|b| explicit_surface_slot(b.id()).is_some_and(|slot| slot < 2));
+    if !has_explicit_aileron {
+        if let Some(value) = fallback[0] {
+            out[0] = value;
+        }
+        if let Some(value) = fallback[1] {
+            out[1] = value;
+        }
+    }
+    let _ = SurfaceId::control_surfaces();
+    out.map(|value| value as f32)
+}
+
+fn explicit_surface_slot(binding_id: &str) -> Option<usize> {
+    let normalized = binding_id.to_ascii_lowercase();
+    if normalized.contains("aileron") && normalized.contains("left") {
+        return Some(0);
+    }
+    if normalized.contains("aileron") && normalized.contains("right") {
+        return Some(1);
+    }
+    if normalized.contains("elevator") {
+        return Some(2);
+    }
+    if normalized.contains("rudder") {
+        return Some(3);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +190,10 @@ impl AircraftRenderSnapshotBuffer {
             render_origin_world_ned_m,
         )
     }
+
+    pub(crate) fn interpolated_snapshot(&self, alpha: f64) -> AircraftRenderSnapshot {
+        interpolate(self.previous, self.current, alpha)
+    }
 }
 
 pub(crate) fn interpolation_alpha(remainder: Duration, physics_dt: Duration) -> f64 {
@@ -113,6 +217,11 @@ fn interpolate(
     } else {
         0.0
     };
+    let surfaces_rad = if alpha < 1.0 {
+        previous.surfaces_rad
+    } else {
+        current.surfaces_rad
+    };
     AircraftRenderSnapshot {
         step_index: if alpha < 1.0 {
             previous.step_index
@@ -132,6 +241,7 @@ fn interpolate(
             current.orientation_world_from_body_wxyz,
             alpha,
         ),
+        surfaces_rad,
     }
 }
 
@@ -313,7 +423,7 @@ fn run_pattern(model: &AircraftModel, pattern: &[Duration]) -> Result<PatternRes
             let snapshot = simulation.step(&sampled);
             inputs.push(sampled);
             hashes.push(AircraftSnapshotHash::from_snapshot(&snapshot));
-            render_buffer.push(AircraftRenderSnapshot::post_step(&snapshot));
+            render_buffer.push(AircraftRenderSnapshot::post_step(&snapshot, model));
             render_insertions += 1;
         }
     }
@@ -336,6 +446,55 @@ mod tests {
 
     fn snapshot(position: [f64; 3], orientation: [f64; 4]) -> AircraftRenderSnapshot {
         AircraftRenderSnapshot::from_components(0, 0.0, position, orientation)
+    }
+
+    fn acro_model() -> AircraftModel {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        load_aircraft_model(&path).expect("acro model must load")
+    }
+
+    fn stepped_snapshot(
+        model: &AircraftModel,
+        input: PilotInput,
+        steps: usize,
+    ) -> AircraftSnapshot {
+        let config = AircraftSimulationConfig::from_physics_hz(
+            DEFAULT_PHYSICS_HZ,
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap();
+        let initial = RigidBodyState {
+            position_world_m: Vec3::new(0.0, 0.0, -100.0),
+            linear_velocity_world_mps: Vec3::new(18.0, 0.0, 0.0),
+            orientation_world_from_body: Orientation::identity(),
+            angular_velocity_body_radps: Vec3::zeros(),
+        };
+        let mut simulation = AircraftSimulation::new(model.clone(), config, initial).unwrap();
+        let mut snapshot = simulation.step(&PilotInput::neutral());
+        for _ in 1..steps.max(1) {
+            snapshot = simulation.step(&input);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn presentation_comes_from_simulated_servo_state_not_keyboard() {
+        let model = acro_model();
+        let before = model.physics_fingerprint();
+        let snapshot = stepped_snapshot(&model, PilotInput::new(1.0, 0.0, 0.0, 0.5), 600);
+        let deflections = surface_deflections_from_simulation(&model, &snapshot);
+        assert!((deflections[0] + deflections[1]).abs() < 1.0e-4);
+        assert!(deflections[0].abs() > 0.05);
+        let pitch = stepped_snapshot(&model, PilotInput::new(0.0, 1.0, 0.0, 0.5), 600);
+        assert!(surface_deflections_from_simulation(&model, &pitch)[2].abs() > 0.05);
+        let yaw = stepped_snapshot(&model, PilotInput::new(0.0, 0.0, 1.0, 0.5), 600);
+        assert!(surface_deflections_from_simulation(&model, &yaw)[3].abs() > 0.05);
+        let neutral = stepped_snapshot(&model, PilotInput::neutral(), 600);
+        for value in surface_deflections_from_simulation(&model, &neutral) {
+            assert!(value.abs() < 1.0e-6);
+        }
+        assert_eq!(model.physics_fingerprint(), before);
     }
 
     fn assert_quaternion_close(actual: [f64; 4], expected: [f64; 4]) {
