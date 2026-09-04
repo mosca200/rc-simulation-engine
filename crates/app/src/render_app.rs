@@ -11,8 +11,8 @@ use platform::{
 };
 use renderer::{
     AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderDataError, RenderFrame, RendererError, SurfaceError, WgpuRenderer,
-    aircraft_mesh, load_glb_asset,
+    PresentationAsset, RenderTerrainMode, RenderDataError, RenderFrame, RendererError, SurfaceError,
+    WgpuRenderer, aircraft_mesh, load_glb_asset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -54,6 +54,7 @@ pub struct RenderOptions {
     altitude_m: f64,
     airspeed_mps: f64,
     replay_output_path: Option<PathBuf>,
+    start_on_ground: bool,
 }
 
 impl RenderOptions {
@@ -64,6 +65,7 @@ impl RenderOptions {
             altitude_m: DEFAULT_ALTITUDE_M,
             airspeed_mps: DEFAULT_AIRSPEED_MPS,
             replay_output_path: None,
+            start_on_ground: false,
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -118,6 +120,9 @@ impl RenderOptions {
                         Some(PathBuf::from(arguments.next().ok_or(
                             RenderAppError::MissingArgumentValue("--record-replay"),
                         )?));
+                }
+                "--start-on-ground" => {
+                    options.start_on_ground = true;
                 }
                 "--help" | "-h" => {
                     super::print_usage();
@@ -228,6 +233,7 @@ struct RenderApplication {
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
     ground_below_render_origin_m: f32,
+    terrain_mode: RenderTerrainMode,
     render_snapshots: AircraftRenderSnapshotBuffer,
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
@@ -254,9 +260,21 @@ impl RenderApplication {
         )?;
         let model_id = model.model_id().to_owned();
         let model_fingerprint = model.physics_fingerprint();
-        let initial_state = render_initial_state(altitude_m, airspeed_mps);
+        let (initial_state, ground_below_render_origin_m, terrain_mode) =
+            if options.start_on_ground {
+                let cg_height_m = compute_ground_start_cg_height(&model);
+                let state = RigidBodyState {
+                    position_world_m: Vec3::new(0.0, 0.0, -cg_height_m),
+                    linear_velocity_world_mps: Vec3::zeros(),
+                    orientation_world_from_body: Orientation::identity(),
+                    angular_velocity_body_radps: Vec3::zeros(),
+                };
+                (state, cg_height_m as f32, RenderTerrainMode::Flat)
+            } else {
+                let state = render_initial_state(altitude_m, airspeed_mps);
+                (state, altitude_m as f32, RenderTerrainMode::Rolling)
+            };
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
-        let ground_below_render_origin_m = altitude_m as f32;
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
@@ -293,6 +311,7 @@ impl RenderApplication {
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
             ground_below_render_origin_m,
+            terrain_mode,
             render_snapshots,
             fixed_step,
             last_frame_time: None,
@@ -432,6 +451,7 @@ impl ApplicationHandler for RenderApplication {
             Arc::clone(&window),
             presentation_asset,
             self.ground_below_render_origin_m,
+            self.terrain_mode,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -544,6 +564,29 @@ fn resolve_presentation_model(
         source: Box::new(source),
     })?;
     Ok(PresentationModel::Glb(asset))
+}
+
+/// Compute the CG height above ground for a ground-start configuration.
+///
+/// Uses the model's landing gear contact points to determine the maximum
+/// wheel-bottom distance below the CG in body FRD coordinates (z-down).
+/// Adds a small settling tolerance for contact-model compression.
+///
+/// Returns the default airborne altitude if no landing gear is configured.
+fn compute_ground_start_cg_height(model: &model::AircraftModel) -> f64 {
+    const GROUND_SETTLING_TOLERANCE_M: f64 = 0.02;
+    let gear = model.landing_gear();
+    if gear.is_empty() {
+        return DEFAULT_ALTITUDE_M;
+    }
+    let max_contact_z = gear
+        .iter()
+        .map(|contact| {
+            let gear = contact.contact();
+            gear.position_body_m[2] + gear.wheel_radius_m
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    max_contact_z + GROUND_SETTLING_TOLERANCE_M
 }
 
 fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {

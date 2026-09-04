@@ -78,6 +78,19 @@ pub enum PresentationAsset<'a> {
     Procedural(&'a AircraftMesh),
 }
 
+/// Terrain visual mode for the renderer.
+///
+/// The physics ground authority is always the flat NED z=0 plane.
+/// This enum only controls the visual terrain mesh shown in the renderer.
+#[derive(Clone, Copy)]
+pub enum RenderTerrainMode {
+    /// Rolling/hilly terrain for airborne visual demos.
+    Rolling,
+    /// Flat terrain aligned with the physics ground plane.
+    /// Suitable for ground operations (taxi, takeoff, landing).
+    Flat,
+}
+
 #[derive(Debug, Error)]
 pub enum RendererError {
     #[error("failed to create the wgpu surface: {0}")]
@@ -302,6 +315,7 @@ impl WgpuRenderer {
         window: Arc<Window>,
         asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
+        terrain_mode: RenderTerrainMode,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
@@ -519,13 +533,21 @@ impl WgpuRenderer {
         }
 
         // FIX 3: Generate centered terrain (extends in both +X/-X and +Z/-Z).
-        let terrain_height_field = crate::terrain::generate_rolling_terrain(
-            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
-            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
-            DEFAULT_TERRAIN_CELL_SPACING_M,
-            -ground_below_render_origin_m,
-            3.0,
-        );
+        let terrain_height_field = match terrain_mode {
+            RenderTerrainMode::Rolling => crate::terrain::generate_rolling_terrain(
+                (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+                (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+                DEFAULT_TERRAIN_CELL_SPACING_M,
+                -ground_below_render_origin_m,
+                3.0,
+            ),
+            RenderTerrainMode::Flat => crate::terrain::generate_flat_terrain(
+                (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+                (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+                DEFAULT_TERRAIN_CELL_SPACING_M,
+                -ground_below_render_origin_m,
+            ),
+        };
         let terrain_material = TerrainMaterial::default();
         // FIX 3: Use centered chunk generation.
         let terrain_chunk_data = generate_centered_terrain_chunks(
@@ -678,6 +700,7 @@ impl WgpuRenderer {
             window,
             PresentationAsset::Procedural(aircraft),
             ground_below_render_origin_m,
+            RenderTerrainMode::Rolling,
         )
         .await
     }
@@ -692,6 +715,7 @@ impl WgpuRenderer {
             window,
             PresentationAsset::Glb(asset),
             ground_below_render_origin_m,
+            RenderTerrainMode::Rolling,
         )
         .await
     }
