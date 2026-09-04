@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod benchmark_app;
+mod controller_app;
 mod first_slice_app;
 mod input_app;
 mod propulsion_bench_app;
@@ -18,6 +19,7 @@ mod xfoil_runner_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
 use benchmark_app::{AircraftBenchmarkOptions, run_aircraft_benchmark};
+use controller_app::{ControllerCommand, run_controller};
 use first_slice_app::{FirstSliceOptions, run_first_slice_validation};
 use input_app::run_input_list;
 use model::{AircraftModelFingerprint, load_aircraft_model};
@@ -47,6 +49,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut arguments = env::args().skip(1);
     match arguments.next() {
+        Some(command) if command == "controller" => {
+            run_controller(ControllerCommand::parse(arguments)?)?;
+            Ok(())
+        }
         Some(command) if command == "input" => match arguments.next().as_deref() {
             Some("list") if arguments.next().is_none() => {
                 run_input_list()?;
@@ -441,6 +447,8 @@ fn print_usage() {
     println!(
         "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays]"
     );
+    println!("  rcsim-app controller list");
+    println!("  rcsim-app controller monitor [--samples N] [--duration-seconds N]");
     println!("  rcsim-app input list");
     println!(
         "  rcsim-app replay record --model PATH --output PATH --steps N [--roll V] [--pitch V] [--yaw V] [--throttle V]"

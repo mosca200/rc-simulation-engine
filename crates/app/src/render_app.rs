@@ -1,5 +1,9 @@
-use crate::render_snapshot::{
-    AircraftRenderSnapshot, AircraftRenderSnapshotBuffer, interpolation_alpha,
+use crate::{
+    controller_app::{
+        ControllerStatusTracker, controller_device_views, format_controller_transition,
+        format_viewer_controller_status,
+    },
+    render_snapshot::{AircraftRenderSnapshot, AircraftRenderSnapshotBuffer, interpolation_alpha},
 };
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
@@ -392,6 +396,7 @@ struct RenderApplication {
     debug_overlays: bool,
     input_state: InputState,
     input_backend: GilrsInputBackend,
+    controller_status: ControllerStatusTracker,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
@@ -448,6 +453,12 @@ impl RenderApplication {
             KeyboardInputState::new(initial_throttle)?,
         );
         let input_backend = GilrsInputBackend::new()?;
+        let selected_controller_id = input_backend.selected_device_id();
+        let controller_devices = input_backend.devices();
+        let controller_views = controller_device_views(&controller_devices, selected_controller_id);
+        let controller_startup_status =
+            format_viewer_controller_status(&controller_views, selected_controller_id);
+        let controller_status = ControllerStatusTracker::new(selected_controller_id);
         let replay_recorder = options
             .replay_output_path
             .as_ref()
@@ -467,6 +478,8 @@ impl RenderApplication {
             initial_ground.weight_on_wheels(),
             terrain_mode,
         );
+        println!();
+        println!("{controller_startup_status}");
         Ok(Self {
             simulation,
             presentation,
@@ -474,6 +487,7 @@ impl RenderApplication {
             debug_overlays: options.debug_overlays,
             input_state,
             input_backend,
+            controller_status,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
@@ -526,8 +540,14 @@ impl RenderApplication {
                 now.saturating_duration_since(previous)
             });
         let step_plan = self.fixed_step.advance(frame_delta);
-        self.input_state
-            .set_controller_axes(self.input_backend.poll_axes());
+        let controller_axes = self.input_backend.poll_axes();
+        let selected_controller_id = self.input_backend.selected_device_id();
+        if let Some(event) = self.controller_status.observe(selected_controller_id) {
+            let devices = self.input_backend.devices();
+            let views = controller_device_views(&devices, selected_controller_id);
+            println!("{}", format_controller_transition(event, &views));
+        }
+        self.input_state.set_controller_axes(controller_axes);
         for _ in 0..step_plan.physics_steps() {
             let input = match self.input_state.sample(PHYSICS_DT.as_secs_f64()) {
                 Ok(input) => input,
@@ -1041,6 +1061,27 @@ mod tests {
                 Err(RenderAppError::InvalidThrottle(_))
             ));
         }
+    }
+
+    #[test]
+    fn existing_render_cli_remains_valid_with_controller_diagnostics_present() {
+        assert!(
+            RenderOptions::parse(
+                [
+                    "--model",
+                    "models/acro_electric_01/model.json",
+                    "--throttle",
+                    "0.55",
+                    "--camera",
+                    "pilot",
+                    "--scenery",
+                    "flying-field",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
