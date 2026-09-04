@@ -153,7 +153,11 @@ impl GilrsInputBackend {
     /// selected. The returned state contains only axes the device actually
     /// reports; an axis missing from the state is unavailable, not zero.
     pub fn poll_raw_axes(&mut self) -> Result<Option<RawControllerState>, InputError> {
+        let had_explicit_selection = self.explicit.is_some();
         self.drain_events();
+        if had_explicit_selection && self.explicit.is_none() {
+            return Ok(None);
+        }
         let Some(selected) = self.explicit else {
             return Err(InputError::RequestedDeviceNotFound);
         };
@@ -177,8 +181,12 @@ impl GilrsInputBackend {
     fn drain_events(&mut self) -> bool {
         let mut selection_may_have_changed = false;
         while let Some(event) = self.gilrs.next_event() {
+            let disconnected = matches!(&event.event, EventType::Disconnected);
             selection_may_have_changed |=
-                matches!(event.event, EventType::Connected | EventType::Disconnected);
+                disconnected || matches!(&event.event, EventType::Connected);
+            if disconnected && self.explicit == Some(event.id.into()) {
+                self.explicit = None;
+            }
         }
         selection_may_have_changed
     }

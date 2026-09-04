@@ -2,6 +2,7 @@
 
 mod benchmark_app;
 mod controller_app;
+mod controller_profile_app;
 mod first_slice_app;
 mod input_app;
 mod propulsion_bench_app;
@@ -445,10 +446,13 @@ fn print_usage() {
         "  rcsim-app propulsion bench [--model PATH] [--throttle V --airspeed-mps MPS | sweep options] [--format table|csv|json] [--output PATH]"
     );
     println!(
-        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays]"
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--controller-profile PATH] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays]"
     );
     println!("  rcsim-app controller list");
-    println!("  rcsim-app controller monitor [--samples N] [--duration-seconds N]");
+    println!(
+        "  rcsim-app controller monitor [--raw] [--device-id ID] [--samples N] [--duration-seconds N]"
+    );
+    println!("  rcsim-app controller calibrate --output PATH [--deadzone VALUE]");
     println!("  rcsim-app input list");
     println!(
         "  rcsim-app replay record --model PATH --output PATH --steps N [--roll V] [--pitch V] [--yaw V] [--throttle V]"

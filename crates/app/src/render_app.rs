@@ -3,6 +3,10 @@ use crate::{
         ControllerStatusTracker, controller_device_views, format_controller_transition,
         format_viewer_controller_status,
     },
+    controller_profile_app::{
+        CalibratedControllerState, ControllerProfileFileError, format_device_identity,
+        load_controller_profile,
+    },
     render_snapshot::{AircraftRenderSnapshot, AircraftRenderSnapshotBuffer, interpolation_alpha},
 };
 use aircraft::{
@@ -13,8 +17,8 @@ use model::{
     PresentationSurface, load_aircraft_model,
 };
 use platform::{
-    GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
-    KeyboardKey,
+    DeviceIdentity, GilrsInputBackend, InputDeviceInfo, InputError, InputMapping, InputSource,
+    InputState, KeyboardInputState, KeyboardKey,
 };
 use renderer::{
     AircraftMesh, CameraConfig, FixedStepAccumulator, FixedStepAccumulatorError,
@@ -63,6 +67,7 @@ pub struct RenderOptions {
     altitude_m: f64,
     airspeed_mps: f64,
     replay_output_path: Option<PathBuf>,
+    controller_profile_path: Option<PathBuf>,
     start_on_ground: bool,
     scenery: SceneryPreset,
     camera: CameraSelection,
@@ -127,6 +132,7 @@ impl RenderOptions {
             altitude_m: DEFAULT_ALTITUDE_M,
             airspeed_mps: DEFAULT_AIRSPEED_MPS,
             replay_output_path: None,
+            controller_profile_path: None,
             start_on_ground: false,
             scenery: SceneryPreset::None,
             camera: CameraSelection::default(),
@@ -184,6 +190,12 @@ impl RenderOptions {
                     options.replay_output_path =
                         Some(PathBuf::from(arguments.next().ok_or(
                             RenderAppError::MissingArgumentValue("--record-replay"),
+                        )?));
+                }
+                "--controller-profile" => {
+                    options.controller_profile_path =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            RenderAppError::MissingArgumentValue("--controller-profile"),
                         )?));
                 }
                 "--start-on-ground" => {
@@ -333,6 +345,8 @@ pub enum RenderAppError {
     FixedStep(#[from] FixedStepAccumulatorError),
     #[error("failed to initialize render input: {0}")]
     Input(#[from] InputError),
+    #[error(transparent)]
+    ControllerProfile(#[from] ControllerProfileFileError),
     #[error("failed to initialize live aircraft replay recording: {0}")]
     Replay(#[from] AircraftReplayError),
     #[error("failed to create the winit event loop: {0}")]
@@ -389,14 +403,128 @@ enum PresentationModel {
     Procedural(AircraftMesh),
 }
 
+enum ViewerInputMode {
+    Legacy {
+        state: InputState,
+        status: ControllerStatusTracker,
+    },
+    Calibrated(Box<CalibratedControllerState>),
+}
+
+impl ViewerInputMode {
+    fn set_key(&mut self, key: KeyboardKey, pressed: bool) {
+        if let Self::Legacy { state, .. } = self {
+            state.set_key(key, pressed);
+        }
+    }
+
+    fn poll_hardware(
+        &mut self,
+        backend: &mut GilrsInputBackend,
+    ) -> Result<Option<&'static str>, InputError> {
+        match self {
+            Self::Legacy { state, status } => {
+                let controller_axes = backend.poll_axes();
+                let selected_controller_id = backend.selected_device_id();
+                if let Some(event) = status.observe(selected_controller_id) {
+                    let devices = backend.devices();
+                    let views = controller_device_views(&devices, selected_controller_id);
+                    println!("{}", format_controller_transition(event, &views));
+                }
+                state.set_controller_axes(controller_axes);
+                Ok(None)
+            }
+            Self::Calibrated(state) => poll_calibrated_hardware(state, backend),
+        }
+    }
+
+    fn sample(&mut self, physics_dt_s: f64) -> Result<PilotInput, InputError> {
+        match self {
+            Self::Legacy { state, .. } => state.sample(physics_dt_s),
+            Self::Calibrated(state) => Ok(state.input()),
+        }
+    }
+}
+
+fn poll_calibrated_hardware(
+    state: &mut CalibratedControllerState,
+    backend: &mut GilrsInputBackend,
+) -> Result<Option<&'static str>, InputError> {
+    if !state.is_connected() {
+        let devices = backend.devices();
+        let identities: Vec<DeviceIdentity> =
+            devices.iter().map(InputDeviceInfo::identity).collect();
+        if state.match_requested_device(&identities).is_err()
+            || backend.select_device(state.requested_device()).is_err()
+        {
+            return Ok(state.neutralize().map(|event| event.message()));
+        }
+    }
+
+    match backend.poll_raw_axes()? {
+        Some(raw_state) => Ok(state
+            .accept_raw_state(&raw_state)?
+            .map(|event| event.message())),
+        None => Ok(state.neutralize().map(|event| event.message())),
+    }
+}
+
+fn initialize_viewer_input(
+    profile_path: Option<&Path>,
+    initial_throttle: f64,
+    backend: &mut GilrsInputBackend,
+) -> Result<(ViewerInputMode, String), RenderAppError> {
+    let Some(profile_path) = profile_path else {
+        let selected_controller_id = backend.selected_device_id();
+        let controller_devices = backend.devices();
+        let controller_views = controller_device_views(&controller_devices, selected_controller_id);
+        let startup_status =
+            format_viewer_controller_status(&controller_views, selected_controller_id);
+        return Ok((
+            ViewerInputMode::Legacy {
+                state: InputState::new(
+                    InputMapping::default(),
+                    KeyboardInputState::new(initial_throttle)?,
+                ),
+                status: ControllerStatusTracker::new(selected_controller_id),
+            },
+            startup_status,
+        ));
+    };
+
+    let profile = load_controller_profile(profile_path)?;
+    let mut state = CalibratedControllerState::new(profile);
+    let devices = backend.devices();
+    let identities: Vec<DeviceIdentity> = devices.iter().map(InputDeviceInfo::identity).collect();
+    state.match_requested_device(&identities)?;
+    let matched = backend.select_device(state.requested_device())?;
+    let raw_state = backend
+        .poll_raw_axes()?
+        .ok_or(InputError::RequestedDeviceNotFound)?;
+    state.accept_raw_state(&raw_state)?;
+
+    let startup_status = format!(
+        "Controller profile:\n{}\n\
+         Profile schema:\n{}\n\
+         Requested controller:\n{}\n\
+         Matched controller:\nsession_id={} {}\n\
+         Input mode:\ncalibrated controller profile",
+        profile_path.display(),
+        state.profile().schema_version(),
+        format_device_identity(state.requested_device()),
+        matched.id(),
+        format_device_identity(&matched.identity()),
+    );
+    Ok((ViewerInputMode::Calibrated(Box::new(state)), startup_status))
+}
+
 struct RenderApplication {
     simulation: AircraftSimulation,
     presentation: PresentationModel,
     scenery_preset: SceneryPreset,
     debug_overlays: bool,
-    input_state: InputState,
+    input_mode: ViewerInputMode,
     input_backend: GilrsInputBackend,
-    controller_status: ControllerStatusTracker,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
@@ -448,17 +576,12 @@ impl RenderApplication {
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
         let config = AircraftSimulationConfig::from_physics_hz(DEFAULT_PHYSICS_HZ, environment)?;
         let simulation = AircraftSimulation::new(model, config, initial_state)?;
-        let input_state = InputState::new(
-            InputMapping::default(),
-            KeyboardInputState::new(initial_throttle)?,
-        );
-        let input_backend = GilrsInputBackend::new()?;
-        let selected_controller_id = input_backend.selected_device_id();
-        let controller_devices = input_backend.devices();
-        let controller_views = controller_device_views(&controller_devices, selected_controller_id);
-        let controller_startup_status =
-            format_viewer_controller_status(&controller_views, selected_controller_id);
-        let controller_status = ControllerStatusTracker::new(selected_controller_id);
+        let mut input_backend = GilrsInputBackend::new()?;
+        let (input_mode, controller_startup_status) = initialize_viewer_input(
+            options.controller_profile_path.as_deref(),
+            initial_throttle,
+            &mut input_backend,
+        )?;
         let replay_recorder = options
             .replay_output_path
             .as_ref()
@@ -485,9 +608,8 @@ impl RenderApplication {
             presentation,
             scenery_preset: options.scenery,
             debug_overlays: options.debug_overlays,
-            input_state,
+            input_mode,
             input_backend,
-            controller_status,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
@@ -540,16 +662,16 @@ impl RenderApplication {
                 now.saturating_duration_since(previous)
             });
         let step_plan = self.fixed_step.advance(frame_delta);
-        let controller_axes = self.input_backend.poll_axes();
-        let selected_controller_id = self.input_backend.selected_device_id();
-        if let Some(event) = self.controller_status.observe(selected_controller_id) {
-            let devices = self.input_backend.devices();
-            let views = controller_device_views(&devices, selected_controller_id);
-            println!("{}", format_controller_transition(event, &views));
+        match self.input_mode.poll_hardware(&mut self.input_backend) {
+            Ok(Some(message)) => println!("{message}"),
+            Ok(None) => {}
+            Err(error) => {
+                self.fail(event_loop, error.into());
+                return;
+            }
         }
-        self.input_state.set_controller_axes(controller_axes);
         for _ in 0..step_plan.physics_steps() {
-            let input = match self.input_state.sample(PHYSICS_DT.as_secs_f64()) {
+            let input = match self.input_mode.sample(PHYSICS_DT.as_secs_f64()) {
                 Ok(input) => input,
                 Err(error) => {
                     self.fail(event_loop, error.into());
@@ -693,7 +815,7 @@ impl ApplicationHandler for RenderApplication {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(key) = keyboard_key(event.physical_key) {
-                    self.input_state
+                    self.input_mode
                         .set_key(key, event.state == ElementState::Pressed);
                 }
             }
@@ -1082,6 +1204,43 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn controller_profile_cli_parses_without_changing_legacy_default() {
+        let legacy = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(legacy.controller_profile_path, None);
+
+        let calibrated = RenderOptions::parse(
+            ["--controller-profile", "controllers/test-radio.json"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            calibrated.controller_profile_path,
+            Some(PathBuf::from("controllers/test-radio.json"))
+        );
+        assert!(matches!(
+            RenderOptions::parse(["--controller-profile".to_owned()].into_iter()),
+            Err(RenderAppError::MissingArgumentValue("--controller-profile"))
+        ));
+    }
+
+    #[test]
+    fn legacy_viewer_mode_keeps_keyboard_fallback_semantics() {
+        let mut mode = ViewerInputMode::Legacy {
+            state: InputState::new(
+                InputMapping::default(),
+                KeyboardInputState::new(0.4).unwrap(),
+            ),
+            status: ControllerStatusTracker::new(None),
+        };
+        mode.set_key(KeyboardKey::RollRight, true);
+        mode.set_key(KeyboardKey::ThrottleIncrease, true);
+        let input = mode.sample(PHYSICS_DT.as_secs_f64()).unwrap();
+        assert_eq!(input.roll(), 1.0);
+        assert_eq!(input.throttle(), 0.401);
     }
 
     #[test]
