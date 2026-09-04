@@ -18,7 +18,6 @@ mod gpu;
 mod math;
 mod mesh;
 mod pose;
-mod surfaces;
 pub mod terrain;
 pub mod texture;
 
@@ -35,15 +34,10 @@ pub use gpu::{
 };
 pub use math::{Mat4, ProjectionError, matrix_to_wgsl_columns, webgpu_perspective};
 pub use mesh::{
-    AircraftMesh, ArticulatedAircraftMesh, LineMesh, MeshError, SAFE_NORMAL, SAFE_UV, Vertex,
-    aircraft_mesh, articulated_aircraft_mesh, articulated_binding_table, ground_plane,
+    AircraftMesh, LineMesh, MeshError, SAFE_NORMAL, SAFE_UV, Vertex, aircraft_mesh, ground_plane,
     ground_plane_at, reference_grid_and_axes, reference_grid_and_axes_at,
 };
 pub use pose::{RenderDataError, RenderFrame, RenderPose, world_ned_pose_to_render};
-pub use surfaces::{
-    CONTROL_SURFACE_COUNT, ControlSurfacePresentation, SurfaceBindingTable, SurfaceHinge,
-    SurfaceId, VISUAL_SLOT_COUNT,
-};
 pub use terrain::{
     TerrainChunk, TerrainHeightField, TerrainMaterial, generate_centered_terrain_chunks,
     generate_flat_terrain, generate_rolling_terrain, generate_terrain_chunks,

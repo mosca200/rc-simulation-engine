@@ -64,38 +64,17 @@ impl RenderPose {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderFrame {
     aircraft_pose: RenderPose,
-    surfaces: crate::ControlSurfacePresentation,
 }
 
 impl RenderFrame {
     #[must_use]
     pub const fn new(aircraft_pose: RenderPose) -> Self {
-        Self {
-            aircraft_pose,
-            surfaces: crate::ControlSurfacePresentation::neutral(),
-        }
-    }
-
-    #[must_use]
-    pub const fn with_surfaces(
-        aircraft_pose: RenderPose,
-        surfaces: crate::ControlSurfacePresentation,
-    ) -> Self {
-        Self {
-            aircraft_pose,
-            surfaces,
-        }
+        Self { aircraft_pose }
     }
 
     #[must_use]
     pub const fn aircraft_pose(&self) -> &RenderPose {
         &self.aircraft_pose
-    }
-
-    /// Per-frame control-surface presentation from simulated servo output.
-    #[must_use]
-    pub const fn surfaces(&self) -> &crate::ControlSurfacePresentation {
-        &self.surfaces
     }
 }
 

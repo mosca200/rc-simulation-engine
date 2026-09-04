@@ -4,20 +4,21 @@ use crate::render_snapshot::{
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
 };
-use model::{AircraftModelFingerprint, ModelLoadError, load_aircraft_model};
+use model::{AircraftModel, AircraftModelFingerprint, ModelLoadError, load_aircraft_model};
 use platform::{
     GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
     KeyboardKey,
 };
 use renderer::{
     AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderTerrainMode, RenderDataError, RenderFrame, RendererError, SurfaceError,
-    WgpuRenderer, aircraft_mesh, load_glb_asset,
+    PresentationAsset, RenderDataError, RenderFrame, RenderTerrainMode, RendererError,
+    SurfaceError, WgpuRenderer, aircraft_mesh, load_glb_asset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
-    AeroEnvironment, AeroEnvironmentError, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyState,
-    SimulationConfigError,
+    AeroEnvironment, AeroEnvironmentError, DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ,
+    FlatGroundPlane, GroundCommand, GroundEvaluation, GroundSurface, PilotInput, RigidBodyState,
+    SimulationConfigError, evaluate_ground_wrench,
 };
 use sim_math::{Orientation, Vec3};
 use std::{
@@ -159,6 +160,13 @@ pub enum RenderAppError {
         #[source]
         source: Box<GlbLoadError>,
     },
+    #[error("render ground start requested for model {model_id:?}, but it has no landing gear")]
+    GroundStartWithoutLandingGear { model_id: String },
+    #[error("model {model_id:?} cannot form a supported render ground start: {reason}")]
+    InvalidGroundStart {
+        model_id: String,
+        reason: &'static str,
+    },
     #[error("failed to initialize AircraftSimulation for render mode: {0}")]
     AircraftSimulation(#[from] AircraftSimulationError),
     #[error("failed to configure the render atmosphere: {0}")]
@@ -253,27 +261,30 @@ impl RenderApplication {
                 path: model_path.clone(),
                 source,
             })?;
-        // FIX 1: Resolve presentation as GlbAsset (not merged AircraftMesh).
+        let model_id = model.model_id().to_owned();
+        let model_fingerprint = model.physics_fingerprint();
+        let (initial_state, ground_below_render_origin_m, terrain_mode, initial_ground) =
+            if options.start_on_ground {
+                let initialized = supported_ground_start(&model)?;
+                (
+                    initialized.state,
+                    initialized.ground_below_render_origin_m,
+                    RenderTerrainMode::Flat,
+                    initialized.ground_evaluation,
+                )
+            } else {
+                (
+                    render_initial_state(altitude_m, airspeed_mps),
+                    altitude_m as f32,
+                    RenderTerrainMode::Rolling,
+                    GroundEvaluation::zero(),
+                )
+            };
+        // Preserve the rigid G1C GLB path; this integration branch does not own G1E.
         let presentation = resolve_presentation_model(
             &model_path,
             model.presentation().map(|value| value.glb_path()),
         )?;
-        let model_id = model.model_id().to_owned();
-        let model_fingerprint = model.physics_fingerprint();
-        let (initial_state, ground_below_render_origin_m, terrain_mode) =
-            if options.start_on_ground {
-                let cg_height_m = compute_ground_start_cg_height(&model);
-                let state = RigidBodyState {
-                    position_world_m: Vec3::new(0.0, 0.0, -cg_height_m),
-                    linear_velocity_world_mps: Vec3::zeros(),
-                    orientation_world_from_body: Orientation::identity(),
-                    angular_velocity_body_radps: Vec3::zeros(),
-                };
-                (state, cg_height_m as f32, RenderTerrainMode::Flat)
-            } else {
-                let state = render_initial_state(altitude_m, airspeed_mps);
-                (state, altitude_m as f32, RenderTerrainMode::Rolling)
-            };
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
@@ -298,9 +309,11 @@ impl RenderApplication {
         print_manual_flight_startup(
             &model_id,
             &model_fingerprint,
-            altitude_m,
-            airspeed_mps,
+            &initial_state,
             initial_throttle,
+            options.start_on_ground,
+            initial_ground.weight_on_wheels(),
+            terrain_mode,
         );
         Ok(Self {
             simulation,
@@ -566,27 +579,97 @@ fn resolve_presentation_model(
     Ok(PresentationModel::Glb(asset))
 }
 
-/// Compute the CG height above ground for a ground-start configuration.
-///
-/// Uses the model's landing gear contact points to determine the maximum
-/// wheel-bottom distance below the CG in body FRD coordinates (z-down).
-/// Adds a small settling tolerance for contact-model compression.
-///
-/// Returns the default airborne altitude if no landing gear is configured.
-fn compute_ground_start_cg_height(model: &model::AircraftModel) -> f64 {
-    const GROUND_SETTLING_TOLERANCE_M: f64 = 0.02;
+#[derive(Debug, Clone, PartialEq)]
+struct GroundStartInitialization {
+    state: RigidBodyState,
+    ground_below_render_origin_m: f32,
+    ground_evaluation: GroundEvaluation,
+}
+
+/// Places a level, stationary aircraft at the unique vertical compression
+/// where the landing-gear springs support its weight on the flat physics plane.
+/// The fixed-iteration bisection is startup-only and deterministic.
+fn supported_ground_start(
+    model: &AircraftModel,
+) -> Result<GroundStartInitialization, RenderAppError> {
     let gear = model.landing_gear();
     if gear.is_empty() {
-        return DEFAULT_ALTITUDE_M;
+        return Err(RenderAppError::GroundStartWithoutLandingGear {
+            model_id: model.model_id().to_owned(),
+        });
     }
-    let max_contact_z = gear
+
+    let minimum_bottom_body_z = gear
         .iter()
         .map(|contact| {
-            let gear = contact.contact();
-            gear.position_body_m[2] + gear.wheel_radius_m
+            let contact = contact.contact();
+            contact.position_body_m.z + contact.wheel_radius_m
+        })
+        .fold(f64::INFINITY, f64::min);
+    let maximum_bottom_body_z = gear
+        .iter()
+        .map(|contact| {
+            let contact = contact.contact();
+            contact.position_body_m.z + contact.wheel_radius_m
         })
         .fold(f64::NEG_INFINITY, f64::max);
-    max_contact_z + GROUND_SETTLING_TOLERANCE_M
+    let minimum_stiffness = gear
+        .iter()
+        .map(|contact| contact.contact().stiffness_n_per_m)
+        .fold(f64::INFINITY, f64::min);
+    let weight_n = model.rigid_body().mass_kg() * DEFAULT_GRAVITY_MPS2;
+
+    // Upper bound is just clear of every wheel. The lower bound guarantees
+    // at least one spring alone would exceed the aircraft weight.
+    let mut unsupported_height_m = maximum_bottom_body_z;
+    let mut overcompressed_height_m = minimum_bottom_body_z - weight_n / minimum_stiffness;
+    for _ in 0..96 {
+        let candidate_height_m = 0.5 * (overcompressed_height_m + unsupported_height_m);
+        let normal_force_n = gear
+            .iter()
+            .map(|contact| {
+                let contact = contact.contact();
+                let bottom_body_z = contact.position_body_m.z + contact.wheel_radius_m;
+                contact.stiffness_n_per_m * (bottom_body_z - candidate_height_m).max(0.0)
+            })
+            .sum::<f64>();
+        if normal_force_n > weight_n {
+            overcompressed_height_m = candidate_height_m;
+        } else {
+            unsupported_height_m = candidate_height_m;
+        }
+    }
+    let cg_height_m = 0.5 * (overcompressed_height_m + unsupported_height_m);
+    if !cg_height_m.is_finite() || cg_height_m <= 0.0 || cg_height_m > f64::from(f32::MAX) {
+        return Err(RenderAppError::InvalidGroundStart {
+            model_id: model.model_id().to_owned(),
+            reason: "computed CG height above the ground plane is not finite and positive",
+        });
+    }
+    let state = RigidBodyState {
+        position_world_m: Vec3::new(0.0, 0.0, -cg_height_m),
+        linear_velocity_world_mps: Vec3::zeros(),
+        orientation_world_from_body: Orientation::identity(),
+        angular_velocity_body_radps: Vec3::zeros(),
+    };
+    let contacts = model.gear_contacts();
+    let ground_evaluation = evaluate_ground_wrench(
+        &state,
+        &contacts,
+        &GroundSurface::Flat(FlatGroundPlane::default()),
+        &GroundCommand::new(0.0, 0.0),
+    );
+    if !ground_evaluation.weight_on_wheels() {
+        return Err(RenderAppError::InvalidGroundStart {
+            model_id: model.model_id().to_owned(),
+            reason: "computed state has no active physical ground contact",
+        });
+    }
+    Ok(GroundStartInitialization {
+        state,
+        ground_below_render_origin_m: cg_height_m as f32,
+        ground_evaluation,
+    })
 }
 
 fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {
@@ -601,9 +684,11 @@ fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {
 fn print_manual_flight_startup(
     model_id: &str,
     fingerprint: &AircraftModelFingerprint,
-    altitude_m: f64,
-    airspeed_mps: f64,
+    initial_state: &RigidBodyState,
     throttle: f64,
+    ground_start: bool,
+    initial_weight_on_wheels: bool,
+    terrain_mode: RenderTerrainMode,
 ) {
     println!("Manual flight controls:");
     println!("A/D = roll");
@@ -619,9 +704,18 @@ fn print_manual_flight_startup(
     }
     println!();
     println!("physics rate: {DEFAULT_PHYSICS_HZ} Hz");
-    println!("initial altitude: {altitude_m:.3} m");
-    println!("initial airspeed: {airspeed_mps:.3} m/s");
+    println!(
+        "initial altitude: {:.3} m",
+        -initial_state.position_world_m.z
+    );
+    println!(
+        "initial airspeed: {:.3} m/s",
+        initial_state.linear_velocity_world_mps.norm()
+    );
     println!("initial throttle: {throttle:.3}");
+    println!("ground_start={ground_start}");
+    println!("initial_weight_on_wheels={initial_weight_on_wheels}");
+    println!("terrain_mode={}", terrain_mode.as_str());
 }
 
 fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
@@ -647,6 +741,12 @@ mod tests {
     use super::*;
     use replay::{AircraftReplayPlayer, AircraftReplayRecording};
 
+    fn repository_model_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+    }
+
     #[test]
     fn throttle_parser_accepts_bounds_and_rejects_invalid_values() {
         for value in ["0", "0.5", "1"] {
@@ -668,6 +768,7 @@ mod tests {
         let defaults = RenderOptions::parse(std::iter::empty()).unwrap();
         assert_eq!(defaults.altitude_m, 30.0);
         assert_eq!(defaults.airspeed_mps, 18.0);
+        assert!(!defaults.start_on_ground);
 
         let options = RenderOptions::parse(
             [
@@ -685,6 +786,12 @@ mod tests {
         assert_eq!(options.altitude_m, 45.5);
         assert_eq!(options.airspeed_mps, 22.25);
         assert_eq!(options.throttle, 0.6);
+    }
+
+    #[test]
+    fn start_on_ground_flag_parses_explicitly() {
+        let options = RenderOptions::parse(["--start-on-ground".to_owned()].into_iter()).unwrap();
+        assert!(options.start_on_ground);
     }
 
     #[test]
@@ -710,6 +817,68 @@ mod tests {
         assert_eq!(state.linear_velocity_world_mps, Vec3::new(22.25, 0.0, 0.0));
         assert_eq!(state.orientation_world_from_body, Orientation::identity());
         assert_eq!(state.angular_velocity_body_radps, Vec3::zeros());
+    }
+
+    #[test]
+    fn ground_start_without_landing_gear_fails_explicitly() {
+        let model_path = repository_model_path("models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        assert!(matches!(
+            supported_ground_start(&model),
+            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
+                if model_id == "acro-electric-01"
+        ));
+        let options = RenderOptions::parse(
+            [
+                "--model".to_owned(),
+                model_path.display().to_string(),
+                "--start-on-ground".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(matches!(
+            RenderApplication::new(options),
+            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
+                if model_id == "acro-electric-01"
+        ));
+    }
+
+    #[test]
+    fn dedicated_ground_demo_starts_supported_on_the_physical_flat_plane() {
+        let model_path = repository_model_path("models/acro_electric_ground_demo/model.json");
+        let model = load_aircraft_model(model_path).unwrap();
+        assert_eq!(
+            model.classification(),
+            model::AircraftClassification::SyntheticTest
+        );
+        assert!(model.reference_aircraft().is_none());
+
+        let initialized = supported_ground_start(&model).unwrap();
+        assert!(initialized.state.validate().is_ok());
+        assert_eq!(initialized.state.linear_velocity_world_mps.x, 0.0);
+        assert_eq!(initialized.state.linear_velocity_world_mps.y, 0.0);
+        assert_eq!(initialized.state.linear_velocity_world_mps.z, 0.0);
+        assert!(initialized.ground_evaluation.weight_on_wheels());
+        assert!(initialized.ground_evaluation.active_contacts > 0);
+        let weight_n = model.rigid_body().mass_kg() * DEFAULT_GRAVITY_MPS2;
+        assert!(
+            (initialized.ground_evaluation.total_normal_force_n - weight_n).abs()
+                <= 1.0e-10 * weight_n
+        );
+
+        let render_origin = vector_to_array(initialized.state.position_world_m);
+        let physical_ground_pose = renderer::world_ned_pose_to_render(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            render_origin,
+        )
+        .unwrap();
+        assert_eq!(
+            physical_ground_pose.translation_render_m()[1],
+            -initialized.ground_below_render_origin_m
+        );
+        assert_eq!(RenderTerrainMode::Flat.as_str(), "flat");
     }
 
     #[test]

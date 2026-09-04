@@ -71,7 +71,7 @@
   "propeller_slipstream_interactions": [],
   "propulsion": {
     "battery": { "open_circuit_voltage_v": 16.8, "internal_resistance_ohm": 0.035 },
-    "esc": { "series_resistance_ohm": 0.01 },
+    "esc": { "series_resistance_ohm": 0.0 },
     "motor": { "kv_rpm_per_v": 900.0, "winding_resistance_ohm": 0.045, "no_load_current_a": 1.2 },
     "propeller": {
       "position_body_m": [0.45, 0.0, 0.0],
@@ -137,7 +137,5 @@
       "braked": true
     }
   ],
-  "presentation": {
-    "glb_path": "../acro_electric_01/aircraft.glb"
-  }
+  "presentation": null
 }

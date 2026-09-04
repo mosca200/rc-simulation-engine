@@ -82,13 +82,23 @@ pub enum PresentationAsset<'a> {
 ///
 /// The physics ground authority is always the flat NED z=0 plane.
 /// This enum only controls the visual terrain mesh shown in the renderer.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderTerrainMode {
     /// Rolling/hilly terrain for airborne visual demos.
     Rolling,
     /// Flat terrain aligned with the physics ground plane.
     /// Suitable for ground operations (taxi, takeoff, landing).
     Flat,
+}
+
+impl RenderTerrainMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rolling => "rolling",
+            Self::Flat => "flat",
+        }
+    }
 }
 
 #[derive(Debug, Error)]
