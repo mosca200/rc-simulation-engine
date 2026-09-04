@@ -34,8 +34,8 @@
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer};
 use crate::{
-    AircraftMesh, ChaseCamera, GlbAsset, Mat4, RenderFrame, Vertex, matrix_to_wgsl_columns,
-    reference_grid_and_axes_at,
+    AircraftMesh, CameraConfig, CameraMode, GlbAsset, Mat4, RenderFrame, Vertex,
+    matrix_to_wgsl_columns, reference_grid_and_axes_at,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -300,7 +300,7 @@ pub struct WgpuRenderer {
     line_vertex_count: u32,
 
     depth_target: DepthTarget,
-    camera: ChaseCamera,
+    camera: CameraMode,
     asynchronous_gpu_error: Arc<AtomicU8>,
 
     show_debug_overlays: bool,
@@ -316,6 +316,7 @@ impl WgpuRenderer {
         asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
         terrain_mode: RenderTerrainMode,
+        camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
@@ -684,7 +685,7 @@ impl WgpuRenderer {
             line_vertex_buffer,
             line_vertex_count: references.vertices().len() as u32,
             depth_target,
-            camera: ChaseCamera::new(size.width, size.height),
+            camera: camera_config.build(size.width, size.height),
             asynchronous_gpu_error,
             show_debug_overlays: true,
         })
@@ -701,6 +702,7 @@ impl WgpuRenderer {
             PresentationAsset::Procedural(aircraft),
             ground_below_render_origin_m,
             RenderTerrainMode::Rolling,
+            CameraConfig::chase_default(),
         )
         .await
     }
@@ -716,6 +718,7 @@ impl WgpuRenderer {
             PresentationAsset::Glb(asset),
             ground_below_render_origin_m,
             RenderTerrainMode::Rolling,
+            CameraConfig::chase_default(),
         )
         .await
     }

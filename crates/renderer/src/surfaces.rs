@@ -284,6 +284,3 @@ fn rotation_about_axis(axis: [f32; 3], angle_rad: f32) -> Mat4 {
         [0.0, 0.0, 0.0, 1.0],
     ])
 }
-
-
-

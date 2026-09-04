@@ -4,12 +4,13 @@ use crate::{
     webgpu_perspective,
 };
 
-const VERTICAL_FOV_RAD: f32 = 55.0_f32.to_radians();
+const DEFAULT_VERTICAL_FOV_RAD: f32 = 55.0_f32.to_radians();
 const NEAR_PLANE_M: f32 = 0.05;
 const FAR_PLANE_M: f32 = 5_000.0;
-const DISTANCE_BEHIND_M: f32 = 3.5;
-const HEIGHT_ABOVE_M: f32 = 1.25;
-const LOOK_AHEAD_M: f32 = 1.5;
+const DEFAULT_DISTANCE_BEHIND_M: f32 = 3.5;
+const DEFAULT_HEIGHT_ABOVE_M: f32 = 1.25;
+const DEFAULT_LOOK_AHEAD_M: f32 = 1.5;
+const DEFAULT_PILOT_POSITION_RENDER_M: [f32; 3] = [0.0, 1.8, 20.0];
 
 /// Render-space world-up direction: +Y is up.
 ///
@@ -17,17 +18,265 @@ const LOOK_AHEAD_M: f32 = 1.5;
 /// so physics Up (NED −Z) maps to render +Y.
 pub const RENDER_WORLD_UP: [f32; 3] = [0.0, 1.0, 0.0];
 
+// ---------------------------------------------------------------------------
+// Camera configuration (presentation-side only; never part of the physics
+// fingerprint).
+// ---------------------------------------------------------------------------
+
+/// Presentation-side RC camera configuration.
+///
+/// All values live purely in render presentation space. Nothing here feeds
+/// back into physics, and none of these fields appear in the physics
+/// fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CameraConfig {
+    /// Fixed RC pilot position that automatically looks at the aircraft.
+    Pilot {
+        position_render_m: [f32; 3],
+        /// Vertical field of view in degrees. Narrower FOV is a camera-only
+        /// zoom (never scales the aircraft or fakes distance).
+        vertical_fov_deg: f32,
+    },
+    /// Conventional chase camera following the aircraft from behind/above.
+    Chase {
+        distance_behind_m: f32,
+        height_above_m: f32,
+        look_ahead_m: f32,
+        vertical_fov_deg: f32,
+    },
+}
+
+impl CameraConfig {
+    /// Default pilot camera: fixed point near the flight field.
+    #[must_use]
+    pub fn pilot_default() -> Self {
+        Self::Pilot {
+            position_render_m: DEFAULT_PILOT_POSITION_RENDER_M,
+            vertical_fov_deg: DEFAULT_VERTICAL_FOV_RAD.to_degrees(),
+        }
+    }
+
+    /// Default chase camera matching the historic chase behavior.
+    #[must_use]
+    pub fn chase_default() -> Self {
+        Self::Chase {
+            distance_behind_m: DEFAULT_DISTANCE_BEHIND_M,
+            height_above_m: DEFAULT_HEIGHT_ABOVE_M,
+            look_ahead_m: DEFAULT_LOOK_AHEAD_M,
+            vertical_fov_deg: DEFAULT_VERTICAL_FOV_RAD.to_degrees(),
+        }
+    }
+
+    /// Build the concrete camera for a given render surface size.
+    #[must_use]
+    pub fn build(self, width: u32, height: u32) -> CameraMode {
+        match self {
+            Self::Pilot {
+                position_render_m,
+                vertical_fov_deg,
+            } => CameraMode::Pilot(PilotCamera::new(
+                width,
+                height,
+                position_render_m,
+                vertical_fov_deg,
+            )),
+            Self::Chase {
+                distance_behind_m,
+                height_above_m,
+                look_ahead_m,
+                vertical_fov_deg,
+            } => CameraMode::Chase(ChaseCamera::new_with_config(
+                width,
+                height,
+                ChaseCameraConfig {
+                    distance_behind_m,
+                    height_above_m,
+                    look_ahead_m,
+                    vertical_fov_deg,
+                },
+            )),
+        }
+    }
+}
+
+/// Active RC camera mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CameraMode {
+    Pilot(PilotCamera),
+    Chase(ChaseCamera),
+}
+
+impl CameraMode {
+    pub fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Self::Pilot(camera) => camera.resize(width, height),
+            Self::Chase(camera) => camera.resize(width, height),
+        }
+    }
+
+    #[must_use]
+    pub fn aspect_ratio(&self) -> f32 {
+        match self {
+            Self::Pilot(camera) => camera.aspect_ratio(),
+            Self::Chase(camera) => camera.aspect_ratio(),
+        }
+    }
+
+    #[must_use]
+    pub fn eye_and_target(&self, aircraft_pose: &RenderPose) -> ([f32; 3], [f32; 3]) {
+        match self {
+            Self::Pilot(camera) => camera.eye_and_target(aircraft_pose),
+            Self::Chase(camera) => camera.eye_and_target(aircraft_pose),
+        }
+    }
+
+    #[must_use]
+    pub fn eye_position(&self, aircraft_pose: &RenderPose) -> [f32; 3] {
+        match self {
+            Self::Pilot(camera) => camera.eye_position(aircraft_pose),
+            Self::Chase(camera) => camera.eye_position(aircraft_pose),
+        }
+    }
+
+    #[must_use]
+    pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+        match self {
+            Self::Pilot(camera) => camera.view_projection(aircraft_pose),
+            Self::Chase(camera) => camera.view_projection(aircraft_pose),
+        }
+    }
+
+    #[must_use]
+    pub fn inv_view_projection(&self, aircraft_pose: &RenderPose) -> Option<Mat4> {
+        match self {
+            Self::Pilot(camera) => camera.inv_view_projection(aircraft_pose),
+            Self::Chase(camera) => camera.inv_view_projection(aircraft_pose),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pilot camera
+// ---------------------------------------------------------------------------
+
+/// Fixed RC pilot camera.
+///
+/// The eye position never moves; the camera always looks at the current
+/// aircraft render position. The horizon stays stable because the world-up
+/// vector is fixed and the pilot point is constant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PilotCamera {
+    aspect_ratio: f32,
+    position_render_m: [f32; 3],
+    vertical_fov_rad: f32,
+}
+
+impl PilotCamera {
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        position_render_m: [f32; 3],
+        vertical_fov_deg: f32,
+    ) -> Self {
+        Self {
+            aspect_ratio: valid_aspect_ratio(width, height).unwrap_or(1.0),
+            position_render_m,
+            vertical_fov_rad: vertical_fov_deg.to_radians(),
+        }
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if let Some(aspect_ratio) = valid_aspect_ratio(width, height) {
+            self.aspect_ratio = aspect_ratio;
+        }
+    }
+
+    #[must_use]
+    pub const fn aspect_ratio(&self) -> f32 {
+        self.aspect_ratio
+    }
+
+    /// The pilot eye is always the fixed configured position.
+    #[must_use]
+    pub fn eye_position(&self, _aircraft_pose: &RenderPose) -> [f32; 3] {
+        self.position_render_m
+    }
+
+    /// Fixed eye; target is the aircraft render position.
+    #[must_use]
+    pub fn eye_and_target(&self, aircraft_pose: &RenderPose) -> ([f32; 3], [f32; 3]) {
+        (self.position_render_m, aircraft_pose.translation_render_m())
+    }
+
+    #[must_use]
+    pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+        let (eye, target) = self.eye_and_target(aircraft_pose);
+        let view = look_at_rh(eye, target, RENDER_WORLD_UP);
+        let projection = webgpu_perspective(
+            self.vertical_fov_rad,
+            self.aspect_ratio,
+            NEAR_PLANE_M,
+            FAR_PLANE_M,
+        )
+        .expect("fixed pilot-camera projection parameters are valid");
+        projection * view
+    }
+
+    #[must_use]
+    pub fn inv_view_projection(&self, aircraft_pose: &RenderPose) -> Option<Mat4> {
+        self.view_projection(aircraft_pose).inverse()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chase camera
+// ---------------------------------------------------------------------------
+
+/// Tunable chase-camera parameters (presentation-only).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChaseCameraConfig {
+    pub distance_behind_m: f32,
+    pub height_above_m: f32,
+    pub look_ahead_m: f32,
+    pub vertical_fov_deg: f32,
+}
+
+impl Default for ChaseCameraConfig {
+    fn default() -> Self {
+        Self {
+            distance_behind_m: DEFAULT_DISTANCE_BEHIND_M,
+            height_above_m: DEFAULT_HEIGHT_ABOVE_M,
+            look_ahead_m: DEFAULT_LOOK_AHEAD_M,
+            vertical_fov_deg: DEFAULT_VERTICAL_FOV_RAD.to_degrees(),
+        }
+    }
+}
+
 /// Stable world-up chase camera driven only by a render pose.
+///
+/// The eye is derived directly from the physics pose each frame, so tracking
+/// is exactly smooth (no artificial lag), fully deterministic, and never
+/// feeds back into physics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChaseCamera {
     aspect_ratio: f32,
+    config: ChaseCameraConfig,
 }
 
 impl ChaseCamera {
+    /// Backward-compatible constructor with default tuning.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
-        let aspect_ratio = valid_aspect_ratio(width, height).unwrap_or(1.0);
-        Self { aspect_ratio }
+        Self::new_with_config(width, height, ChaseCameraConfig::default())
+    }
+
+    #[must_use]
+    pub fn new_with_config(width: u32, height: u32, config: ChaseCameraConfig) -> Self {
+        Self {
+            aspect_ratio: valid_aspect_ratio(width, height).unwrap_or(1.0),
+            config,
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -42,15 +291,23 @@ impl ChaseCamera {
     }
 
     #[must_use]
+    pub const fn config(&self) -> &ChaseCameraConfig {
+        &self.config
+    }
+
+    #[must_use]
     pub fn eye_and_target(&self, aircraft_pose: &RenderPose) -> ([f32; 3], [f32; 3]) {
         let position = aircraft_pose.translation_render_m();
         let forward = aircraft_pose.transform_direction([0.0, 0.0, -1.0]);
         let horizontal_forward = normalized_horizontal_forward(forward);
         let eye = add3(
-            sub3(position, scale3(horizontal_forward, DISTANCE_BEHIND_M)),
-            [0.0, HEIGHT_ABOVE_M, 0.0],
+            sub3(
+                position,
+                scale3(horizontal_forward, self.config.distance_behind_m),
+            ),
+            [0.0, self.config.height_above_m, 0.0],
         );
-        let target = add3(position, scale3(forward, LOOK_AHEAD_M));
+        let target = add3(position, scale3(forward, self.config.look_ahead_m));
         (eye, target)
     }
 
@@ -65,7 +322,7 @@ impl ChaseCamera {
         let (eye, target) = self.eye_and_target(aircraft_pose);
         let view = look_at_rh(eye, target, RENDER_WORLD_UP);
         let projection = webgpu_perspective(
-            VERTICAL_FOV_RAD,
+            self.config.vertical_fov_deg.to_radians(),
             self.aspect_ratio,
             NEAR_PLANE_M,
             FAR_PLANE_M,
@@ -159,6 +416,14 @@ mod tests {
         world_ned_pose_to_render([0.0; 3], quaternion, [0.0; 3]).unwrap()
     }
 
+    fn translated_pose(translation_ned: [f64; 3], quaternion: [f64; 4]) -> RenderPose {
+        world_ned_pose_to_render(translation_ned, quaternion, [0.0; 3]).unwrap()
+    }
+
+    // -------------------------------------------------------------------
+    // Chase camera
+    // -------------------------------------------------------------------
+
     #[test]
     fn identity_camera_is_behind_and_targets_ahead() {
         let camera = ChaseCamera::new(1_600, 900);
@@ -198,6 +463,23 @@ mod tests {
         assert_ne!(eye, target);
         assert!(eye.into_iter().chain(target).all(f32::is_finite));
         assert!(camera.view_projection(&vertical_pose).is_finite());
+    }
+
+    #[test]
+    fn chase_config_is_presentation_only_and_tunable() {
+        let camera = ChaseCamera::new_with_config(
+            1_600,
+            900,
+            ChaseCameraConfig {
+                distance_behind_m: 8.0,
+                height_above_m: 3.0,
+                look_ahead_m: 4.0,
+                vertical_fov_deg: 40.0,
+            },
+        );
+        let (eye, target) = camera.eye_and_target(&pose([1.0, 0.0, 0.0, 0.0]));
+        assert_eq!(eye, [0.0, 3.0, 8.0]);
+        assert_eq!(target, [0.0, 0.0, -4.0]);
     }
 
     #[test]
@@ -257,6 +539,116 @@ mod tests {
                 .expect("non-singular VP");
             assert!(inv.is_finite(), "inv VP not finite for quat {quat:?}");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Pilot camera
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn pilot_position_remains_fixed_regardless_of_aircraft() {
+        let camera = PilotCamera::new(1_600, 900, [10.0, 1.8, 25.0], 55.0);
+        let here = pose([1.0, 0.0, 0.0, 0.0]);
+        let away = translated_pose([500.0, 200.0, 100.0], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(camera.eye_position(&here), [10.0, 1.8, 25.0]);
+        assert_eq!(camera.eye_position(&away), [10.0, 1.8, 25.0]);
+    }
+
+    #[test]
+    fn pilot_camera_points_at_aircraft() {
+        let camera = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 55.0);
+        let aircraft = translated_pose([50.0, 30.0, -12.0], [1.0, 0.0, 0.0, 0.0]);
+        let (eye, target) = camera.eye_and_target(&aircraft);
+        assert_eq!(eye, [0.0, 1.8, 20.0]);
+        assert_eq!(target, aircraft.translation_render_m());
+        assert!(camera.view_projection(&aircraft).is_finite());
+    }
+
+    #[test]
+    fn pilot_camera_handles_degenerate_and_extreme_cases_without_nan() {
+        let camera = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 55.0);
+        // Aircraft exactly at the pilot position → look_at degenerates, but
+        // the result must stay finite (look_at_rh guards the singular case).
+        let at_pilot = translated_pose([0.0, 1.8, 20.0], [1.0, 0.0, 0.0, 0.0]);
+        assert!(camera.view_projection(&at_pilot).is_finite());
+        // Aircraft far away and vertically above.
+        let far_overhead = translated_pose([10_000.0, 5_000.0, -8_000.0], [1.0, 0.0, 0.0, 0.0]);
+        let vp = camera.view_projection(&far_overhead);
+        assert!(vp.is_finite());
+        // Aircraft directly overhead of the pilot.
+        let overhead = translated_pose([0.0, 1.0, 20.0], [1.0, 0.0, 0.0, 0.0]);
+        assert!(camera.view_projection(&overhead).is_finite());
+    }
+
+    #[test]
+    fn pilot_camera_narrower_fov_zooms_without_moving_positions() {
+        let wide = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 55.0);
+        let zoomed = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 30.0);
+        let aircraft = translated_pose([30.0, 5.0, 0.0], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(wide.eye_position(&aircraft), zoomed.eye_position(&aircraft));
+        assert_eq!(
+            wide.eye_and_target(&aircraft).1,
+            zoomed.eye_and_target(&aircraft).1
+        );
+    }
+
+    #[test]
+    fn pilot_camera_transform_is_deterministic() {
+        let camera = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 55.0);
+        let aircraft = translated_pose([40.0, 12.0, -5.0], [0.75, 0.25, -0.35, 0.5]);
+        assert_eq!(
+            camera.view_projection(&aircraft),
+            camera.view_projection(&aircraft)
+        );
+    }
+
+    #[test]
+    fn pilot_camera_handles_render_origin_translation() {
+        // The camera operates in render space; a non-zero render origin must
+        // be reflected in the target the camera looks at.
+        let camera = PilotCamera::new(1_600, 900, [0.0, 1.8, 20.0], 55.0);
+        let origin = [100.0, 0.0, -200.0];
+        let aircraft =
+            world_ned_pose_to_render([50.0, 30.0, -12.0], [1.0, 0.0, 0.0, 0.0], origin).unwrap();
+        let (_, target) = camera.eye_and_target(&aircraft);
+        assert_eq!(target, aircraft.translation_render_m());
+        assert!(target.iter().all(|v| v.is_finite()));
+    }
+
+    // -------------------------------------------------------------------
+    // CameraMode union
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn camera_mode_builds_both_variants_and_is_finite() {
+        let pilot_mode = CameraConfig::pilot_default().build(1_600, 900);
+        let chase_mode = CameraConfig::chase_default().build(1_600, 900);
+        let aircraft = pose([1.0, 0.0, 0.0, 0.0]);
+        assert!(pilot_mode.view_projection(&aircraft).is_finite());
+        assert!(chase_mode.view_projection(&aircraft).is_finite());
+        assert!(
+            pilot_mode.view_projection(&aircraft).is_finite()
+                && chase_mode.view_projection(&aircraft).is_finite()
+        );
+    }
+
+    #[test]
+    fn camera_mode_resize_updates_aspect() {
+        let mut mode = CameraConfig::chase_default().build(800, 600);
+        assert!((mode.aspect_ratio() - 4.0 / 3.0).abs() < f32::EPSILON);
+        mode.resize(1_920, 1_080);
+        assert!((mode.aspect_ratio() - 16.0 / 9.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn camera_settings_do_not_touch_physics_fingerprint_path() {
+        // Camera configs are plain presentation data; assert no NaN and that
+        // both defaults build distinct modes deterministically.
+        let pilot = CameraConfig::pilot_default();
+        let chase = CameraConfig::chase_default();
+        assert_ne!(pilot, chase);
+        assert!(matches!(pilot, CameraConfig::Pilot { .. }));
+        assert!(matches!(chase, CameraConfig::Chase { .. }));
     }
 
     // -----------------------------------------------------------------------

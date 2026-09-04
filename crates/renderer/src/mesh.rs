@@ -287,7 +287,6 @@ fn colored_box(minimum: [f32; 3], maximum: [f32; 3], color: [f32; 3]) -> Aircraf
     AircraftMesh { vertices, indices }
 }
 
-
 const DEFAULT_GROUND_Y_RENDER_M: f32 = -30.04;
 const DEFAULT_GRID_Y_RENDER_M: f32 = -30.0;
 
