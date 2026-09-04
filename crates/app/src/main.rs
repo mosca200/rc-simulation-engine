@@ -3,19 +3,25 @@
 mod benchmark_app;
 mod first_slice_app;
 mod input_app;
+mod propulsion_bench_app;
 mod render_app;
 mod render_snapshot;
 mod replay_app;
 mod telemetry_app;
+mod telemetry_experiment;
 mod trim_characterization_app;
 mod trim_sweep_validation_app;
 mod validation_app;
+mod xfoil_campaign_app;
+mod xfoil_evidence_bundle_app;
+mod xfoil_runner_app;
 
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
 use benchmark_app::{AircraftBenchmarkOptions, run_aircraft_benchmark};
 use first_slice_app::{FirstSliceOptions, run_first_slice_validation};
 use input_app::run_input_list;
 use model::{AircraftModelFingerprint, load_aircraft_model};
+use propulsion_bench_app::{PropulsionBenchOptions, run_propulsion_bench};
 use render_app::{RenderOptions, run_render};
 use replay::ReplayRecorder;
 use replay_app::{ReplayOptions, run_replay};
@@ -59,6 +65,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             None => Err("missing benchmark command; expected `aircraft`".into()),
         },
+        Some(command) if command == "propulsion" => match arguments.next().as_deref() {
+            Some("bench") => {
+                run_propulsion_bench(PropulsionBenchOptions::parse(arguments)?)?;
+                Ok(())
+            }
+            Some(propulsion_command) => {
+                Err(format!("unknown propulsion command: {propulsion_command}").into())
+            }
+            None => Err("missing propulsion command; expected `bench`".into()),
+        },
         Some(command) if command == "replay" => {
             run_replay(ReplayOptions::parse(arguments)?)?;
             Ok(())
@@ -71,6 +87,46 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_render(RenderOptions::parse(arguments)?)?;
             Ok(())
         }
+        Some(command) if command == "xfoil" => match arguments.next().as_deref() {
+            Some("run-campaign") => {
+                let options = xfoil_runner_app::XfoilRunnerOptions::parse(arguments)?;
+                match xfoil_runner_app::run_xfoil_campaign(options) {
+                    Ok(xfoil_runner_app::XfoilRunnerStatus::Completed) => Ok(()),
+                    Ok(xfoil_runner_app::XfoilRunnerStatus::Incomplete) => {
+                        eprintln!(
+                            "XFOIL campaign execution is incomplete; see xfoil_execution.md"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some("build-evidence-bundle") => {
+                let options =
+                    xfoil_evidence_bundle_app::XfoilEvidenceBundleOptions::parse(arguments)?;
+                match xfoil_evidence_bundle_app::run_xfoil_evidence_bundle(options) {
+                    Ok(xfoil_evidence_bundle_app::XfoilEvidenceBundleStatus::Built) => Ok(()),
+                    Ok(xfoil_evidence_bundle_app::XfoilEvidenceBundleStatus::NotPromotable) => {
+                        eprintln!(
+                            "XFOIL execution output is not promotable to an evidence bundle"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(command) => Err(format!("unknown XFOIL command: {command}").into()),
+            None => Err(
+                "missing XFOIL command; expected `run-campaign` or `build-evidence-bundle`"
+                    .into(),
+            ),
+        },
         Some(command) if command == "analyze" => match arguments.next().as_deref() {
             Some("trim-characterization") => {
                 let options =
@@ -82,6 +138,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             None => Err("missing analysis target; expected `trim-characterization`".into()),
         },
         Some(command) if command == "validate" => match arguments.next().as_deref() {
+            Some("xfoil-campaign") => {
+                let options = xfoil_campaign_app::XfoilCampaignOptions::parse(arguments)?;
+                match xfoil_campaign_app::run_xfoil_campaign_validation(options) {
+                    Ok(xfoil_campaign_app::XfoilCampaignRunStatus::Qualified) => Ok(()),
+                    Ok(xfoil_campaign_app::XfoilCampaignRunStatus::NotQualified) => {
+                        eprintln!(
+                            "XFOIL campaign analysis completed with status Not Qualified; see xfoil_campaign.md"
+                        );
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             Some("first-slice") => {
                 run_first_slice_validation(FirstSliceOptions::parse(arguments)?)?;
                 Ok(())
@@ -110,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(())
             }
             None => Err(
-                "missing validation target; expected `acro-electric-01`, `first-slice`, or `trim-sweep`".into(),
+                "missing validation target; expected `acro-electric-01`, `first-slice`, `trim-sweep`, or `xfoil-campaign`".into(),
             ),
         },
         Some(command) if command == "aircraft" => run_aircraft(AircraftOptions::parse(arguments)?),
@@ -364,7 +436,10 @@ fn print_usage() {
         "  rcsim-app benchmark aircraft [--model PATH] [--warmup-steps N] [--steps N] [--physics-hz HZ]"
     );
     println!(
-        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--record-replay PATH]"
+        "  rcsim-app propulsion bench [--model PATH] [--throttle V --airspeed-mps MPS | sweep options] [--format table|csv|json] [--output PATH]"
+    );
+    println!(
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays]"
     );
     println!("  rcsim-app input list");
     println!(
@@ -376,8 +451,14 @@ fn print_usage() {
     );
     println!("  rcsim-app telemetry from-replay --model PATH --replay PATH --output PATH");
     println!("  rcsim-app telemetry analyze --input PATH");
+    println!("  rcsim-app telemetry experiment --model PATH --schedule PATH --output PATH");
     println!("  rcsim-app validate acro-electric-01 --output-dir PATH");
     println!("  rcsim-app validate first-slice --output-dir PATH");
+    println!("  rcsim-app validate xfoil-campaign --manifest PATH --output-dir PATH");
+    println!(
+        "  rcsim-app xfoil run-campaign --manifest PATH --xfoil-executable PATH --output-dir PATH [--timeout-seconds N]"
+    );
+    println!("  rcsim-app xfoil build-evidence-bundle --execution-dir PATH --output-dir PATH");
     println!(
         "  rcsim-app analyze trim-characterization --model PATH --speed-mps M [--speed-mps M]... --alpha-min-rad A --alpha-max-rad A --elevator-min A --elevator-max A --throttle-min A --throttle-max A --initial-alpha-rad A --initial-elevator A --initial-throttle A --force-tolerance-n N --moment-tolerance-nm N --max-iterations N --alpha-step-rad A --elevator-step E --output-dir PATH"
     );

@@ -1,0 +1,143 @@
+{
+  "schema_version": 8,
+  "model_id": "acro-electric-ground-demo",
+  "display_name": "Acro Electric Ground Demo (Synthetic)",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 2.3,
+    "inertia_body_kg_m2": [
+      [0.18, 0.0, 0.0],
+      [0.0, 0.24, 0.0],
+      [0.0, 0.0, 0.39]
+    ]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [
+      {
+        "id": "main-airfoil",
+        "samples": [
+          { "alpha_rad": -0.35, "cl": -0.82, "cd": 0.12, "cm": -0.015 },
+          { "alpha_rad": -0.17, "cl": -0.58, "cd": 0.048, "cm": -0.018 },
+          { "alpha_rad": 0.0, "cl": 0.08, "cd": 0.025, "cm": -0.02 },
+          { "alpha_rad": 0.17, "cl": 0.76, "cd": 0.052, "cm": -0.024 },
+          { "alpha_rad": 0.35, "cl": 0.98, "cd": 0.145, "cm": -0.03 }
+        ]
+      },
+      {
+        "id": "tail-symmetric",
+        "samples": [
+          { "alpha_rad": -0.35, "cl": -0.7, "cd": 0.11, "cm": 0.0 },
+          { "alpha_rad": -0.17, "cl": -0.5, "cd": 0.042, "cm": 0.0 },
+          { "alpha_rad": 0.0, "cl": 0.0, "cd": 0.022, "cm": 0.0 },
+          { "alpha_rad": 0.17, "cl": 0.5, "cd": 0.042, "cm": 0.0 },
+          { "alpha_rad": 0.35, "cl": 0.7, "cd": 0.11, "cm": 0.0 }
+        ]
+      }
+    ],
+    "polar_families": [],
+    "elements": [
+      { "id": "wing-left-fixed", "position_body_m": [0.04, -0.36, 0.0], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.24, "chord_m": 0.29, "polar_binding": { "kind": "polar", "polar_id": "main-airfoil" } },
+      { "id": "wing-left-aileron", "position_body_m": [-0.05, -0.7, 0.0], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.1, "chord_m": 0.2, "polar_binding": { "kind": "polar", "polar_id": "main-airfoil" } },
+      { "id": "wing-right-fixed", "position_body_m": [0.04, 0.36, 0.0], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.24, "chord_m": 0.29, "polar_binding": { "kind": "polar", "polar_id": "main-airfoil" } },
+      { "id": "wing-right-aileron", "position_body_m": [-0.05, 0.7, 0.0], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.1, "chord_m": 0.2, "polar_binding": { "kind": "polar", "polar_id": "main-airfoil" } },
+      { "id": "horizontal-tail-fixed", "position_body_m": [-0.61, 0.0, 0.025], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.1, "chord_m": 0.2, "polar_binding": { "kind": "polar", "polar_id": "tail-symmetric" } },
+      { "id": "elevator", "position_body_m": [-0.69, 0.0, 0.025], "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0], "area_m2": 0.06, "chord_m": 0.12, "polar_binding": { "kind": "polar", "polar_id": "tail-symmetric" } },
+      { "id": "vertical-tail-fixed", "position_body_m": [-0.56, 0.0, -0.11], "orientation_body_from_element_wxyz": [0.7071067811865476, -0.7071067811865475, 0.0, 0.0], "area_m2": 0.065, "chord_m": 0.18, "polar_binding": { "kind": "polar", "polar_id": "tail-symmetric" } },
+      { "id": "rudder", "position_body_m": [-0.68, 0.0, -0.11], "orientation_body_from_element_wxyz": [0.7071067811865476, -0.7071067811865475, 0.0, 0.0], "area_m2": 0.04, "chord_m": 0.12, "polar_binding": { "kind": "polar", "polar_id": "tail-symmetric" } }
+    ],
+    "surfaces": []
+  },
+  "controls": {
+    "response": {
+      "roll": { "rate": 0.82, "expo": 0.3 },
+      "pitch": { "rate": 0.76, "expo": 0.28 },
+      "yaw": { "rate": 0.68, "expo": 0.22 }
+    },
+    "servos": {
+      "aileron": { "min_angle_rad": -0.38, "neutral_angle_rad": 0.0, "max_angle_rad": 0.38, "max_speed_rad_s": 4.5, "reversed": false },
+      "elevator": { "min_angle_rad": -0.42, "neutral_angle_rad": 0.0, "max_angle_rad": 0.42, "max_speed_rad_s": 4.2, "reversed": false },
+      "rudder": { "min_angle_rad": -0.48, "neutral_angle_rad": 0.0, "max_angle_rad": 0.48, "max_speed_rad_s": 3.8, "reversed": true }
+    }
+  },
+  "control_surface_bindings": [
+    { "id": "aileron-left", "element_id": "wing-left-aileron", "actuator": "aileron", "deflection_gain": 1.0 },
+    { "id": "aileron-right", "element_id": "wing-right-aileron", "actuator": "aileron", "deflection_gain": -1.0 },
+    { "id": "elevator", "element_id": "elevator", "actuator": "elevator", "deflection_gain": -1.0 },
+    { "id": "rudder", "element_id": "rudder", "actuator": "rudder", "deflection_gain": -1.0 }
+  ],
+  "aero_downwash_interactions": [],
+  "propeller_slipstream_interactions": [],
+  "propulsion": {
+    "battery": { "open_circuit_voltage_v": 16.8, "internal_resistance_ohm": 0.035 },
+    "esc": { "series_resistance_ohm": 0.0 },
+    "motor": { "kv_rpm_per_v": 900.0, "winding_resistance_ohm": 0.045, "no_load_current_a": 1.2 },
+    "propeller": {
+      "position_body_m": [0.45, 0.0, 0.0],
+      "orientation_body_from_prop_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "diameter_m": 0.28,
+      "spin_direction": "positive_about_local_x"
+    },
+    "coefficient_source": {
+      "kind": "fixed_table",
+      "samples": [
+        { "advance_ratio_j": -0.25, "ct": 0.135, "cq": 0.019 },
+        { "advance_ratio_j": 0.0, "ct": 0.125, "cq": 0.018 },
+        { "advance_ratio_j": 0.5, "ct": 0.09, "cq": 0.013 },
+        { "advance_ratio_j": 1.0, "ct": 0.04, "cq": 0.007 },
+        { "advance_ratio_j": 1.5, "ct": 0.0, "cq": 0.002 }
+      ]
+    }
+  },
+  "landing_gear": [
+    {
+      "id": "nose-gear",
+      "position_body_m": [0.25, 0.0, 0.08],
+      "wheel_radius_m": 0.02,
+      "normal_stiffness_n_per_m": 8000.0,
+      "normal_damping_n_s_per_m": 400.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.0,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": false
+    },
+    {
+      "id": "left-main",
+      "position_body_m": [-0.05, -0.18, 0.07],
+      "wheel_radius_m": 0.03,
+      "normal_stiffness_n_per_m": 10000.0,
+      "normal_damping_n_s_per_m": 500.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.8,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": true
+    },
+    {
+      "id": "right-main",
+      "position_body_m": [-0.05, 0.18, 0.07],
+      "wheel_radius_m": 0.03,
+      "normal_stiffness_n_per_m": 10000.0,
+      "normal_damping_n_s_per_m": 500.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.8,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": true
+    }
+  ],
+  "presentation": {
+    "glb_path": "aircraft.glb"
+  }
+}

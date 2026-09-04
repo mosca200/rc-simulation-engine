@@ -485,7 +485,7 @@ fn build_criteria(
         "Basic user flight session",
         GateKind::Manual,
         AcceptanceStatus::NotTested,
-        "no real interactive user flight session has been observed and recorded",
+        "not evaluated by the headless validator; manual evidence is tracked separately",
     ));
     criteria.push(live_recording_criterion(model));
     criteria.push(performance_criterion(model));
@@ -519,7 +519,7 @@ fn build_criteria(
         "Graphical viewer verification",
         GateKind::Manual,
         AcceptanceStatus::NotTested,
-        "the renderer has not been visually observed in a persisted, reviewable verification",
+        "not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report",
     ));
     criteria.push(headless_criterion());
     criteria.push(match replay_result {
@@ -806,7 +806,7 @@ fn minimal_scene_criterion() -> CriterionRecord {
         } else {
             AcceptanceStatus::Fail
         },
-        "ground-plane and sky-clear implementations exist, but no visual observation has been performed",
+        "ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator",
     )
     .with("ground_triangles", ground.indices().len() / 3)
     .with("visual_verification", "NOT_TESTED")

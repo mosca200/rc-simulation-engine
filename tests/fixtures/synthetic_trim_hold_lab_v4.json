@@ -1,0 +1,74 @@
+{
+  "schema_version": 4,
+  "model_id": "synthetic_trim_hold_lab_v4",
+  "display_name": "Synthetic Exact Trim-Hold Laboratory Aircraft",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 1.5,
+    "inertia_body_kg_m2": [[0.16, 0.0, 0.0], [0.0, 0.35, 0.0], [0.0, 0.0, 0.45]]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [
+      {
+        "id": "trim-wing-polar",
+        "samples": [
+          {"alpha_rad": -0.35, "cl": -0.7471733333333333, "cd": 0.0, "cm": 0.0},
+          {"alpha_rad":  0.00, "cl":  0.0,                "cd": 0.0, "cm": 0.0},
+          {"alpha_rad":  0.10, "cl":  0.21347809523809524,"cd": 0.0, "cm": 0.0},
+          {"alpha_rad":  0.35, "cl":  0.7471733333333333, "cd": 0.0, "cm": 0.0}
+        ]
+      },
+      {
+        "id": "trim-tail-polar",
+        "samples": [
+          {"alpha_rad": -0.35, "cl": -1.40, "cd": 0.0, "cm": 0.0},
+          {"alpha_rad":  0.00, "cl":  0.00, "cd": 0.0, "cm": 0.0},
+          {"alpha_rad":  0.35, "cl":  1.40, "cd": 0.0, "cm": 0.0}
+        ]
+      }
+    ],
+    "polar_families": [],
+    "elements": [
+      {
+        "id": "trim-wing",
+        "position_body_m": [0.0, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "area_m2": 0.50,
+        "chord_m": 0.30,
+        "polar_binding": {"kind": "polar", "polar_id": "trim-wing-polar"}
+      },
+      {
+        "id": "trim-tail",
+        "position_body_m": [-0.75, 0.0, 0.0],
+        "orientation_body_from_element_wxyz": [0.9987502603949663, 0.0, -0.04997916927067833, 0.0],
+        "area_m2": 0.10,
+        "chord_m": 0.18,
+        "polar_binding": {"kind": "polar", "polar_id": "trim-tail-polar"}
+      }
+    ]
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 1.0, "expo": 0.0},
+      "pitch": {"rate": 1.0, "expo": 0.0},
+      "yaw": {"rate": 1.0, "expo": 0.0}
+    },
+    "servos": {
+      "aileron": {"min_angle_rad": -0.35, "neutral_angle_rad": 0.0, "max_angle_rad": 0.35, "max_speed_rad_s": 8.0, "reversed": false},
+      "elevator": {"min_angle_rad": -0.40, "neutral_angle_rad": 0.0, "max_angle_rad": 0.40, "max_speed_rad_s": 8.0, "reversed": false},
+      "rudder": {"min_angle_rad": -0.35, "neutral_angle_rad": 0.0, "max_angle_rad": 0.35, "max_speed_rad_s": 8.0, "reversed": false}
+    }
+  },
+  "control_surface_bindings": [
+    {
+      "id": "trim-elevator-binding",
+      "element_id": "trim-tail",
+      "actuator": "elevator",
+      "deflection_gain": -1.0
+    }
+  ],
+  "propulsion": null,
+  "presentation": null
+}

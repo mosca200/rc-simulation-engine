@@ -1,13 +1,14 @@
 use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5, AircraftClassification,
-    ReferenceAircraftMetadata,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V8, AircraftClassification, ReferenceAircraftMetadata,
 };
 use sim_core::{
-    AeroElement, ControlSystemConfig, ElectricPropulsionConfig, PolarTable,
+    AeroElement, ControlSystemConfig, ElectricPropulsionConfig, GearContact, PolarTable,
     PropellerCoefficientSource, PropellerCoefficientTable, PropellerSpinDirection,
-    ReynoldsPolarFamily, RigidBodyParams,
+    ReynoldsPolarFamily, RigidBodyParams, SteeringSource, validate_gear_contact,
 };
 
 /// Immutable validated aircraft configuration with all file references resolved.
@@ -23,10 +24,13 @@ pub struct AircraftModel {
     aero_polar_families: Vec<RuntimeReynoldsPolarFamily>,
     aero_elements: Vec<RuntimeAeroElement>,
     aero_surfaces: Vec<RuntimeAeroSurface>,
+    aero_downwash_interactions: Vec<RuntimeAeroDownwashInteraction>,
+    propeller_slipstream_interactions: Vec<RuntimePropellerSlipstreamInteraction>,
     kinematic_viscosity_m2_s: Option<f64>,
     controls: ControlSystemConfig,
     control_surface_bindings: Vec<RuntimeControlSurfaceBinding>,
     propulsion: Option<RuntimeElectricPropulsion>,
+    landing_gear: Vec<RuntimeLandingGearContact>,
     presentation: Option<PresentationMetadata>,
 }
 
@@ -55,10 +59,13 @@ impl AircraftModel {
             aero_polar_families: Vec::new(),
             aero_elements,
             aero_surfaces: Vec::new(),
+            aero_downwash_interactions: Vec::new(),
+            propeller_slipstream_interactions: Vec::new(),
             kinematic_viscosity_m2_s: None,
             controls,
             control_surface_bindings,
             propulsion,
+            landing_gear: Vec::new(),
             presentation,
         }
     }
@@ -100,6 +107,30 @@ impl AircraftModel {
 
     pub(crate) fn with_aero_surfaces(mut self, aero_surfaces: Vec<RuntimeAeroSurface>) -> Self {
         self.aero_surfaces = aero_surfaces;
+        self
+    }
+
+    pub(crate) fn with_aero_downwash_interactions(
+        mut self,
+        interactions: Vec<RuntimeAeroDownwashInteraction>,
+    ) -> Self {
+        self.aero_downwash_interactions = interactions;
+        self
+    }
+
+    pub(crate) fn with_propeller_slipstream_interactions(
+        mut self,
+        interactions: Vec<RuntimePropellerSlipstreamInteraction>,
+    ) -> Self {
+        self.propeller_slipstream_interactions = interactions;
+        self
+    }
+
+    pub(crate) fn with_landing_gear(
+        mut self,
+        landing_gear: Vec<RuntimeLandingGearContact>,
+    ) -> Self {
+        self.landing_gear = landing_gear;
         self
     }
 
@@ -154,7 +185,19 @@ impl AircraftModel {
         &self.aero_surfaces
     }
 
-    /// Explicit model-authoritative viscosity for schema-v3/v4/v5 Reynolds aerodynamics.
+    /// Ordered, initialization-resolved one-way downwash interactions.
+    #[must_use]
+    pub fn aero_downwash_interactions(&self) -> &[RuntimeAeroDownwashInteraction] {
+        &self.aero_downwash_interactions
+    }
+
+    /// Ordered, initialization-resolved propeller-slipstream interactions.
+    #[must_use]
+    pub fn propeller_slipstream_interactions(&self) -> &[RuntimePropellerSlipstreamInteraction] {
+        &self.propeller_slipstream_interactions
+    }
+
+    /// Explicit model-authoritative viscosity for schema-v3+ Reynolds aerodynamics.
     #[must_use]
     pub const fn kinematic_viscosity_m2_s(&self) -> Option<f64> {
         self.kinematic_viscosity_m2_s
@@ -176,6 +219,24 @@ impl AircraftModel {
         self.propulsion.as_ref()
     }
 
+    /// Ordered, initialization-resolved landing-gear contacts (schema v8+).
+    /// Empty means "no gear configured": airborne/headless workflows are unchanged
+    /// and no invisible wheels are fabricated.
+    #[must_use]
+    pub fn landing_gear(&self) -> &[RuntimeLandingGearContact] {
+        &self.landing_gear
+    }
+
+    /// Copies validated gear contacts into hot-loop `GearContact` values.
+    /// No allocation beyond the caller's preallocated aircraft vector.
+    #[must_use]
+    pub fn gear_contacts(&self) -> Vec<GearContact> {
+        self.landing_gear
+            .iter()
+            .map(|contact| contact.contact())
+            .collect()
+    }
+
     #[must_use]
     pub const fn presentation(&self) -> Option<&PresentationMetadata> {
         self.presentation.as_ref()
@@ -185,6 +246,26 @@ impl AircraftModel {
     #[must_use]
     pub fn physics_fingerprint(&self) -> AircraftModelFingerprint {
         AircraftModelFingerprint::from_model(self)
+    }
+
+    /// Find a Reynolds polar family by ID and return its index.
+    pub(crate) fn find_reynolds_family_index(&self, family_id: &str) -> Option<usize> {
+        self.aero_polar_families
+            .iter()
+            .position(|f| f.id() == family_id)
+    }
+
+    /// Replace the Reynolds polar family at `index` in-place, preserving the family ID.
+    ///
+    /// This keeps the family index stable so existing aero-element bindings
+    /// (`RuntimeAeroPolarBinding::ReynoldsFamily { family_index }`) remain valid.
+    pub(crate) fn replace_reynolds_polar_family_at(
+        &mut self,
+        index: usize,
+        family: ReynoldsPolarFamily,
+    ) {
+        let id = self.aero_polar_families[index].id().to_owned();
+        self.aero_polar_families[index] = RuntimeReynoldsPolarFamily::new(id, family);
     }
 }
 
@@ -357,7 +438,7 @@ impl RuntimeAeroElement {
 
 /// Immutable resolved aerodynamic surface grouping existing aero elements.
 ///
-/// Created during model loading (schema v5 only). Surfaces group existing
+/// Created during model loading (schema v5+). Surfaces group existing
 /// aerodynamic elements for future finite-wing physics (M2.8B).
 ///
 /// - `element_indices`: compact resolved handles into `AircraftModel::aero_elements()`
@@ -442,10 +523,102 @@ impl RuntimeAeroSurface {
     }
 }
 
+/// Immutable one-way aerodynamic downwash interaction with resolved surface handles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeAeroDownwashInteraction {
+    id: String,
+    source_surface_index: usize,
+    target_surface_index: usize,
+    downwash_factor: f64,
+}
+
+impl RuntimeAeroDownwashInteraction {
+    pub(crate) fn new(
+        id: String,
+        source_surface_index: usize,
+        target_surface_index: usize,
+        downwash_factor: f64,
+    ) -> Self {
+        Self {
+            id,
+            source_surface_index,
+            target_surface_index,
+            downwash_factor,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn source_surface_index(&self) -> usize {
+        self.source_surface_index
+    }
+
+    #[must_use]
+    pub const fn target_surface_index(&self) -> usize {
+        self.target_surface_index
+    }
+
+    #[must_use]
+    pub const fn downwash_factor(&self) -> f64 {
+        self.downwash_factor
+    }
+}
+
+/// Immutable one-way propeller-slipstream coupling with resolved element handles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimePropellerSlipstreamInteraction {
+    id: String,
+    target_element_indices: Vec<usize>,
+    slipstream_velocity_factor: f64,
+    swirl_velocity_factor: f64,
+}
+
+impl RuntimePropellerSlipstreamInteraction {
+    pub(crate) fn new(
+        id: String,
+        target_element_indices: Vec<usize>,
+        slipstream_velocity_factor: f64,
+        swirl_velocity_factor: f64,
+    ) -> Self {
+        Self {
+            id,
+            target_element_indices,
+            slipstream_velocity_factor,
+            swirl_velocity_factor,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn target_element_indices(&self) -> &[usize] {
+        &self.target_element_indices
+    }
+
+    #[must_use]
+    pub const fn slipstream_velocity_factor(&self) -> f64 {
+        self.slipstream_velocity_factor
+    }
+
+    /// Tangential wake speed as a multiple of actuator-disk induced velocity.
+    #[must_use]
+    pub const fn swirl_velocity_factor(&self) -> f64 {
+        self.swirl_velocity_factor
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeElectricPropulsion {
     config: ElectricPropulsionConfig,
     coefficient_source: PropellerCoefficientSource,
+    propeller_rotational_inertia_kg_m2: f64,
 }
 
 impl RuntimeElectricPropulsion {
@@ -456,7 +629,16 @@ impl RuntimeElectricPropulsion {
         Self {
             config,
             coefficient_source,
+            propeller_rotational_inertia_kg_m2: 0.0,
         }
+    }
+
+    pub(crate) const fn with_propeller_rotational_inertia(
+        mut self,
+        propeller_rotational_inertia_kg_m2: f64,
+    ) -> Self {
+        self.propeller_rotational_inertia_kg_m2 = propeller_rotational_inertia_kg_m2;
+        self
     }
 
     pub(crate) const fn new_legacy(
@@ -479,6 +661,12 @@ impl RuntimeElectricPropulsion {
         &self.coefficient_source
     }
 
+    /// Rotor polar moment of inertia about the configured propeller axis.
+    #[must_use]
+    pub const fn propeller_rotational_inertia_kg_m2(&self) -> f64 {
+        self.propeller_rotational_inertia_kg_m2
+    }
+
     /// Legacy fixed-table accessor. Schema-v4 map consumers should use `coefficient_source`.
     #[must_use]
     pub const fn coefficient_table(&self) -> &PropellerCoefficientTable {
@@ -491,19 +679,125 @@ impl RuntimeElectricPropulsion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PresentationMetadata {
     glb_path: String,
+    articulated_surfaces: Vec<PresentationArticulatedSurface>,
 }
 
 impl PresentationMetadata {
-    pub(crate) fn new(glb_path: String) -> Self {
-        Self { glb_path }
+    pub(crate) fn new(
+        glb_path: String,
+        articulated_surfaces: Vec<PresentationArticulatedSurface>,
+    ) -> Self {
+        Self {
+            glb_path,
+            articulated_surfaces,
+        }
     }
 
     #[must_use]
     pub fn glb_path(&self) -> &str {
         &self.glb_path
+    }
+
+    #[must_use]
+    pub fn articulated_surfaces(&self) -> &[PresentationArticulatedSurface] {
+        &self.articulated_surfaces
+    }
+}
+
+/// Presentation-only identity for one conventional visual control surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationSurface {
+    LeftAileron,
+    RightAileron,
+    Elevator,
+    Rudder,
+}
+
+/// Validated non-physical mapping from a GLB primitive to a physics binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationArticulatedSurface {
+    visual_primitive_index: usize,
+    surface: PresentationSurface,
+    control_surface_binding_id: String,
+    hinge_origin_render_body_m: [f32; 3],
+    hinge_axis_render_body: [f32; 3],
+    visual_gain: f32,
+}
+
+impl PresentationArticulatedSurface {
+    pub(crate) fn new(
+        visual_primitive_index: usize,
+        surface: PresentationSurface,
+        control_surface_binding_id: String,
+        hinge_origin_render_body_m: [f32; 3],
+        hinge_axis_render_body: [f32; 3],
+        visual_gain: f32,
+    ) -> Self {
+        Self {
+            visual_primitive_index,
+            surface,
+            control_surface_binding_id,
+            hinge_origin_render_body_m,
+            hinge_axis_render_body,
+            visual_gain,
+        }
+    }
+
+    #[must_use]
+    pub const fn visual_primitive_index(&self) -> usize {
+        self.visual_primitive_index
+    }
+
+    #[must_use]
+    pub const fn surface(&self) -> PresentationSurface {
+        self.surface
+    }
+
+    #[must_use]
+    pub fn control_surface_binding_id(&self) -> &str {
+        &self.control_surface_binding_id
+    }
+
+    #[must_use]
+    pub const fn hinge_origin_render_body_m(&self) -> [f32; 3] {
+        self.hinge_origin_render_body_m
+    }
+
+    #[must_use]
+    pub const fn hinge_axis_render_body(&self) -> [f32; 3] {
+        self.hinge_axis_render_body
+    }
+
+    #[must_use]
+    pub const fn visual_gain(&self) -> f32 {
+        self.visual_gain
+    }
+}
+
+/// Immutable resolved landing-gear contact with stable ID and hot-loop params.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeLandingGearContact {
+    id: String,
+    contact: GearContact,
+}
+
+impl RuntimeLandingGearContact {
+    pub(crate) fn new(id: String, contact: GearContact) -> Self {
+        debug_assert!(validate_gear_contact(&contact).is_ok());
+        Self { id, contact }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn contact(&self) -> GearContact {
+        self.contact
     }
 }
 
@@ -536,6 +830,18 @@ impl AircraftModelFingerprint {
                 hasher.update(b"rcsim:aircraft-model:v5");
                 AIRCRAFT_MODEL_SCHEMA_VERSION_V5
             }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V6 => {
+                hasher.update(b"rcsim:aircraft-model:v6");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+            }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V7 => {
+                hasher.update(b"rcsim:aircraft-model:v7");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+            }
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V8 => {
+                hasher.update(b"rcsim:aircraft-model:v8");
+                AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+            }
             _ => unreachable!("runtime models are created only from supported schemas"),
         };
         hasher.update(&fingerprint_schema_version.to_le_bytes());
@@ -563,12 +869,15 @@ impl AircraftModelFingerprint {
             AIRCRAFT_MODEL_SCHEMA_VERSION_V3
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             update_f64(
                 &mut hasher,
                 model
                     .kinematic_viscosity_m2_s
-                    .expect("schema v3/v4 models have explicit viscosity"),
+                    .expect("schema v3+ models have explicit viscosity"),
             );
             hasher.update(b"reynolds-family:ln-re-clamped:v1");
             update_len(&mut hasher, model.aero_polar_families.len());
@@ -603,6 +912,8 @@ impl AircraftModelFingerprint {
                         AIRCRAFT_MODEL_SCHEMA_VERSION_V3
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
                     ) {
                         hasher.update(&[0]);
                     }
@@ -614,6 +925,9 @@ impl AircraftModelFingerprint {
                         AIRCRAFT_MODEL_SCHEMA_VERSION_V3
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                             | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                            | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                     ));
                     hasher.update(&[1]);
                     update_len(&mut hasher, family_index);
@@ -651,7 +965,11 @@ impl AircraftModelFingerprint {
                 update_f64(&mut hasher, battery.internal_resistance_ohm());
                 if matches!(
                     model.schema_version,
-                    AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                    AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                        | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                 ) {
                     hasher.update(b"esc:series-resistance:v1");
                     update_f64(&mut hasher, config.esc().series_resistance_ohm());
@@ -672,11 +990,22 @@ impl AircraftModelFingerprint {
                     PropellerSpinDirection::NegativeAboutLocalX => 1,
                 };
                 hasher.update(&[spin_tag]);
+                if runtime_propulsion.propeller_rotational_inertia_kg_m2 != 0.0 {
+                    hasher.update(b"propeller-rotational-inertia:v1");
+                    update_f64(
+                        &mut hasher,
+                        runtime_propulsion.propeller_rotational_inertia_kg_m2,
+                    );
+                }
                 match runtime_propulsion.coefficient_source() {
                     PropellerCoefficientSource::FixedTable(table) => {
                         if matches!(
                             model.schema_version,
-                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                         ) {
                             hasher
                                 .update(b"propeller-coefficients:fixed-table:j-linear-clamped:v1");
@@ -691,7 +1020,11 @@ impl AircraftModelFingerprint {
                     PropellerCoefficientSource::ShaftSpeedMap(map) => {
                         debug_assert!(matches!(
                             model.schema_version,
-                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                            AIRCRAFT_MODEL_SCHEMA_VERSION_V4
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
                         ));
                         hasher.update(
                             b"propeller-coefficients:shaft-speed-linear:j-linear-clamped:v1",
@@ -718,6 +1051,9 @@ impl AircraftModelFingerprint {
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V3
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V4
                 | AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
         ) {
             update_len(&mut hasher, model.control_surface_bindings.len());
             for binding in &model.control_surface_bindings {
@@ -732,7 +1068,13 @@ impl AircraftModelFingerprint {
             }
         }
 
-        if model.schema_version == AIRCRAFT_MODEL_SCHEMA_VERSION_V5 {
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V5
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+        ) {
             hasher.update(b"aero-surfaces:v1");
             update_len(&mut hasher, model.aero_surfaces.len());
             for surface in &model.aero_surfaces {
@@ -745,6 +1087,71 @@ impl AircraftModelFingerprint {
                 update_f64(&mut hasher, surface.span_efficiency_factor);
                 update_f64(&mut hasher, surface.area_m2);
                 update_f64(&mut hasher, surface.aspect_ratio);
+            }
+        }
+
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V6
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V7
+                | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+        ) {
+            hasher.update(b"aero-downwash-interactions:v1");
+            update_len(&mut hasher, model.aero_downwash_interactions.len());
+            for interaction in &model.aero_downwash_interactions {
+                update_len(&mut hasher, interaction.source_surface_index);
+                update_len(&mut hasher, interaction.target_surface_index);
+                update_f64(&mut hasher, interaction.downwash_factor);
+            }
+        }
+
+        if matches!(
+            model.schema_version,
+            AIRCRAFT_MODEL_SCHEMA_VERSION_V7 | AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+        ) {
+            hasher.update(b"propeller-slipstream-interactions:v1");
+            update_len(&mut hasher, model.propeller_slipstream_interactions.len());
+            for interaction in &model.propeller_slipstream_interactions {
+                update_len(&mut hasher, interaction.target_element_indices.len());
+                for &element_index in &interaction.target_element_indices {
+                    update_len(&mut hasher, element_index);
+                }
+                update_f64(&mut hasher, interaction.slipstream_velocity_factor);
+            }
+            if model
+                .propeller_slipstream_interactions
+                .iter()
+                .any(|interaction| interaction.swirl_velocity_factor != 0.0)
+            {
+                hasher.update(b"propeller-swirl:v1");
+                for interaction in &model.propeller_slipstream_interactions {
+                    update_f64(&mut hasher, interaction.swirl_velocity_factor);
+                }
+            }
+        }
+
+        if model.schema_version >= AIRCRAFT_MODEL_SCHEMA_VERSION_V8 {
+            hasher.update(b"landing-gear:v1");
+            update_len(&mut hasher, model.landing_gear.len());
+            for contact in &model.landing_gear {
+                update_vector(&mut hasher, contact.contact.position_body_m.as_slice());
+                update_f64(&mut hasher, contact.contact.wheel_radius_m);
+                update_f64(&mut hasher, contact.contact.stiffness_n_per_m);
+                update_f64(&mut hasher, contact.contact.damping_n_s_per_m);
+                update_f64(&mut hasher, contact.contact.long_mu);
+                update_f64(&mut hasher, contact.contact.lat_mu);
+                update_f64(&mut hasher, contact.contact.rolling_mu);
+                update_f64(&mut hasher, contact.contact.brake_mu);
+                update_len(
+                    &mut hasher,
+                    match contact.contact.steering {
+                        SteeringSource::Fixed => 0,
+                        SteeringSource::Rudder => 1,
+                    },
+                );
+                update_f64(&mut hasher, contact.contact.max_steer_rad);
+                update_len(&mut hasher, usize::from(contact.contact.steerable));
+                update_len(&mut hasher, usize::from(contact.contact.braked));
             }
         }
 

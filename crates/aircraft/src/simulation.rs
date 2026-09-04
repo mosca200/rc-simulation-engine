@@ -4,10 +4,12 @@ use model::{
 };
 use sim_core::{
     AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
-    PilotInput, PolarCoefficients, PropulsionOutput, ReynoldsAeroElementOutput,
-    RigidBodyDerivative, RigidBodyState, Rk4Integrator, StateError, advance_controls,
-    assemble_aero_element_wrench, calculate_reynolds_number, compute_section_kinematics,
-    evaluate_aero_element, evaluate_derivative, evaluate_electric_propulsion_with_source,
+    FlatGroundPlane, GearContact, GroundCommand, GroundEvaluation, GroundSurface,
+    MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients, PropellerSpinDirection,
+    PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
+    Rk4Integrator, SectionKinematics, StateError, advance_controls, assemble_aero_element_wrench,
+    calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
+    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_ground_wrench,
     evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
@@ -39,6 +41,20 @@ pub struct AircraftSnapshot {
     sim_time_s: f64,
     rigid_body_state: RigidBodyState,
     control_surface_positions: ControlSurfacePositions,
+    ground_contacts: usize,
+    total_ground_normal_force_n: f64,
+    total_ground_tangential_force_n: f64,
+    weight_on_wheels: bool,
+}
+
+/// Deterministic per-step ground diagnostic derived from the committed state.
+/// Kept separate from the replay-hashed core so existing recordings stay valid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AircraftGroundTelemetry {
+    pub active_contacts: usize,
+    pub total_normal_force_n: f64,
+    pub total_tangential_force_n: f64,
+    pub weight_on_wheels: bool,
 }
 
 /// Per-element aerodynamic output, preserving Reynolds diagnostics without hot-path allocation.
@@ -111,6 +127,36 @@ impl AircraftSnapshot {
     pub const fn control_surface_positions(&self) -> &ControlSurfacePositions {
         &self.control_surface_positions
     }
+
+    #[must_use]
+    pub const fn ground_contacts(&self) -> usize {
+        self.ground_contacts
+    }
+
+    #[must_use]
+    pub const fn total_ground_normal_force_n(&self) -> f64 {
+        self.total_ground_normal_force_n
+    }
+
+    #[must_use]
+    pub const fn total_ground_tangential_force_n(&self) -> f64 {
+        self.total_ground_tangential_force_n
+    }
+
+    #[must_use]
+    pub const fn weight_on_wheels(&self) -> bool {
+        self.weight_on_wheels
+    }
+
+    #[must_use]
+    pub const fn ground_telemetry(&self) -> AircraftGroundTelemetry {
+        AircraftGroundTelemetry {
+            active_contacts: self.ground_contacts,
+            total_normal_force_n: self.total_ground_normal_force_n,
+            total_tangential_force_n: self.total_ground_tangential_force_n,
+            weight_on_wheels: self.weight_on_wheels,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -128,6 +174,10 @@ pub struct AircraftSimulation {
     config: AircraftSimulationConfig,
     state: AircraftState,
     effective_aero_elements: Vec<AeroElement>,
+    gear_contacts: Vec<GearContact>,
+    ground_surface: GroundSurface,
+    brake_command: f64,
+    last_ground: GroundEvaluation,
     step_index: u64,
 }
 
@@ -159,6 +209,11 @@ impl AircraftSimulation {
             .iter()
             .map(|runtime_element| *runtime_element.element())
             .collect();
+        let gear_contacts: Vec<GearContact> = model
+            .landing_gear()
+            .iter()
+            .map(|contact| contact.contact())
+            .collect();
         let controls = ControlSystemState::neutral(model.controls());
         Ok(Self {
             model,
@@ -168,8 +223,49 @@ impl AircraftSimulation {
                 controls,
             },
             effective_aero_elements,
+            gear_contacts,
+            ground_surface: GroundSurface::Flat(FlatGroundPlane::default()),
+            brake_command: 0.0,
+            last_ground: GroundEvaluation::zero(),
             step_index: 0,
         })
+    }
+
+    /// Sets the normalized brake command in [0, 1] (non-finite clamps to 0).
+    /// No throttle or yaw channel is hijacked; the value is held across RK4 stages.
+    pub fn set_brake_command(&mut self, brake_command: f64) {
+        self.brake_command = if brake_command.is_finite() {
+            brake_command.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    #[must_use]
+    pub const fn brake_command(&self) -> f64 {
+        self.brake_command
+    }
+
+    /// Sets the flat ground plane height (NED down, metres). Default is 0.
+    pub fn set_ground_height_world_down_m(&mut self, height_m: f64) {
+        if let Ok(plane) = FlatGroundPlane::new(height_m) {
+            self.ground_surface = GroundSurface::Flat(plane);
+        }
+    }
+
+    #[must_use]
+    pub const fn ground_surface(&self) -> &GroundSurface {
+        &self.ground_surface
+    }
+
+    #[must_use]
+    pub fn gear_contacts(&self) -> &[GearContact] {
+        &self.gear_contacts
+    }
+
+    #[must_use]
+    pub const fn last_ground_evaluation(&self) -> &GroundEvaluation {
+        &self.last_ground
     }
 
     /// Advances controls once, holds actuators/throttle fixed, then evaluates all four RK4 stages.
@@ -231,15 +327,21 @@ impl AircraftSimulation {
         let initial_state = self.state.rigid_body;
         let model = &self.model;
         let effective_aero_elements = &self.effective_aero_elements;
+        let gear_contacts = &self.gear_contacts;
+        let ground_surface = &self.ground_surface;
         let throttle = control_surface_positions.throttle();
+        let ground_command = GroundCommand::new(input.yaw(), self.brake_command);
         self.state.rigid_body =
             Rk4Integrator::step(&initial_state, self.config.dt_s(), |stage_state| {
-                let evaluation = evaluate_aircraft_instantaneous(
+                let evaluation = evaluate_aircraft_instantaneous_with_ground(
                     stage_state,
                     effective_aero_elements,
                     model,
                     throttle,
                     &self.config,
+                    gear_contacts,
+                    ground_surface,
+                    &ground_command,
                 );
                 debug_assert_eq!(
                     evaluation.propulsion.is_some(),
@@ -251,11 +353,26 @@ impl AircraftSimulation {
         self.step_index += 1;
         debug_assert!(self.state.rigid_body.validate().is_ok());
 
+        // Committed-state ground diagnostic: re-evaluate at the post-step state.
+        // This is observation only; the integrated trajectory already includes
+        // stage-correct ground forces. Allocation-free (fixed array).
+        let committed_command = GroundCommand::new(input.yaw(), self.brake_command);
+        self.last_ground = evaluate_ground_wrench(
+            &self.state.rigid_body,
+            &self.gear_contacts,
+            &self.ground_surface,
+            &committed_command,
+        );
+
         AircraftSnapshot {
             step_index: self.step_index,
             sim_time_s: self.sim_time_s(),
             rigid_body_state: self.state.rigid_body,
             control_surface_positions,
+            ground_contacts: self.last_ground.active_contacts,
+            total_ground_normal_force_n: self.last_ground.total_normal_force_n,
+            total_ground_tangential_force_n: self.last_ground.total_tangential_force_n,
+            weight_on_wheels: self.last_ground.weight_on_wheels(),
         }
     }
 }
@@ -330,17 +447,67 @@ pub fn evaluate_aircraft_wrench(
     throttle: f64,
     environment: &sim_core::AeroEnvironment,
 ) -> BodyWrench {
+    evaluate_aircraft_wrench_with_ground(
+        stage_state,
+        effective_aero_elements,
+        model,
+        throttle,
+        environment,
+        &[],
+        &GroundSurface::default(),
+        &GroundCommand::new(0.0, 0.0),
+    )
+}
+
+/// Stage-local ground context bundled to keep stage arities reviewable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundStageContext<'a> {
+    pub gear: &'a [GearContact],
+    pub surface: &'a GroundSurface,
+    pub command: &'a GroundCommand,
+}
+
+impl<'a> GroundStageContext<'a> {
+    #[must_use]
+    pub const fn new(
+        gear: &'a [GearContact],
+        surface: &'a GroundSurface,
+        command: &'a GroundCommand,
+    ) -> Self {
+        Self {
+            gear,
+            surface,
+            command,
+        }
+    }
+}
+
+/// Re-evaluates the complete wrench (aero + propulsion + stage ground contact).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_aircraft_wrench_with_ground(
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    environment: &sim_core::AeroEnvironment,
+    gear: &[GearContact],
+    surface: &GroundSurface,
+    command: &GroundCommand,
+) -> BodyWrench {
     evaluate_stage(
         stage_state,
         effective_aero_elements,
         model,
         throttle,
         environment,
+        GroundStageContext::new(gear, surface, command),
     )
     .total_wrench
 }
 
 /// Evaluates wrench and rigid-body derivative without advancing controls or integrating time.
+/// Airborne path: no gear contact (preserves existing callers and tests exactly).
 #[must_use]
 pub fn evaluate_aircraft_instantaneous(
     state: &RigidBodyState,
@@ -349,12 +516,38 @@ pub fn evaluate_aircraft_instantaneous(
     throttle: f64,
     config: &AircraftSimulationConfig,
 ) -> AircraftInstantaneousEvaluation {
+    evaluate_aircraft_instantaneous_with_ground(
+        state,
+        effective_aero_elements,
+        model,
+        throttle,
+        config,
+        &[],
+        &GroundSurface::default(),
+        &GroundCommand::new(0.0, 0.0),
+    )
+}
+
+/// Evaluates wrench and derivative including stage ground contact.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_aircraft_instantaneous_with_ground(
+    state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    config: &AircraftSimulationConfig,
+    gear: &[GearContact],
+    surface: &GroundSurface,
+    command: &GroundCommand,
+) -> AircraftInstantaneousEvaluation {
     let stage = evaluate_stage(
         state,
         effective_aero_elements,
         model,
         throttle,
         config.aero_environment(),
+        GroundStageContext::new(gear, surface, command),
     );
     let derivative = evaluate_derivative(
         state,
@@ -369,9 +562,202 @@ pub fn evaluate_aircraft_instantaneous(
     }
 }
 
+/// Same-stage actuator-disk result shared by every targeted aerodynamic element.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PropellerSlipstream {
+    induced_velocity_mps: f64,
+    axis_body: Vec3,
+}
+
+impl PropellerSlipstream {
+    #[must_use]
+    pub const fn induced_velocity_mps(self) -> f64 {
+        self.induced_velocity_mps
+    }
+
+    /// Body-frame direction corresponding to propeller local `+X` and positive thrust.
+    #[must_use]
+    pub const fn axis_body(self) -> Vec3 {
+        self.axis_body
+    }
+}
+
+/// Derives ideal actuator-disk induced velocity from actual same-stage thrust.
+///
+/// For positive thrust, `vi = 0.5 * (sqrt(V^2 + 2T/(rho A)) - V)`, where `V` is
+/// the propulsion evaluator's air-relative velocity at the propeller projected on
+/// propeller local `+X`. Unsupported or non-finite derived states fail safe to zero.
+#[must_use]
+pub fn propeller_slipstream(
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    propulsion_output: &PropulsionOutput,
+) -> PropellerSlipstream {
+    if model.propeller_slipstream_interactions().is_empty()
+        || propulsion_output.thrust_n <= 0.0
+        || !propulsion_output.thrust_n.is_finite()
+    {
+        return PropellerSlipstream::default();
+    }
+    let rho = environment.air_density_kg_m3();
+    let Some(runtime_propulsion) = model.propulsion() else {
+        return PropellerSlipstream::default();
+    };
+    let diameter = runtime_propulsion.config().propeller().diameter_m();
+    let disk_area = std::f64::consts::PI * diameter * diameter * 0.25;
+    if rho <= 0.0 || !rho.is_finite() || disk_area <= 0.0 || !disk_area.is_finite() {
+        return PropellerSlipstream::default();
+    }
+    let axial_velocity = propulsion_output.axial_airspeed_mps;
+    if !axial_velocity.is_finite() {
+        return PropellerSlipstream::default();
+    }
+    let radicand = axial_velocity.mul_add(
+        axial_velocity,
+        2.0 * propulsion_output.thrust_n / (rho * disk_area),
+    );
+    let induced_velocity_mps = 0.5 * (radicand.sqrt() - axial_velocity);
+    if !induced_velocity_mps.is_finite() || induced_velocity_mps <= 0.0 {
+        return PropellerSlipstream::default();
+    }
+    let axis_body = runtime_propulsion
+        .config()
+        .propeller()
+        .orientation_body_from_prop()
+        .transform_vector(&Vec3::new(1.0, 0.0, 0.0));
+    PropellerSlipstream {
+        induced_velocity_mps,
+        axis_body,
+    }
+}
+
+fn slipstream_velocity_factors(element_index: usize, model: &AircraftModel) -> (f64, f64) {
+    model
+        .propeller_slipstream_interactions()
+        .iter()
+        .find(|interaction| {
+            interaction
+                .target_element_indices()
+                .contains(&element_index)
+        })
+        .map_or((0.0, 0.0), |interaction| {
+            (
+                interaction.slipstream_velocity_factor(),
+                interaction.swirl_velocity_factor(),
+            )
+        })
+}
+
+/// Canonical physical section flow after axial slipstream and rotational propwash.
+///
+/// Positive propeller spin follows the right-hand rule about propeller local `+X`.
+/// For an off-axis target, the tangential direction is
+/// `spin_sign * normalize(axis_body cross radial_body)`. An on-axis target has no
+/// well-defined tangent and therefore receives zero swirl.
+pub(crate) fn physical_section_kinematics(
+    element_index: usize,
+    stage_state: &RigidBodyState,
+    effective_element: &AeroElement,
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    slipstream: PropellerSlipstream,
+) -> SectionKinematics {
+    let base = compute_section_kinematics(stage_state, effective_element, environment);
+    let (axial_factor, swirl_factor) = slipstream_velocity_factors(element_index, model);
+    if (axial_factor == 0.0 && swirl_factor == 0.0) || slipstream.induced_velocity_mps == 0.0 {
+        return base;
+    }
+    let axial_increment_mps = axial_factor * slipstream.induced_velocity_mps;
+    let swirl_increment_mps = swirl_factor * slipstream.induced_velocity_mps;
+    if !axial_increment_mps.is_finite() || !swirl_increment_mps.is_finite() {
+        return base;
+    }
+    let mut wake_body_mps = slipstream.axis_body * axial_increment_mps;
+    if swirl_increment_mps != 0.0 {
+        let propeller = model
+            .propulsion()
+            .expect("validated slipstream interactions require propulsion")
+            .config()
+            .propeller();
+        let offset_body_m = effective_element.position_body_m() - propeller.position_body_m();
+        let radial_body_m =
+            offset_body_m - slipstream.axis_body * offset_body_m.dot(&slipstream.axis_body);
+        let radial_norm_m = radial_body_m.norm();
+        if radial_norm_m.is_finite() && radial_norm_m > 0.0 {
+            let spin_sign = match propeller.spin_direction() {
+                PropellerSpinDirection::PositiveAboutLocalX => 1.0,
+                PropellerSpinDirection::NegativeAboutLocalX => -1.0,
+            };
+            let tangent_body = slipstream.axis_body.cross(&radial_body_m) / radial_norm_m;
+            wake_body_mps += tangent_body * (spin_sign * swirl_increment_mps);
+        }
+    }
+    if !wake_body_mps.iter().all(|component| component.is_finite()) {
+        return base;
+    }
+    let wake_element_mps = effective_element
+        .orientation_body_from_element()
+        .inverse_transform_vector(&wake_body_mps);
+    let velocity = base.air_relative_velocity_element_mps + wake_element_mps;
+    if !velocity.iter().all(|component| component.is_finite()) {
+        return base;
+    }
+    let speed_squared = velocity.x.mul_add(velocity.x, velocity.z * velocity.z);
+    if !speed_squared.is_finite() {
+        return base;
+    }
+    let section_airspeed_mps = speed_squared.sqrt();
+    let beta_rad = velocity.y.atan2(section_airspeed_mps);
+    if section_airspeed_mps < MIN_SECTION_AIRSPEED_MPS {
+        return SectionKinematics {
+            air_relative_velocity_element_mps: velocity,
+            section_airspeed_mps,
+            alpha_rad: 0.0,
+            beta_rad,
+            dynamic_pressure_pa: 0.0,
+        };
+    }
+    let alpha_rad = velocity.z.atan2(velocity.x);
+    let dynamic_pressure_pa = 0.5 * environment.air_density_kg_m3() * speed_squared;
+    if !dynamic_pressure_pa.is_finite() {
+        return base;
+    }
+    SectionKinematics {
+        air_relative_velocity_element_mps: velocity,
+        section_airspeed_mps,
+        alpha_rad,
+        beta_rad,
+        dynamic_pressure_pa,
+    }
+}
+
+/// Public diagnostic for the exact pre-downwash physical flow used by schema-v7 physics.
+#[must_use]
+pub fn evaluate_aircraft_section_kinematics(
+    element_index: usize,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    propulsion_output: Option<&PropulsionOutput>,
+) -> SectionKinematics {
+    assert_eq!(effective_aero_elements.len(), model.aero_elements().len());
+    let slipstream = propulsion_output
+        .map(|output| propeller_slipstream(model, environment, output))
+        .unwrap_or_default();
+    physical_section_kinematics(
+        element_index,
+        stage_state,
+        &effective_aero_elements[element_index],
+        model,
+        environment,
+        slipstream,
+    )
+}
+
 /// Aggregates every S4 element wrench, preserving the model's declaration order.
 ///
-/// When the model has finite-wing surfaces (schema v5), each surface is solved
+/// When the model has finite-wing surfaces (schema v5+), each surface is solved
 /// independently for a common induced angle of attack using deterministic bracketed
 /// bisection. Members assigned to surfaces receive finite-wing corrections (effective
 /// alpha for polar sampling, induced drag added to profile drag). Unassigned elements
@@ -383,22 +769,54 @@ pub fn evaluate_aerodynamic_wrench(
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
 ) -> BodyWrench {
+    evaluate_aerodynamic_wrench_with_propulsion(
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        None,
+    )
+}
+
+/// Aggregates aerodynamic wrench using an already-evaluated same-stage propulsion output.
+///
+/// Passing `None` preserves the uncoupled v0-v6 path exactly. Schema-v7 callers provide
+/// the actual same-stage output so slipstream is driven by thrust rather than throttle.
+#[must_use]
+pub fn evaluate_aerodynamic_wrench_with_propulsion(
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    propulsion_output: Option<&PropulsionOutput>,
+) -> BodyWrench {
     assert_eq!(effective_aero_elements.len(), model.aero_elements().len());
+    let slipstream = propulsion_output
+        .map(|output| propeller_slipstream(model, environment, output))
+        .unwrap_or_default();
     let surfaces = model.aero_surfaces();
 
     if surfaces.is_empty() {
-        return evaluate_legacy_wrench(stage_state, effective_aero_elements, model, environment);
+        return evaluate_legacy_wrench(
+            stage_state,
+            effective_aero_elements,
+            model,
+            environment,
+            slipstream,
+        );
     }
 
     let mut total_wrench = BodyWrench::zero();
 
-    for surface in surfaces {
+    for (surface_index, surface) in surfaces.iter().enumerate() {
         let wrench = evaluate_surface_wrench(
+            surface_index,
             surface,
             stage_state,
             effective_aero_elements,
             model,
             environment,
+            slipstream,
         );
         total_wrench.force_body_n += wrench.force_body_n;
         total_wrench.moment_body_nm += wrench.moment_body_nm;
@@ -412,16 +830,17 @@ pub fn evaluate_aerodynamic_wrench(
         if is_element_assigned_to_any_surface(surfaces, idx) {
             continue;
         }
-        let output = evaluate_aircraft_aero_element(
+        let wrench = evaluate_independent_element_wrench(
+            idx,
             stage_state,
             effective_element,
             runtime_element,
             model,
             environment,
+            slipstream,
         );
-        let output = output.aero();
-        total_wrench.force_body_n += output.wrench_body.force_body_n;
-        total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+        total_wrench.force_body_n += wrench.force_body_n;
+        total_wrench.moment_body_nm += wrench.moment_body_nm;
     }
 
     total_wrench
@@ -435,36 +854,94 @@ fn is_element_assigned_to_any_surface(surfaces: &[RuntimeAeroSurface], index: us
 }
 
 /// Legacy path: every element evaluated independently through the quasi-2D polar path.
-/// Used when the model has no finite-wing surfaces (schema v0-v4, or v5 with surfaces=[]).
+/// Used when the model has no finite-wing surfaces (schema v0-v4, or v5+ with surfaces=[]).
 fn evaluate_legacy_wrench(
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
+    slipstream: PropellerSlipstream,
 ) -> BodyWrench {
     let mut total_wrench = BodyWrench::zero();
-    for (effective_element, runtime_element) in
-        effective_aero_elements.iter().zip(model.aero_elements())
+    for (element_index, (effective_element, runtime_element)) in effective_aero_elements
+        .iter()
+        .zip(model.aero_elements())
+        .enumerate()
     {
-        let output = evaluate_aircraft_aero_element(
+        let wrench = evaluate_independent_element_wrench(
+            element_index,
             stage_state,
             effective_element,
             runtime_element,
             model,
             environment,
+            slipstream,
         );
-        let output = output.aero();
-        total_wrench.force_body_n += output.wrench_body.force_body_n;
-        total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+        total_wrench.force_body_n += wrench.force_body_n;
+        total_wrench.moment_body_nm += wrench.moment_body_nm;
     }
     total_wrench
+}
+
+fn evaluate_independent_element_wrench(
+    element_index: usize,
+    stage_state: &RigidBodyState,
+    effective_element: &AeroElement,
+    runtime_element: &RuntimeAeroElement,
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    slipstream: PropellerSlipstream,
+) -> BodyWrench {
+    if slipstream_velocity_factors(element_index, model) == (0.0, 0.0)
+        || slipstream.induced_velocity_mps == 0.0
+    {
+        return evaluate_aircraft_aero_element(
+            stage_state,
+            effective_element,
+            runtime_element,
+            model,
+            environment,
+        )
+        .aero()
+        .wrench_body;
+    }
+    let kin = physical_section_kinematics(
+        element_index,
+        stage_state,
+        effective_element,
+        model,
+        environment,
+        slipstream,
+    );
+    if kin.dynamic_pressure_pa == 0.0 {
+        return BodyWrench::zero();
+    }
+    let coefficients = match runtime_element.polar_binding() {
+        RuntimeAeroPolarBinding::Polar { polar_index } => model.aero_polars()[polar_index]
+            .table()
+            .sample_clamped(kin.alpha_rad),
+        RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+            let viscosity = model.kinematic_viscosity_m2_s().unwrap();
+            let reynolds = calculate_reynolds_number(
+                kin.section_airspeed_mps,
+                effective_element.chord_m(),
+                viscosity,
+            )
+            .unwrap_or(0.0);
+            model.aero_polar_families()[family_index]
+                .family()
+                .sample(reynolds, kin.alpha_rad)
+                .coefficients
+        }
+    };
+    assemble_aero_element_wrench(effective_element, &kin, &coefficients)
 }
 
 /// Number of deterministic bisection iterations for the induced-angle solver.
 const INDUCED_ALPHA_BISECTION_ITERATIONS: usize = 40;
 
 /// Samples the CL coefficient for one surface member at a given alpha, without allocation.
-fn sample_member_cl(
+pub(crate) fn sample_member_cl(
     runtime_element: &RuntimeAeroElement,
     model: &AircraftModel,
     section_airspeed: f64,
@@ -519,12 +996,15 @@ fn max_abs_cl_member(runtime_element: &RuntimeAeroElement, model: &AircraftModel
 /// `alpha_bound = CL_abs_max / (PI * AR * e)`.
 ///
 /// Returns `(alpha_i, CL_surface, CDi_surface)`.
-fn solve_surface_induced_alpha(
+/// Solves one surface using slipstream-adjusted physical member flows, then downwash.
+pub(crate) fn solve_surface_induced_alpha_with_physical_flow(
     surface: &RuntimeAeroSurface,
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
+    downwash_angle_rad: f64,
+    slipstream: PropellerSlipstream,
 ) -> (f64, f64, f64) {
     let ar = surface.aspect_ratio();
     let e = surface.span_efficiency_factor();
@@ -551,10 +1031,16 @@ fn solve_surface_induced_alpha(
         let mut weight_sum = 0.0;
 
         for &member_idx in member_indices {
-            let kin = compute_section_kinematics(
-                stage_state,
-                &effective_aero_elements[member_idx],
-                environment,
+            let kin = downwashed_section_kinematics(
+                physical_section_kinematics(
+                    member_idx,
+                    stage_state,
+                    &effective_aero_elements[member_idx],
+                    model,
+                    environment,
+                    slipstream,
+                ),
+                downwash_angle_rad,
             );
             if kin.dynamic_pressure_pa == 0.0 {
                 continue;
@@ -593,10 +1079,16 @@ fn solve_surface_induced_alpha(
     let mut weighted_cl_sum = 0.0;
     let mut weight_sum = 0.0;
     for &member_idx in member_indices {
-        let kin = compute_section_kinematics(
-            stage_state,
-            &effective_aero_elements[member_idx],
-            environment,
+        let kin = downwashed_section_kinematics(
+            physical_section_kinematics(
+                member_idx,
+                stage_state,
+                &effective_aero_elements[member_idx],
+                model,
+                environment,
+                slipstream,
+            ),
+            downwash_angle_rad,
         );
         if kin.dynamic_pressure_pa == 0.0 {
             continue;
@@ -622,25 +1114,155 @@ fn solve_surface_induced_alpha(
     (alpha_i, cl_surface, cdi)
 }
 
+/// Source induced angle and target wake rotation for one resolved target surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SurfaceDownwash {
+    pub source_alpha_i_rad: f64,
+    pub downwash_angle_rad: f64,
+}
+
+/// Allocation-free diagnostic of the exact finite-wing solution used at one stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AircraftSurfaceAerodynamicState {
+    pub source_alpha_i_rad: f64,
+    pub downwash_angle_rad: f64,
+    pub induced_alpha_rad: f64,
+    pub surface_cl: f64,
+    pub induced_drag_coefficient: f64,
+}
+
+/// Evaluates one surface's same-stage slipstream/downwash/finite-wing composition.
+#[must_use]
+pub fn evaluate_aircraft_surface_aerodynamic_state(
+    surface_index: usize,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    propulsion_output: Option<&PropulsionOutput>,
+) -> AircraftSurfaceAerodynamicState {
+    let slipstream = propulsion_output
+        .map(|output| propeller_slipstream(model, environment, output))
+        .unwrap_or_default();
+    let surface = &model.aero_surfaces()[surface_index];
+    let downwash = surface_downwash_with_slipstream(
+        surface_index,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        slipstream,
+    );
+    let (induced_alpha_rad, surface_cl, induced_drag_coefficient) =
+        solve_surface_induced_alpha_with_physical_flow(
+            surface,
+            stage_state,
+            effective_aero_elements,
+            model,
+            environment,
+            downwash.downwash_angle_rad,
+            slipstream,
+        );
+    AircraftSurfaceAerodynamicState {
+        source_alpha_i_rad: downwash.source_alpha_i_rad,
+        downwash_angle_rad: downwash.downwash_angle_rad,
+        induced_alpha_rad,
+        surface_cl,
+        induced_drag_coefficient,
+    }
+}
+
+pub(crate) fn surface_downwash_with_slipstream(
+    target_surface_index: usize,
+    stage_state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    environment: &sim_core::AeroEnvironment,
+    slipstream: PropellerSlipstream,
+) -> SurfaceDownwash {
+    let Some(interaction) = model
+        .aero_downwash_interactions()
+        .iter()
+        .find(|interaction| interaction.target_surface_index() == target_surface_index)
+    else {
+        return SurfaceDownwash {
+            source_alpha_i_rad: 0.0,
+            downwash_angle_rad: 0.0,
+        };
+    };
+    let source = &model.aero_surfaces()[interaction.source_surface_index()];
+    let (source_alpha_i_rad, _, _) = solve_surface_induced_alpha_with_physical_flow(
+        source,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        0.0,
+        slipstream,
+    );
+    SurfaceDownwash {
+        source_alpha_i_rad,
+        downwash_angle_rad: interaction.downwash_factor() * source_alpha_i_rad,
+    }
+}
+
+/// Rotates physical section-relative airflow about local +Y so that
+/// `alpha_after = alpha_before - downwash_angle_rad`.
+pub(crate) fn downwashed_section_kinematics(
+    kinematics: SectionKinematics,
+    downwash_angle_rad: f64,
+) -> SectionKinematics {
+    if downwash_angle_rad == 0.0 || kinematics.section_airspeed_mps == 0.0 {
+        return kinematics;
+    }
+    let (sin_epsilon, cos_epsilon) = downwash_angle_rad.sin_cos();
+    let velocity = kinematics.air_relative_velocity_element_mps;
+    let rotated = Vec3::new(
+        cos_epsilon.mul_add(velocity.x, sin_epsilon * velocity.z),
+        velocity.y,
+        (-sin_epsilon).mul_add(velocity.x, cos_epsilon * velocity.z),
+    );
+    SectionKinematics {
+        air_relative_velocity_element_mps: rotated,
+        section_airspeed_mps: kinematics.section_airspeed_mps,
+        alpha_rad: rotated.z.atan2(rotated.x),
+        beta_rad: kinematics.beta_rad,
+        dynamic_pressure_pa: kinematics.dynamic_pressure_pa,
+    }
+}
+
 /// Evaluates the total wrench for one finite-wing surface, including induced drag.
 ///
 /// For each member:
-/// - Polar is sampled at `alpha_geom - alpha_i` (effective alpha)
+/// - Downwash physically rotates target flow before any target finite-wing solve
+/// - Polar is sampled at `alpha_geom_downwashed - alpha_i` (effective alpha)
 /// - `CDi_surface` is added to the profile drag coefficient
-/// - Force directions come from the ACTUAL local section flow (not rotated)
+/// - Force directions come from the actual, possibly downwashed local section flow
 fn evaluate_surface_wrench(
+    surface_index: usize,
     surface: &RuntimeAeroSurface,
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
     model: &AircraftModel,
     environment: &sim_core::AeroEnvironment,
+    slipstream: PropellerSlipstream,
 ) -> BodyWrench {
-    let (alpha_i, _cl_surface, cdi_surface) = solve_surface_induced_alpha(
+    let downwash = surface_downwash_with_slipstream(
+        surface_index,
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        slipstream,
+    );
+    let (alpha_i, _cl_surface, cdi_surface) = solve_surface_induced_alpha_with_physical_flow(
         surface,
         stage_state,
         effective_aero_elements,
         model,
         environment,
+        downwash.downwash_angle_rad,
+        slipstream,
     );
 
     let mut wrench = BodyWrench::zero();
@@ -649,7 +1271,17 @@ fn evaluate_surface_wrench(
         let effective_element = &effective_aero_elements[member_idx];
         let runtime_element = &model.aero_elements()[member_idx];
 
-        let kin = compute_section_kinematics(stage_state, effective_element, environment);
+        let kin = downwashed_section_kinematics(
+            physical_section_kinematics(
+                member_idx,
+                stage_state,
+                effective_element,
+                model,
+                environment,
+                slipstream,
+            ),
+            downwash.downwash_angle_rad,
+        );
         if kin.dynamic_pressure_pa == 0.0 {
             continue;
         }
@@ -710,7 +1342,7 @@ pub fn evaluate_aircraft_aero_element<'a>(
         RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
             let viscosity = model
                 .kinematic_viscosity_m2_s()
-                .expect("Reynolds-family bindings exist only in schema-v3/v4 models");
+                .expect("Reynolds-family bindings require schema v3+ with explicit viscosity");
             AircraftAeroElementOutput::ReynoldsFamily(evaluate_reynolds_aero_element(
                 stage_state,
                 effective_element,
@@ -728,28 +1360,79 @@ struct StageEvaluation {
     propulsion: Option<PropulsionOutput>,
 }
 
+/// Gyroscopic reaction exerted by the constant-speed propeller rotor on the aircraft.
+///
+/// `H_body = spin_sign * I * shaft_speed * axis_body` and
+/// `M_gyro_body = H_body cross omega_body`. Rotor spin acceleration is intentionally
+/// excluded because shaft speed remains quasi-static.
+fn propeller_gyroscopic_moment_body(
+    stage_state: &RigidBodyState,
+    runtime_propulsion: &model::RuntimeElectricPropulsion,
+    output: &PropulsionOutput,
+) -> Vec3 {
+    let inertia = runtime_propulsion.propeller_rotational_inertia_kg_m2();
+    if inertia == 0.0
+        || output.shaft_speed_rad_s == 0.0
+        || stage_state.angular_velocity_body_radps == Vec3::zeros()
+    {
+        return Vec3::zeros();
+    }
+    let propeller = runtime_propulsion.config().propeller();
+    let spin_sign = match propeller.spin_direction() {
+        PropellerSpinDirection::PositiveAboutLocalX => 1.0,
+        PropellerSpinDirection::NegativeAboutLocalX => -1.0,
+    };
+    let axis_body = propeller
+        .orientation_body_from_prop()
+        .transform_vector(&Vec3::new(1.0, 0.0, 0.0));
+    let angular_momentum_body = axis_body * (spin_sign * inertia * output.shaft_speed_rad_s);
+    let moment_body = angular_momentum_body.cross(&stage_state.angular_velocity_body_radps);
+    if moment_body.iter().all(|component| component.is_finite()) {
+        moment_body
+    } else {
+        Vec3::zeros()
+    }
+}
+
 fn evaluate_stage(
     stage_state: &RigidBodyState,
     effective_aero_elements: &[AeroElement],
     model: &AircraftModel,
     throttle: f64,
     environment: &sim_core::AeroEnvironment,
+    ground: GroundStageContext<'_>,
 ) -> StageEvaluation {
-    let mut total_wrench =
-        evaluate_aerodynamic_wrench(stage_state, effective_aero_elements, model, environment);
-
     let propulsion = model.propulsion().map(|runtime_propulsion| {
-        let output = evaluate_electric_propulsion_with_source(
+        let mut output = evaluate_electric_propulsion_with_source(
             stage_state,
             throttle,
             runtime_propulsion.config(),
             environment,
             runtime_propulsion.coefficient_source(),
         );
-        total_wrench.force_body_n += output.wrench_body.force_body_n;
-        total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+        output.wrench_body.moment_body_nm +=
+            propeller_gyroscopic_moment_body(stage_state, runtime_propulsion, &output);
         output
     });
+    let mut total_wrench = evaluate_aerodynamic_wrench_with_propulsion(
+        stage_state,
+        effective_aero_elements,
+        model,
+        environment,
+        propulsion.as_ref(),
+    );
+    if let Some(output) = propulsion {
+        total_wrench.force_body_n += output.wrench_body.force_body_n;
+        total_wrench.moment_body_nm += output.wrench_body.moment_body_nm;
+    }
+    // Stage-correct compliant ground contact: recomputed from each RK4 stage
+    // state, never held constant across k1..k4. Empty gear short-circuits to zero.
+    if !ground.gear.is_empty() {
+        let contact =
+            evaluate_ground_wrench(stage_state, ground.gear, ground.surface, ground.command);
+        total_wrench.force_body_n += contact.force_body_n;
+        total_wrench.moment_body_nm += contact.moment_body_nm;
+    }
 
     StageEvaluation {
         total_wrench,
@@ -1655,5 +2338,138 @@ mod tests {
     fn rudder_fixture_local_y_is_body_vertical() {
         let orientation = Orientation::from_axis_angle(&Vec3::x_axis(), FRAC_PI_2);
         assert_vec_close(orientation.transform_vector(&Vec3::y()), Vec3::z(), 4.0e-16);
+    }
+
+    #[test]
+    fn m2_8c_downwash_rotation_obeys_sign_and_preserves_speed() {
+        let alpha = 0.2_f64;
+        let speed = 17.0_f64;
+        let original = SectionKinematics {
+            air_relative_velocity_element_mps: Vec3::new(
+                speed * alpha.cos(),
+                1.25,
+                speed * alpha.sin(),
+            ),
+            section_airspeed_mps: speed,
+            alpha_rad: alpha,
+            beta_rad: 1.25_f64.atan2(speed),
+            dynamic_pressure_pa: 123.0,
+        };
+        let epsilon = 0.075;
+        let downwashed = downwashed_section_kinematics(original, epsilon);
+        assert!((downwashed.alpha_rad - (alpha - epsilon)).abs() < 2.0e-16);
+        assert_eq!(
+            downwashed.section_airspeed_mps.to_bits(),
+            original.section_airspeed_mps.to_bits()
+        );
+        assert_eq!(
+            downwashed.dynamic_pressure_pa.to_bits(),
+            original.dynamic_pressure_pa.to_bits()
+        );
+        assert_eq!(
+            downwashed.air_relative_velocity_element_mps.y.to_bits(),
+            original.air_relative_velocity_element_mps.y.to_bits()
+        );
+        let rotated_section_speed = downwashed
+            .air_relative_velocity_element_mps
+            .x
+            .hypot(downwashed.air_relative_velocity_element_mps.z);
+        assert!((rotated_section_speed - speed).abs() < 4.0e-15);
+        let opposite = downwashed_section_kinematics(original, -epsilon);
+        assert!((opposite.alpha_rad - (alpha + epsilon)).abs() < 2.0e-16);
+        assert_eq!(downwashed_section_kinematics(original, 0.0), original);
+    }
+
+    #[test]
+    fn m2_8c_runtime_diagnostic_uses_source_solution_without_feedback() {
+        let fixture = include_str!("../../../tests/fixtures/synthetic_downwash_v6.json");
+        let model = AircraftModelLoader::from_json_str(fixture).unwrap();
+        let mut uncoupled_value: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        uncoupled_value["aero_downwash_interactions"] = serde_json::json!([]);
+        let uncoupled_model =
+            AircraftModelLoader::from_json_str(&serde_json::to_string(&uncoupled_value).unwrap())
+                .unwrap();
+        let alpha = 0.15_f64;
+        let speed = 18.0_f64;
+        let state = state_with_velocity(Vec3::new(speed * alpha.cos(), 0.0, speed * alpha.sin()));
+        let effective = model
+            .aero_elements()
+            .iter()
+            .map(|runtime| *runtime.element())
+            .collect::<Vec<_>>();
+        let uncoupled_effective = uncoupled_model
+            .aero_elements()
+            .iter()
+            .map(|runtime| *runtime.element())
+            .collect::<Vec<_>>();
+        let environment = AeroEnvironment::new(1.225, Vec3::zeros()).unwrap();
+        let diagnostic = surface_downwash_with_slipstream(
+            1,
+            &state,
+            &effective,
+            &model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        assert!(diagnostic.source_alpha_i_rad > 0.0);
+        assert_eq!(
+            diagnostic.downwash_angle_rad,
+            1.5 * diagnostic.source_alpha_i_rad
+        );
+        let negative_state =
+            state_with_velocity(Vec3::new(speed * alpha.cos(), 0.0, -speed * alpha.sin()));
+        let negative_diagnostic = surface_downwash_with_slipstream(
+            1,
+            &negative_state,
+            &effective,
+            &model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        assert!(negative_diagnostic.source_alpha_i_rad < 0.0);
+        assert!(negative_diagnostic.downwash_angle_rad < 0.0);
+        assert_eq!(
+            negative_diagnostic.downwash_angle_rad,
+            1.5 * negative_diagnostic.source_alpha_i_rad
+        );
+
+        let source_coupled = evaluate_surface_wrench(
+            0,
+            &model.aero_surfaces()[0],
+            &state,
+            &effective,
+            &model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        let target = evaluate_surface_wrench(
+            1,
+            &model.aero_surfaces()[1],
+            &state,
+            &effective,
+            &model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        let source_uncoupled = evaluate_surface_wrench(
+            0,
+            &uncoupled_model.aero_surfaces()[0],
+            &state,
+            &uncoupled_effective,
+            &uncoupled_model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        let target_uncoupled = evaluate_surface_wrench(
+            1,
+            &uncoupled_model.aero_surfaces()[1],
+            &state,
+            &uncoupled_effective,
+            &uncoupled_model,
+            &environment,
+            PropellerSlipstream::default(),
+        );
+        assert_eq!(source_coupled, source_uncoupled);
+        assert_ne!(target, target_uncoupled);
     }
 }

@@ -13,10 +13,16 @@ thiserror.workspace = true
 
 [dev-dependencies]
 allocation-counter = "0.8"
+blake3.workspace = true
 criterion.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "aircraft_s6_1"
+harness = false
+
+[[bench]]
+name = "aircraft_runtime_soak"
 harness = false
 
 [lints]

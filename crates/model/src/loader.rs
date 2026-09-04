@@ -2,6 +2,8 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V0, AIRCRAFT_MODEL_SCHEMA_VERSION_V1,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V8,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -9,13 +11,15 @@ use crate::{
         ReferenceParameterEvidence, ReferencePhysicalSpecification, ReferenceScalar,
     },
     runtime::{
-        AircraftModel, ControlActuator, PresentationMetadata, RuntimeAeroElement,
-        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion, RuntimePolar,
+        AircraftModel, ControlActuator, PresentationArticulatedSurface, PresentationMetadata,
+        PresentationSurface, RuntimeAeroDownwashInteraction, RuntimeAeroElement,
+        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion,
+        RuntimeLandingGearContact, RuntimePolar, RuntimePropellerSlipstreamInteraction,
         RuntimeReynoldsPolarFamily,
     },
     v0::{
-        AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PropellerSpinDirectionFileV0,
-        ServoFileV0,
+        AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PresentationSurfaceFileV0,
+        PropellerSpinDirectionFileV0, ServoFileV0,
     },
     v1::{AircraftModelFileV1, ControlActuatorFileV1, ControlSurfaceBindingFileV1},
     v2::{
@@ -28,17 +32,21 @@ use crate::{
     v3::{AeroPolarBindingFileV3, AircraftModelFileV3},
     v4::{AircraftModelFileV4, PropellerCoefficientSourceFileV4, PropulsionFileV4},
     v5::{AeroSurfaceFileV5, AircraftModelFileV5},
+    v6::{AeroDownwashInteractionFileV6, AircraftModelFileV6},
+    v7::{AircraftModelFileV7, PropellerSlipstreamInteractionFileV7},
+    v8::{AircraftModelFileV8, LandingGearContactFileV8, SteeringSourceFileV8},
 };
 use serde::Deserialize;
 use sim_core::{
     AeroElement, AeroElementError, AxisResponseConfig, BatteryConfig, BatteryConfigError,
     ControlActuatorConfig, ControlConfigError, ControlResponseConfig, ControlSystemConfig,
-    ElectricPropulsionConfig, EscConfig, EscConfigError, MotorConfig, MotorConfigError,
-    ParameterError, PolarError, PolarSample, PolarTable, PropellerCoefficientError,
-    PropellerCoefficientMap, PropellerCoefficientMapError, PropellerCoefficientNode,
-    PropellerCoefficientSource, PropellerCoefficientTable, PropellerConfig, PropellerConfigError,
-    PropellerSample, PropellerSpinDirection, ReynoldsPolar, ReynoldsPolarFamily,
-    ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig,
+    ElectricPropulsionConfig, EscConfig, EscConfigError, GearContact, GroundConfigError,
+    MAX_GEAR_CONTACTS, MotorConfig, MotorConfigError, ParameterError, PolarError, PolarSample,
+    PolarTable, PropellerCoefficientError, PropellerCoefficientMap, PropellerCoefficientMapError,
+    PropellerCoefficientNode, PropellerCoefficientSource, PropellerCoefficientTable,
+    PropellerConfig, PropellerConfigError, PropellerSample, PropellerSpinDirection, ReynoldsPolar,
+    ReynoldsPolarFamily, ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig, SteeringSource,
+    validate_gear_contact,
 };
 use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use std::{fs, io, path::Path};
@@ -190,6 +198,8 @@ pub enum ModelLoadError {
         #[source]
         source: PropellerConfigError,
     },
+    #[error("propeller_rotational_inertia_kg_m2 must be finite and non-negative, got {value:?}")]
+    InvalidPropellerRotationalInertia { value: f64 },
     #[error("invalid propulsion coefficient table: {source}")]
     InvalidPropellerCoefficientTable {
         #[source]
@@ -205,6 +215,32 @@ pub enum ModelLoadError {
         "invalid presentation GLB path {path:?}: expected a nonempty relative path without '..'"
     )]
     InvalidPresentationAssetPath { path: String },
+    #[error("invalid articulated presentation surface at index {index}: {requirement}")]
+    InvalidPresentationArticulation {
+        index: usize,
+        requirement: &'static str,
+    },
+    #[error(
+        "articulated presentation surface at index {duplicate_index} repeats GLB primitive {visual_primitive_index}, first mapped at index {first_index}"
+    )]
+    DuplicatePresentationVisualPrimitive {
+        duplicate_index: usize,
+        first_index: usize,
+        visual_primitive_index: usize,
+    },
+    #[error(
+        "articulated presentation surface at index {index} references unknown control-surface binding {binding_id:?}"
+    )]
+    UnresolvedPresentationControlSurfaceBinding { index: usize, binding_id: String },
+    #[error(
+        "articulated presentation surface at index {index} maps {surface:?} to incompatible {actuator:?} binding {binding_id:?}"
+    )]
+    PresentationBindingActuatorMismatch {
+        index: usize,
+        binding_id: String,
+        surface: PresentationSurface,
+        actuator: ControlActuator,
+    },
     #[error("synthetic_test model must not contain reference_aircraft metadata")]
     UnexpectedReferenceAircraftMetadata,
     #[error("reference_aircraft model requires a reference_aircraft metadata object")]
@@ -326,6 +362,120 @@ pub enum ModelLoadError {
         surface_index: usize,
         value: f64,
     },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} references unknown source surface {surface_id:?}"
+    )]
+    UnresolvedDownwashSourceSurface {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} references unknown target surface {surface_id:?}"
+    )]
+    UnresolvedDownwashTargetSurface {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} uses surface {surface_id:?} as both source and target"
+    )]
+    DownwashSelfInteraction {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} has invalid downwash_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidDownwashFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
+        "aerodynamic downwash interaction {interaction_id:?} at index {interaction_index} targets surface {surface_id:?}, already targeted by interaction {first_interaction_id:?} at index {first_interaction_index}"
+    )]
+    DuplicateDownwashTarget {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        surface_id: Box<str>,
+        first_interaction_id: Box<str>,
+        first_interaction_index: usize,
+    },
+    #[error(
+        "aerodynamic downwash graph is chained: surface {surface_id:?} is both a source and a target"
+    )]
+    ChainedDownwashSurface { surface_id: Box<str> },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has no target elements"
+    )]
+    EmptySlipstreamTargets {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has invalid slipstream_velocity_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidSlipstreamVelocityFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} has invalid swirl_velocity_factor {value:?}; expected finite and non-negative"
+    )]
+    InvalidSwirlVelocityFactor {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        value: f64,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} requires propulsion"
+    )]
+    SlipstreamInteractionWithoutPropulsion {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} references unknown target element {element_id:?} at target index {target_index}"
+    )]
+    UnresolvedSlipstreamTargetElement {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        target_index: usize,
+        element_id: Box<str>,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} repeats target element {element_id:?} at target index {duplicate_target_index}; first declared at target index {first_target_index}"
+    )]
+    DuplicateSlipstreamTargetWithinInteraction {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        element_id: Box<str>,
+        first_target_index: usize,
+        duplicate_target_index: usize,
+    },
+    #[error(
+        "propeller slipstream interaction {interaction_id:?} at index {interaction_index} targets element {element_id:?}, already targeted by interaction {first_interaction_id:?} at index {first_interaction_index}"
+    )]
+    DuplicateSlipstreamTarget {
+        interaction_id: Box<str>,
+        interaction_index: usize,
+        element_id: Box<str>,
+        first_interaction_id: Box<str>,
+        first_interaction_index: usize,
+    },
+    #[error("landing gear declares {count} contacts; at most 16 are supported")]
+    TooManyLandingGearContacts { count: usize },
+    #[error("landing gear contact {contact_id:?} at index {contact_index} is invalid: {source}")]
+    InvalidLandingGearContact {
+        contact_id: Box<str>,
+        contact_index: usize,
+        #[source]
+        source: GroundConfigError,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -336,7 +486,7 @@ impl AircraftModelLoader {
         let version = serde_json::from_str::<VersionProbe>(json)
             .map_err(classify_probe_error)?
             .schema_version;
-        match version {
+        let model = match version {
             version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V0) => {
                 let file: AircraftModelFileV0 = serde_json::from_str(json)
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
@@ -373,8 +523,28 @@ impl AircraftModelLoader {
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V5);
                 resolve_v5(file)
             }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V6) => {
+                let file: AircraftModelFileV6 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V6);
+                resolve_v6(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V7) => {
+                let file: AircraftModelFileV7 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V7);
+                resolve_v7(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V8) => {
+                let file: AircraftModelFileV8 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V8);
+                resolve_v8(file)
+            }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
-        }
+        }?;
+        validate_presentation_bindings(&model)?;
+        Ok(model)
     }
 }
 
@@ -679,6 +849,13 @@ fn resolve_v4(file: AircraftModelFileV4) -> Result<AircraftModel, ModelLoadError
 }
 
 fn resolve_v5(file: AircraftModelFileV5) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v5_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V5)
+}
+
+fn resolve_v5_fields(
+    file: AircraftModelFileV5,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
     let AircraftModelFileV5 {
         schema_version,
         model_id,
@@ -712,10 +889,349 @@ fn resolve_v5(file: AircraftModelFileV5) -> Result<AircraftModel, ModelLoadError
         propulsion: None,
         presentation,
     };
-    let model = resolve_v3_fields(v3_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V5)?
-        .with_propulsion(runtime_propulsion);
+    let model =
+        resolve_v3_fields(v3_file, runtime_schema_version)?.with_propulsion(runtime_propulsion);
     let runtime_surfaces = resolve_aero_surfaces(&model, surfaces)?;
     Ok(model.with_aero_surfaces(runtime_surfaces))
+}
+
+fn resolve_v6(file: AircraftModelFileV6) -> Result<AircraftModel, ModelLoadError> {
+    resolve_v6_fields(file, AIRCRAFT_MODEL_SCHEMA_VERSION_V6)
+}
+
+fn resolve_v6_fields(
+    file: AircraftModelFileV6,
+    runtime_schema_version: u32,
+) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    } = file;
+    let v5_file = AircraftModelFileV5 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v5_fields(v5_file, runtime_schema_version)?;
+    let interactions = resolve_aero_downwash_interactions(&model, aero_downwash_interactions)?;
+    Ok(model.with_aero_downwash_interactions(interactions))
+}
+
+fn resolve_v7(file: AircraftModelFileV7) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV7 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propeller_slipstream_interactions,
+        propulsion,
+        presentation,
+    } = file;
+    let v6_file = AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v6_fields(v6_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V7)?;
+    let interactions =
+        resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
+    Ok(model.with_propeller_slipstream_interactions(interactions))
+}
+
+fn resolve_v8(file: AircraftModelFileV8) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV8 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propeller_slipstream_interactions,
+        propulsion,
+        landing_gear,
+        presentation,
+    } = file;
+    let v6_file = AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v6_fields(v6_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V8)?;
+    let slipstream =
+        resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
+    let model = model.with_propeller_slipstream_interactions(slipstream);
+    let gear = resolve_landing_gear(landing_gear)?;
+    Ok(model.with_landing_gear(gear))
+}
+
+fn resolve_landing_gear(
+    files: Vec<LandingGearContactFileV8>,
+) -> Result<Vec<RuntimeLandingGearContact>, ModelLoadError> {
+    if files.len() > MAX_GEAR_CONTACTS {
+        return Err(ModelLoadError::TooManyLandingGearContacts { count: files.len() });
+    }
+    let mut contacts = Vec::with_capacity(files.len());
+    for (index, file) in files.into_iter().enumerate() {
+        validate_unique_id(
+            "landing gear contact",
+            index,
+            &file.id,
+            contacts
+                .iter()
+                .map(|contact: &RuntimeLandingGearContact| contact.id()),
+        )?;
+        let steering = match file.steering {
+            SteeringSourceFileV8::Fixed => SteeringSource::Fixed,
+            SteeringSourceFileV8::Rudder => SteeringSource::Rudder,
+        };
+        let contact = GearContact {
+            position_body_m: Vec3::new(
+                file.position_body_m[0],
+                file.position_body_m[1],
+                file.position_body_m[2],
+            ),
+            wheel_radius_m: file.wheel_radius_m,
+            stiffness_n_per_m: file.normal_stiffness_n_per_m,
+            damping_n_s_per_m: file.normal_damping_n_s_per_m,
+            long_mu: file.longitudinal_friction_coefficient,
+            lat_mu: file.lateral_friction_coefficient,
+            rolling_mu: file.rolling_resistance_coefficient,
+            brake_mu: file.max_brake_friction_coefficient,
+            steering,
+            max_steer_rad: file.max_steer_angle_rad,
+            steerable: file.steerable,
+            braked: file.braked,
+        };
+        validate_gear_contact(&contact).map_err(|source| {
+            ModelLoadError::InvalidLandingGearContact {
+                contact_id: file.id.clone().into_boxed_str(),
+                contact_index: index,
+                source,
+            }
+        })?;
+        contacts.push(RuntimeLandingGearContact::new(file.id, contact));
+    }
+    Ok(contacts)
+}
+
+fn resolve_propeller_slipstream_interactions(
+    model: &AircraftModel,
+    interaction_files: Vec<PropellerSlipstreamInteractionFileV7>,
+) -> Result<Vec<RuntimePropellerSlipstreamInteraction>, ModelLoadError> {
+    let mut interactions = Vec::with_capacity(interaction_files.len());
+    for (interaction_index, file) in interaction_files.into_iter().enumerate() {
+        validate_unique_id(
+            "propeller slipstream interaction",
+            interaction_index,
+            &file.id,
+            interactions
+                .iter()
+                .map(RuntimePropellerSlipstreamInteraction::id),
+        )?;
+        if !file.slipstream_velocity_factor.is_finite() || file.slipstream_velocity_factor < 0.0 {
+            return Err(ModelLoadError::InvalidSlipstreamVelocityFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.slipstream_velocity_factor,
+            });
+        }
+        if !file.swirl_velocity_factor.is_finite() || file.swirl_velocity_factor < 0.0 {
+            return Err(ModelLoadError::InvalidSwirlVelocityFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.swirl_velocity_factor,
+            });
+        }
+        if model.propulsion().is_none() {
+            return Err(ModelLoadError::SlipstreamInteractionWithoutPropulsion {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+            });
+        }
+        if file.target_element_ids.is_empty() {
+            return Err(ModelLoadError::EmptySlipstreamTargets {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+            });
+        }
+
+        let mut target_element_indices = Vec::with_capacity(file.target_element_ids.len());
+        for (target_index, element_id) in file.target_element_ids.iter().enumerate() {
+            let element_index = model
+                .aero_elements()
+                .iter()
+                .position(|element| element.id() == element_id)
+                .ok_or_else(|| ModelLoadError::UnresolvedSlipstreamTargetElement {
+                    interaction_id: file.id.clone().into_boxed_str(),
+                    interaction_index,
+                    target_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                })?;
+            if let Some(first_target_index) = target_element_indices
+                .iter()
+                .position(|&index| index == element_index)
+            {
+                return Err(ModelLoadError::DuplicateSlipstreamTargetWithinInteraction {
+                    interaction_id: file.id.into_boxed_str(),
+                    interaction_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                    first_target_index,
+                    duplicate_target_index: target_index,
+                });
+            }
+            if let Some((first_interaction_index, first)) =
+                interactions.iter().enumerate().find(|(_, interaction)| {
+                    interaction
+                        .target_element_indices()
+                        .contains(&element_index)
+                })
+            {
+                return Err(ModelLoadError::DuplicateSlipstreamTarget {
+                    interaction_id: file.id.into_boxed_str(),
+                    interaction_index,
+                    element_id: element_id.clone().into_boxed_str(),
+                    first_interaction_id: first.id().into(),
+                    first_interaction_index,
+                });
+            }
+            target_element_indices.push(element_index);
+        }
+        interactions.push(RuntimePropellerSlipstreamInteraction::new(
+            file.id,
+            target_element_indices,
+            file.slipstream_velocity_factor,
+            file.swirl_velocity_factor,
+        ));
+    }
+    Ok(interactions)
+}
+
+fn resolve_aero_downwash_interactions(
+    model: &AircraftModel,
+    interaction_files: Vec<AeroDownwashInteractionFileV6>,
+) -> Result<Vec<RuntimeAeroDownwashInteraction>, ModelLoadError> {
+    let mut interactions = Vec::with_capacity(interaction_files.len());
+    for (interaction_index, file) in interaction_files.into_iter().enumerate() {
+        validate_unique_id(
+            "aerodynamic downwash interaction",
+            interaction_index,
+            &file.id,
+            interactions.iter().map(RuntimeAeroDownwashInteraction::id),
+        )?;
+        if !file.downwash_factor.is_finite() || file.downwash_factor < 0.0 {
+            return Err(ModelLoadError::InvalidDownwashFactor {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                value: file.downwash_factor,
+            });
+        }
+        let source_surface_index = model
+            .aero_surfaces()
+            .iter()
+            .position(|surface| surface.id() == file.source_surface_id)
+            .ok_or_else(|| ModelLoadError::UnresolvedDownwashSourceSurface {
+                interaction_id: file.id.clone().into_boxed_str(),
+                interaction_index,
+                surface_id: file.source_surface_id.clone().into_boxed_str(),
+            })?;
+        let target_surface_index = model
+            .aero_surfaces()
+            .iter()
+            .position(|surface| surface.id() == file.target_surface_id)
+            .ok_or_else(|| ModelLoadError::UnresolvedDownwashTargetSurface {
+                interaction_id: file.id.clone().into_boxed_str(),
+                interaction_index,
+                surface_id: file.target_surface_id.clone().into_boxed_str(),
+            })?;
+        if source_surface_index == target_surface_index {
+            return Err(ModelLoadError::DownwashSelfInteraction {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                surface_id: file.source_surface_id.into_boxed_str(),
+            });
+        }
+        if let Some((first_interaction_index, first)) = interactions
+            .iter()
+            .enumerate()
+            .find(|(_, interaction)| interaction.target_surface_index() == target_surface_index)
+        {
+            return Err(ModelLoadError::DuplicateDownwashTarget {
+                interaction_id: file.id.into_boxed_str(),
+                interaction_index,
+                surface_id: file.target_surface_id.into_boxed_str(),
+                first_interaction_id: first.id().into(),
+                first_interaction_index,
+            });
+        }
+        interactions.push(RuntimeAeroDownwashInteraction::new(
+            file.id,
+            source_surface_index,
+            target_surface_index,
+            file.downwash_factor,
+        ));
+    }
+
+    for (surface_index, surface) in model.aero_surfaces().iter().enumerate() {
+        let is_source = interactions
+            .iter()
+            .any(|interaction| interaction.source_surface_index() == surface_index);
+        let is_target = interactions
+            .iter()
+            .any(|interaction| interaction.target_surface_index() == surface_index);
+        if is_source && is_target {
+            return Err(ModelLoadError::ChainedDownwashSurface {
+                surface_id: surface.id().into(),
+            });
+        }
+    }
+
+    Ok(interactions)
 }
 
 fn resolve_propulsion_v5(
@@ -867,6 +1383,7 @@ fn resolve_aero_surfaces(
 fn resolve_propulsion_v4(
     file: PropulsionFileV4,
 ) -> Result<RuntimeElectricPropulsion, ModelLoadError> {
+    validate_propeller_rotational_inertia(file.propeller.propeller_rotational_inertia_kg_m2)?;
     let battery = BatteryConfig::new(
         file.battery.open_circuit_voltage_v,
         file.battery.internal_resistance_ohm,
@@ -925,7 +1442,15 @@ fn resolve_propulsion_v4(
     Ok(RuntimeElectricPropulsion::new(
         ElectricPropulsionConfig::new_with_esc(battery, esc, motor, propeller),
         coefficient_source,
-    ))
+    )
+    .with_propeller_rotational_inertia(file.propeller.propeller_rotational_inertia_kg_m2))
+}
+
+fn validate_propeller_rotational_inertia(value: f64) -> Result<(), ModelLoadError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(ModelLoadError::InvalidPropellerRotationalInertia { value });
+    }
+    Ok(())
 }
 
 fn resolve_propeller_table(
@@ -1048,6 +1573,9 @@ fn resolve_common(
     let propulsion = file
         .propulsion
         .map(|propulsion_file| {
+            validate_propeller_rotational_inertia(
+                propulsion_file.propeller.propeller_rotational_inertia_kg_m2,
+            )?;
             let battery = BatteryConfig::new(
                 propulsion_file.battery.open_circuit_voltage_v,
                 propulsion_file.battery.internal_resistance_ohm,
@@ -1089,21 +1617,14 @@ fn resolve_common(
             Ok(RuntimeElectricPropulsion::new_legacy(
                 ElectricPropulsionConfig::new(battery, motor, propeller),
                 coefficient_table,
+            )
+            .with_propeller_rotational_inertia(
+                propulsion_file.propeller.propeller_rotational_inertia_kg_m2,
             ))
         })
         .transpose()?;
 
-    let presentation = file
-        .presentation
-        .map(|presentation_file| {
-            if !is_valid_relative_asset_path(&presentation_file.glb_path) {
-                return Err(ModelLoadError::InvalidPresentationAssetPath {
-                    path: presentation_file.glb_path,
-                });
-            }
-            Ok(PresentationMetadata::new(presentation_file.glb_path))
-        })
-        .transpose()?;
+    let presentation = file.presentation.map(resolve_presentation).transpose()?;
 
     Ok(AircraftModel::new(
         schema_version,
@@ -1117,6 +1638,147 @@ fn resolve_common(
         propulsion,
         presentation,
     ))
+}
+
+fn resolve_presentation(
+    presentation_file: crate::v0::PresentationFileV0,
+) -> Result<PresentationMetadata, ModelLoadError> {
+    if !is_valid_relative_asset_path(&presentation_file.glb_path) {
+        return Err(ModelLoadError::InvalidPresentationAssetPath {
+            path: presentation_file.glb_path,
+        });
+    }
+    let mut surfaces = Vec::with_capacity(presentation_file.articulated_surfaces.len());
+    for (index, file) in presentation_file
+        .articulated_surfaces
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(first_index) =
+            surfaces
+                .iter()
+                .position(|surface: &PresentationArticulatedSurface| {
+                    surface.visual_primitive_index() == file.visual_primitive_index
+                })
+        {
+            return Err(ModelLoadError::DuplicatePresentationVisualPrimitive {
+                duplicate_index: index,
+                first_index,
+                visual_primitive_index: file.visual_primitive_index,
+            });
+        }
+        if file.control_surface_binding_id.trim().is_empty() {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "control_surface_binding_id must be nonempty",
+            });
+        }
+        let Some(hinge_origin_render_body_m) = finite_f32_vector(file.hinge_origin_render_body_m)
+        else {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge origin must contain finite f32-representable values",
+            });
+        };
+        let Some(hinge_axis_render_body) = finite_f32_vector(file.hinge_axis_render_body) else {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge axis must contain finite f32-representable values",
+            });
+        };
+        let axis_norm_squared = hinge_axis_render_body
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f32>();
+        if !axis_norm_squared.is_finite() || axis_norm_squared <= 1.0e-18 {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "hinge axis must be nonzero",
+            });
+        }
+        let visual_gain = file.visual_gain as f32;
+        if !file.visual_gain.is_finite() || !visual_gain.is_finite() {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "visual_gain must be finite and f32-representable",
+            });
+        }
+        let surface = match file.surface {
+            PresentationSurfaceFileV0::LeftAileron => PresentationSurface::LeftAileron,
+            PresentationSurfaceFileV0::RightAileron => PresentationSurface::RightAileron,
+            PresentationSurfaceFileV0::Elevator => PresentationSurface::Elevator,
+            PresentationSurfaceFileV0::Rudder => PresentationSurface::Rudder,
+        };
+        surfaces.push(PresentationArticulatedSurface::new(
+            file.visual_primitive_index,
+            surface,
+            file.control_surface_binding_id,
+            hinge_origin_render_body_m,
+            hinge_axis_render_body,
+            visual_gain,
+        ));
+    }
+    Ok(PresentationMetadata::new(
+        presentation_file.glb_path,
+        surfaces,
+    ))
+}
+
+fn finite_f32_vector(values: [f64; 3]) -> Option<[f32; 3]> {
+    let converted = values.map(|value| value as f32);
+    values
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some(converted)
+        .filter(|values| values.iter().copied().all(f32::is_finite))
+}
+
+fn validate_presentation_bindings(model: &AircraftModel) -> Result<(), ModelLoadError> {
+    let Some(presentation) = model.presentation() else {
+        return Ok(());
+    };
+    for (index, surface) in presentation.articulated_surfaces().iter().enumerate() {
+        let binding_id = surface.control_surface_binding_id();
+        if presentation.articulated_surfaces()[..index]
+            .iter()
+            .any(|previous| {
+                previous.surface() == surface.surface()
+                    && previous.control_surface_binding_id() != binding_id
+            })
+        {
+            return Err(ModelLoadError::InvalidPresentationArticulation {
+                index,
+                requirement: "all primitives for one visual surface must reference the same binding",
+            });
+        }
+        let binding = model
+            .control_surface_bindings()
+            .iter()
+            .find(|binding| binding.id() == binding_id)
+            .ok_or_else(
+                || ModelLoadError::UnresolvedPresentationControlSurfaceBinding {
+                    index,
+                    binding_id: binding_id.to_owned(),
+                },
+            )?;
+        let compatible = matches!(
+            (surface.surface(), binding.actuator()),
+            (
+                PresentationSurface::LeftAileron | PresentationSurface::RightAileron,
+                ControlActuator::Aileron
+            ) | (PresentationSurface::Elevator, ControlActuator::Elevator)
+                | (PresentationSurface::Rudder, ControlActuator::Rudder)
+        );
+        if !compatible {
+            return Err(ModelLoadError::PresentationBindingActuatorMismatch {
+                index,
+                binding_id: binding_id.to_owned(),
+                surface: surface.surface(),
+                actuator: binding.actuator(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resolve_control_surface_bindings(

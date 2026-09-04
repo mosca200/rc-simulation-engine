@@ -4,19 +4,25 @@ use crate::render_snapshot::{
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
 };
-use model::{AircraftModelFingerprint, ModelLoadError, load_aircraft_model};
+use model::{
+    AircraftModel, AircraftModelFingerprint, ModelLoadError, PresentationMetadata,
+    PresentationSurface, load_aircraft_model,
+};
 use platform::{
     GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
     KeyboardKey,
 };
 use renderer::{
-    AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbLoadError, RenderDataError,
-    RenderFrame, RendererError, SurfaceError, WgpuRenderer, aircraft_mesh, load_glb_mesh,
+    AircraftMesh, CameraConfig, FixedStepAccumulator, FixedStepAccumulatorError,
+    GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError, PresentationAsset,
+    RenderDataError, RenderTerrainMode, RendererError, SurfaceError, SurfaceHinge, SurfaceId,
+    WgpuRenderer, aircraft_mesh, load_glb_asset, scenery::SceneryPreset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
-    AeroEnvironment, AeroEnvironmentError, DEFAULT_PHYSICS_HZ, PilotInput, RigidBodyState,
-    SimulationConfigError,
+    AeroEnvironment, AeroEnvironmentError, DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ,
+    FlatGroundPlane, GroundCommand, GroundEvaluation, GroundSurface, PilotInput, RigidBodyState,
+    SimulationConfigError, evaluate_ground_wrench,
 };
 use sim_math::{Orientation, Vec3};
 use std::{
@@ -53,6 +59,60 @@ pub struct RenderOptions {
     altitude_m: f64,
     airspeed_mps: f64,
     replay_output_path: Option<PathBuf>,
+    start_on_ground: bool,
+    scenery: SceneryPreset,
+    camera: CameraSelection,
+    debug_overlays: bool,
+}
+
+/// Presentation-side camera selection parsed from the CLI.
+///
+/// `CameraConfig` construction is deferred to `camera_config()` so the
+/// renderer can build the concrete camera with the window size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CameraSelection {
+    Pilot {
+        position_render_m: [f32; 3],
+        vertical_fov_deg: f32,
+    },
+    Chase {
+        distance_behind_m: f32,
+        height_above_m: f32,
+        vertical_fov_deg: f32,
+    },
+}
+
+impl CameraSelection {
+    fn into_camera_config(self) -> CameraConfig {
+        match self {
+            Self::Pilot {
+                position_render_m,
+                vertical_fov_deg,
+            } => CameraConfig::Pilot {
+                position_render_m,
+                vertical_fov_deg,
+            },
+            Self::Chase {
+                distance_behind_m,
+                height_above_m,
+                vertical_fov_deg,
+            } => CameraConfig::Chase {
+                distance_behind_m,
+                height_above_m,
+                look_ahead_m: 1.5,
+                vertical_fov_deg,
+            },
+        }
+    }
+}
+
+impl Default for CameraSelection {
+    fn default() -> Self {
+        Self::Pilot {
+            position_render_m: [0.0, 0.3, 0.85],
+            vertical_fov_deg: 70.0,
+        }
+    }
 }
 
 impl RenderOptions {
@@ -63,6 +123,10 @@ impl RenderOptions {
             altitude_m: DEFAULT_ALTITUDE_M,
             airspeed_mps: DEFAULT_AIRSPEED_MPS,
             replay_output_path: None,
+            start_on_ground: false,
+            scenery: SceneryPreset::None,
+            camera: CameraSelection::default(),
+            debug_overlays: false,
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -118,6 +182,87 @@ impl RenderOptions {
                             RenderAppError::MissingArgumentValue("--record-replay"),
                         )?));
                 }
+                "--start-on-ground" => {
+                    options.start_on_ground = true;
+                }
+                "--debug-overlays" => {
+                    options.debug_overlays = true;
+                }
+                "--scenery" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--scenery"))?;
+                    options.scenery = match value.as_str() {
+                        "none" => SceneryPreset::None,
+                        "flying-field" => SceneryPreset::FlyingField,
+                        _ => return Err(RenderAppError::InvalidScenery(value)),
+                    };
+                }
+                "--camera" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--camera"))?;
+                    match value.as_str() {
+                        "pilot" => {
+                            options.camera = CameraSelection::Pilot {
+                                position_render_m: [0.0, 1.8, 20.0],
+                                vertical_fov_deg: 55.0,
+                            };
+                        }
+                        "chase" => {
+                            options.camera = CameraSelection::Chase {
+                                distance_behind_m: 3.5,
+                                height_above_m: 1.25,
+                                vertical_fov_deg: 55.0,
+                            };
+                        }
+                        _ => return Err(RenderAppError::UnknownCamera(value)),
+                    }
+                }
+                "--camera-fov" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--camera-fov"))?;
+                    let fov = value
+                        .parse::<f32>()
+                        .map_err(|_| RenderAppError::InvalidCameraFov(value.clone()))?;
+                    if !fov.is_finite() || !(10.0..=120.0).contains(&fov) {
+                        return Err(RenderAppError::InvalidCameraFov(value));
+                    }
+                    options.camera = apply_fov(options.camera, fov);
+                }
+                "--chase-distance-m" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--chase-distance-m"))?;
+                    let distance = value
+                        .parse::<f32>()
+                        .map_err(|_| RenderAppError::InvalidChaseDistance(value.clone()))?;
+                    if !distance.is_finite() || distance <= 0.0 || distance > 1_000.0 {
+                        return Err(RenderAppError::InvalidChaseDistance(value));
+                    }
+                    options.camera = apply_chase_distance(options.camera, distance);
+                }
+                "--chase-height-m" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--chase-height-m"))?;
+                    let height = value
+                        .parse::<f32>()
+                        .map_err(|_| RenderAppError::InvalidChaseHeight(value.clone()))?;
+                    if !height.is_finite() || !(-100.0..=1_000.0).contains(&height) {
+                        return Err(RenderAppError::InvalidChaseHeight(value));
+                    }
+                    options.camera = apply_chase_height(options.camera, height);
+                }
+                "--pilot-position" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--pilot-position"))?;
+                    let position = parse_position(&value)
+                        .ok_or_else(|| RenderAppError::InvalidPilotPosition(value.clone()))?;
+                    options.camera = apply_pilot_position(options.camera, position);
+                }
                 "--help" | "-h" => {
                     super::print_usage();
                     std::process::exit(0);
@@ -141,6 +286,18 @@ pub enum RenderAppError {
     InvalidAirspeed(String),
     #[error("unknown render argument: {0}")]
     UnknownArgument(String),
+    #[error("invalid scenery preset `{0}`; expected `none` or `flying-field`")]
+    InvalidScenery(String),
+    #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
+    UnknownCamera(String),
+    #[error("invalid camera FOV `{0}`; expected a finite value inside (10, 120) degrees")]
+    InvalidCameraFov(String),
+    #[error("invalid chase distance `{0}`; expected a finite positive value")]
+    InvalidChaseDistance(String),
+    #[error("invalid chase height `{0}`; expected a finite value")]
+    InvalidChaseHeight(String),
+    #[error("invalid pilot position `{0}`; expected three finite numbers `x,y,z`")]
+    InvalidPilotPosition(String),
     #[error("failed to load render model from {path}: {source}")]
     ModelLoad {
         path: PathBuf,
@@ -151,8 +308,17 @@ pub enum RenderAppError {
     PresentationAsset {
         path: PathBuf,
         #[source]
-        source: GlbLoadError,
+        source: Box<GlbLoadError>,
     },
+    #[error("render ground start requested for model {model_id:?}, but it has no landing gear")]
+    GroundStartWithoutLandingGear { model_id: String },
+    #[error("model {model_id:?} cannot form a supported render ground start: {reason}")]
+    InvalidGroundStart {
+        model_id: String,
+        reason: &'static str,
+    },
+    #[error("invalid articulated GLB presentation mapping: {0}")]
+    PresentationArticulation(#[from] GlbArticulationError),
     #[error("failed to initialize AircraftSimulation for render mode: {0}")]
     AircraftSimulation(#[from] AircraftSimulationError),
     #[error("failed to configure the render atmosphere: {0}")]
@@ -211,15 +377,27 @@ pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
     Ok(())
 }
 
+enum PresentationModel {
+    Glb {
+        asset: GlbAsset,
+        articulation: GlbArticulationPlan,
+    },
+    Procedural(AircraftMesh),
+}
+
 struct RenderApplication {
     simulation: AircraftSimulation,
-    aircraft_mesh: AircraftMesh,
+    presentation: PresentationModel,
+    scenery_preset: SceneryPreset,
+    debug_overlays: bool,
     input_state: InputState,
     input_backend: GilrsInputBackend,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
     ground_below_render_origin_m: f32,
+    terrain_mode: RenderTerrainMode,
+    camera_config: CameraConfig,
     render_snapshots: AircraftRenderSnapshotBuffer,
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
@@ -239,15 +417,27 @@ impl RenderApplication {
                 path: model_path.clone(),
                 source,
             })?;
-        let aircraft_mesh = resolve_aircraft_mesh(
-            &model_path,
-            model.presentation().map(|value| value.glb_path()),
-        )?;
+        let presentation = resolve_presentation_model(&model_path, model.presentation())?;
         let model_id = model.model_id().to_owned();
         let model_fingerprint = model.physics_fingerprint();
-        let initial_state = render_initial_state(altitude_m, airspeed_mps);
+        let (initial_state, ground_below_render_origin_m, terrain_mode, initial_ground) =
+            if options.start_on_ground {
+                let initialized = supported_ground_start(&model)?;
+                (
+                    initialized.state,
+                    initialized.ground_below_render_origin_m,
+                    RenderTerrainMode::Flat,
+                    initialized.ground_evaluation,
+                )
+            } else {
+                (
+                    render_initial_state(altitude_m, airspeed_mps),
+                    altitude_m as f32,
+                    RenderTerrainMode::Rolling,
+                    GroundEvaluation::zero(),
+                )
+            };
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
-        let ground_below_render_origin_m = altitude_m as f32;
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
@@ -271,19 +461,25 @@ impl RenderApplication {
         print_manual_flight_startup(
             &model_id,
             &model_fingerprint,
-            altitude_m,
-            airspeed_mps,
+            &initial_state,
             initial_throttle,
+            options.start_on_ground,
+            initial_ground.weight_on_wheels(),
+            terrain_mode,
         );
         Ok(Self {
             simulation,
-            aircraft_mesh,
+            presentation,
+            scenery_preset: options.scenery,
+            debug_overlays: options.debug_overlays,
             input_state,
             input_backend,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
             ground_below_render_origin_m,
+            terrain_mode,
+            camera_config: options.camera.into_camera_config(),
             render_snapshots,
             fixed_step,
             last_frame_time: None,
@@ -349,7 +545,10 @@ impl RenderApplication {
                     }
                 };
             self.render_snapshots
-                .push(AircraftRenderSnapshot::post_step(&snapshot));
+                .push(AircraftRenderSnapshot::post_step(
+                    &snapshot,
+                    self.simulation.model(),
+                ));
         }
         if step_plan.dropped_time_s() > 0.0 {
             warn!(
@@ -359,6 +558,7 @@ impl RenderApplication {
         }
 
         let alpha = interpolation_alpha(step_plan.remainder(), self.fixed_step.physics_dt());
+        let snapshot = self.render_snapshots.interpolated_snapshot(alpha);
         let pose = match self
             .render_snapshots
             .interpolated_pose(alpha, self.render_origin_world_ned_m)
@@ -369,7 +569,7 @@ impl RenderApplication {
                 return;
             }
         };
-        let frame = RenderFrame::new(pose);
+        let frame = snapshot.render_frame(pose);
         let render_result = self
             .renderer
             .as_mut()
@@ -414,10 +614,23 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
-        let renderer = match pollster::block_on(WgpuRenderer::new(
+        let presentation_asset = match &self.presentation {
+            PresentationModel::Glb {
+                asset,
+                articulation,
+            } => PresentationAsset::ArticulatedGlb {
+                asset,
+                articulation,
+            },
+            PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
+        };
+        let mut renderer = match pollster::block_on(WgpuRenderer::new_with_presentation(
             Arc::clone(&window),
-            &self.aircraft_mesh,
+            presentation_asset,
             self.ground_below_render_origin_m,
+            self.terrain_mode,
+            Some(self.scenery_preset),
+            self.camera_config,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -428,6 +641,7 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
+        renderer.set_show_debug_overlays(self.debug_overlays);
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());
@@ -514,15 +728,139 @@ fn resolve_presentation_path(model_path: &Path, glb_path: &str) -> PathBuf {
         .join(glb_path)
 }
 
-fn resolve_aircraft_mesh(
+fn resolve_presentation_model(
     model_path: &Path,
-    glb_path: Option<&str>,
-) -> Result<AircraftMesh, RenderAppError> {
-    let Some(glb_path) = glb_path else {
-        return Ok(aircraft_mesh());
+    presentation: Option<&PresentationMetadata>,
+) -> Result<PresentationModel, RenderAppError> {
+    let Some(presentation) = presentation else {
+        return Ok(PresentationModel::Procedural(aircraft_mesh()));
     };
-    let path = resolve_presentation_path(model_path, glb_path);
-    load_glb_mesh(&path).map_err(|source| RenderAppError::PresentationAsset { path, source })
+    let path = resolve_presentation_path(model_path, presentation.glb_path());
+    let asset = load_glb_asset(&path).map_err(|source| RenderAppError::PresentationAsset {
+        path,
+        source: Box::new(source),
+    })?;
+    let articulation = articulation_plan(presentation, asset.primitives.len())?;
+    Ok(PresentationModel::Glb {
+        asset,
+        articulation,
+    })
+}
+
+fn articulation_plan(
+    presentation: &PresentationMetadata,
+    primitive_count: usize,
+) -> Result<GlbArticulationPlan, GlbArticulationError> {
+    let mappings = presentation.articulated_surfaces().iter().map(|mapping| {
+        let surface = match mapping.surface() {
+            PresentationSurface::LeftAileron => SurfaceId::LeftAileron,
+            PresentationSurface::RightAileron => SurfaceId::RightAileron,
+            PresentationSurface::Elevator => SurfaceId::Elevator,
+            PresentationSurface::Rudder => SurfaceId::Rudder,
+        };
+        let hinge = SurfaceHinge::new(
+            surface,
+            mapping.hinge_origin_render_body_m(),
+            mapping.hinge_axis_render_body(),
+            mapping.visual_gain(),
+        )
+        .expect("model loading validates presentation hinge metadata");
+        (mapping.visual_primitive_index(), hinge)
+    });
+    GlbArticulationPlan::from_mappings(primitive_count, mappings)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GroundStartInitialization {
+    state: RigidBodyState,
+    ground_below_render_origin_m: f32,
+    ground_evaluation: GroundEvaluation,
+}
+
+/// Places a level, stationary aircraft at the unique vertical compression
+/// where the landing-gear springs support its weight on the flat physics plane.
+/// The fixed-iteration bisection is startup-only and deterministic.
+fn supported_ground_start(
+    model: &AircraftModel,
+) -> Result<GroundStartInitialization, RenderAppError> {
+    let gear = model.landing_gear();
+    if gear.is_empty() {
+        return Err(RenderAppError::GroundStartWithoutLandingGear {
+            model_id: model.model_id().to_owned(),
+        });
+    }
+
+    let minimum_bottom_body_z = gear
+        .iter()
+        .map(|contact| {
+            let contact = contact.contact();
+            contact.position_body_m.z + contact.wheel_radius_m
+        })
+        .fold(f64::INFINITY, f64::min);
+    let maximum_bottom_body_z = gear
+        .iter()
+        .map(|contact| {
+            let contact = contact.contact();
+            contact.position_body_m.z + contact.wheel_radius_m
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    let minimum_stiffness = gear
+        .iter()
+        .map(|contact| contact.contact().stiffness_n_per_m)
+        .fold(f64::INFINITY, f64::min);
+    let weight_n = model.rigid_body().mass_kg() * DEFAULT_GRAVITY_MPS2;
+
+    // Upper bound is just clear of every wheel. The lower bound guarantees
+    // at least one spring alone would exceed the aircraft weight.
+    let mut unsupported_height_m = maximum_bottom_body_z;
+    let mut overcompressed_height_m = minimum_bottom_body_z - weight_n / minimum_stiffness;
+    for _ in 0..96 {
+        let candidate_height_m = 0.5 * (overcompressed_height_m + unsupported_height_m);
+        let normal_force_n = gear
+            .iter()
+            .map(|contact| {
+                let contact = contact.contact();
+                let bottom_body_z = contact.position_body_m.z + contact.wheel_radius_m;
+                contact.stiffness_n_per_m * (bottom_body_z - candidate_height_m).max(0.0)
+            })
+            .sum::<f64>();
+        if normal_force_n > weight_n {
+            overcompressed_height_m = candidate_height_m;
+        } else {
+            unsupported_height_m = candidate_height_m;
+        }
+    }
+    let cg_height_m = 0.5 * (overcompressed_height_m + unsupported_height_m);
+    if !cg_height_m.is_finite() || cg_height_m <= 0.0 || cg_height_m > f64::from(f32::MAX) {
+        return Err(RenderAppError::InvalidGroundStart {
+            model_id: model.model_id().to_owned(),
+            reason: "computed CG height above the ground plane is not finite and positive",
+        });
+    }
+    let state = RigidBodyState {
+        position_world_m: Vec3::new(0.0, 0.0, -cg_height_m),
+        linear_velocity_world_mps: Vec3::zeros(),
+        orientation_world_from_body: Orientation::identity(),
+        angular_velocity_body_radps: Vec3::zeros(),
+    };
+    let contacts = model.gear_contacts();
+    let ground_evaluation = evaluate_ground_wrench(
+        &state,
+        &contacts,
+        &GroundSurface::Flat(FlatGroundPlane::default()),
+        &GroundCommand::new(0.0, 0.0),
+    );
+    if !ground_evaluation.weight_on_wheels() {
+        return Err(RenderAppError::InvalidGroundStart {
+            model_id: model.model_id().to_owned(),
+            reason: "computed state has no active physical ground contact",
+        });
+    }
+    Ok(GroundStartInitialization {
+        state,
+        ground_below_render_origin_m: cg_height_m as f32,
+        ground_evaluation,
+    })
 }
 
 fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {
@@ -537,9 +875,11 @@ fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {
 fn print_manual_flight_startup(
     model_id: &str,
     fingerprint: &AircraftModelFingerprint,
-    altitude_m: f64,
-    airspeed_mps: f64,
+    initial_state: &RigidBodyState,
     throttle: f64,
+    ground_start: bool,
+    initial_weight_on_wheels: bool,
+    terrain_mode: RenderTerrainMode,
 ) {
     println!("Manual flight controls:");
     println!("A/D = roll");
@@ -555,9 +895,18 @@ fn print_manual_flight_startup(
     }
     println!();
     println!("physics rate: {DEFAULT_PHYSICS_HZ} Hz");
-    println!("initial altitude: {altitude_m:.3} m");
-    println!("initial airspeed: {airspeed_mps:.3} m/s");
+    println!(
+        "initial altitude: {:.3} m",
+        -initial_state.position_world_m.z
+    );
+    println!(
+        "initial airspeed: {:.3} m/s",
+        initial_state.linear_velocity_world_mps.norm()
+    );
     println!("initial throttle: {throttle:.3}");
+    println!("ground_start={ground_start}");
+    println!("initial_weight_on_wheels={initial_weight_on_wheels}");
+    println!("terrain_mode={}", terrain_mode.as_str());
 }
 
 fn keyboard_key(physical_key: PhysicalKey) -> Option<KeyboardKey> {
@@ -578,10 +927,105 @@ fn vector_to_array(vector: Vec3) -> [f64; 3] {
     [vector.x, vector.y, vector.z]
 }
 
+// ---------------------------------------------------------------------------
+// Camera CLI helpers (presentation-side).
+// ---------------------------------------------------------------------------
+
+/// Parse `x,y,z` into a finite `[f32; 3]`, or `None` on malformed input.
+fn parse_position(value: &str) -> Option<[f32; 3]> {
+    let mut parts = value.split(',');
+    let x = parts.next()?.trim().parse::<f32>().ok()?;
+    let y = parts.next()?.trim().parse::<f32>().ok()?;
+    let z = parts.next()?.trim().parse::<f32>().ok()?;
+    if parts.next().is_some() || ![x, y, z].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    Some([x, y, z])
+}
+
+fn apply_fov(camera: CameraSelection, fov_deg: f32) -> CameraSelection {
+    match camera {
+        CameraSelection::Pilot {
+            position_render_m, ..
+        } => CameraSelection::Pilot {
+            position_render_m,
+            vertical_fov_deg: fov_deg,
+        },
+        CameraSelection::Chase {
+            distance_behind_m,
+            height_above_m,
+            ..
+        } => CameraSelection::Chase {
+            distance_behind_m,
+            height_above_m,
+            vertical_fov_deg: fov_deg,
+        },
+    }
+}
+
+fn apply_chase_distance(camera: CameraSelection, distance_behind_m: f32) -> CameraSelection {
+    match camera {
+        CameraSelection::Pilot { .. } => camera,
+        CameraSelection::Chase {
+            height_above_m,
+            vertical_fov_deg,
+            ..
+        } => CameraSelection::Chase {
+            distance_behind_m,
+            height_above_m,
+            vertical_fov_deg,
+        },
+    }
+}
+
+fn apply_chase_height(camera: CameraSelection, height_above_m: f32) -> CameraSelection {
+    match camera {
+        CameraSelection::Pilot { .. } => camera,
+        CameraSelection::Chase {
+            distance_behind_m,
+            vertical_fov_deg,
+            ..
+        } => CameraSelection::Chase {
+            distance_behind_m,
+            height_above_m,
+            vertical_fov_deg,
+        },
+    }
+}
+
+fn apply_pilot_position(camera: CameraSelection, position_render_m: [f32; 3]) -> CameraSelection {
+    match camera {
+        CameraSelection::Chase { .. } => camera,
+        CameraSelection::Pilot {
+            vertical_fov_deg, ..
+        } => CameraSelection::Pilot {
+            position_render_m,
+            vertical_fov_deg,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use replay::{AircraftReplayPlayer, AircraftReplayRecording};
+
+    fn repository_model_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+    }
+
+    fn acro_model_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/acro_electric_01/model.json")
+    }
+
+    fn acro_model_with_presentation_path(glb_path: &str) -> model::AircraftModel {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(acro_model_path()).unwrap()).unwrap();
+        value["presentation"]["glb_path"] = serde_json::json!(glb_path);
+        model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap()
+    }
 
     #[test]
     fn throttle_parser_accepts_bounds_and_rejects_invalid_values() {
@@ -600,10 +1044,105 @@ mod tests {
     }
 
     #[test]
+    fn camera_options_select_pilot_and_chase_modes() {
+        let pilot =
+            RenderOptions::parse(["--camera", "pilot"].map(str::to_owned).into_iter()).unwrap();
+        assert!(matches!(pilot.camera, CameraSelection::Pilot { .. }));
+
+        let chase =
+            RenderOptions::parse(["--camera", "chase"].map(str::to_owned).into_iter()).unwrap();
+        assert!(matches!(chase.camera, CameraSelection::Chase { .. }));
+
+        let default = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert!(matches!(default.camera, CameraSelection::Pilot { .. }));
+    }
+
+    #[test]
+    fn camera_options_apply_tuning_and_reject_invalid_values() {
+        let tuned = RenderOptions::parse(
+            [
+                "--camera",
+                "chase",
+                "--camera-fov",
+                "35",
+                "--chase-distance-m",
+                "8",
+                "--chase-height-m",
+                "2.5",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        match tuned.camera {
+            CameraSelection::Chase {
+                distance_behind_m,
+                height_above_m,
+                vertical_fov_deg,
+            } => {
+                assert_eq!(distance_behind_m, 8.0);
+                assert_eq!(height_above_m, 2.5);
+                assert_eq!(vertical_fov_deg, 35.0);
+            }
+            _ => panic!("expected chase selection"),
+        }
+
+        let pilot = RenderOptions::parse(
+            ["--camera", "pilot", "--pilot-position", "4,1.7,30"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        match pilot.camera {
+            CameraSelection::Pilot {
+                position_render_m, ..
+            } => assert_eq!(position_render_m, [4.0, 1.7, 30.0]),
+            _ => panic!("expected pilot selection"),
+        }
+
+        assert!(matches!(
+            RenderOptions::parse(["--camera", "orbit"].map(str::to_owned).into_iter()),
+            Err(RenderAppError::UnknownCamera(_))
+        ));
+        assert!(matches!(
+            RenderOptions::parse(["--camera-fov", "200"].map(str::to_owned).into_iter()),
+            Err(RenderAppError::InvalidCameraFov(_))
+        ));
+        assert!(matches!(
+            RenderOptions::parse(["--chase-distance-m", "0"].map(str::to_owned).into_iter()),
+            Err(RenderAppError::InvalidChaseDistance(_))
+        ));
+        assert!(matches!(
+            RenderOptions::parse(["--pilot-position", "1,2"].map(str::to_owned).into_iter()),
+            Err(RenderAppError::InvalidPilotPosition(_))
+        ));
+    }
+
+    #[test]
+    fn camera_config_conversion_is_presentation_only() {
+        let selection = CameraSelection::Pilot {
+            position_render_m: [1.0, 2.0, 3.0],
+            vertical_fov_deg: 50.0,
+        };
+        let config = selection.into_camera_config();
+        assert!(matches!(config, renderer::CameraConfig::Pilot { .. }));
+        let chase = CameraSelection::Chase {
+            distance_behind_m: 5.0,
+            height_above_m: 2.0,
+            vertical_fov_deg: 45.0,
+        };
+        assert!(matches!(
+            chase.into_camera_config(),
+            renderer::CameraConfig::Chase { .. }
+        ));
+    }
+
+    #[test]
     fn altitude_and_airspeed_options_parse_with_manual_flight_defaults_and_overrides() {
         let defaults = RenderOptions::parse(std::iter::empty()).unwrap();
         assert_eq!(defaults.altitude_m, 30.0);
         assert_eq!(defaults.airspeed_mps, 18.0);
+        assert!(!defaults.start_on_ground);
 
         let options = RenderOptions::parse(
             [
@@ -621,6 +1160,12 @@ mod tests {
         assert_eq!(options.altitude_m, 45.5);
         assert_eq!(options.airspeed_mps, 22.25);
         assert_eq!(options.throttle, 0.6);
+    }
+
+    #[test]
+    fn start_on_ground_flag_parses_explicitly() {
+        let options = RenderOptions::parse(["--start-on-ground".to_owned()].into_iter()).unwrap();
+        assert!(options.start_on_ground);
     }
 
     #[test]
@@ -649,6 +1194,78 @@ mod tests {
     }
 
     #[test]
+    fn ground_start_without_landing_gear_fails_explicitly() {
+        let model_path = repository_model_path("models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        assert!(matches!(
+            supported_ground_start(&model),
+            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
+                if model_id == "acro-electric-01"
+        ));
+        let options = RenderOptions::parse(
+            [
+                "--model".to_owned(),
+                model_path.display().to_string(),
+                "--start-on-ground".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(matches!(
+            RenderApplication::new(options),
+            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
+                if model_id == "acro-electric-01"
+        ));
+    }
+
+    #[test]
+    fn dedicated_ground_demo_starts_supported_on_the_physical_flat_plane() {
+        let model_path = repository_model_path("models/acro_electric_ground_demo/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        assert_eq!(
+            model.classification(),
+            model::AircraftClassification::SyntheticTest
+        );
+        assert!(model.reference_aircraft().is_none());
+        let presentation = resolve_presentation_model(&model_path, model.presentation()).unwrap();
+        match presentation {
+            PresentationModel::Glb { asset, .. } => {
+                assert!(!asset.primitives.is_empty());
+                assert!(asset.total_vertex_count() > 0);
+            }
+            PresentationModel::Procedural(_) => {
+                panic!("dedicated ground demo must use the production GLB path");
+            }
+        }
+
+        let initialized = supported_ground_start(&model).unwrap();
+        assert!(initialized.state.validate().is_ok());
+        assert_eq!(initialized.state.linear_velocity_world_mps.x, 0.0);
+        assert_eq!(initialized.state.linear_velocity_world_mps.y, 0.0);
+        assert_eq!(initialized.state.linear_velocity_world_mps.z, 0.0);
+        assert!(initialized.ground_evaluation.weight_on_wheels());
+        assert!(initialized.ground_evaluation.active_contacts > 0);
+        let weight_n = model.rigid_body().mass_kg() * DEFAULT_GRAVITY_MPS2;
+        assert!(
+            (initialized.ground_evaluation.total_normal_force_n - weight_n).abs()
+                <= 1.0e-10 * weight_n
+        );
+
+        let render_origin = vector_to_array(initialized.state.position_world_m);
+        let physical_ground_pose = renderer::world_ned_pose_to_render(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            render_origin,
+        )
+        .unwrap();
+        assert_eq!(
+            physical_ground_pose.translation_render_m()[1],
+            -initialized.ground_below_render_origin_m
+        );
+        assert_eq!(RenderTerrainMode::Flat.as_str(), "flat");
+    }
+
+    #[test]
     fn initial_render_snapshot_adapter_preserves_raw_pose_semantics() {
         let state = RigidBodyState {
             position_world_m: Vec3::new(101.0, 202.0, 303.0),
@@ -668,31 +1285,83 @@ mod tests {
         let model_path = Path::new("models/acro_electric_01/model.json");
         assert_eq!(
             resolve_presentation_path(model_path, "aircraft.glb"),
-            PathBuf::from("models/acro_electric_01/aircraft.glb")
+            Path::new("models/acro_electric_01/aircraft.glb")
         );
+    }
+
+    #[test]
+    fn resolve_presentation_model_without_glb_returns_procedural() {
+        let model_path = Path::new("models/nonexistent/model.json");
+        let result = resolve_presentation_model(model_path, None).unwrap();
+        assert!(matches!(result, PresentationModel::Procedural(_)));
+    }
+
+    #[test]
+    fn resolve_presentation_model_with_missing_glb_returns_explicit_error() {
+        let model_path = Path::new("models/nonexistent/model.json");
+        let model = acro_model_with_presentation_path("missing.glb");
+        let result = resolve_presentation_model(model_path, model.presentation());
+        assert!(matches!(
+            result,
+            Err(RenderAppError::PresentationAsset { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_presentation_model_with_real_glb_returns_glb_asset() {
+        let model_path = acro_model_path();
+        if !model_path.exists() {
+            return; // Skip if model not available in CI.
+        }
+        let model = load_aircraft_model(&model_path).unwrap();
+        let result = resolve_presentation_model(&model_path, model.presentation()).unwrap();
+        match result {
+            PresentationModel::Glb {
+                asset,
+                articulation,
+            } => {
+                assert!(!asset.primitives.is_empty());
+                assert!(asset.total_vertex_count() > 0);
+                assert_eq!(articulation.len(), asset.primitives.len());
+            }
+            PresentationModel::Procedural(_) => {
+                panic!("expected Glb variant for real GLB model");
+            }
+        }
     }
 
     #[test]
     fn declared_valid_missing_and_invalid_assets_have_explicit_outcomes() {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../models/acro_electric_01/model.json");
-        let valid = resolve_aircraft_mesh(&model_path, Some("aircraft.glb")).unwrap();
-        assert!(!valid.vertices().is_empty());
+        let valid_model = load_aircraft_model(&model_path).unwrap();
+        let valid = resolve_presentation_model(&model_path, valid_model.presentation()).unwrap();
+        match valid {
+            PresentationModel::Glb { asset, .. } => assert!(!asset.primitives.is_empty()),
+            PresentationModel::Procedural(_) => panic!("expected Glb for valid asset"),
+        }
+        let missing = acro_model_with_presentation_path("missing.glb");
         assert!(matches!(
-            resolve_aircraft_mesh(&model_path, Some("missing.glb")),
+            resolve_presentation_model(&model_path, missing.presentation()),
             Err(RenderAppError::PresentationAsset { .. })
         ));
+        let invalid = acro_model_with_presentation_path("README.md");
         assert!(matches!(
-            resolve_aircraft_mesh(&model_path, Some("README.md")),
+            resolve_presentation_model(&model_path, invalid.presentation()),
             Err(RenderAppError::PresentationAsset { .. })
         ));
     }
 
     #[test]
     fn absent_presentation_metadata_uses_procedural_fallback() {
-        let mesh = resolve_aircraft_mesh(Path::new("model.json"), None).unwrap();
-        assert!(!mesh.vertices().is_empty());
-        assert!(!mesh.indices().is_empty());
+        let result = resolve_presentation_model(Path::new("model.json"), None).unwrap();
+        match result {
+            PresentationModel::Procedural(mesh) => {
+                assert!(!mesh.vertices().is_empty());
+                assert!(!mesh.indices().is_empty());
+            }
+            PresentationModel::Glb { .. } => panic!("expected procedural fallback"),
+        }
     }
 
     #[test]
@@ -701,12 +1370,53 @@ mod tests {
             .join("../../models/acro_electric_01/model.json");
         let model = load_aircraft_model(&model_path).unwrap();
         let before = model.physics_fingerprint();
-        let _mesh = resolve_aircraft_mesh(
-            &model_path,
-            model.presentation().map(|value| value.glb_path()),
-        )
-        .unwrap();
+        let _presentation = resolve_presentation_model(&model_path, model.presentation()).unwrap();
         assert_eq!(model.physics_fingerprint(), before);
+    }
+
+    #[test]
+    fn opaque_metadata_builds_explicit_glb_plan_without_changing_fingerprint() {
+        let model_path = acro_model_path();
+        let original = load_aircraft_model(&model_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&model_path).unwrap()).unwrap();
+        for (binding, id) in value["control_surface_bindings"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(["p", "q", "r", "s"])
+        {
+            binding["id"] = serde_json::json!(id);
+        }
+        value["presentation"]["articulated_surfaces"] = serde_json::json!([
+            {"visual_primitive_index":1,"surface":"left_aileron","control_surface_binding_id":"p","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":2,"surface":"right_aileron","control_surface_binding_id":"q","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":3,"surface":"elevator","control_surface_binding_id":"r","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":4,"surface":"rudder","control_surface_binding_id":"s","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[0.0,1.0,0.0],"visual_gain":1.0}
+        ]);
+        let explicit = model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap();
+        let plan = articulation_plan(explicit.presentation().unwrap(), 6).unwrap();
+        assert!(matches!(plan.part(0), renderer::GlbPrimitivePart::Rigid));
+        assert!(matches!(plan.part(5), renderer::GlbPrimitivePart::Rigid));
+        for (index, surface) in [
+            SurfaceId::LeftAileron,
+            SurfaceId::RightAileron,
+            SurfaceId::Elevator,
+            SurfaceId::Rudder,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                plan.part(index + 1),
+                renderer::GlbPrimitivePart::Articulated { surface: actual, .. }
+                    if *actual == surface
+            ));
+        }
+        assert_eq!(
+            explicit.physics_fingerprint(),
+            original.physics_fingerprint()
+        );
     }
 
     #[test]
@@ -725,7 +1435,7 @@ mod tests {
             orientation_world_from_body: Orientation::identity(),
             angular_velocity_body_radps: Vec3::zeros(),
         };
-        let mut simulation = AircraftSimulation::new(model, config, initial_state).unwrap();
+        let mut simulation = AircraftSimulation::new(model.clone(), config, initial_state).unwrap();
         let mut recorder = Some(AircraftReplayRecorder::new(&simulation).unwrap());
         let mut input_state = InputState::default();
         input_state.set_key(KeyboardKey::PitchUp, true);
@@ -745,9 +1455,116 @@ mod tests {
         }
         let json = recording.to_json_pretty().unwrap();
         let decoded = AircraftReplayRecording::from_json(&json).unwrap();
-        let model = load_aircraft_model(model_path).unwrap();
         let mut replayed = decoded.reconstruct_simulation(model).unwrap();
         let player = AircraftReplayPlayer::new(&decoded, &replayed).unwrap();
         assert_eq!(player.verify_all(&mut replayed).unwrap(), 3);
+    }
+
+    #[test]
+    fn scenery_parser_accepts_flying_field() {
+        let options =
+            RenderOptions::parse(["--scenery".to_owned(), "flying-field".to_owned()].into_iter())
+                .unwrap();
+        assert_eq!(options.scenery, SceneryPreset::FlyingField);
+    }
+
+    #[test]
+    fn scenery_parser_accepts_none() {
+        let options =
+            RenderOptions::parse(["--scenery".to_owned(), "none".to_owned()].into_iter()).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::None);
+    }
+
+    #[test]
+    fn scenery_parser_rejects_invalid_value() {
+        let result = RenderOptions::parse(["--scenery".to_owned(), "city".to_owned()].into_iter());
+        assert!(matches!(result, Err(RenderAppError::InvalidScenery(_))));
+    }
+
+    #[test]
+    fn scenery_default_is_none() {
+        let options = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::None);
+    }
+
+    // ── Integration tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn complete_render_options_parse_together() {
+        let options = RenderOptions::parse(
+            [
+                "--model",
+                "models/acro_electric_ground_demo/model.json",
+                "--start-on-ground",
+                "--scenery",
+                "flying-field",
+                "--camera",
+                "pilot",
+                "--throttle",
+                "0",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(options.start_on_ground);
+        assert_eq!(options.scenery, SceneryPreset::FlyingField);
+        assert!(matches!(options.camera, CameraSelection::Pilot { .. }));
+        assert_eq!(options.throttle, 0.0);
+    }
+
+    #[test]
+    fn pilot_camera_is_default() {
+        let options = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert!(matches!(options.camera, CameraSelection::Pilot { .. }));
+    }
+
+    #[test]
+    fn chase_camera_mode_remains_available() {
+        let options =
+            RenderOptions::parse(["--camera".to_owned(), "chase".to_owned()].into_iter()).unwrap();
+        assert!(matches!(options.camera, CameraSelection::Chase { .. }));
+    }
+
+    #[test]
+    fn camera_settings_parse_without_affecting_physics_options() {
+        let options = RenderOptions::parse(
+            [
+                "--camera",
+                "chase",
+                "--camera-fov",
+                "90",
+                "--chase-distance-m",
+                "8",
+                "--chase-height-m",
+                "3",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(matches!(options.camera, CameraSelection::Chase { .. }));
+    }
+
+    #[test]
+    fn ground_start_with_flying_field_scenery_and_pilot_camera() {
+        let options = RenderOptions::parse(
+            [
+                "--start-on-ground",
+                "--scenery",
+                "flying-field",
+                "--camera",
+                "pilot",
+                "--throttle",
+                "0.5",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(options.start_on_ground);
+        assert_eq!(options.scenery, SceneryPreset::FlyingField);
+        assert!(matches!(options.camera, CameraSelection::Pilot { .. }));
+        assert!((options.throttle - 0.5).abs() < 1e-9);
     }
 }

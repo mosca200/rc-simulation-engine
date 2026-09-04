@@ -9,7 +9,7 @@ use sim_core::{
     BodyWrench, ControlSurfacePositions, PilotInput, RigidBodyDerivative, RigidBodyState,
     evaluate_steady_controls,
 };
-use sim_math::{Mat3, Orientation, Vec3};
+use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use thiserror::Error;
 
 const FINITE_DIFFERENCE_RELATIVE_STEP: f64 = 1.0e-5;
@@ -419,6 +419,8 @@ fn evaluate_candidate(
     let input = PilotInput::new(0.0, variables.elevator_command, 0.0, variables.throttle);
     let positions = evaluate_steady_controls(model.controls(), &input);
     let elements = effective_aero_elements_for_positions(model, &positions);
+    // Trim is an airborne equilibrium solve: gear contact is excluded so a
+    // runway-parked configuration cannot masquerade as a trimmed free-flight state.
     let instantaneous =
         evaluate_aircraft_instantaneous(&state, &elements, model, positions.throttle(), config);
     let derivative = *instantaneous.derivative();
@@ -549,5 +551,242 @@ fn failure(
         reason,
         iteration_count,
         last_evaluation: last_evaluation.map(Box::new),
+    }
+}
+
+/// Bitwise comparison of two [`LongitudinalTrimEvaluation`] values.
+///
+/// Unlike `PartialEq` (derived), which uses `f64::eq` where `+0.0 == -0.0`, this
+/// function compares every floating-point field via `f64::to_bits()`. A sign-different
+/// zero pair (`+0.0` vs `-0.0`) is therefore treated as distinct, matching the M2.6C
+/// re-evaluation contract: a cached evaluation and an independent re-evaluation must
+/// be bitwise identical, not merely numerically equal.
+///
+/// Covers every floating-point field in the evaluation: trim variables, pitch attitude,
+/// rigid-body state (position, velocity, Hamilton quaternion `wxyz`, angular velocity),
+/// control surface positions, body wrench, derivative (including quaternion derivative
+/// `wxyz`), and residuals. No allocations, no tolerances, no serialization.
+#[must_use]
+pub fn evaluations_bitwise_equal(
+    a: &LongitudinalTrimEvaluation,
+    b: &LongitudinalTrimEvaluation,
+) -> bool {
+    f64_bits_eq(a.variables.alpha_rad, b.variables.alpha_rad)
+        && f64_bits_eq(a.variables.elevator_command, b.variables.elevator_command)
+        && f64_bits_eq(a.variables.throttle, b.variables.throttle)
+        && f64_bits_eq(a.pitch_attitude_rad, b.pitch_attitude_rad)
+        && vec3_bits_eq(&a.state.position_world_m, &b.state.position_world_m)
+        && vec3_bits_eq(
+            &a.state.linear_velocity_world_mps,
+            &b.state.linear_velocity_world_mps,
+        )
+        && orientation_bits_eq(
+            &a.state.orientation_world_from_body,
+            &b.state.orientation_world_from_body,
+        )
+        && vec3_bits_eq(
+            &a.state.angular_velocity_body_radps,
+            &b.state.angular_velocity_body_radps,
+        )
+        && f64_bits_eq(
+            a.control_surface_positions.aileron_angle_rad(),
+            b.control_surface_positions.aileron_angle_rad(),
+        )
+        && f64_bits_eq(
+            a.control_surface_positions.elevator_angle_rad(),
+            b.control_surface_positions.elevator_angle_rad(),
+        )
+        && f64_bits_eq(
+            a.control_surface_positions.rudder_angle_rad(),
+            b.control_surface_positions.rudder_angle_rad(),
+        )
+        && f64_bits_eq(
+            a.control_surface_positions.throttle(),
+            b.control_surface_positions.throttle(),
+        )
+        && vec3_bits_eq(&a.body_wrench.force_body_n, &b.body_wrench.force_body_n)
+        && vec3_bits_eq(&a.body_wrench.moment_body_nm, &b.body_wrench.moment_body_nm)
+        && vec3_bits_eq(
+            &a.derivative.position_world_mps,
+            &b.derivative.position_world_mps,
+        )
+        && vec3_bits_eq(
+            &a.derivative.linear_velocity_world_mps2,
+            &b.derivative.linear_velocity_world_mps2,
+        )
+        && quaternion_bits_eq(
+            a.derivative.orientation_world_from_body_per_s,
+            b.derivative.orientation_world_from_body_per_s,
+        )
+        && vec3_bits_eq(
+            &a.derivative.angular_velocity_body_radps2,
+            &b.derivative.angular_velocity_body_radps2,
+        )
+        && f64_bits_eq(
+            a.residuals.longitudinal_force_n,
+            b.residuals.longitudinal_force_n,
+        )
+        && f64_bits_eq(a.residuals.vertical_force_n, b.residuals.vertical_force_n)
+        && f64_bits_eq(a.residuals.pitch_moment_nm, b.residuals.pitch_moment_nm)
+}
+
+#[inline]
+const fn f64_bits_eq(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+#[inline]
+fn vec3_bits_eq(a: &Vec3, b: &Vec3) -> bool {
+    f64_bits_eq(a.x, b.x) && f64_bits_eq(a.y, b.y) && f64_bits_eq(a.z, b.z)
+}
+
+#[inline]
+fn quaternion_bits_eq(a: Quaternion<f64>, b: Quaternion<f64>) -> bool {
+    f64_bits_eq(a.w, b.w) && f64_bits_eq(a.i, b.i) && f64_bits_eq(a.j, b.j) && f64_bits_eq(a.k, b.k)
+}
+
+#[inline]
+fn orientation_bits_eq(a: &Orientation, b: &Orientation) -> bool {
+    quaternion_bits_eq(*a.quaternion(), *b.quaternion())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AircraftSimulationConfig;
+    use sim_core::AeroEnvironment;
+
+    const FIXTURE: &str =
+        include_str!("../../../tests/fixtures/synthetic_non_reference_trim_v4.json");
+
+    fn aircraft() -> model::AircraftModel {
+        model::AircraftModelLoader::from_json_str(FIXTURE).unwrap()
+    }
+
+    fn sim_config() -> AircraftSimulationConfig {
+        AircraftSimulationConfig::new(
+            0.002,
+            Vec3::new(0.0, 0.0, 9.80665),
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn solved_evaluation() -> LongitudinalTrimEvaluation {
+        let (alpha, elevator, throttle, guess, tolerance, iters) = (
+            TrimBounds::new(-0.15, 0.30).unwrap(),
+            TrimBounds::new(-0.9, 0.9).unwrap(),
+            TrimBounds::new(0.02, 1.0).unwrap(),
+            LongitudinalTrimVariables::new(0.08, 0.1, 0.45).unwrap(),
+            LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap(),
+            40,
+        );
+        let request =
+            LongitudinalTrimRequest::new(18.0, alpha, elevator, throttle, guess, tolerance, iters)
+                .unwrap();
+        solve_longitudinal_trim(&aircraft(), &sim_config(), &request)
+            .unwrap()
+            .evaluation
+    }
+
+    #[test]
+    fn bitwise_equal_identical_evaluations() {
+        let eval = solved_evaluation();
+        let copy = eval;
+        assert!(
+            evaluations_bitwise_equal(&eval, &copy),
+            "two evaluations from the same solve must be bitwise identical"
+        );
+        assert_eq!(
+            eval, copy,
+            "PartialEq must also agree for truly identical evaluations"
+        );
+    }
+
+    #[test]
+    fn bitwise_equal_detects_signed_zero_difference_in_state_position() {
+        let eval = solved_evaluation();
+        // position_world_m is Vec3::zeros() from evaluate_candidate — all +0.0.
+        // Flip x to -0.0: PartialEq still says equal (+0.0 == -0.0), but bitwise must not.
+        let mut flipped = eval;
+        flipped.state.position_world_m.x = -0.0;
+
+        assert_eq!(
+            eval, flipped,
+            "sanity: PartialEq treats +0.0 and -0.0 as equal (the bug we are fixing)"
+        );
+        assert!(
+            !evaluations_bitwise_equal(&eval, &flipped),
+            "bitwise comparison MUST reject +0.0 vs -0.0 in position_world_m.x"
+        );
+    }
+
+    #[test]
+    fn bitwise_equal_detects_signed_zero_difference_in_residual() {
+        let eval = solved_evaluation();
+        let mut flipped = eval;
+        flipped.residuals.longitudinal_force_n = -0.0;
+        // If the solved residual was already +0.0, flipping to -0.0 must be caught.
+        // If it was non-zero, this test still verifies that a real difference is caught.
+        let mut zeroed = eval;
+        zeroed.residuals.longitudinal_force_n = 0.0;
+        if flipped.residuals.longitudinal_force_n.to_bits()
+            != zeroed.residuals.longitudinal_force_n.to_bits()
+        {
+            assert!(
+                !evaluations_bitwise_equal(&zeroed, &flipped),
+                "bitwise comparison MUST reject +0.0 vs -0.0 in residuals"
+            );
+        }
+    }
+
+    #[test]
+    fn bitwise_equal_detects_signed_zero_difference_in_quaternion() {
+        let eval = solved_evaluation();
+        let mut flipped = eval;
+        flipped.derivative.orientation_world_from_body_per_s.w = -0.0;
+        let mut reference = eval;
+        reference.derivative.orientation_world_from_body_per_s.w = 0.0;
+        if flipped
+            .derivative
+            .orientation_world_from_body_per_s
+            .w
+            .to_bits()
+            != reference
+                .derivative
+                .orientation_world_from_body_per_s
+                .w
+                .to_bits()
+        {
+            assert!(
+                !evaluations_bitwise_equal(&reference, &flipped),
+                "bitwise comparison MUST reject +0.0 vs -0.0 in quaternion derivative w"
+            );
+        }
+    }
+
+    #[test]
+    fn bitwise_equal_rejects_nonzero_difference() {
+        let eval = solved_evaluation();
+        let mut different = eval;
+        different.variables.alpha_rad += 1.0e-3;
+        assert!(
+            !evaluations_bitwise_equal(&eval, &different),
+            "any real numeric difference must be rejected"
+        );
+    }
+
+    #[test]
+    fn partial_eq_and_bitwise_diverge_on_signed_zero() {
+        // This is the core discriminant test: PartialEq says +0.0 == -0.0,
+        // but the bitwise comparison must NOT.
+        let eval = solved_evaluation();
+        let mut flipped = eval;
+        flipped.state.angular_velocity_body_radps.y = -0.0;
+
+        // PartialEq treats them as equal (the bug).
+        assert_eq!(eval, flipped);
+        // Bitwise comparison correctly rejects.
+        assert!(!evaluations_bitwise_equal(&eval, &flipped));
     }
 }

@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "generated_by": "rcsim-app validate first-slice",
+  "base_commit_if_known": "47615a21ba0cf5826642f6f82eb4c0c47dd3d2b7",
+  "model_id": "acro-electric-01",
+  "model_physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+  "overall_status": "PARTIAL",
+  "criteria": [
+    {
+      "id": "workspace_structure",
+      "title": "Workspace structure",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "required workspace crates and canonical model are present",
+      "evidence": {}
+    },
+    {
+      "id": "rust_stable_build",
+      "title": "Rust stable build contract",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "workspace declares Rust 1.98 MSRV and this acceptance binary is executing",
+      "evidence": {}
+    },
+    {
+      "id": "f64_flight_core",
+      "title": "f64 flight core",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "canonical timestep, state vectors, quaternion, model coefficients, and dynamics use f64",
+      "evidence": {
+        "scalar_bits": "64"
+      }
+    },
+    {
+      "id": "fixed_step_500hz",
+      "title": "Fixed physics step at 500 Hz",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "default physics configuration is exactly 500 Hz / 0.002 s",
+      "evidence": {}
+    },
+    {
+      "id": "rk4_integrator",
+      "title": "RK4 integrator",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "AircraftSimulation uses the four-stage state-dependent Rk4Integrator path covered by regression tests",
+      "evidence": {
+        "stages": "4"
+      }
+    },
+    {
+      "id": "local_aerodynamic_elements",
+      "title": "Local aerodynamic elements",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "validated model contains ordered local aerodynamic elements and resolved polars",
+      "evidence": {
+        "element_count": "8",
+        "polar_count": "2"
+      }
+    },
+    {
+      "id": "electric_propulsion",
+      "title": "Electric propulsion",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "Acro Electric model includes validated battery, ESC/motor, propeller, and coefficient data",
+      "evidence": {}
+    },
+    {
+      "id": "control_servo_pipeline",
+      "title": "Control and servo pipeline",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "rates/expo, conventional mixer, servo dynamics, and resolved surface bindings are configured",
+      "evidence": {
+        "surface_bindings": "4"
+      }
+    },
+    {
+      "id": "versioned_model_format",
+      "title": "Versioned model format",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "canonical model loaded through strict schema-v2 validation",
+      "evidence": {
+        "schema_version": "2"
+      }
+    },
+    {
+      "id": "deterministic_aircraft_replay",
+      "title": "Deterministic aircraft replay",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "verified all 2000 canonical replay steps",
+      "evidence": {
+        "model_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+        "schema_version": "1",
+        "steps": "2000"
+      }
+    },
+    {
+      "id": "telemetry_pipeline",
+      "title": "Telemetry pipeline",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "2,000 contiguous finite replay-derived telemetry frames validated in memory",
+      "evidence": {
+        "frame_count": "2000",
+        "model_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+        "model_id": "acro-electric-01",
+        "schema_version": "2"
+      }
+    },
+    {
+      "id": "model_versioning",
+      "title": "Model versioning and identity",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "schema, model ID, physics fingerprint, and canonical replay identity agree",
+      "evidence": {
+        "model_id": "acro-electric-01",
+        "physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+        "schema_version": "2"
+      }
+    },
+    {
+      "id": "glb_presentation",
+      "title": "GLB presentation",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "declared GLB exists and parsed to a finite, non-empty indexed triangle mesh",
+      "evidence": {
+        "asset": "aircraft.glb",
+        "triangles": "72",
+        "vertices": "48"
+      }
+    },
+    {
+      "id": "minimal_outdoor_scene",
+      "title": "Minimal outdoor scene",
+      "gate": "MANUAL",
+      "status": "PARTIAL",
+      "detail": "ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator",
+      "evidence": {
+        "ground_triangles": "2",
+        "visual_verification": "NOT_TESTED"
+      }
+    },
+    {
+      "id": "sim_render_separation",
+      "title": "Simulation/render separation",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "renderer dependency boundary excludes simulation ownership and physics remains fixed-step",
+      "evidence": {}
+    },
+    {
+      "id": "sim_render_snapshot_interpolation",
+      "title": "Simulation/render snapshot interpolation",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "two-snapshot f64 interpolation, alpha clamp, shortest-path normalized SLERP, and origin-before-f32 verified",
+      "evidence": {}
+    },
+    {
+      "id": "physics_frame_rate_independence",
+      "title": "Physics frame-rate independence",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "60 Hz-like, 144 Hz-like, and variable frame patterns produced identical physics",
+      "evidence": {
+        "patterns": "3",
+        "physics_steps": "500",
+        "render_snapshot_insertions": "500"
+      }
+    },
+    {
+      "id": "input_pipeline",
+      "title": "Input normalization and fixed-step sampling",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "normalization, deadzone, inversion, throttle endpoints, mapping, keyboard fallback, and fixed-step sampling verified without hardware",
+      "evidence": {}
+    },
+    {
+      "id": "real_controller_hardware",
+      "title": "Real controller hardware",
+      "gate": "MANUAL",
+      "status": "NOT_TESTED",
+      "detail": "no physical controller was connected or exercised; devices: 0 is not acceptance evidence",
+      "evidence": {}
+    },
+    {
+      "id": "radiomaster_tx16s",
+      "title": "Radiomaster TX16S",
+      "gate": "MANUAL",
+      "status": "NOT_TESTED",
+      "detail": "Radiomaster TX16S hardware has not been tested",
+      "evidence": {}
+    },
+    {
+      "id": "basic_user_flight_session",
+      "title": "Basic user flight session",
+      "gate": "MANUAL",
+      "status": "NOT_TESTED",
+      "detail": "not evaluated by the headless validator; manual evidence is tracked separately",
+      "evidence": {}
+    },
+    {
+      "id": "live_input_replay_recording",
+      "title": "Live input replay recording",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "applied PilotInput equals recorded input and pre-step N maps to post-step N+1 hash",
+      "evidence": {
+        "verified_steps": "32"
+      }
+    },
+    {
+      "id": "physics_performance",
+      "title": "Physics performance",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "short release acceptance measurement classified PASS",
+      "evidence": {
+        "classification": "PASS",
+        "max_us": "70.400000",
+        "mean_us": "7.328520",
+        "measured_steps": "10000",
+        "p50_us": "7.300000",
+        "p95_us": "7.400000",
+        "p99_us": "9.000000",
+        "physics_budget_us": "2000.000",
+        "warmup_steps": "1000"
+      }
+    },
+    {
+      "id": "hot_loop_allocations",
+      "title": "Hot-loop allocations",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "P2 evidence level VERIFIED: allocation-counter measured zero allocations across 100 Acro Electric steps after initialization",
+      "evidence": {
+        "evidence_level": "VERIFIED",
+        "measured_steps": "100"
+      }
+    },
+    {
+      "id": "acro_electric_characterization",
+      "title": "Acro Electric deterministic characterization",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "all S10 manoeuvres executed with valid replay and telemetry in memory",
+      "evidence": {
+        "manoeuvre_count": "8",
+        "replay_valid": "true",
+        "suite_version": "1",
+        "telemetry_valid": "true"
+      }
+    },
+    {
+      "id": "pilot_review_protocol",
+      "title": "Pilot-review protocol",
+      "gate": "REAL_WORLD",
+      "status": "PASS",
+      "detail": "versioned structured protocol exists and explicitly records that it has not been executed",
+      "evidence": {
+        "review_executed": "false"
+      }
+    },
+    {
+      "id": "real_pilot_review",
+      "title": "Real pilot review",
+      "gate": "REAL_WORLD",
+      "status": "NOT_TESTED",
+      "detail": "the structured pilot-review protocol exists but no real pilot session has occurred",
+      "evidence": {}
+    },
+    {
+      "id": "real_world_calibration",
+      "title": "Real-world calibration",
+      "gate": "REAL_WORLD",
+      "status": "NOT_TESTED",
+      "detail": "no measured aircraft reference, propulsion bench data, flight telemetry, or calibrated inertia is available",
+      "evidence": {}
+    },
+    {
+      "id": "graphical_viewer_verification",
+      "title": "Graphical viewer verification",
+      "gate": "MANUAL",
+      "status": "NOT_TESTED",
+      "detail": "not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report",
+      "evidence": {}
+    },
+    {
+      "id": "headless_execution",
+      "title": "Headless execution",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "acceptance path uses direct Rust APIs and initializes no GPU, window, renderer object, hardware backend, or child process",
+      "evidence": {}
+    },
+    {
+      "id": "regression_dataset",
+      "title": "Regression dataset",
+      "gate": "TECHNICAL",
+      "status": "PASS",
+      "detail": "canonical dataset exists, is versioned, contiguous, identity-bound, and all hashes pass",
+      "evidence": {
+        "schema_version": "1",
+        "steps": "2000"
+      }
+    }
+  ],
+  "summary": {
+    "total_criteria": 31,
+    "pass": 24,
+    "partial": 1,
+    "not_tested": 6,
+    "fail": 0,
+    "technical_gate_status": "PASS",
+    "manual_gate_status": "PARTIAL",
+    "real_world_gate_status": "PARTIAL",
+    "open_gaps": [
+      "minimal_outdoor_scene: ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator",
+      "real_controller_hardware: no physical controller was connected or exercised; devices: 0 is not acceptance evidence",
+      "radiomaster_tx16s: Radiomaster TX16S hardware has not been tested",
+      "basic_user_flight_session: not evaluated by the headless validator; manual evidence is tracked separately",
+      "real_pilot_review: the structured pilot-review protocol exists but no real pilot session has occurred",
+      "real_world_calibration: no measured aircraft reference, propulsion bench data, flight telemetry, or calibrated inertia is available",
+      "graphical_viewer_verification: not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report"
+    ]
+  }
+}

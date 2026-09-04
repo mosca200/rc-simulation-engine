@@ -1,0 +1,28 @@
+Manual flight controls:
+A/D = roll
+W/S = pitch
+Q/E = yaw
+R/F = throttle
+ESC = exit
+
+model ID: acro-electric-01
+physics fingerprint: dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed
+physics rate: 500 Hz
+initial altitude: 45.000 m
+initial airspeed: 20.000 m/s
+initial throttle: 0.550
+ground_start=false
+initial_weight_on_wheels=false
+terrain_mode=rolling
+2026-09-04T17:46:18.149475Z DEBUG Instance::new: created Vulkan backend
+2026-09-04T17:46:18.152342Z DEBUG Instance::new: created Dx12 backend
+2026-09-04T17:46:18.197123Z DEBUG Instance::new: created Gl backend
+2026-09-04T17:46:18.203349Z  INFO Found 6 cooperative matrix configurations supported by wgpu
+2026-09-04T17:46:18.408120Z DEBUG Found 6 compatible adapters. Sorted by preference:
+2026-09-04T17:46:18.408489Z DEBUG * AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:09:00.0", driver: "NVIDIA", driver_info: "595.97", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-09-04T17:46:18.408594Z DEBUG * AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:09:00.0", driver: "32.0.15.9597", driver_info: "", backend: Dx12, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-09-04T17:46:18.408672Z DEBUG * AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:09:00.0", driver: "32.0.15.9597", driver_info: "", backend: Dx12, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-09-04T17:46:18.408749Z DEBUG * AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:09:00.0", driver: "32.0.15.9597", driver_info: "", backend: Dx12, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-09-04T17:46:18.408825Z DEBUG * AdapterInfo { name: "NVIDIA GeForce RTX 3090/PCIe/SSE2", vendor: 4318, device: 0, device_type: Other, device_pci_bus_id: "", driver: "", driver_info: "4.6.0 NVIDIA 595.97", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: None, limit_bucket: None }
+2026-09-04T17:46:18.408900Z DEBUG * AdapterInfo { name: "Microsoft Basic Render Driver", vendor: 5140, device: 140, device_type: Cpu, device_pci_bus_id: "", driver: "10.0.26100.9278", driver_info: "", backend: Dx12, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: Some(false), limit_bucket: None }
+2026-09-04T17:46:18.408974Z DEBUG Request adapter result AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:09:00.0", driver: "NVIDIA", driver_info: "595.97", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }

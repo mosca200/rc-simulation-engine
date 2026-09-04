@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "airfoil_id": "clark-y",
+  "display_name": "Clark Y",
+  "source_name": "UIUC Airfoil Data Site / Michael Selig coordinate database",
+  "source_file_name": "clarky.dat",
+  "source_format": "Selig",
+  "source_locator": "https://m-selig.ae.illinois.edu/ads/coord_seligFmt/clarky.dat",
+  "retrieved_asset_sha256": "a30da5120fd7cd95c08541496cfc8607d58ef64f58198e25c799ffe6532f6e4d",
+  "point_count": 121,
+  "first_data_coordinate": {
+    "x": 1.0,
+    "y": 0.0005993
+  },
+  "last_data_coordinate": {
+    "x": 1.0,
+    "y": -0.0005993
+  }
+}

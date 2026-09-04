@@ -4,7 +4,7 @@ use sim_core::PilotInput;
 use std::fmt::Write as _;
 use thiserror::Error;
 
-pub const AIRCRAFT_TELEMETRY_SCHEMA_VERSION: u32 = 1;
+pub const AIRCRAFT_TELEMETRY_SCHEMA_VERSION: u32 = 2;
 const HEADER_RECORD_TYPE: &str = "aircraft_telemetry_header";
 const FRAME_RECORD_TYPE: &str = "aircraft_telemetry_frame";
 
@@ -27,6 +27,10 @@ pub struct AircraftTelemetryFrame {
     elevator_angle_rad: f64,
     rudder_angle_rad: f64,
     throttle: f64,
+    ground_contacts: u64,
+    total_ground_normal_force_n: f64,
+    total_ground_tangential_force_n: f64,
+    weight_on_wheels: bool,
     physics_step_wall_time_s: Option<f64>,
 }
 
@@ -64,6 +68,10 @@ impl AircraftTelemetryFrame {
             elevator_angle_rad: controls.elevator_angle_rad(),
             rudder_angle_rad: controls.rudder_angle_rad(),
             throttle: controls.throttle(),
+            ground_contacts: snapshot.ground_contacts() as u64,
+            total_ground_normal_force_n: snapshot.total_ground_normal_force_n(),
+            total_ground_tangential_force_n: snapshot.total_ground_tangential_force_n(),
+            weight_on_wheels: snapshot.weight_on_wheels(),
             physics_step_wall_time_s,
         };
         validate_frame(&frame)?;
@@ -148,6 +156,26 @@ impl AircraftTelemetryFrame {
     #[must_use]
     pub const fn throttle(&self) -> f64 {
         self.throttle
+    }
+
+    #[must_use]
+    pub const fn ground_contacts(&self) -> u64 {
+        self.ground_contacts
+    }
+
+    #[must_use]
+    pub const fn total_ground_normal_force_n(&self) -> f64 {
+        self.total_ground_normal_force_n
+    }
+
+    #[must_use]
+    pub const fn total_ground_tangential_force_n(&self) -> f64 {
+        self.total_ground_tangential_force_n
+    }
+
+    #[must_use]
+    pub const fn weight_on_wheels(&self) -> bool {
+        self.weight_on_wheels
     }
 
     /// Non-deterministic performance datum, excluded from deterministic summaries.
@@ -465,6 +493,7 @@ struct FrameDto {
     pilot_input: PilotInputDto,
     rigid_body: RigidBodyDto,
     controls: ControlsDto,
+    ground: GroundDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     physics_step_wall_time_s: Option<f64>,
 }
@@ -501,6 +530,15 @@ struct ControlsDto {
     elevator_angle_rad: f64,
     rudder_angle_rad: f64,
     throttle: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroundDto {
+    contacts: u64,
+    total_normal_force_n: f64,
+    total_tangential_force_n: f64,
+    weight_on_wheels: bool,
 }
 
 impl From<&AircraftTelemetryRecording> for HeaderDto {
@@ -546,6 +584,12 @@ impl From<&AircraftTelemetryFrame> for FrameDto {
                 elevator_angle_rad: frame.elevator_angle_rad,
                 rudder_angle_rad: frame.rudder_angle_rad,
                 throttle: frame.throttle,
+            },
+            ground: GroundDto {
+                contacts: frame.ground_contacts,
+                total_normal_force_n: frame.total_ground_normal_force_n,
+                total_tangential_force_n: frame.total_ground_tangential_force_n,
+                weight_on_wheels: frame.weight_on_wheels,
             },
             physics_step_wall_time_s: frame.physics_step_wall_time_s,
         }
@@ -597,6 +641,10 @@ impl TryFrom<FrameDto> for AircraftTelemetryFrame {
             elevator_angle_rad: dto.controls.elevator_angle_rad,
             rudder_angle_rad: dto.controls.rudder_angle_rad,
             throttle: dto.controls.throttle,
+            ground_contacts: dto.ground.contacts,
+            total_ground_normal_force_n: dto.ground.total_normal_force_n,
+            total_ground_tangential_force_n: dto.ground.total_tangential_force_n,
+            weight_on_wheels: dto.ground.weight_on_wheels,
             physics_step_wall_time_s: dto.physics_step_wall_time_s,
         };
         validate_frame(&frame)?;
@@ -752,6 +800,34 @@ fn validate_frame(frame: &AircraftTelemetryFrame) -> Result<(), TelemetryCapture
         return Err(TelemetryCaptureError::InvalidFrame {
             step_index: frame.step_index,
             field: "physics_step_wall_time_s",
+        });
+    }
+    if !frame.total_ground_normal_force_n.is_finite()
+        || frame.total_ground_normal_force_n < 0.0
+        || !frame.total_ground_tangential_force_n.is_finite()
+        || frame.total_ground_tangential_force_n < 0.0
+    {
+        return Err(TelemetryCaptureError::InvalidFrame {
+            step_index: frame.step_index,
+            field: "ground",
+        });
+    }
+    if frame.ground_contacts > sim_core::MAX_GEAR_CONTACTS as u64 {
+        return Err(TelemetryCaptureError::InvalidFrame {
+            step_index: frame.step_index,
+            field: "ground",
+        });
+    }
+    if !frame.weight_on_wheels && frame.ground_contacts != 0 {
+        return Err(TelemetryCaptureError::InvalidFrame {
+            step_index: frame.step_index,
+            field: "ground",
+        });
+    }
+    if frame.weight_on_wheels && frame.ground_contacts == 0 {
+        return Err(TelemetryCaptureError::InvalidFrame {
+            step_index: frame.step_index,
+            field: "ground",
         });
     }
     Ok(())

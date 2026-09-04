@@ -1,0 +1,2617 @@
+//! M2.6C — Deterministic longitudinal trim domain qualification.
+//!
+//! A converged trim solution is NOT automatically qualified. This module determines whether a
+//! converged trim operating point lies inside the aerodynamic and propulsion evidence domains
+//! and whether its off-axis residuals satisfy caller-supplied limits.
+//!
+//! # Core principle: fail closed
+//!
+//! Runtime samplers clamp outside their tabulated domains. Qualification distinguishes
+//! "runtime can evaluate this value" from "this operating point is inside the supported
+//! evidence domain". A solution relying on endpoint clamping is NOT qualified.
+//!
+//! # Finite-wing alpha_sample
+//!
+//! For elements belonging to a [`RuntimeAeroSurface`], runtime samples coefficients at
+//! `alpha_sample = alpha_geom - alpha_i`. Qualification audits `alpha_sample`, NOT `alpha_geom`.
+//! The induced angle `alpha_i` is obtained from the SAME deterministic bisection used by runtime.
+//!
+//! # Physical Reynolds
+//!
+//! Reynolds numbers use the PHYSICAL section airspeed, including an explicitly authored schema-v7
+//! propeller slipstream increment and excluding any effective-alpha-only modification. M2.8C
+//! downwash then rotates that physical flow without changing its speed.
+//!
+//! # Accepted trim operating point
+//!
+//! Qualification audits the EXACT accepted trim operating point:
+//! - Aero elements are built through `effective_aero_elements_for_positions` using the
+//!   solution's `control_surface_positions` (deflected geometry, not base geometry).
+//! - Propulsion is evaluated with `control_surface_positions.throttle()` (the accepted
+//!   control output throttle, not the raw trim variable).
+//! - Re-evaluation must match the solver-cached evaluation exactly (M2.6A precedent).
+
+use crate::{
+    AircraftSimulationConfig,
+    simulation::{
+        downwashed_section_kinematics, physical_section_kinematics, propeller_slipstream,
+        solve_surface_induced_alpha_with_physical_flow, surface_downwash_with_slipstream,
+    },
+    trim::{
+        LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate, evaluations_bitwise_equal,
+    },
+};
+use model::AircraftModel;
+use sim_core::{
+    PolarTable, PropellerCoefficientMap, PropellerCoefficientSource, PropulsionOutput,
+    evaluate_electric_propulsion_with_source,
+};
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// Range status
+// ---------------------------------------------------------------------------
+
+/// Whether a value lies inside, below, or above its evidence support.
+///
+/// The five valid-domain classifications are exhaustive for a finite, ordered interval:
+/// - [`RangeStatus::BelowRange`] — strictly below the supported interval (NOT supported;
+///   the runtime reaches this value only by clamping).
+/// - [`RangeStatus::AtLowerBound`] — bitwise-equal to the supported lower endpoint (supported).
+/// - [`RangeStatus::InRange`] — numerically inside the supported interval without being
+///   bitwise-identical to either endpoint (supported).
+/// - [`RangeStatus::AtUpperBound`] — bitwise-equal to the supported upper endpoint (supported).
+/// - [`RangeStatus::AboveRange`] — strictly above the supported interval (NOT supported;
+///   the runtime reaches this value only by clamping).
+///
+/// `NonFinite` and `InvalidRange` are fail-closed sentinels: NaN / ±Infinity inputs and
+/// inverted intervals cannot be classified as supported. Qualification remains
+/// `NotQualified` through the `NonFiniteAuditValue` integrity blocker when any audited
+/// value is non-finite; authored intervals are validated before reaching qualification.
+///
+/// Boundaries use exact bitwise `f64` equality with the authored endpoint; no epsilon is
+/// introduced (an epsilon would invent support that the authored data does not declare).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeStatus {
+    NonFinite,
+    InvalidRange,
+    BelowRange,
+    AtLowerBound,
+    InRange,
+    AtUpperBound,
+    AboveRange,
+}
+
+/// Classifies `value` against the closed authored support interval `[lower, upper]`.
+///
+/// Boundary membership uses exact bitwise equality: `value.to_bits() == lower.to_bits()`
+/// yields [`RangeStatus::AtLowerBound`] and the analogous upper comparison yields
+/// [`RangeStatus::AtUpperBound`]. A numerically equivalent signed zero with different bits
+/// remains supported as [`RangeStatus::InRange`], but is not mislabeled as the authored endpoint.
+/// This function is pure, allocation-free, and deterministic; it is the single classifier
+/// used for polar alpha domains, Reynolds family domains, and propeller J domains.
+#[must_use]
+pub fn classify_range_status(value: f64, lower: f64, upper: f64) -> RangeStatus {
+    if !value.is_finite() || !lower.is_finite() || !upper.is_finite() {
+        return RangeStatus::NonFinite;
+    }
+    if lower > upper {
+        return RangeStatus::InvalidRange;
+    }
+    if value.to_bits() == lower.to_bits() {
+        RangeStatus::AtLowerBound
+    } else if value.to_bits() == upper.to_bits() {
+        RangeStatus::AtUpperBound
+    } else if value < lower {
+        RangeStatus::BelowRange
+    } else if value > upper {
+        RangeStatus::AboveRange
+    } else {
+        RangeStatus::InRange
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Qualification blockers
+// ---------------------------------------------------------------------------
+
+/// Typed reason a trim point is not qualified.
+///
+/// Blocker ordering follows the documented contract:
+/// 1. Aero elements in model order (alpha first, Reynolds second per element)
+/// 2. Propulsion (shaft-speed first, J second)
+/// 3. Residual limits (Fy, Mx, Mz, lateral accel, roll accel, yaw accel)
+/// 4. Integrity / non-finite / re-evaluation
+#[derive(Debug, Clone, PartialEq)]
+pub enum QualificationBlocker {
+    // Aero alpha
+    AerodynamicAlphaBelowRange {
+        element_index: usize,
+        element_id: String,
+        alpha_sample_rad: f64,
+        alpha_lower_rad: f64,
+    },
+    AerodynamicAlphaAboveRange {
+        element_index: usize,
+        element_id: String,
+        alpha_sample_rad: f64,
+        alpha_upper_rad: f64,
+    },
+
+    // Reynolds contributing node alpha (emitted before element Reynolds range)
+    ReynoldsContributingNodeAlphaBelowRange {
+        element_index: usize,
+        element_id: String,
+        node_reynolds: f64,
+        alpha_sample_rad: f64,
+        alpha_lower_rad: f64,
+    },
+    ReynoldsContributingNodeAlphaAboveRange {
+        element_index: usize,
+        element_id: String,
+        node_reynolds: f64,
+        alpha_sample_rad: f64,
+        alpha_upper_rad: f64,
+    },
+
+    // Reynolds range
+    ReynoldsBelowRange {
+        element_index: usize,
+        element_id: String,
+        reynolds_number: f64,
+        reynolds_lower: f64,
+    },
+    ReynoldsAboveRange {
+        element_index: usize,
+        element_id: String,
+        reynolds_number: f64,
+        reynolds_upper: f64,
+    },
+
+    // Propulsion shaft speed
+    PropellerShaftSpeedBelowRange {
+        shaft_speed_rad_s: f64,
+        shaft_speed_lower_rad_s: f64,
+    },
+    PropellerShaftSpeedAboveRange {
+        shaft_speed_rad_s: f64,
+        shaft_speed_upper_rad_s: f64,
+    },
+
+    // Propulsion J
+    PropellerAdvanceRatioBelowRange {
+        advance_ratio_j: f64,
+        j_lower: f64,
+    },
+    PropellerAdvanceRatioAboveRange {
+        advance_ratio_j: f64,
+        j_upper: f64,
+    },
+
+    // Off-axis residual limits
+    SideForceLimitExceeded {
+        fy_body_n: f64,
+        limit_n: f64,
+    },
+    RollMomentLimitExceeded {
+        mx_body_nm: f64,
+        limit_nm: f64,
+    },
+    YawMomentLimitExceeded {
+        mz_body_nm: f64,
+        limit_nm: f64,
+    },
+    LateralAccelerationLimitExceeded {
+        ay_world_mps2: f64,
+        limit_mps2: f64,
+    },
+    RollAngularAccelerationLimitExceeded {
+        angular_accel_body_x_rad_s2: f64,
+        limit_rad_s2: f64,
+    },
+    YawAngularAccelerationLimitExceeded {
+        angular_accel_body_z_rad_s2: f64,
+        limit_rad_s2: f64,
+    },
+
+    // Integrity (always last)
+    NonFiniteAuditValue {
+        field: &'static str,
+    },
+    ReEvaluationFailure,
+}
+
+// ---------------------------------------------------------------------------
+// Qualification limits
+// ---------------------------------------------------------------------------
+
+/// Caller-supplied maxima for off-axis residuals. No hidden defaults.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongitudinalTrimQualificationLimits {
+    max_side_force_n: f64,
+    max_roll_moment_nm: f64,
+    max_yaw_moment_nm: f64,
+    max_lateral_acceleration_mps2: f64,
+    max_roll_angular_acceleration_rad_s2: f64,
+    max_yaw_angular_acceleration_rad_s2: f64,
+}
+
+/// Errors from constructing [`LongitudinalTrimQualificationLimits`].
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
+pub enum QualificationLimitsError {
+    #[error("limit field `{field}` must be finite, got {value}")]
+    NonFinite { field: &'static str, value: f64 },
+    #[error("limit field `{field}` must be non-negative, got {value}")]
+    Negative { field: &'static str, value: f64 },
+}
+
+impl LongitudinalTrimQualificationLimits {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        max_side_force_n: f64,
+        max_roll_moment_nm: f64,
+        max_yaw_moment_nm: f64,
+        max_lateral_acceleration_mps2: f64,
+        max_roll_angular_acceleration_rad_s2: f64,
+        max_yaw_angular_acceleration_rad_s2: f64,
+    ) -> Result<Self, QualificationLimitsError> {
+        let limits = [
+            ("max_side_force_n", max_side_force_n),
+            ("max_roll_moment_nm", max_roll_moment_nm),
+            ("max_yaw_moment_nm", max_yaw_moment_nm),
+            (
+                "max_lateral_acceleration_mps2",
+                max_lateral_acceleration_mps2,
+            ),
+            (
+                "max_roll_angular_acceleration_rad_s2",
+                max_roll_angular_acceleration_rad_s2,
+            ),
+            (
+                "max_yaw_angular_acceleration_rad_s2",
+                max_yaw_angular_acceleration_rad_s2,
+            ),
+        ];
+        for &(field, value) in &limits {
+            if !value.is_finite() {
+                return Err(QualificationLimitsError::NonFinite { field, value });
+            }
+            if value < 0.0 {
+                return Err(QualificationLimitsError::Negative { field, value });
+            }
+        }
+        Ok(Self {
+            max_side_force_n,
+            max_roll_moment_nm,
+            max_yaw_moment_nm,
+            max_lateral_acceleration_mps2,
+            max_roll_angular_acceleration_rad_s2,
+            max_yaw_angular_acceleration_rad_s2,
+        })
+    }
+
+    #[must_use]
+    pub const fn max_side_force_n(&self) -> f64 {
+        self.max_side_force_n
+    }
+    #[must_use]
+    pub const fn max_roll_moment_nm(&self) -> f64 {
+        self.max_roll_moment_nm
+    }
+    #[must_use]
+    pub const fn max_yaw_moment_nm(&self) -> f64 {
+        self.max_yaw_moment_nm
+    }
+    #[must_use]
+    pub const fn max_lateral_acceleration_mps2(&self) -> f64 {
+        self.max_lateral_acceleration_mps2
+    }
+    #[must_use]
+    pub const fn max_roll_angular_acceleration_rad_s2(&self) -> f64 {
+        self.max_roll_angular_acceleration_rad_s2
+    }
+    #[must_use]
+    pub const fn max_yaw_angular_acceleration_rad_s2(&self) -> f64 {
+        self.max_yaw_angular_acceleration_rad_s2
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full residual audit
+// ---------------------------------------------------------------------------
+
+/// Signed raw residual values for one audited trim point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FullResidualAudit {
+    // Body wrench
+    pub fx_body_n: f64,
+    pub fy_body_n: f64,
+    pub fz_body_n: f64,
+    pub mx_body_nm: f64,
+    pub my_body_nm: f64,
+    pub mz_body_nm: f64,
+    // Linear acceleration (world frame)
+    pub linear_accel_world_x_mps2: f64,
+    pub linear_accel_world_y_mps2: f64,
+    pub linear_accel_world_z_mps2: f64,
+    // Angular acceleration (body frame)
+    pub angular_accel_body_x_rad_s2: f64,
+    pub angular_accel_body_y_rad_s2: f64,
+    pub angular_accel_body_z_rad_s2: f64,
+    // Trim residuals
+    pub longitudinal_force_n: f64,
+    pub vertical_force_n: f64,
+    pub pitch_moment_nm: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Aerodynamic element domain audit
+// ---------------------------------------------------------------------------
+
+/// Per-element domain audit for one qualified trim point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AerodynamicElementDomainAudit {
+    pub element_index: usize,
+    pub element_id: String,
+    pub alpha_geom_rad: f64,
+    pub alpha_sample_rad: f64,
+    pub alpha_lower_rad: f64,
+    pub alpha_upper_rad: f64,
+    pub alpha_range_status: RangeStatus,
+    pub section_airspeed_mps: f64,
+    pub polar_binding_kind: &'static str,
+    // Reynolds (populated only for ReynoldsFamily bindings)
+    pub reynolds_number: Option<f64>,
+    pub reynolds_lower: Option<f64>,
+    pub reynolds_upper: Option<f64>,
+    pub reynolds_range_status: Option<RangeStatus>,
+    pub reynolds_lower_node_alpha_lower_rad: Option<f64>,
+    pub reynolds_lower_node_alpha_upper_rad: Option<f64>,
+    pub reynolds_upper_node_alpha_lower_rad: Option<f64>,
+    pub reynolds_upper_node_alpha_upper_rad: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// Propulsion domain audit
+// ---------------------------------------------------------------------------
+
+/// Shaft-speed domain sub-audit. Only present when the coefficient source has a
+/// shaft-speed map. Fixed propeller tables have no shaft-speed domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShaftSpeedDomainAudit {
+    pub shaft_speed_lower_rad_s: f64,
+    pub shaft_speed_upper_rad_s: f64,
+    pub shaft_speed_range_status: RangeStatus,
+}
+
+/// RPM support classification.
+///
+/// RPM is ONLY classified against a support range when the authored model/runtime data
+/// explicitly declares one. No RPM envelope is ever invented here: without an explicit
+/// authored RPM support range the audit reports [`RpmDomainStatus::NotDeclared`] while
+/// still recording the runtime RPM value itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RpmDomainStatus {
+    /// The authored model/runtime data declares no explicit RPM support range. The
+    /// runtime RPM value is recorded unclassified; no envelope is invented.
+    NotDeclared,
+    /// An explicit authored RPM support range exists and was classified against.
+    Declared {
+        lower_rpm: f64,
+        upper_rpm: f64,
+        status: RangeStatus,
+    },
+}
+
+/// Propulsion operating-point audit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PropulsionDomainAudit {
+    /// No propulsion system configured on this aircraft.
+    NotPresent,
+    /// Propulsion system present and audited.
+    Present {
+        /// Accepted control-output throttle (from `control_surface_positions.throttle()`).
+        throttle: f64,
+        axial_airspeed_mps: f64,
+        shaft_speed_rad_s: f64,
+        shaft_speed_rpm: f64,
+        advance_ratio_j: f64,
+        j_lower: f64,
+        j_upper: f64,
+        j_range_status: RangeStatus,
+        /// Shaft-speed domain audit. `None` for fixed propeller tables (no shaft-speed
+        /// map domain exists). `Some` for shaft-speed maps.
+        shaft_speed_domain: Option<ShaftSpeedDomainAudit>,
+        /// RPM support classification. `NotDeclared` unless the authored data explicitly
+        /// declares an RPM support range.
+        rpm_domain: RpmDomainStatus,
+        /// Thrust produced at the audited operating point [N].
+        thrust_n: f64,
+        /// Shaft torque produced at the audited operating point [N·m].
+        torque_n_m: f64,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Qualification outcome
+// ---------------------------------------------------------------------------
+
+/// Categorization of a [`QualificationBlocker`], used to select the typed outcome variant.
+///
+/// The mapping is total and deterministic; no string codes are involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationBlockerCategory {
+    /// Authored-domain violation (aero alpha, Reynolds family, propulsion J/shaft speed).
+    Domain,
+    /// Off-axis residual-limit violation (caller-supplied limits).
+    Residual,
+    /// Integrity failure (non-finite audit value, failed deterministic re-evaluation).
+    Integrity,
+}
+
+impl QualificationBlocker {
+    /// Returns the deterministic category of this blocker.
+    #[must_use]
+    pub const fn category(&self) -> QualificationBlockerCategory {
+        match self {
+            Self::AerodynamicAlphaBelowRange { .. }
+            | Self::AerodynamicAlphaAboveRange { .. }
+            | Self::ReynoldsContributingNodeAlphaBelowRange { .. }
+            | Self::ReynoldsContributingNodeAlphaAboveRange { .. }
+            | Self::ReynoldsBelowRange { .. }
+            | Self::ReynoldsAboveRange { .. }
+            | Self::PropellerShaftSpeedBelowRange { .. }
+            | Self::PropellerShaftSpeedAboveRange { .. }
+            | Self::PropellerAdvanceRatioBelowRange { .. }
+            | Self::PropellerAdvanceRatioAboveRange { .. } => QualificationBlockerCategory::Domain,
+            Self::SideForceLimitExceeded { .. }
+            | Self::RollMomentLimitExceeded { .. }
+            | Self::YawMomentLimitExceeded { .. }
+            | Self::LateralAccelerationLimitExceeded { .. }
+            | Self::RollAngularAccelerationLimitExceeded { .. }
+            | Self::YawAngularAccelerationLimitExceeded { .. } => {
+                QualificationBlockerCategory::Residual
+            }
+            Self::NonFiniteAuditValue { .. } | Self::ReEvaluationFailure => {
+                QualificationBlockerCategory::Integrity
+            }
+        }
+    }
+}
+
+/// Complete diagnostics for one audited trim point (a point whose trim evaluation exists
+/// and was therefore fully audited). Nothing is zeroed, filtered, or truncated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualificationDiagnostics {
+    blockers: Vec<QualificationBlocker>,
+    residual_audit: FullResidualAudit,
+    aero_audits: Vec<AerodynamicElementDomainAudit>,
+    propulsion_audit: PropulsionDomainAudit,
+}
+
+impl QualificationDiagnostics {
+    /// All blockers in the documented deterministic order (aero elements in model order,
+    /// then propulsion, then residual limits, then integrity). ALL blockers are preserved.
+    #[must_use]
+    pub fn blockers(&self) -> &[QualificationBlocker] {
+        &self.blockers
+    }
+
+    /// Full signed residual audit.
+    #[must_use]
+    pub const fn residual_audit(&self) -> &FullResidualAudit {
+        &self.residual_audit
+    }
+
+    /// Per-element aerodynamic domain audits in model element order.
+    #[must_use]
+    pub fn aero_audits(&self) -> &[AerodynamicElementDomainAudit] {
+        &self.aero_audits
+    }
+
+    /// Propulsion domain audit.
+    #[must_use]
+    pub const fn propulsion_audit(&self) -> &PropulsionDomainAudit {
+        &self.propulsion_audit
+    }
+}
+
+/// Per-point qualification result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LongitudinalTrimQualificationPoint {
+    pub target_airspeed_mps: f64,
+    pub outcome: LongitudinalTrimQualificationOutcome,
+}
+
+/// Why qualification could not present trustworthy diagnostics for a point that DID
+/// produce a trim evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationUnavailableReason {
+    /// An audited value was NaN or ±Infinity; the offending field is named here and by
+    /// the matching `NonFiniteAuditValue` blocker in the preserved diagnostics.
+    NonFiniteAuditValue { field: &'static str },
+    /// The accepted trim evaluation could not be re-evaluated identically through the
+    /// authoritative runtime path, so its cached diagnostics cannot be trusted.
+    ReEvaluationFailure,
+    /// The M2.6A sweep flagged the point as a re-evaluation MISMATCH; the point is not
+    /// audited because its solver-cached evaluation is already known to be untrustworthy.
+    SweepReEvaluationMismatch,
+    /// The M2.6A sweep could not produce an independent re-evaluation for the point, so
+    /// there is no trustworthy evaluation to audit.
+    SweepReEvaluationUnverifiable,
+}
+
+/// Outcome of qualifying one trim point.
+///
+/// Variant-selection precedence (documented, deterministic):
+/// 1. [`LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure`] — the point never
+///    produced a trim solution; nothing is audited and NO diagnostics are fabricated.
+/// 2. [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] — whenever
+///    evaluation integrity is broken. Partially valid diagnostics are preserved for audited
+///    points; sweep mismatch/unverifiable points fabricate no diagnostics.
+/// 3. [`LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation`] — at least one
+///    authored-domain blocker exists. ALL domain and residual blockers are preserved in the
+///    diagnostics; nothing is dropped at the first violation.
+/// 4. [`LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation`] — no domain
+///    blockers, but at least one off-axis residual-limit blocker exists.
+/// 5. [`LongitudinalTrimQualificationOutcome::Qualified`] — trim succeeded, every applicable
+///    authored domain is supported, and every off-axis residual limit passes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LongitudinalTrimQualificationOutcome {
+    /// Trim succeeded and every applicable authored domain and off-axis limit is supported.
+    Qualified(QualificationDiagnostics),
+    /// The trim solver failed for this point. No aerodynamic or propulsion diagnostics
+    /// exist and none are fabricated.
+    NotQualifiedTrimFailure {
+        failure: crate::trim::LongitudinalTrimFailure,
+    },
+    /// Trim succeeded, but the operating point relies on evidence outside the authored
+    /// domains (extrapolation-by-clamping). ALL blockers are preserved.
+    NotQualifiedDomainViolation(QualificationDiagnostics),
+    /// Trim succeeded, all authored domains are supported, but an off-axis residual
+    /// exceeds a caller-supplied limit. ALL blockers are preserved.
+    NotQualifiedResidualViolation(QualificationDiagnostics),
+    /// The point produced a trim evaluation but its diagnostics cannot be trusted or
+    /// presented (integrity failure). For integrity-failed audits the partially valid
+    /// diagnostics are preserved (`Some`); for already-untrusted sweep points nothing
+    /// is audited (`None`).
+    QualificationUnavailable {
+        reason: QualificationUnavailableReason,
+        diagnostics: Option<QualificationDiagnostics>,
+    },
+}
+
+impl LongitudinalTrimQualificationOutcome {
+    #[must_use]
+    pub const fn is_qualified(&self) -> bool {
+        matches!(self, Self::Qualified(_))
+    }
+
+    /// All preserved blockers for this outcome. Empty for `Qualified` and
+    /// `NotQualifiedTrimFailure`; for `QualificationUnavailable` the preserved
+    /// diagnostics' blockers are returned when present.
+    #[must_use]
+    pub fn blockers(&self) -> &[QualificationBlocker] {
+        match self {
+            Self::Qualified(diagnostics) => diagnostics.blockers(),
+            Self::NotQualifiedTrimFailure { .. } => &[],
+            Self::NotQualifiedDomainViolation(diagnostics)
+            | Self::NotQualifiedResidualViolation(diagnostics) => diagnostics.blockers(),
+            Self::QualificationUnavailable { diagnostics, .. } => match diagnostics {
+                Some(preserved) => preserved.blockers(),
+                None => &[],
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Qualification collection
+// ---------------------------------------------------------------------------
+
+/// Ordered collection of qualification points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LongitudinalTrimQualification {
+    points: Vec<LongitudinalTrimQualificationPoint>,
+}
+
+impl LongitudinalTrimQualification {
+    /// Private constructor used only by the qualification entry points.
+    const fn from_points(points: Vec<LongitudinalTrimQualificationPoint>) -> Self {
+        Self { points }
+    }
+
+    #[must_use]
+    pub fn points(&self) -> &[LongitudinalTrimQualificationPoint] {
+        &self.points
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    #[must_use]
+    pub fn qualified_count(&self) -> usize {
+        self.points
+            .iter()
+            .filter(|p| p.outcome.is_qualified())
+            .count()
+    }
+
+    #[must_use]
+    pub fn not_qualified_count(&self) -> usize {
+        self.points
+            .iter()
+            .filter(|p| !p.outcome.is_qualified())
+            .count()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (Range-status classification lives in the public `classify_range_status`.)
+// ---------------------------------------------------------------------------
+
+fn polar_alpha_bounds(table: &PolarTable) -> (f64, f64) {
+    let samples = table.samples();
+    (samples[0].alpha_rad, samples[samples.len() - 1].alpha_rad)
+}
+
+// ---------------------------------------------------------------------------
+// Main qualification entry point
+// ---------------------------------------------------------------------------
+
+/// Qualifies one successful trim solution against its evidence domains and off-axis limits.
+#[must_use]
+pub fn qualify_longitudinal_trim_solution(
+    model: &AircraftModel,
+    config: &AircraftSimulationConfig,
+    solution: &LongitudinalTrimSolution,
+    limits: &LongitudinalTrimQualificationLimits,
+    target_airspeed_mps: f64,
+) -> LongitudinalTrimQualificationPoint {
+    let eval = &solution.evaluation;
+    let state = &eval.state;
+    let positions = &eval.control_surface_positions;
+
+    // FIX 3: Re-evaluate to verify deterministic reproducibility (M2.6A precedent).
+    let variables = &eval.variables;
+    let request_check = crate::trim::LongitudinalTrimRequest::new(
+        target_airspeed_mps,
+        crate::trim::TrimBounds::new(variables.alpha_rad - 0.5, variables.alpha_rad + 0.5)
+            .unwrap_or_else(|_| crate::trim::TrimBounds::new(-1.0, 1.0).unwrap()),
+        crate::trim::TrimBounds::new(-1.0, 1.0).unwrap(),
+        crate::trim::TrimBounds::new(0.0, 1.0).unwrap(),
+        *variables,
+        crate::trim::LongitudinalTrimTolerances::new(1.0, 0.1).unwrap(),
+        1,
+    );
+
+    let re_eval_matches = match &request_check {
+        Ok(req) => match evaluate_longitudinal_trim_candidate(model, config, req, *variables) {
+            Some(independent) => evaluations_bitwise_equal(&independent, eval),
+            None => false,
+        },
+        Err(_) => false,
+    };
+
+    // FIX 1: Build effective aero elements from the ACCEPTED control surface positions.
+    // This audits the deflected geometry actually evaluated by the trim solver,
+    // not the base geometry.
+    let effective = crate::effective_aero_elements_for_positions(model, positions);
+
+    // Use the exact accepted same-stage propulsion output for both slipstream and its audit.
+    let accepted_throttle = positions.throttle();
+    let propulsion_output = model.propulsion().map(|runtime_propulsion| {
+        evaluate_electric_propulsion_with_source(
+            state,
+            accepted_throttle,
+            runtime_propulsion.config(),
+            config.aero_environment(),
+            runtime_propulsion.coefficient_source(),
+        )
+    });
+    let slipstream = propulsion_output
+        .as_ref()
+        .map(|output| propeller_slipstream(model, config.aero_environment(), output))
+        .unwrap_or_default();
+
+    // Compute per-surface alpha_i values using the deflected elements
+    let surfaces = model.aero_surfaces();
+    let mut surface_alpha_i = vec![0.0f64; surfaces.len()];
+    let mut surface_downwash_angles = vec![0.0f64; surfaces.len()];
+    let mut element_surface_map = vec![None; model.aero_elements().len()];
+    for (surf_idx, surface) in surfaces.iter().enumerate() {
+        let downwash = surface_downwash_with_slipstream(
+            surf_idx,
+            state,
+            &effective,
+            model,
+            config.aero_environment(),
+            slipstream,
+        );
+        let (alpha_i, _, _) = solve_surface_induced_alpha_with_physical_flow(
+            surface,
+            state,
+            &effective,
+            model,
+            config.aero_environment(),
+            downwash.downwash_angle_rad,
+            slipstream,
+        );
+        surface_alpha_i[surf_idx] = alpha_i;
+        surface_downwash_angles[surf_idx] = downwash.downwash_angle_rad;
+        for &elem_idx in surface.element_indices() {
+            element_surface_map[elem_idx] = Some(surf_idx);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Aero element blockers (in model order)
+    // -----------------------------------------------------------------------
+    let mut aero_blockers = Vec::new();
+    let mut aero_audits = Vec::with_capacity(model.aero_elements().len());
+
+    for (elem_idx, runtime_elem) in model.aero_elements().iter().enumerate() {
+        let eff_elem = &effective[elem_idx];
+        let slipstream_kinematics = physical_section_kinematics(
+            elem_idx,
+            state,
+            eff_elem,
+            model,
+            config.aero_environment(),
+            slipstream,
+        );
+        let kin = element_surface_map[elem_idx]
+            .map(|surface_index| {
+                downwashed_section_kinematics(
+                    slipstream_kinematics,
+                    surface_downwash_angles[surface_index],
+                )
+            })
+            .unwrap_or(slipstream_kinematics);
+
+        let alpha_geom = kin.alpha_rad;
+        let alpha_i = element_surface_map[elem_idx]
+            .map(|si| surface_alpha_i[si])
+            .unwrap_or(0.0);
+        let alpha_sample = alpha_geom - alpha_i;
+
+        let (audit, elem_blockers) = audit_aero_element(
+            elem_idx,
+            runtime_elem,
+            eff_elem,
+            model,
+            alpha_geom,
+            alpha_sample,
+            kin.section_airspeed_mps,
+        );
+        aero_audits.push(audit);
+        aero_blockers.extend(elem_blockers);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Propulsion blockers (shaft-speed first, then J)
+    // -----------------------------------------------------------------------
+    // FIX 2: Use the accepted control-output throttle, not the raw trim variable.
+    let mut propulsion_blockers = Vec::new();
+    let propulsion_audit = audit_propulsion(
+        model,
+        accepted_throttle,
+        propulsion_output.as_ref(),
+        &mut propulsion_blockers,
+    );
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Full residual audit and off-axis limit blockers
+    // -----------------------------------------------------------------------
+    let body_wrench = &eval.body_wrench;
+    let derivative = &eval.derivative;
+    let residual_audit = FullResidualAudit {
+        fx_body_n: body_wrench.force_body_n.x,
+        fy_body_n: body_wrench.force_body_n.y,
+        fz_body_n: body_wrench.force_body_n.z,
+        mx_body_nm: body_wrench.moment_body_nm.x,
+        my_body_nm: body_wrench.moment_body_nm.y,
+        mz_body_nm: body_wrench.moment_body_nm.z,
+        linear_accel_world_x_mps2: derivative.linear_velocity_world_mps2.x,
+        linear_accel_world_y_mps2: derivative.linear_velocity_world_mps2.y,
+        linear_accel_world_z_mps2: derivative.linear_velocity_world_mps2.z,
+        angular_accel_body_x_rad_s2: derivative.angular_velocity_body_radps2.x,
+        angular_accel_body_y_rad_s2: derivative.angular_velocity_body_radps2.y,
+        angular_accel_body_z_rad_s2: derivative.angular_velocity_body_radps2.z,
+        longitudinal_force_n: eval.residuals.longitudinal_force_n,
+        vertical_force_n: eval.residuals.vertical_force_n,
+        pitch_moment_nm: eval.residuals.pitch_moment_nm,
+    };
+
+    let mut residual_limit_blockers = Vec::new();
+    if residual_audit.fy_body_n.abs() > limits.max_side_force_n {
+        residual_limit_blockers.push(QualificationBlocker::SideForceLimitExceeded {
+            fy_body_n: residual_audit.fy_body_n,
+            limit_n: limits.max_side_force_n,
+        });
+    }
+    if residual_audit.mx_body_nm.abs() > limits.max_roll_moment_nm {
+        residual_limit_blockers.push(QualificationBlocker::RollMomentLimitExceeded {
+            mx_body_nm: residual_audit.mx_body_nm,
+            limit_nm: limits.max_roll_moment_nm,
+        });
+    }
+    if residual_audit.mz_body_nm.abs() > limits.max_yaw_moment_nm {
+        residual_limit_blockers.push(QualificationBlocker::YawMomentLimitExceeded {
+            mz_body_nm: residual_audit.mz_body_nm,
+            limit_nm: limits.max_yaw_moment_nm,
+        });
+    }
+    if residual_audit.linear_accel_world_y_mps2.abs() > limits.max_lateral_acceleration_mps2 {
+        residual_limit_blockers.push(QualificationBlocker::LateralAccelerationLimitExceeded {
+            ay_world_mps2: residual_audit.linear_accel_world_y_mps2,
+            limit_mps2: limits.max_lateral_acceleration_mps2,
+        });
+    }
+    if residual_audit.angular_accel_body_x_rad_s2.abs()
+        > limits.max_roll_angular_acceleration_rad_s2
+    {
+        residual_limit_blockers.push(QualificationBlocker::RollAngularAccelerationLimitExceeded {
+            angular_accel_body_x_rad_s2: residual_audit.angular_accel_body_x_rad_s2,
+            limit_rad_s2: limits.max_roll_angular_acceleration_rad_s2,
+        });
+    }
+    if residual_audit.angular_accel_body_z_rad_s2.abs() > limits.max_yaw_angular_acceleration_rad_s2
+    {
+        residual_limit_blockers.push(QualificationBlocker::YawAngularAccelerationLimitExceeded {
+            angular_accel_body_z_rad_s2: residual_audit.angular_accel_body_z_rad_s2,
+            limit_rad_s2: limits.max_yaw_angular_acceleration_rad_s2,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Integrity blockers (non-finite audit values, re-evaluation)
+    // -----------------------------------------------------------------------
+    let mut integrity_blockers = Vec::new();
+
+    // FIX 4: Check finiteness of ALL audit values in deterministic order.
+
+    // Aero audit values (in element order)
+    for audit in &aero_audits {
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_geom_rad",
+            audit.alpha_geom_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_sample_rad",
+            audit.alpha_sample_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_lower_rad",
+            audit.alpha_lower_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "alpha_upper_rad",
+            audit.alpha_upper_rad,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "section_airspeed_mps",
+            audit.section_airspeed_mps,
+        );
+        if let Some(re) = audit.reynolds_number {
+            check_finite_field(&mut integrity_blockers, "reynolds_number", re);
+        }
+        if let Some(re_lo) = audit.reynolds_lower {
+            check_finite_field(&mut integrity_blockers, "reynolds_lower", re_lo);
+        }
+        if let Some(re_hi) = audit.reynolds_upper {
+            check_finite_field(&mut integrity_blockers, "reynolds_upper", re_hi);
+        }
+        if let Some(ln_alpha_lo) = audit.reynolds_lower_node_alpha_lower_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_lower_node_alpha_lower_rad",
+                ln_alpha_lo,
+            );
+        }
+        if let Some(ln_alpha_hi) = audit.reynolds_lower_node_alpha_upper_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_lower_node_alpha_upper_rad",
+                ln_alpha_hi,
+            );
+        }
+        if let Some(un_alpha_lo) = audit.reynolds_upper_node_alpha_lower_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_upper_node_alpha_lower_rad",
+                un_alpha_lo,
+            );
+        }
+        if let Some(un_alpha_hi) = audit.reynolds_upper_node_alpha_upper_rad {
+            check_finite_field(
+                &mut integrity_blockers,
+                "reynolds_upper_node_alpha_upper_rad",
+                un_alpha_hi,
+            );
+        }
+    }
+
+    // Propulsion audit values
+    if let PropulsionDomainAudit::Present {
+        throttle,
+        axial_airspeed_mps,
+        shaft_speed_rad_s,
+        shaft_speed_rpm,
+        advance_ratio_j,
+        j_lower,
+        j_upper,
+        j_range_status: _,
+        shaft_speed_domain,
+        rpm_domain,
+        thrust_n,
+        torque_n_m,
+    } = &propulsion_audit
+    {
+        check_finite_field(&mut integrity_blockers, "throttle", *throttle);
+        check_finite_field(
+            &mut integrity_blockers,
+            "axial_airspeed_mps",
+            *axial_airspeed_mps,
+        );
+        check_finite_field(
+            &mut integrity_blockers,
+            "shaft_speed_rad_s",
+            *shaft_speed_rad_s,
+        );
+        check_finite_field(&mut integrity_blockers, "shaft_speed_rpm", *shaft_speed_rpm);
+        check_finite_field(&mut integrity_blockers, "advance_ratio_j", *advance_ratio_j);
+        check_finite_field(&mut integrity_blockers, "j_lower", *j_lower);
+        check_finite_field(&mut integrity_blockers, "j_upper", *j_upper);
+        check_finite_field(&mut integrity_blockers, "thrust_n", *thrust_n);
+        check_finite_field(&mut integrity_blockers, "torque_n_m", *torque_n_m);
+        if let Some(ss_domain) = shaft_speed_domain {
+            check_finite_field(
+                &mut integrity_blockers,
+                "shaft_speed_lower_rad_s",
+                ss_domain.shaft_speed_lower_rad_s,
+            );
+            check_finite_field(
+                &mut integrity_blockers,
+                "shaft_speed_upper_rad_s",
+                ss_domain.shaft_speed_upper_rad_s,
+            );
+        }
+        if let RpmDomainStatus::Declared {
+            lower_rpm,
+            upper_rpm,
+            status: _,
+        } = rpm_domain
+        {
+            check_finite_field(&mut integrity_blockers, "rpm_lower", *lower_rpm);
+            check_finite_field(&mut integrity_blockers, "rpm_upper", *upper_rpm);
+        }
+    }
+
+    // Residual audit values
+    check_finite_field(
+        &mut integrity_blockers,
+        "fx_body_n",
+        residual_audit.fx_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "fy_body_n",
+        residual_audit.fy_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "fz_body_n",
+        residual_audit.fz_body_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "mx_body_nm",
+        residual_audit.mx_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "my_body_nm",
+        residual_audit.my_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "mz_body_nm",
+        residual_audit.mz_body_nm,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_x",
+        residual_audit.linear_accel_world_x_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_y",
+        residual_audit.linear_accel_world_y_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "linear_accel_world_z",
+        residual_audit.linear_accel_world_z_mps2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_x",
+        residual_audit.angular_accel_body_x_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_y",
+        residual_audit.angular_accel_body_y_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "angular_accel_body_z",
+        residual_audit.angular_accel_body_z_rad_s2,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "longitudinal_force_n",
+        residual_audit.longitudinal_force_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "vertical_force_n",
+        residual_audit.vertical_force_n,
+    );
+    check_finite_field(
+        &mut integrity_blockers,
+        "pitch_moment_nm",
+        residual_audit.pitch_moment_nm,
+    );
+
+    // Re-evaluation integrity
+    if !re_eval_matches {
+        integrity_blockers.push(QualificationBlocker::ReEvaluationFailure);
+    }
+
+    // -----------------------------------------------------------------------
+    // Assemble final blocker list in documented order
+    // -----------------------------------------------------------------------
+    let mut blockers = Vec::with_capacity(
+        aero_blockers.len()
+            + propulsion_blockers.len()
+            + residual_limit_blockers.len()
+            + integrity_blockers.len(),
+    );
+    blockers.extend(aero_blockers);
+    blockers.extend(propulsion_blockers);
+    blockers.extend(residual_limit_blockers);
+    blockers.extend(integrity_blockers);
+
+    let integrity_reason = blockers.iter().find_map(|blocker| match blocker {
+        QualificationBlocker::NonFiniteAuditValue { field } => {
+            Some(QualificationUnavailableReason::NonFiniteAuditValue { field })
+        }
+        QualificationBlocker::ReEvaluationFailure => {
+            Some(QualificationUnavailableReason::ReEvaluationFailure)
+        }
+        _ => None,
+    });
+
+    let outcome = if let Some(reason) = integrity_reason {
+        // Any integrity failure makes the qualification result unavailable, even when
+        // domain or residual blockers are also present. Preserve every blocker and all
+        // partially valid diagnostics for audit instead of presenting an untrustworthy
+        // domain/residual verdict as authoritative.
+        LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+            reason,
+            diagnostics: Some(QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            }),
+        }
+    } else if blockers
+        .iter()
+        .any(|b| b.category() == QualificationBlockerCategory::Domain)
+    {
+        LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(
+            QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            },
+        )
+    } else if blockers
+        .iter()
+        .any(|b| b.category() == QualificationBlockerCategory::Residual)
+    {
+        LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(
+            QualificationDiagnostics {
+                blockers,
+                residual_audit,
+                aero_audits,
+                propulsion_audit,
+            },
+        )
+    } else {
+        LongitudinalTrimQualificationOutcome::Qualified(QualificationDiagnostics {
+            blockers,
+            residual_audit,
+            aero_audits,
+            propulsion_audit,
+        })
+    };
+
+    LongitudinalTrimQualificationPoint {
+        target_airspeed_mps,
+        outcome,
+    }
+}
+
+/// Qualifies a whole longitudinal trim sweep, preserving the sweep's point order exactly.
+///
+/// The returned collection contains exactly one entry per sweep point, in the same order
+/// as the sweep's (and therefore the request's) target airspeeds. For every sweep point:
+///
+/// - `Success` points are fully audited through [`qualify_longitudinal_trim_solution`].
+/// - `TrimFailure` points map to
+///   [`LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure`] carrying the typed
+///   solver failure. NO element, propulsion, or residual diagnostics are fabricated.
+/// - `ReEvaluationMismatch` / `ReEvaluationUnverifiable` points map to
+///   [`LongitudinalTrimQualificationOutcome::QualificationUnavailable`] with NO
+///   diagnostics: the point's evaluation integrity was already broken at sweep level,
+///   so auditing its cached values would fabricate untrustworthy evidence.
+#[must_use]
+pub fn qualify_longitudinal_trim_sweep(
+    model: &AircraftModel,
+    config: &AircraftSimulationConfig,
+    sweep: &crate::trim_sweep::LongitudinalTrimSweep,
+    limits: &LongitudinalTrimQualificationLimits,
+) -> LongitudinalTrimQualification {
+    let points = sweep
+        .points()
+        .iter()
+        .map(|sweep_point| {
+            let outcome = match &sweep_point.outcome {
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::Success { solution } => {
+                    qualify_longitudinal_trim_solution(
+                        model,
+                        config,
+                        solution,
+                        limits,
+                        sweep_point.target_airspeed_mps,
+                    )
+                    .outcome
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::TrimFailure { failure } => {
+                    LongitudinalTrimQualificationOutcome::NotQualifiedTrimFailure {
+                        failure: failure.clone(),
+                    }
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::ReEvaluationMismatch(_) => {
+                    LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                        reason: QualificationUnavailableReason::SweepReEvaluationMismatch,
+                        diagnostics: None,
+                    }
+                }
+                crate::trim_sweep::LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(_) => {
+                    LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                        reason: QualificationUnavailableReason::SweepReEvaluationUnverifiable,
+                        diagnostics: None,
+                    }
+                }
+            };
+            LongitudinalTrimQualificationPoint {
+                target_airspeed_mps: sweep_point.target_airspeed_mps,
+                outcome,
+            }
+        })
+        .collect();
+    LongitudinalTrimQualification::from_points(points)
+}
+
+fn check_finite_field(blockers: &mut Vec<QualificationBlocker>, field: &'static str, value: f64) {
+    if !value.is_finite() {
+        blockers.push(QualificationBlocker::NonFiniteAuditValue { field });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Aero element audit
+// ---------------------------------------------------------------------------
+
+fn audit_aero_element(
+    elem_idx: usize,
+    runtime_elem: &model::RuntimeAeroElement,
+    eff_elem: &sim_core::AeroElement,
+    model: &AircraftModel,
+    alpha_geom: f64,
+    alpha_sample: f64,
+    section_airspeed: f64,
+) -> (AerodynamicElementDomainAudit, Vec<QualificationBlocker>) {
+    let mut blockers = Vec::new();
+
+    match runtime_elem.polar_binding() {
+        model::RuntimeAeroPolarBinding::Polar { polar_index } => {
+            let table = &model.aero_polars()[polar_index].table();
+            let (alpha_lo, alpha_hi) = polar_alpha_bounds(table);
+            let status = classify_range_status(alpha_sample, alpha_lo, alpha_hi);
+
+            if status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::AerodynamicAlphaBelowRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    alpha_sample_rad: alpha_sample,
+                    alpha_lower_rad: alpha_lo,
+                });
+            } else if status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::AerodynamicAlphaAboveRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    alpha_sample_rad: alpha_sample,
+                    alpha_upper_rad: alpha_hi,
+                });
+            }
+
+            let audit = AerodynamicElementDomainAudit {
+                element_index: elem_idx,
+                element_id: runtime_elem.id().to_owned(),
+                alpha_geom_rad: alpha_geom,
+                alpha_sample_rad: alpha_sample,
+                alpha_lower_rad: alpha_lo,
+                alpha_upper_rad: alpha_hi,
+                alpha_range_status: status,
+                section_airspeed_mps: section_airspeed,
+                polar_binding_kind: "polar",
+                reynolds_number: None,
+                reynolds_lower: None,
+                reynolds_upper: None,
+                reynolds_range_status: None,
+                reynolds_lower_node_alpha_lower_rad: None,
+                reynolds_lower_node_alpha_upper_rad: None,
+                reynolds_upper_node_alpha_lower_rad: None,
+                reynolds_upper_node_alpha_upper_rad: None,
+            };
+            (audit, blockers)
+        }
+        model::RuntimeAeroPolarBinding::ReynoldsFamily { family_index } => {
+            let family = &model.aero_polar_families()[family_index].family();
+            let viscosity = model.kinematic_viscosity_m2_s().unwrap();
+            let chord = eff_elem.chord_m();
+            let re = section_airspeed * chord / viscosity;
+
+            let nodes = family.nodes();
+            let re_lo = nodes[0].reynolds_number();
+            let re_hi = nodes[nodes.len() - 1].reynolds_number();
+            let re_status = classify_range_status(re, re_lo, re_hi);
+
+            // Contributing-node alpha blockers come BEFORE Reynolds range blockers
+            let (lower_node, upper_node, _fraction) = find_reynolds_bracket(family, re);
+
+            let mut ln_node_alpha_lo = None;
+            let mut ln_node_alpha_hi = None;
+            let mut un_node_alpha_lo = None;
+            let mut un_node_alpha_hi = None;
+
+            if let Some(ln) = lower_node {
+                let (lo, hi) = polar_alpha_bounds(ln.table());
+                ln_node_alpha_lo = Some(lo);
+                ln_node_alpha_hi = Some(hi);
+                if alpha_sample < lo {
+                    blockers.push(
+                        QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                            element_index: elem_idx,
+                            element_id: runtime_elem.id().to_owned(),
+                            node_reynolds: ln.reynolds_number(),
+                            alpha_sample_rad: alpha_sample,
+                            alpha_lower_rad: lo,
+                        },
+                    );
+                } else if alpha_sample > hi {
+                    blockers.push(
+                        QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                            element_index: elem_idx,
+                            element_id: runtime_elem.id().to_owned(),
+                            node_reynolds: ln.reynolds_number(),
+                            alpha_sample_rad: alpha_sample,
+                            alpha_upper_rad: hi,
+                        },
+                    );
+                }
+            }
+            if let Some(un) = upper_node {
+                let (lo, hi) = polar_alpha_bounds(un.table());
+                un_node_alpha_lo = Some(lo);
+                un_node_alpha_hi = Some(hi);
+                if upper_node.map(|n| n.reynolds_number())
+                    != lower_node.map(|n| n.reynolds_number())
+                {
+                    if alpha_sample < lo {
+                        blockers.push(
+                            QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                                element_index: elem_idx,
+                                element_id: runtime_elem.id().to_owned(),
+                                node_reynolds: un.reynolds_number(),
+                                alpha_sample_rad: alpha_sample,
+                                alpha_lower_rad: lo,
+                            },
+                        );
+                    } else if alpha_sample > hi {
+                        blockers.push(
+                            QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                                element_index: elem_idx,
+                                element_id: runtime_elem.id().to_owned(),
+                                node_reynolds: un.reynolds_number(),
+                                alpha_sample_rad: alpha_sample,
+                                alpha_upper_rad: hi,
+                            },
+                        );
+                    }
+                }
+            }
+
+            // Reynolds range blockers come AFTER contributing-node alpha blockers
+            if re_status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::ReynoldsBelowRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    reynolds_number: re,
+                    reynolds_lower: re_lo,
+                });
+            } else if re_status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::ReynoldsAboveRange {
+                    element_index: elem_idx,
+                    element_id: runtime_elem.id().to_owned(),
+                    reynolds_number: re,
+                    reynolds_upper: re_hi,
+                });
+            }
+
+            let alpha_lo = ln_node_alpha_lo
+                .unwrap_or(0.0)
+                .max(un_node_alpha_lo.unwrap_or(0.0));
+            let alpha_hi = ln_node_alpha_hi
+                .unwrap_or(0.0)
+                .min(un_node_alpha_hi.unwrap_or(0.0));
+            let alpha_status = if let (Some(ln), Some(un)) = (lower_node, upper_node) {
+                if ln.reynolds_number() == un.reynolds_number() {
+                    let (lo, hi) = polar_alpha_bounds(ln.table());
+                    classify_range_status(alpha_sample, lo, hi)
+                } else {
+                    classify_range_status(alpha_sample, alpha_lo, alpha_hi)
+                }
+            } else {
+                classify_range_status(alpha_sample, alpha_lo, alpha_hi)
+            };
+
+            let audit = AerodynamicElementDomainAudit {
+                element_index: elem_idx,
+                element_id: runtime_elem.id().to_owned(),
+                alpha_geom_rad: alpha_geom,
+                alpha_sample_rad: alpha_sample,
+                alpha_lower_rad: alpha_lo,
+                alpha_upper_rad: alpha_hi,
+                alpha_range_status: alpha_status,
+                section_airspeed_mps: section_airspeed,
+                polar_binding_kind: "reynolds_family",
+                reynolds_number: Some(re),
+                reynolds_lower: Some(re_lo),
+                reynolds_upper: Some(re_hi),
+                reynolds_range_status: Some(re_status),
+                reynolds_lower_node_alpha_lower_rad: ln_node_alpha_lo,
+                reynolds_lower_node_alpha_upper_rad: ln_node_alpha_hi,
+                reynolds_upper_node_alpha_lower_rad: un_node_alpha_lo,
+                reynolds_upper_node_alpha_upper_rad: un_node_alpha_hi,
+            };
+            (audit, blockers)
+        }
+    }
+}
+
+fn find_reynolds_bracket(
+    family: &sim_core::ReynoldsPolarFamily,
+    re: f64,
+) -> (
+    Option<&sim_core::ReynoldsPolar>,
+    Option<&sim_core::ReynoldsPolar>,
+    f64,
+) {
+    let nodes = family.nodes();
+    if nodes.len() == 1 {
+        return (Some(&nodes[0]), Some(&nodes[0]), 0.0);
+    }
+    match nodes.binary_search_by(|n| n.reynolds_number().total_cmp(&re)) {
+        Ok(idx) => (Some(&nodes[idx]), Some(&nodes[idx]), 0.0),
+        Err(0) => (Some(&nodes[0]), Some(&nodes[0]), 0.0),
+        Err(upper) if upper == nodes.len() => {
+            let last = nodes.len() - 1;
+            (Some(&nodes[last]), Some(&nodes[last]), 0.0)
+        }
+        Err(upper) => {
+            let lower = upper - 1;
+            let lo = nodes[lower].reynolds_number();
+            let hi = nodes[upper].reynolds_number();
+            let frac = if (hi - lo).abs() < 1e-30 {
+                0.0
+            } else {
+                (re - lo) / (hi - lo)
+            };
+            (Some(&nodes[lower]), Some(&nodes[upper]), frac)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Propulsion audit
+// ---------------------------------------------------------------------------
+
+fn audit_propulsion(
+    model: &AircraftModel,
+    accepted_throttle: f64,
+    propulsion_output: Option<&PropulsionOutput>,
+    blockers: &mut Vec<QualificationBlocker>,
+) -> PropulsionDomainAudit {
+    let Some(runtime_prop) = model.propulsion() else {
+        return PropulsionDomainAudit::NotPresent;
+    };
+
+    let prop_output =
+        propulsion_output.expect("a propulsion model has a same-stage qualification output");
+
+    let j = prop_output.advance_ratio_j;
+    let shaft_speed = prop_output.shaft_speed_rad_s;
+
+    match runtime_prop.coefficient_source() {
+        PropellerCoefficientSource::FixedTable(table) => {
+            let samples = table.samples();
+            let j_lo = samples[0].advance_ratio_j;
+            let j_hi = samples[samples.len() - 1].advance_ratio_j;
+            let j_stat = classify_range_status(j, j_lo, j_hi);
+            if j_stat == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j,
+                    j_lower: j_lo,
+                });
+            } else if j_stat == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j,
+                    j_upper: j_hi,
+                });
+            }
+            // FIX 6: Fixed table has no shaft-speed map domain -> None.
+            // No authored RPM support range exists in the model/runtime data -> NotDeclared.
+            PropulsionDomainAudit::Present {
+                throttle: accepted_throttle,
+                axial_airspeed_mps: prop_output.axial_airspeed_mps,
+                shaft_speed_rad_s: shaft_speed,
+                shaft_speed_rpm: prop_output.shaft_speed_rpm,
+                advance_ratio_j: j,
+                j_lower: j_lo,
+                j_upper: j_hi,
+                j_range_status: j_stat,
+                shaft_speed_domain: None,
+                rpm_domain: RpmDomainStatus::NotDeclared,
+                thrust_n: prop_output.thrust_n,
+                torque_n_m: prop_output.motor_torque_nm,
+            }
+        }
+        PropellerCoefficientSource::ShaftSpeedMap(map) => {
+            let nodes = map.nodes();
+            let ss_lo = nodes[0].shaft_speed_rad_s();
+            let ss_hi = nodes[nodes.len() - 1].shaft_speed_rad_s();
+            let ss_stat = classify_range_status(shaft_speed, ss_lo, ss_hi);
+            // Shaft-speed blockers BEFORE J blockers (documented order).
+            if ss_stat == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerShaftSpeedBelowRange {
+                    shaft_speed_rad_s: shaft_speed,
+                    shaft_speed_lower_rad_s: ss_lo,
+                });
+            } else if ss_stat == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::PropellerShaftSpeedAboveRange {
+                    shaft_speed_rad_s: shaft_speed,
+                    shaft_speed_upper_rad_s: ss_hi,
+                });
+            }
+
+            let (j_lo, j_hi, j_stat) = audit_map_j_domain(map, shaft_speed, j, blockers);
+            PropulsionDomainAudit::Present {
+                throttle: accepted_throttle,
+                axial_airspeed_mps: prop_output.axial_airspeed_mps,
+                shaft_speed_rad_s: shaft_speed,
+                shaft_speed_rpm: prop_output.shaft_speed_rpm,
+                advance_ratio_j: j,
+                j_lower: j_lo,
+                j_upper: j_hi,
+                j_range_status: j_stat,
+                shaft_speed_domain: Some(ShaftSpeedDomainAudit {
+                    shaft_speed_lower_rad_s: ss_lo,
+                    shaft_speed_upper_rad_s: ss_hi,
+                    shaft_speed_range_status: ss_stat,
+                }),
+                // No explicit authored RPM support range exists in the model/runtime
+                // data (the map's node range is an authored shaft-speed domain, not an
+                // RPM support range) -> NotDeclared. No RPM envelope is invented.
+                rpm_domain: RpmDomainStatus::NotDeclared,
+                thrust_n: prop_output.thrust_n,
+                torque_n_m: prop_output.motor_torque_nm,
+            }
+        }
+    }
+}
+
+fn audit_map_j_domain(
+    map: &PropellerCoefficientMap,
+    shaft_speed: f64,
+    j: f64,
+    blockers: &mut Vec<QualificationBlocker>,
+) -> (f64, f64, RangeStatus) {
+    let nodes = map.nodes();
+    if nodes.len() == 1 {
+        let table = nodes[0].table();
+        let samples = table.samples();
+        let j_lo = samples[0].advance_ratio_j;
+        let j_hi = samples[samples.len() - 1].advance_ratio_j;
+        let status = classify_range_status(j, j_lo, j_hi);
+        if status == RangeStatus::BelowRange {
+            blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                advance_ratio_j: j,
+                j_lower: j_lo,
+            });
+        } else if status == RangeStatus::AboveRange {
+            blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                advance_ratio_j: j,
+                j_upper: j_hi,
+            });
+        }
+        return (j_lo, j_hi, status);
+    }
+
+    match nodes.binary_search_by(|n| n.shaft_speed_rad_s().total_cmp(&shaft_speed)) {
+        Ok(idx) => {
+            let table = nodes[idx].table();
+            let samples = table.samples();
+            let j_lo = samples[0].advance_ratio_j;
+            let j_hi = samples[samples.len() - 1].advance_ratio_j;
+            let status = classify_range_status(j, j_lo, j_hi);
+            if status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j,
+                    j_lower: j_lo,
+                });
+            } else if status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j,
+                    j_upper: j_hi,
+                });
+            }
+            (j_lo, j_hi, status)
+        }
+        Err(0) => {
+            let table = nodes[0].table();
+            let samples = table.samples();
+            let j_lo = samples[0].advance_ratio_j;
+            let j_hi = samples[samples.len() - 1].advance_ratio_j;
+            let status = classify_range_status(j, j_lo, j_hi);
+            if status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j,
+                    j_lower: j_lo,
+                });
+            } else if status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j,
+                    j_upper: j_hi,
+                });
+            }
+            (j_lo, j_hi, status)
+        }
+        Err(upper) if upper == nodes.len() => {
+            let last = nodes.len() - 1;
+            let table = nodes[last].table();
+            let samples = table.samples();
+            let j_lo = samples[0].advance_ratio_j;
+            let j_hi = samples[samples.len() - 1].advance_ratio_j;
+            let status = classify_range_status(j, j_lo, j_hi);
+            if status == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j,
+                    j_lower: j_lo,
+                });
+            } else if status == RangeStatus::AboveRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j,
+                    j_upper: j_hi,
+                });
+            }
+            (j_lo, j_hi, status)
+        }
+        Err(upper) => {
+            let lower = upper - 1;
+            let lower_table = nodes[lower].table();
+            let upper_table = nodes[upper].table();
+            let l_samples = lower_table.samples();
+            let u_samples = upper_table.samples();
+            let j_lo_lower = l_samples[0].advance_ratio_j;
+            let j_hi_lower = l_samples[l_samples.len() - 1].advance_ratio_j;
+            let j_lo_upper = u_samples[0].advance_ratio_j;
+            let j_hi_upper = u_samples[u_samples.len() - 1].advance_ratio_j;
+
+            let j_lo = j_lo_lower.max(j_lo_upper);
+            let j_hi = j_hi_lower.min(j_hi_upper);
+            let status = classify_range_status(j, j_lo, j_hi);
+
+            let j_in_lower = classify_range_status(j, j_lo_lower, j_hi_lower);
+            let j_in_upper = classify_range_status(j, j_lo_upper, j_hi_upper);
+
+            if j_in_lower == RangeStatus::BelowRange || j_in_upper == RangeStatus::BelowRange {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j,
+                    j_lower: j_lo,
+                });
+            } else if j_in_lower == RangeStatus::AboveRange || j_in_upper == RangeStatus::AboveRange
+            {
+                blockers.push(QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j,
+                    j_upper: j_hi,
+                });
+            }
+
+            (j_lo, j_hi, status)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for private helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_status_nan_is_non_finite() {
+        assert_eq!(
+            classify_range_status(f64::NAN, -1.0, 1.0),
+            RangeStatus::NonFinite,
+            "NaN must NOT classify as InRange"
+        );
+    }
+
+    #[test]
+    fn range_status_infinity_is_non_finite() {
+        assert_eq!(
+            classify_range_status(f64::INFINITY, -1.0, 1.0),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(f64::NEG_INFINITY, -1.0, 1.0),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(0.0, f64::NEG_INFINITY, 1.0),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(0.0, -1.0, f64::INFINITY),
+            RangeStatus::NonFinite
+        );
+        assert_eq!(
+            classify_range_status(0.0, f64::NAN, 1.0),
+            RangeStatus::NonFinite
+        );
+    }
+
+    #[test]
+    fn range_status_inverted_interval_is_invalid() {
+        assert_eq!(
+            classify_range_status(0.0, 1.0, -1.0),
+            RangeStatus::InvalidRange
+        );
+    }
+
+    #[test]
+    fn range_status_finite_values_classify_correctly() {
+        assert_eq!(classify_range_status(0.0, -1.0, 1.0), RangeStatus::InRange);
+        assert_eq!(
+            classify_range_status(-2.0, -1.0, 1.0),
+            RangeStatus::BelowRange
+        );
+        assert_eq!(
+            classify_range_status(2.0, -1.0, 1.0),
+            RangeStatus::AboveRange
+        );
+    }
+
+    #[test]
+    fn range_status_distinguishes_exact_bounds_from_interior() {
+        // Exact bitwise lower endpoint
+        assert_eq!(
+            classify_range_status(-1.0, -1.0, 1.0),
+            RangeStatus::AtLowerBound
+        );
+        // Exact bitwise upper endpoint
+        assert_eq!(
+            classify_range_status(1.0, -1.0, 1.0),
+            RangeStatus::AtUpperBound
+        );
+        // Strictly interior on both sides
+        assert_eq!(
+            classify_range_status(-1.0 + f64::EPSILON, -1.0, 1.0),
+            RangeStatus::InRange
+        );
+        assert_eq!(
+            classify_range_status(1.0 - f64::EPSILON, -1.0, 1.0),
+            RangeStatus::InRange
+        );
+        // Just outside is NOT a bound
+        assert_eq!(
+            classify_range_status(-1.0 - f64::EPSILON, -1.0, 1.0),
+            RangeStatus::BelowRange
+        );
+        assert_eq!(
+            classify_range_status(1.0 + f64::EPSILON, -1.0, 1.0),
+            RangeStatus::AboveRange
+        );
+    }
+
+    #[test]
+    fn range_status_degenerate_interval_only_admits_exact_endpoint() {
+        // Single-point support: only the exact value is inside the closed interval.
+        // Documented precedence: the lower endpoint is checked first, so the exact value
+        // of a degenerate interval classifies as AtLowerBound.
+        assert_eq!(
+            classify_range_status(0.5, 0.5, 0.5),
+            RangeStatus::AtLowerBound
+        );
+        assert_eq!(
+            classify_range_status(0.5 + f64::EPSILON, 0.5, 0.5),
+            RangeStatus::AboveRange
+        );
+        assert_eq!(
+            classify_range_status(0.5 - f64::EPSILON, 0.5, 0.5),
+            RangeStatus::BelowRange
+        );
+    }
+
+    #[test]
+    fn range_status_boundary_identity_distinguishes_signed_zero_bits() {
+        assert_eq!(
+            classify_range_status(-0.0, -0.0, 1.0),
+            RangeStatus::AtLowerBound
+        );
+        assert_eq!(classify_range_status(0.0, -0.0, 1.0), RangeStatus::InRange);
+        assert_eq!(
+            classify_range_status(0.0, -1.0, 0.0),
+            RangeStatus::AtUpperBound
+        );
+        assert_eq!(classify_range_status(-0.0, -1.0, 0.0), RangeStatus::InRange);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: bitwise re-evaluation enforcement
+    // -----------------------------------------------------------------------
+
+    use crate::AircraftSimulationConfig;
+    use crate::trim::{
+        LongitudinalTrimRequest, LongitudinalTrimSolution, LongitudinalTrimTolerances,
+        LongitudinalTrimVariables, TrimBounds, solve_longitudinal_trim,
+    };
+    use sim_core::AeroEnvironment;
+    use sim_math::Vec3;
+
+    const QUAL_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/synthetic_non_reference_trim_v4.json");
+
+    fn qual_aircraft() -> model::AircraftModel {
+        model::AircraftModelLoader::from_json_str(QUAL_FIXTURE).unwrap()
+    }
+
+    fn qual_sim_config() -> AircraftSimulationConfig {
+        AircraftSimulationConfig::new(
+            0.002,
+            Vec3::new(0.0, 0.0, 9.80665),
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn generous_limits() -> LongitudinalTrimQualificationLimits {
+        LongitudinalTrimQualificationLimits::new(1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6).unwrap()
+    }
+
+    fn solved_solution() -> LongitudinalTrimSolution {
+        let request = LongitudinalTrimRequest::new(
+            18.0,
+            TrimBounds::new(-0.15, 0.30).unwrap(),
+            TrimBounds::new(-0.9, 0.9).unwrap(),
+            TrimBounds::new(0.02, 1.0).unwrap(),
+            LongitudinalTrimVariables::new(0.08, 0.1, 0.45).unwrap(),
+            LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap(),
+            40,
+        )
+        .unwrap();
+        solve_longitudinal_trim(&qual_aircraft(), &qual_sim_config(), &request).unwrap()
+    }
+
+    /// Alters one `+0.0` field in the cached evaluation to `-0.0`.
+    /// `position_world_m` is always `Vec3::zeros()` from `evaluate_candidate`,
+    /// so `x` is guaranteed `+0.0` before the flip.
+    fn flip_cached_position_x_to_neg_zero(
+        solution: &LongitudinalTrimSolution,
+    ) -> LongitudinalTrimSolution {
+        let mut altered = *solution;
+        assert_eq!(
+            altered.evaluation.state.position_world_m.x.to_bits(),
+            0.0_f64.to_bits(),
+            "precondition: position_world_m.x must be +0.0 from evaluate_candidate"
+        );
+        altered.evaluation.state.position_world_m.x = -0.0;
+        altered
+    }
+
+    #[test]
+    fn qualification_rejects_signed_zero_reevaluation_mismatch() {
+        let solution = solved_solution();
+        let altered = flip_cached_position_x_to_neg_zero(&solution);
+
+        // Sanity: PartialEq considers them equal (the bug the bitwise fix addresses).
+        assert_eq!(
+            solution.evaluation, altered.evaluation,
+            "PartialEq must treat +0.0 and -0.0 as equal — this is the bug"
+        );
+
+        let point = qualify_longitudinal_trim_solution(
+            &qual_aircraft(),
+            &qual_sim_config(),
+            &altered,
+            &generous_limits(),
+            18.0,
+        );
+
+        match &point.outcome {
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                reason: QualificationUnavailableReason::ReEvaluationFailure,
+                ..
+            } => {
+                // Expected: the bitwise re-evaluation detected the signed-zero mismatch.
+            }
+            other => {
+                panic!("expected QualificationUnavailable::ReEvaluationFailure, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_preserves_diagnostics_on_signed_zero_reevaluation_failure() {
+        let solution = solved_solution();
+        let altered = flip_cached_position_x_to_neg_zero(&solution);
+
+        let point = qualify_longitudinal_trim_solution(
+            &qual_aircraft(),
+            &qual_sim_config(),
+            &altered,
+            &generous_limits(),
+            18.0,
+        );
+
+        match &point.outcome {
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                reason: QualificationUnavailableReason::ReEvaluationFailure,
+                diagnostics,
+            } => {
+                // Diagnostics must be preserved (Some), not None.
+                let diag = diagnostics
+                    .as_ref()
+                    .expect("diagnostics must be preserved for integrity-failed audits");
+
+                // ReEvaluationFailure blocker must be present.
+                assert!(
+                    diag.blockers()
+                        .iter()
+                        .any(|b| matches!(b, QualificationBlocker::ReEvaluationFailure)),
+                    "ReEvaluationFailure blocker must be present in preserved diagnostics"
+                );
+
+                // ReEvaluationFailure is an Integrity blocker.
+                // Verify integrity blockers come AFTER domain and residual blockers
+                // in the preserved blocker list (documented precedence).
+                let mut saw_integrity = false;
+                for blocker in diag.blockers() {
+                    if blocker.category() == QualificationBlockerCategory::Integrity {
+                        saw_integrity = true;
+                    } else if saw_integrity {
+                        panic!(
+                            "found {:?} blocker after integrity blocker — ordering violated",
+                            blocker.category()
+                        );
+                    }
+                }
+
+                // Residual audit must be populated (not zeroed).
+                assert_ne!(
+                    diag.residual_audit().longitudinal_force_n.to_bits(),
+                    f64::NAN.to_bits()
+                );
+
+                // Aero audits must be populated.
+                assert!(
+                    !diag.aero_audits().is_empty(),
+                    "aero audits must be preserved"
+                );
+            }
+            other => {
+                panic!("expected QualificationUnavailable::ReEvaluationFailure, got {other:?}")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test-only bitwise comparison helpers for qualification diagnostics.
+    // These never use structure PartialEq as the floating-point oracle.
+    // -----------------------------------------------------------------------
+
+    const fn f64_bits_eq(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits()
+    }
+
+    /// Asserts `Option<f64>` presence is identical on both sides, and when both
+    /// are `Some` the payloads are bitwise equal. Fails loudly on `Some`/`None`
+    /// mismatches instead of silently skipping them.
+    fn assert_option_f64_bits_eq(
+        a: Option<f64>,
+        b: Option<f64>,
+        field: &'static str,
+        element_index: usize,
+    ) {
+        match (a, b) {
+            (None, None) => {}
+            (Some(va), Some(vb)) => {
+                assert!(
+                    f64_bits_eq(va, vb),
+                    "{field} (element {element_index}) bit patterns differ: {:?} vs {:?}",
+                    va.to_bits(),
+                    vb.to_bits()
+                );
+            }
+            (present_a, present_b) => {
+                panic!(
+                    "{field} (element {element_index}) Some/None presence mismatch: \
+                     {present_a:?} vs {present_b:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_propulsion_audit_bits_eq(a: &PropulsionDomainAudit, b: &PropulsionDomainAudit) {
+        match (a, b) {
+            (PropulsionDomainAudit::NotPresent, PropulsionDomainAudit::NotPresent) => {}
+            (
+                PropulsionDomainAudit::Present {
+                    throttle: throttle_a,
+                    axial_airspeed_mps: axial_a,
+                    shaft_speed_rad_s: shaft_a,
+                    shaft_speed_rpm: rpm_a,
+                    advance_ratio_j: j_a,
+                    j_lower: j_lo_a,
+                    j_upper: j_hi_a,
+                    j_range_status: j_status_a,
+                    shaft_speed_domain: domain_a,
+                    rpm_domain: rpm_domain_a,
+                    thrust_n: thrust_a,
+                    torque_n_m: torque_a,
+                },
+                PropulsionDomainAudit::Present {
+                    throttle: throttle_b,
+                    axial_airspeed_mps: axial_b,
+                    shaft_speed_rad_s: shaft_b,
+                    shaft_speed_rpm: rpm_b,
+                    advance_ratio_j: j_b,
+                    j_lower: j_lo_b,
+                    j_upper: j_hi_b,
+                    j_range_status: j_status_b,
+                    shaft_speed_domain: domain_b,
+                    rpm_domain: rpm_domain_b,
+                    thrust_n: thrust_b,
+                    torque_n_m: torque_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*throttle_a, *throttle_b),
+                    "throttle bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*axial_a, *axial_b),
+                    "axial_airspeed_mps bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*shaft_a, *shaft_b),
+                    "shaft_speed_rad_s bits differ"
+                );
+                assert!(f64_bits_eq(*rpm_a, *rpm_b), "shaft_speed_rpm bits differ");
+                assert!(f64_bits_eq(*j_a, *j_b), "advance_ratio_j bits differ");
+                assert!(f64_bits_eq(*j_lo_a, *j_lo_b), "j_lower bits differ");
+                assert!(f64_bits_eq(*j_hi_a, *j_hi_b), "j_upper bits differ");
+                // Discrete range status compared normally.
+                assert_eq!(j_status_a, j_status_b, "j_range_status mismatch");
+                assert!(f64_bits_eq(*thrust_a, *thrust_b), "thrust_n bits differ");
+                assert!(f64_bits_eq(*torque_a, *torque_b), "torque_n_m bits differ");
+
+                // Optional shaft-speed domain: presence equality, then bitwise floats.
+                match (domain_a, domain_b) {
+                    (None, None) => {}
+                    (Some(da), Some(db)) => {
+                        assert!(
+                            f64_bits_eq(da.shaft_speed_lower_rad_s, db.shaft_speed_lower_rad_s),
+                            "shaft_speed_lower_rad_s bits differ"
+                        );
+                        assert!(
+                            f64_bits_eq(da.shaft_speed_upper_rad_s, db.shaft_speed_upper_rad_s),
+                            "shaft_speed_upper_rad_s bits differ"
+                        );
+                        assert_eq!(
+                            da.shaft_speed_range_status, db.shaft_speed_range_status,
+                            "shaft_speed_range_status mismatch"
+                        );
+                    }
+                    (pa, pb) => {
+                        panic!("shaft_speed_domain Some/None presence mismatch: {pa:?} vs {pb:?}")
+                    }
+                }
+
+                // RPM domain status.
+                match (rpm_domain_a, rpm_domain_b) {
+                    (RpmDomainStatus::NotDeclared, RpmDomainStatus::NotDeclared) => {}
+                    (
+                        RpmDomainStatus::Declared {
+                            lower_rpm: lo_a,
+                            upper_rpm: hi_a,
+                            status: status_a,
+                        },
+                        RpmDomainStatus::Declared {
+                            lower_rpm: lo_b,
+                            upper_rpm: hi_b,
+                            status: status_b,
+                        },
+                    ) => {
+                        assert!(f64_bits_eq(*lo_a, *lo_b), "rpm lower bits differ");
+                        assert!(f64_bits_eq(*hi_a, *hi_b), "rpm upper bits differ");
+                        assert_eq!(status_a, status_b, "rpm range status mismatch");
+                    }
+                    (pa, pb) => {
+                        panic!("rpm_domain variant mismatch: {pa:?} vs {pb:?}")
+                    }
+                }
+            }
+            (pa, pb) => panic!("propulsion audit variant mismatch: {pa:?} vs {pb:?}"),
+        }
+    }
+
+    fn assert_blocker_bits_eq(a: &QualificationBlocker, b: &QualificationBlocker, index: usize) {
+        match (a, b) {
+            (
+                QualificationBlocker::AerodynamicAlphaBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    alpha_sample_rad: sample_a,
+                    alpha_lower_rad: lower_a,
+                },
+                QualificationBlocker::AerodynamicAlphaBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    alpha_sample_rad: sample_b,
+                    alpha_lower_rad: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} alpha_lower_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::AerodynamicAlphaAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    alpha_sample_rad: sample_a,
+                    alpha_upper_rad: upper_a,
+                },
+                QualificationBlocker::AerodynamicAlphaAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    alpha_sample_rad: sample_b,
+                    alpha_upper_rad: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} alpha_upper_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    node_reynolds: re_a,
+                    alpha_sample_rad: sample_a,
+                    alpha_lower_rad: lower_a,
+                },
+                QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    node_reynolds: re_b,
+                    alpha_sample_rad: sample_b,
+                    alpha_lower_rad: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} node_reynolds bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} alpha_lower_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    node_reynolds: re_a,
+                    alpha_sample_rad: sample_a,
+                    alpha_upper_rad: upper_a,
+                },
+                QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    node_reynolds: re_b,
+                    alpha_sample_rad: sample_b,
+                    alpha_upper_rad: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} node_reynolds bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} alpha_upper_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    reynolds_number: re_a,
+                    reynolds_lower: lower_a,
+                },
+                QualificationBlocker::ReynoldsBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    reynolds_number: re_b,
+                    reynolds_lower: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} reynolds_number bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} reynolds_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    reynolds_number: re_a,
+                    reynolds_upper: upper_a,
+                },
+                QualificationBlocker::ReynoldsAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    reynolds_number: re_b,
+                    reynolds_upper: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} reynolds_number bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} reynolds_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerShaftSpeedBelowRange {
+                    shaft_speed_rad_s: speed_a,
+                    shaft_speed_lower_rad_s: lower_a,
+                },
+                QualificationBlocker::PropellerShaftSpeedBelowRange {
+                    shaft_speed_rad_s: speed_b,
+                    shaft_speed_lower_rad_s: lower_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*speed_a, *speed_b),
+                    "blocker {index} shaft_speed_rad_s bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} shaft_speed_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerShaftSpeedAboveRange {
+                    shaft_speed_rad_s: speed_a,
+                    shaft_speed_upper_rad_s: upper_a,
+                },
+                QualificationBlocker::PropellerShaftSpeedAboveRange {
+                    shaft_speed_rad_s: speed_b,
+                    shaft_speed_upper_rad_s: upper_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*speed_a, *speed_b),
+                    "blocker {index} shaft_speed_rad_s bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} shaft_speed_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j_a,
+                    j_lower: lower_a,
+                },
+                QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j_b,
+                    j_lower: lower_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*j_a, *j_b),
+                    "blocker {index} advance_ratio_j bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} j_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j_a,
+                    j_upper: upper_a,
+                },
+                QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j_b,
+                    j_upper: upper_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*j_a, *j_b),
+                    "blocker {index} advance_ratio_j bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} j_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::SideForceLimitExceeded {
+                    fy_body_n: fy_a,
+                    limit_n: limit_a,
+                },
+                QualificationBlocker::SideForceLimitExceeded {
+                    fy_body_n: fy_b,
+                    limit_n: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*fy_a, *fy_b),
+                    "blocker {index} fy_body_n bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_n bits differ"
+                );
+            }
+            (
+                QualificationBlocker::RollMomentLimitExceeded {
+                    mx_body_nm: mx_a,
+                    limit_nm: limit_a,
+                },
+                QualificationBlocker::RollMomentLimitExceeded {
+                    mx_body_nm: mx_b,
+                    limit_nm: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*mx_a, *mx_b),
+                    "blocker {index} mx_body_nm bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_nm bits differ"
+                );
+            }
+            (
+                QualificationBlocker::YawMomentLimitExceeded {
+                    mz_body_nm: mz_a,
+                    limit_nm: limit_a,
+                },
+                QualificationBlocker::YawMomentLimitExceeded {
+                    mz_body_nm: mz_b,
+                    limit_nm: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*mz_a, *mz_b),
+                    "blocker {index} mz_body_nm bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_nm bits differ"
+                );
+            }
+            (
+                QualificationBlocker::LateralAccelerationLimitExceeded {
+                    ay_world_mps2: ay_a,
+                    limit_mps2: limit_a,
+                },
+                QualificationBlocker::LateralAccelerationLimitExceeded {
+                    ay_world_mps2: ay_b,
+                    limit_mps2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*ay_a, *ay_b),
+                    "blocker {index} ay_world_mps2 bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_mps2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::RollAngularAccelerationLimitExceeded {
+                    angular_accel_body_x_rad_s2: ax_a,
+                    limit_rad_s2: limit_a,
+                },
+                QualificationBlocker::RollAngularAccelerationLimitExceeded {
+                    angular_accel_body_x_rad_s2: ax_b,
+                    limit_rad_s2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*ax_a, *ax_b),
+                    "blocker {index} angular_accel_body_x bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_rad_s2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::YawAngularAccelerationLimitExceeded {
+                    angular_accel_body_z_rad_s2: az_a,
+                    limit_rad_s2: limit_a,
+                },
+                QualificationBlocker::YawAngularAccelerationLimitExceeded {
+                    angular_accel_body_z_rad_s2: az_b,
+                    limit_rad_s2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*az_a, *az_b),
+                    "blocker {index} angular_accel_body_z bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_rad_s2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::NonFiniteAuditValue { field: field_a },
+                QualificationBlocker::NonFiniteAuditValue { field: field_b },
+            ) => {
+                assert_eq!(
+                    field_a, field_b,
+                    "blocker {index} NonFiniteAuditValue field mismatch"
+                );
+            }
+            (
+                QualificationBlocker::ReEvaluationFailure,
+                QualificationBlocker::ReEvaluationFailure,
+            ) => {}
+            (ba, bb) => {
+                panic!("blocker {index} variant/ordering mismatch: {ba:?} vs {bb:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_determinism_is_bitwise() {
+        let solution = solved_solution();
+        let limits = generous_limits();
+        let model = qual_aircraft();
+        let config = qual_sim_config();
+
+        let point_a = qualify_longitudinal_trim_solution(&model, &config, &solution, &limits, 18.0);
+        let point_b = qualify_longitudinal_trim_solution(&model, &config, &solution, &limits, 18.0);
+
+        // Target airspeed: bitwise.
+        assert_eq!(
+            point_a.target_airspeed_mps.to_bits(),
+            point_b.target_airspeed_mps.to_bits()
+        );
+
+        // Extract diagnostics from both runs.
+        let diag_a = match &point_a.outcome {
+            LongitudinalTrimQualificationOutcome::Qualified(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(d) => d,
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                diagnostics: Some(d),
+                ..
+            } => d,
+            _ => panic!("unexpected outcome for determinism comparison"),
+        };
+        let diag_b = match &point_b.outcome {
+            LongitudinalTrimQualificationOutcome::Qualified(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(d) => d,
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                diagnostics: Some(d),
+                ..
+            } => d,
+            _ => panic!("unexpected outcome for determinism comparison"),
+        };
+
+        // Residual audit: every f64 field compared via to_bits().
+        let ra_a = diag_a.residual_audit();
+        let ra_b = diag_b.residual_audit();
+        assert!(f64_bits_eq(ra_a.fx_body_n, ra_b.fx_body_n));
+        assert!(f64_bits_eq(ra_a.fy_body_n, ra_b.fy_body_n));
+        assert!(f64_bits_eq(ra_a.fz_body_n, ra_b.fz_body_n));
+        assert!(f64_bits_eq(ra_a.mx_body_nm, ra_b.mx_body_nm));
+        assert!(f64_bits_eq(ra_a.my_body_nm, ra_b.my_body_nm));
+        assert!(f64_bits_eq(ra_a.mz_body_nm, ra_b.mz_body_nm));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_x_mps2,
+            ra_b.linear_accel_world_x_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_y_mps2,
+            ra_b.linear_accel_world_y_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_z_mps2,
+            ra_b.linear_accel_world_z_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_x_rad_s2,
+            ra_b.angular_accel_body_x_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_y_rad_s2,
+            ra_b.angular_accel_body_y_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_z_rad_s2,
+            ra_b.angular_accel_body_z_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.longitudinal_force_n,
+            ra_b.longitudinal_force_n
+        ));
+        assert!(f64_bits_eq(ra_a.vertical_force_n, ra_b.vertical_force_n));
+        assert!(f64_bits_eq(ra_a.pitch_moment_nm, ra_b.pitch_moment_nm));
+
+        // Aero audits: every f64 field compared via to_bits(); all Option<f64>
+        // fields are presence-checked first and bitwise-compared when Some.
+        assert_eq!(diag_a.aero_audits().len(), diag_b.aero_audits().len());
+        for (idx, (aa, ab)) in diag_a
+            .aero_audits()
+            .iter()
+            .zip(diag_b.aero_audits().iter())
+            .enumerate()
+        {
+            assert!(f64_bits_eq(aa.alpha_geom_rad, ab.alpha_geom_rad));
+            assert!(f64_bits_eq(aa.alpha_sample_rad, ab.alpha_sample_rad));
+            assert!(f64_bits_eq(aa.alpha_lower_rad, ab.alpha_lower_rad));
+            assert!(f64_bits_eq(aa.alpha_upper_rad, ab.alpha_upper_rad));
+            assert!(f64_bits_eq(
+                aa.section_airspeed_mps,
+                ab.section_airspeed_mps
+            ));
+            assert_option_f64_bits_eq(
+                aa.reynolds_number,
+                ab.reynolds_number,
+                "reynolds_number",
+                idx,
+            );
+            assert_option_f64_bits_eq(aa.reynolds_lower, ab.reynolds_lower, "reynolds_lower", idx);
+            assert_option_f64_bits_eq(aa.reynolds_upper, ab.reynolds_upper, "reynolds_upper", idx);
+            assert_option_f64_bits_eq(
+                aa.reynolds_lower_node_alpha_lower_rad,
+                ab.reynolds_lower_node_alpha_lower_rad,
+                "reynolds_lower_node_alpha_lower_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_lower_node_alpha_upper_rad,
+                ab.reynolds_lower_node_alpha_upper_rad,
+                "reynolds_lower_node_alpha_upper_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_upper_node_alpha_lower_rad,
+                ab.reynolds_upper_node_alpha_lower_rad,
+                "reynolds_upper_node_alpha_lower_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_upper_node_alpha_upper_rad,
+                ab.reynolds_upper_node_alpha_upper_rad,
+                "reynolds_upper_node_alpha_upper_rad",
+                idx,
+            );
+        }
+
+        // Propulsion audit: complete bitwise comparison.
+        assert_propulsion_audit_bits_eq(diag_a.propulsion_audit(), diag_b.propulsion_audit());
+
+        // Blockers: bitwise comparison of every f64 payload; variant ordering preserved.
+        assert_eq!(diag_a.blockers().len(), diag_b.blockers().len());
+        for (idx, (ba, bb)) in diag_a
+            .blockers()
+            .iter()
+            .zip(diag_b.blockers().iter())
+            .enumerate()
+        {
+            assert_blocker_bits_eq(ba, bb, idx);
+        }
+    }
+}
