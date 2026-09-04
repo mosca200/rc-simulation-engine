@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 gilrs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sim_core = { path = "../sim_core" }
 thiserror.workspace = true
 

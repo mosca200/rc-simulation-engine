@@ -1958,6 +1958,8 @@ name = "platform"
 version = "0.1.0"
 dependencies = [
  "gilrs",
+ "serde",
+ "serde_json",
  "sim_core",
  "thiserror 2.0.20",
 ]
