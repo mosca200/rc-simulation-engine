@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "gate": "Gate 0 - Project convergence",
+  "decision": "PARTIAL",
+  "generated_at": "2026-09-04T19:47:53.0490507+02:00",
+  "branch": "integration/gate0-convergence",
+  "tested_code_commit": "181c74858e355f2634217bc4ddb4de064188b0a8",
+  "baseline": {
+    "complete_flight_demo": "c4864ebef83e97136cbf58e5911186a4f98f1633",
+    "m2_approved_stack": "b02ffcc0fea61d8ba86f31ae2644a23742ae23c8",
+    "m2_6c_reviewed_tip": "a69641a6cdc4b4a92697c0db25a277fbfc82a77f",
+    "m2_6c_merge_commit": "9243abace4f0398ef4ac0c760e7e7bcd3c457d93",
+    "m2_6c_correction_commit": "181c74858e355f2634217bc4ddb4de064188b0a8"
+  },
+  "equivalent_exclusions": [
+    {
+      "branch": "main",
+      "commit": "b51bece893c0a4d2c1abf7156948f6bede5e0b08",
+      "reason": "tree-identical to approved-stack ancestor ef2977f; outcome already present once"
+    },
+    {
+      "branch": "integration/m2-9c-on-main",
+      "commit": "85c4e997c8d4b1ac8f0b6a6ad2864a08d2b550df",
+      "reason": "tree- and patch-identical to cfbf842, an approved-stack ancestor; patch-id 77e2b1308010d9829b60620f19b666e8948b9419"
+    }
+  ],
+  "checks": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "command": "cargo test --workspace --all-targets",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "command": "cargo build --workspace --release",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "command": "cargo run -p rcsim-app --release -- validate first-slice --output-dir target/gate0_first_slice",
+      "exit_code": 0,
+      "status": "PASS_EXECUTION"
+    }
+  ],
+  "first_slice": {
+    "technical_gate": "PASS",
+    "manual_gate": "PARTIAL",
+    "real_world_gate": "PARTIAL",
+    "overall_status": "PARTIAL",
+    "criteria": 31,
+    "pass": 24,
+    "partial": 1,
+    "not_tested": 6,
+    "fail": 0,
+    "model_id": "acro-electric-01",
+    "model_physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+    "report": "docs/validation/gate0/first_slice_report.json"
+  },
+  "viewer": {
+    "status": "PARTIAL",
+    "classification": "functional presentation foundation; not AAA",
+    "actual_gpu": "NVIDIA GeForce RTX 3090",
+    "actual_driver": "NVIDIA 595.97",
+    "actual_backend": "Vulkan",
+    "ground_command": "rcsim-app render --model models/acro_electric_ground_demo/model.json --start-on-ground --throttle 0 --scenery flying-field --camera pilot --pilot-position 0,1.8,20 --camera-fov 55 --debug-overlays --record-replay target/gate0_viewer/viewer_ground_replay.json",
+    "chase_command": "rcsim-app render --model models/acro_electric_01/model.json --altitude-m 45 --airspeed-mps 20 --throttle 0.55 --scenery none --camera chase --chase-distance-m 5 --chase-height-m 2 --camera-fov 55",
+    "screenshots": [
+      {
+        "path": "docs/validation/gate0/viewer_ground_pilot_debug.png",
+        "sha256": "8c039d7d33b4331a4693e598daac95b5286eec9b48b0368e10c7afea52992ec7",
+        "window_size_px": [1296, 759]
+      },
+      {
+        "path": "docs/validation/gate0/viewer_airborne_chase.png",
+        "sha256": "5bf6436c0bf7cf3170a97cad2d87a8278a999b547642863d8406132538c8fa81",
+        "window_size_px": [1296, 759]
+      }
+    ],
+    "recorded_replay": {
+      "path": "target/gate0_viewer/viewer_ground_replay.json",
+      "sha256": "8bd8e7f18a281398924ce5c9a21c72610de8dd6ea5501742749d3b2f2ebd32e1",
+      "steps_verified": 15962,
+      "verification": "PASS",
+      "tracked": false
+    },
+    "checklist": {
+      "sky_haze_fog": "PASS_OBSERVED",
+      "terrain": "PASS_OBSERVED_FLAT; rolling mode confirmed by runtime log",
+      "flying_field_scenery": "PASS_OBSERVED",
+      "glb": "PASS_OBSERVED_LOW_POLY_PLACEHOLDER",
+      "materials": "PARTIAL_VERTEX_COLORS_AND_DIRECTIONAL_LIGHT_ONLY",
+      "moving_surfaces": "NOT_OBSERVABLE_WITH_CHECKED_IN_ASSETS; pipeline tests PASS",
+      "pilot_camera": "PASS_OBSERVED",
+      "chase_camera": "PASS_OBSERVED"
+    }
+  },
+  "model_schema": {
+    "current_authoring_head": 8,
+    "explicit_read_compatibility": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "writer_note": "the engine exposes no model JSON writer; v8 is the single documented schema head and older checked-in models are explicit legacy read fixtures"
+  },
+  "invariants": {
+    "ned_world_frd_body": "PASS_TESTED",
+    "si_units": "PASS_TESTED",
+    "hamilton_wxyz": "PASS_TESTED",
+    "f64_core": "PASS_TESTED",
+    "fixed_step_hz": 500,
+    "hot_step_allocations": 0,
+    "renderer_physics_dependency_boundary": "PASS_TESTED"
+  },
+  "decision_reasons": [
+    "checked-in GLB assets contain no articulated-surface mappings, so moving surfaces cannot be verified visually",
+    "checked-in GLB assets expose only vertex colors; material/texture pipeline is tested but not observable with a production asset",
+    "first-slice Manual and Real-world gates remain PARTIAL by design; synthetic fixtures do not validate realism"
+  ]
+}

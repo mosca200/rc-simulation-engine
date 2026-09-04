@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T19:47:53.0490507+02:00",
+  "tested_code_commit": "181c74858e355f2634217bc4ddb4de064188b0a8",
+  "host": {
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "rustc": "1.98.0 (88d9e12ae 2026-08-18)",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "benchmarks": [
+    {
+      "model_id": "acro-electric-01",
+      "model_path": "models/acro_electric_01/model.json",
+      "model_physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+      "physics_hz": 500,
+      "physics_budget_us": 2000.0,
+      "warmup_steps": 1000,
+      "measured_steps": 10000,
+      "mean_us": 7.6171,
+      "p50_us": 7.3,
+      "p95_us": 9.1,
+      "p99_us": 9.3,
+      "max_us": 121.2,
+      "steps_per_second": 131283.559,
+      "mean_budget_utilization_percent": 0.380855,
+      "p99_budget_utilization_percent": 0.465,
+      "max_budget_utilization_percent": 6.06,
+      "classification": "PASS",
+      "final_snapshot_hash": "8fe6c9e9ecd2bf687db211b451f4467fb06f3ef7b3baa875c58f89e807d97e81"
+    },
+    {
+      "model_id": "sig-kadet-lt40-egv-provisional",
+      "model_path": "models/sig_kadet_lt40_egv/model.json",
+      "model_physics_fingerprint": "328b969e9d137057825af154c1b415bed44e541f88a078d0565b9139f442e0af",
+      "physics_hz": 500,
+      "physics_budget_us": 2000.0,
+      "warmup_steps": 1000,
+      "measured_steps": 10000,
+      "mean_us": 122.6348,
+      "p50_us": 119.5,
+      "p95_us": 146.0,
+      "p99_us": 181.5,
+      "max_us": 304.8,
+      "steps_per_second": 8154.292,
+      "mean_budget_utilization_percent": 6.13174,
+      "p99_budget_utilization_percent": 9.075,
+      "max_budget_utilization_percent": 15.24,
+      "classification": "PASS",
+      "final_snapshot_hash": "caad86d9e3aadb1a5db11fb269279cdc4c0493d17be55ed04659752a0f4875f1"
+    }
+  ]
+}

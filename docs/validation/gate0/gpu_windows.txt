@@ -1,0 +1,36 @@
+Gate 0 GPU inventory
+Captured: 2026-09-04 Europe/Rome
+Command: Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,DriverVersion,DriverDate,PNPDeviceID,VideoProcessor | Format-List
+
+Name                 : Virtual Desktop Monitor
+AdapterCompatibility : Virtual Desktop, Inc.
+DriverVersion        : 13.50.53.699
+DriverDate           : 2024-05-21
+PNPDeviceID          : ROOT\DISPLAY\0000
+
+Name                 : Meta Virtual Monitor
+AdapterCompatibility : Meta Inc.
+DriverVersion        : 5.3.57.114
+DriverDate           : 2025-11-06
+PNPDeviceID          : ROOT\DISPLAY\0001
+
+Name                 : LuminonCore IDDCX Adapter
+AdapterCompatibility : LuminonCore
+DriverVersion        : 1.0.2018.1204
+DriverDate           : 2018-12-04
+PNPDeviceID          : LCI\IDDCX\1&2D12BED1&0&WHO_CARE
+
+Name                 : NVIDIA GeForce RTX 3090
+AdapterCompatibility : NVIDIA
+DriverVersion        : 32.0.15.9597
+DriverDate           : 2026-03-17
+PNPDeviceID          : PCI\VEN_10DE&DEV_2204&SUBSYS_136A196E&REV_A1\4&1FC990D7&0&0019
+VideoProcessor       : NVIDIA GeForce RTX 3090
+
+Actual adapter selected by wgpu (from viewer_ground_stdout.log):
+name                 : NVIDIA GeForce RTX 3090
+device_type          : DiscreteGpu
+driver               : NVIDIA
+driver_info          : 595.97
+backend              : Vulkan
+device_pci_bus_id    : 0000:09:00.0
