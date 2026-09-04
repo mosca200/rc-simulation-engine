@@ -423,7 +423,7 @@ fn print_usage() {
         "  rcsim-app benchmark aircraft [--model PATH] [--warmup-steps N] [--steps N] [--physics-hz HZ]"
     );
     println!(
-        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--record-replay PATH]"
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--record-replay PATH] [--scenery none|flying-field]"
     );
     println!("  rcsim-app input list");
     println!(

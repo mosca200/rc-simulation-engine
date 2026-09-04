@@ -832,4 +832,31 @@ mod tests {
         let player = AircraftReplayPlayer::new(&decoded, &replayed).unwrap();
         assert_eq!(player.verify_all(&mut replayed).unwrap(), 3);
     }
+
+    #[test]
+    fn scenery_parser_accepts_flying_field() {
+        let options =
+            RenderOptions::parse(["--scenery".to_owned(), "flying-field".to_owned()].into_iter())
+                .unwrap();
+        assert_eq!(options.scenery, SceneryPreset::FlyingField);
+    }
+
+    #[test]
+    fn scenery_parser_accepts_none() {
+        let options =
+            RenderOptions::parse(["--scenery".to_owned(), "none".to_owned()].into_iter()).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::None);
+    }
+
+    #[test]
+    fn scenery_parser_rejects_invalid_value() {
+        let result = RenderOptions::parse(["--scenery".to_owned(), "city".to_owned()].into_iter());
+        assert!(matches!(result, Err(RenderAppError::InvalidScenery(_))));
+    }
+
+    #[test]
+    fn scenery_default_is_none() {
+        let options = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::None);
+    }
 }

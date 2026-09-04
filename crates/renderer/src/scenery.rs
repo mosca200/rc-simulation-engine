@@ -15,14 +15,16 @@
 //! - XZ = horizontal plane
 //!
 //! The flying field is centered around the render origin. The runway runs
-//! along the X axis so aircraft taking off in the +X direction align with
-//! the existing simulation forward axis.
+//! along the Z axis, aligned with NED North (render −Z) so that aircraft
+//! taking off in the −Z direction align with the identity-aircraft forward
+//! axis per the approved NED-to-render mapping.
 //!
 //! # Ground Height
 //!
-//! All ground-level scenery (runway, grass field) is placed at
-//! `ground_y_render_m` which matches the existing ground-plane reference
-//! used by the ground-demo architecture.
+//! All ground-level scenery (runway, trees, poles) is placed at
+//! `ground_y_render_m` which matches the existing ground-plane reference.
+//! For the FlyingField preset the visual terrain itself is flat at this Y,
+//! so no redundant coplanar grass plane is generated.
 
 use crate::mesh::{SAFE_NORMAL, SAFE_UV, Vertex};
 
@@ -31,10 +33,10 @@ use crate::mesh::{SAFE_NORMAL, SAFE_UV, Vertex};
 /// Default ground Y in render space (matches `DEFAULT_GROUND_Y_RENDER_M`).
 pub const DEFAULT_GROUND_Y: f32 = -30.04;
 
-/// Runway half-length along X (total 120 m).
+/// Runway half-length along Z (total 120 m, long axis parallel to NED North).
 pub const RUNWAY_HALF_LENGTH_M: f32 = 60.0;
 
-/// Runway half-width along Z (total 12 m).
+/// Runway half-width along X (total 12 m).
 pub const RUNWAY_HALF_WIDTH_M: f32 = 6.0;
 
 /// Runway safety margin beyond the strip edges.
@@ -130,14 +132,8 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
     let mut all_indices = Vec::new();
     let mut objects = Vec::new();
 
-    // Grass field.
-    let grass = generate_grass_field(params.ground_y);
-    merge_mesh(
-        &mut all_vertices,
-        &mut all_indices,
-        &grass.vertices,
-        &grass.indices,
-    );
+    // Grass field: for FlyingField the visual terrain is flat at ground_y
+    // (option A), so no redundant coplanar grass plane is generated here.
 
     // Runway.
     let runway = generate_runway(params.ground_y);
@@ -172,11 +168,11 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         });
     }
 
-    // Marker poles along runway edges.
+    // Marker poles along runway edges (iterating along Z, placed at ±X).
     for i in 0..6_u32 {
-        let x = -RUNWAY_HALF_LENGTH_M + (i as f32 + 0.5) * (RUNWAY_HALF_LENGTH_M * 2.0 / 6.0);
-        for &z_sign in &[-1.0_f32, 1.0] {
-            let z = z_sign * (RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M);
+        let z = -RUNWAY_HALF_LENGTH_M + (i as f32 + 0.5) * (RUNWAY_HALF_LENGTH_M * 2.0 / 6.0);
+        for &x_sign in &[-1.0_f32, 1.0] {
+            let x = x_sign * (RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M);
             let pole = generate_marker_pole(x, params.ground_y, z, 2.0);
             merge_mesh(
                 &mut all_vertices,
@@ -193,8 +189,8 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         }
     }
 
-    // Windsock pole at runway threshold.
-    let windsock = generate_windsock(RUNWAY_HALF_LENGTH_M + 10.0, params.ground_y, -15.0);
+    // Windsock pole at runway threshold (+Z end).
+    let windsock = generate_windsock(15.0, params.ground_y, RUNWAY_HALF_LENGTH_M + 10.0);
     merge_mesh(
         &mut all_vertices,
         &mut all_indices,
@@ -203,7 +199,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
     );
     objects.push(SceneryObject {
         kind: SceneryVisualKind::Windsock,
-        position: [RUNWAY_HALF_LENGTH_M + 10.0, params.ground_y, -15.0],
+        position: [15.0, params.ground_y, RUNWAY_HALF_LENGTH_M + 10.0],
         rotation_yaw_rad: 0.0,
         scale: 1.0,
     });
@@ -219,62 +215,24 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
 
 // ── Runway safety rectangle ────────────────────────────────────────────────
 
-/// Runway safety rectangle as `[min_x, min_z, max_x, max_z]`.
+/// Runway safety rectangle as `[min_x, min_z, max_x, max_z]` (long axis along Z).
 #[must_use]
 pub fn runway_safety_rect() -> [f32; 4] {
     [
-        -(RUNWAY_HALF_LENGTH_M + RUNWAY_SAFETY_MARGIN_M),
         -(RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M),
-        RUNWAY_HALF_LENGTH_M + RUNWAY_SAFETY_MARGIN_M,
+        -(RUNWAY_HALF_LENGTH_M + RUNWAY_SAFETY_MARGIN_M),
         RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M,
+        RUNWAY_HALF_LENGTH_M + RUNWAY_SAFETY_MARGIN_M,
     ]
-}
-
-// ── Grass field ────────────────────────────────────────────────────────────
-
-#[must_use]
-fn generate_grass_field(ground_y: f32) -> SceneryMesh {
-    let extent = FIELD_HALF_EXTENT_M;
-    let base_color = [0.22, 0.42, 0.16, 1.0];
-    let alt_color = [0.26, 0.48, 0.20, 1.0];
-
-    let v0 = Vertex {
-        position: [-extent, ground_y, -extent],
-        normal: SAFE_NORMAL,
-        color: base_color,
-        uv: SAFE_UV,
-    };
-    let v1 = Vertex {
-        position: [extent, ground_y, -extent],
-        normal: SAFE_NORMAL,
-        color: alt_color,
-        uv: SAFE_UV,
-    };
-    let v2 = Vertex {
-        position: [extent, ground_y, extent],
-        normal: SAFE_NORMAL,
-        color: base_color,
-        uv: SAFE_UV,
-    };
-    let v3 = Vertex {
-        position: [-extent, ground_y, extent],
-        normal: SAFE_NORMAL,
-        color: alt_color,
-        uv: SAFE_UV,
-    };
-
-    SceneryMesh {
-        vertices: vec![v0, v1, v2, v3],
-        indices: vec![0, 1, 2, 0, 2, 3],
-    }
 }
 
 // ── Runway ─────────────────────────────────────────────────────────────────
 
 #[must_use]
 fn generate_runway(ground_y: f32) -> SceneryMesh {
-    let lx = RUNWAY_HALF_LENGTH_M;
-    let lz = RUNWAY_HALF_WIDTH_M;
+    // Long axis along Z (NED North), short axis along X.
+    let lz = RUNWAY_HALF_LENGTH_M;
+    let lx = RUNWAY_HALF_WIDTH_M;
     let y = ground_y + 0.02;
     let runway_color = [0.35, 0.33, 0.30, 1.0];
     let edge_color = [0.45, 0.42, 0.38, 1.0];
@@ -310,61 +268,61 @@ fn generate_runway(ground_y: f32) -> SceneryMesh {
     });
     indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
 
-    // Centre-line strip (lighter, narrower).
-    let clz = 0.3;
+    // Centre-line strip (lighter, narrower, runs along Z).
+    let clx = 0.3;
     let base = vertices.len() as u32;
     vertices.push(Vertex {
-        position: [-lx, y + 0.005, -clz],
+        position: [-clx, y + 0.005, -lz],
         normal: SAFE_NORMAL,
         color: center_color,
         uv: SAFE_UV,
     });
     vertices.push(Vertex {
-        position: [lx, y + 0.005, -clz],
+        position: [clx, y + 0.005, -lz],
         normal: SAFE_NORMAL,
         color: center_color,
         uv: SAFE_UV,
     });
     vertices.push(Vertex {
-        position: [lx, y + 0.005, clz],
+        position: [clx, y + 0.005, lz],
         normal: SAFE_NORMAL,
         color: center_color,
         uv: SAFE_UV,
     });
     vertices.push(Vertex {
-        position: [-lx, y + 0.005, clz],
+        position: [-clx, y + 0.005, lz],
         normal: SAFE_NORMAL,
         color: center_color,
         uv: SAFE_UV,
     });
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 
-    // Edge stripes.
+    // Edge stripes (along Z at ±X edges).
     let ew = 0.4;
-    for &z_sign in &[-1.0_f32, 1.0] {
-        let z_outer = z_sign * lz;
-        let z_inner = z_sign * (lz - ew);
+    for &x_sign in &[-1.0_f32, 1.0] {
+        let x_outer = x_sign * lx;
+        let x_inner = x_sign * (lx - ew);
         let base = vertices.len() as u32;
         vertices.push(Vertex {
-            position: [-lx, y + 0.005, z_outer],
+            position: [x_outer, y + 0.005, -lz],
             normal: SAFE_NORMAL,
             color: edge_color,
             uv: SAFE_UV,
         });
         vertices.push(Vertex {
-            position: [lx, y + 0.005, z_outer],
+            position: [x_outer, y + 0.005, lz],
             normal: SAFE_NORMAL,
             color: edge_color,
             uv: SAFE_UV,
         });
         vertices.push(Vertex {
-            position: [lx, y + 0.005, z_inner],
+            position: [x_inner, y + 0.005, lz],
             normal: SAFE_NORMAL,
             color: edge_color,
             uv: SAFE_UV,
         });
         vertices.push(Vertex {
-            position: [-lx, y + 0.005, z_inner],
+            position: [x_inner, y + 0.005, -lz],
             normal: SAFE_NORMAL,
             color: edge_color,
             uv: SAFE_UV,
@@ -714,8 +672,9 @@ mod tests {
             .map(|v| v.position[2])
             .fold(f32::NEG_INFINITY, f32::max);
 
-        let length = max_x - min_x;
-        let width = max_z - min_z;
+        // Long axis along Z (NED North), short axis along X.
+        let length = max_z - min_z;
+        let width = max_x - min_x;
         assert!(
             (length - 120.0).abs() < 0.1,
             "runway length should be 120 m, got {length}"
@@ -837,24 +796,68 @@ mod tests {
     }
 
     #[test]
-    fn terrain_runway_ground_height_matches_visual_ground_plane() {
+    fn all_scenery_object_bases_use_same_ground_reference() {
         let scene = default_scene();
-        // Grass field vertices should be at DEFAULT_GROUND_Y.
-        let grass_verts: Vec<_> = scene
+        let ground_y = DEFAULT_GROUND_Y;
+        for obj in &scene.objects {
+            assert!(
+                (obj.position[1] - ground_y).abs() < 0.001,
+                "object {:?} base Y {} != expected {}",
+                obj.kind,
+                obj.position[1],
+                ground_y
+            );
+        }
+    }
+
+    #[test]
+    fn runway_long_axis_is_parallel_to_render_z() {
+        // Regression test: NED North -> render -Z, identity aircraft forward
+        // is render -Z. The runway long axis must be parallel to Z.
+        let scene = default_scene();
+        let runway_verts: Vec<_> = scene
             .mesh
             .vertices
             .iter()
-            .filter(|v| v.color == [0.22, 0.42, 0.16, 1.0] || v.color == [0.26, 0.48, 0.20, 1.0])
+            .filter(|v| v.color == [0.35, 0.33, 0.30, 1.0])
             .collect();
-        assert!(!grass_verts.is_empty());
-        for v in &grass_verts {
-            assert!(
-                (v.position[1] - DEFAULT_GROUND_Y).abs() < 0.001,
-                "grass vertex Y {} != expected {}",
-                v.position[1],
-                DEFAULT_GROUND_Y
-            );
-        }
+        assert!(
+            !runway_verts.is_empty(),
+            "runway vertices must exist for axis check"
+        );
+
+        let min_z = runway_verts
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::INFINITY, f32::min);
+        let max_z = runway_verts
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_x = runway_verts
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = runway_verts
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let z_extent = max_z - min_z;
+        let x_extent = max_x - min_x;
+
+        assert!(
+            z_extent > x_extent,
+            "runway long axis must be along Z (NED North), got Z={z_extent} X={x_extent}"
+        );
+        assert!(
+            (z_extent - 120.0).abs() < 0.1,
+            "runway long extent should be 120 m, got {z_extent}"
+        );
+        assert!(
+            (x_extent - 12.0).abs() < 0.1,
+            "runway short extent should be 12 m, got {x_extent}"
+        );
     }
 
     #[test]

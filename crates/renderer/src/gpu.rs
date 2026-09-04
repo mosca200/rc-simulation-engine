@@ -533,13 +533,25 @@ impl WgpuRenderer {
         }
 
         // FIX 3: Generate centered terrain (extends in both +X/-X and +Z/-Z).
-        let terrain_height_field = crate::terrain::generate_rolling_terrain(
-            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
-            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
-            DEFAULT_TERRAIN_CELL_SPACING_M,
-            -ground_below_render_origin_m,
-            3.0,
-        );
+        // G2A fix: FlyingField uses flat visual terrain at -ground_below_render_origin_m
+        // to avoid rolling-terrain penetration through the runway/field.
+        // SceneryPreset::None preserves the existing rolling terrain.
+        let terrain_cells = (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32;
+        let terrain_height_field = match scenery_preset {
+            Some(SceneryPreset::FlyingField) => crate::terrain::generate_flat_terrain(
+                terrain_cells,
+                terrain_cells,
+                DEFAULT_TERRAIN_CELL_SPACING_M,
+                -ground_below_render_origin_m,
+            ),
+            _ => crate::terrain::generate_rolling_terrain(
+                terrain_cells,
+                terrain_cells,
+                DEFAULT_TERRAIN_CELL_SPACING_M,
+                -ground_below_render_origin_m,
+                3.0,
+            ),
+        };
         let terrain_material = TerrainMaterial::default();
         // FIX 3: Use centered chunk generation.
         let terrain_chunk_data = generate_centered_terrain_chunks(
