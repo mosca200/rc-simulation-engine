@@ -3,6 +3,7 @@
 mod benchmark_app;
 mod first_slice_app;
 mod input_app;
+mod propulsion_bench_app;
 mod render_app;
 mod render_snapshot;
 mod replay_app;
@@ -20,6 +21,7 @@ use benchmark_app::{AircraftBenchmarkOptions, run_aircraft_benchmark};
 use first_slice_app::{FirstSliceOptions, run_first_slice_validation};
 use input_app::run_input_list;
 use model::{AircraftModelFingerprint, load_aircraft_model};
+use propulsion_bench_app::{PropulsionBenchOptions, run_propulsion_bench};
 use render_app::{RenderOptions, run_render};
 use replay::ReplayRecorder;
 use replay_app::{ReplayOptions, run_replay};
@@ -62,6 +64,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Err(format!("unknown benchmark command: {benchmark_command}").into())
             }
             None => Err("missing benchmark command; expected `aircraft`".into()),
+        },
+        Some(command) if command == "propulsion" => match arguments.next().as_deref() {
+            Some("bench") => {
+                run_propulsion_bench(PropulsionBenchOptions::parse(arguments)?)?;
+                Ok(())
+            }
+            Some(propulsion_command) => {
+                Err(format!("unknown propulsion command: {propulsion_command}").into())
+            }
+            None => Err("missing propulsion command; expected `bench`".into()),
         },
         Some(command) if command == "replay" => {
             run_replay(ReplayOptions::parse(arguments)?)?;
@@ -422,6 +434,9 @@ fn print_usage() {
     println!("  rcsim-app aircraft [--model PATH] [--steps N] [--physics-hz HZ]");
     println!(
         "  rcsim-app benchmark aircraft [--model PATH] [--warmup-steps N] [--steps N] [--physics-hz HZ]"
+    );
+    println!(
+        "  rcsim-app propulsion bench [--model PATH] [--throttle V --airspeed-mps MPS | sweep options] [--format table|csv|json] [--output PATH]"
     );
     println!(
         "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--record-replay PATH]"

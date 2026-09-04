@@ -1,0 +1,103 @@
+{
+  "schema_version": 8,
+  "model_id": "synthetic-propulsion-bench-ground-v8",
+  "display_name": "Synthetic Propulsion Bench Ground Fixture",
+  "classification": "synthetic_test",
+  "reference_aircraft": null,
+  "rigid_body": {
+    "mass_kg": 10.0,
+    "inertia_body_kg_m2": [
+      [1.2, 0.0, 0.0],
+      [0.0, 1.6, 0.0],
+      [0.0, 0.0, 2.2]
+    ]
+  },
+  "aerodynamics": {
+    "kinematic_viscosity_m2_s": 0.000015,
+    "polars": [],
+    "polar_families": [],
+    "elements": [],
+    "surfaces": []
+  },
+  "controls": {
+    "response": {
+      "roll": {"rate": 1.0, "expo": 0.0},
+      "pitch": {"rate": 1.0, "expo": 0.0},
+      "yaw": {"rate": 1.0, "expo": 0.0}
+    },
+    "servos": {
+      "aileron": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false},
+      "elevator": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false},
+      "rudder": {"min_angle_rad": -0.4, "neutral_angle_rad": 0.0, "max_angle_rad": 0.4, "max_speed_rad_s": 8.0, "reversed": false}
+    }
+  },
+  "control_surface_bindings": [],
+  "aero_downwash_interactions": [],
+  "propeller_slipstream_interactions": [],
+  "propulsion": {
+    "battery": {"open_circuit_voltage_v": 12.0, "internal_resistance_ohm": 0.02},
+    "esc": {"series_resistance_ohm": 0.01},
+    "motor": {"kv_rpm_per_v": 600.0, "winding_resistance_ohm": 0.04, "no_load_current_a": 1.0},
+    "propeller": {
+      "position_body_m": [0.0, 0.0, 0.0],
+      "orientation_body_from_prop_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "diameter_m": 0.3,
+      "spin_direction": "positive_about_local_x"
+    },
+    "coefficient_source": {
+      "kind": "fixed_table",
+      "samples": [
+        {"advance_ratio_j": 0.0, "ct": 0.1, "cq": 0.01},
+        {"advance_ratio_j": 1.0, "ct": 0.1, "cq": 0.01}
+      ]
+    }
+  },
+  "landing_gear": [
+    {
+      "id": "nose-gear",
+      "position_body_m": [0.6, 0.0, 0.35],
+      "wheel_radius_m": 0.05,
+      "normal_stiffness_n_per_m": 12000.0,
+      "normal_damping_n_s_per_m": 800.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.0,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": false
+    },
+    {
+      "id": "left-main",
+      "position_body_m": [-0.25, -0.45, 0.34],
+      "wheel_radius_m": 0.06,
+      "normal_stiffness_n_per_m": 12000.0,
+      "normal_damping_n_s_per_m": 800.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.8,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": true
+    },
+    {
+      "id": "right-main",
+      "position_body_m": [-0.25, 0.45, 0.34],
+      "wheel_radius_m": 0.06,
+      "normal_stiffness_n_per_m": 12000.0,
+      "normal_damping_n_s_per_m": 800.0,
+      "longitudinal_friction_coefficient": 0.6,
+      "lateral_friction_coefficient": 0.9,
+      "rolling_resistance_coefficient": 0.02,
+      "max_brake_friction_coefficient": 0.8,
+      "steering": "fixed",
+      "max_steer_angle_rad": 0.0,
+      "steerable": false,
+      "braked": true
+    }
+  ],
+  "presentation": null
+}
