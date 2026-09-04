@@ -65,6 +65,33 @@
     "model_physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
     "report": "docs/validation/gate0/first_slice_report.json"
   },
+  "benchmarks": {
+    "artifact": "docs/validation/gate0/benchmark_results.json",
+    "artifact_sha256": "bc4a5deac56239ec6a178f5216e18b5dd0e2e27ab46c99e0627165fe39a9de83",
+    "tested_code_commit": "181c74858e355f2634217bc4ddb4de064188b0a8",
+    "results": [
+      {
+        "model_id": "acro-electric-01",
+        "model_physics_fingerprint": "dedc79818699d5342ad7c2d770a1957b29d541488635615b8c822135ab08b8ed",
+        "p50_us": 7.3,
+        "p95_us": 9.1,
+        "p99_us": 9.3,
+        "max_us": 121.2,
+        "classification": "PASS",
+        "final_snapshot_hash": "8fe6c9e9ecd2bf687db211b451f4467fb06f3ef7b3baa875c58f89e807d97e81"
+      },
+      {
+        "model_id": "sig-kadet-lt40-egv-provisional",
+        "model_physics_fingerprint": "328b969e9d137057825af154c1b415bed44e541f88a078d0565b9139f442e0af",
+        "p50_us": 119.5,
+        "p95_us": 146.0,
+        "p99_us": 181.5,
+        "max_us": 304.8,
+        "classification": "PASS",
+        "final_snapshot_hash": "caad86d9e3aadb1a5db11fb269279cdc4c0493d17be55ed04659752a0f4875f1"
+      }
+    ]
+  },
   "viewer": {
     "status": "PARTIAL",
     "classification": "functional presentation foundation; not AAA",
@@ -121,5 +148,13 @@
     "checked-in GLB assets contain no articulated-surface mappings, so moving surfaces cannot be verified visually",
     "checked-in GLB assets expose only vertex colors; material/texture pipeline is tested but not observable with a production asset",
     "first-slice Manual and Real-world gates remain PARTIAL by design; synthetic fixtures do not validate realism"
+  ],
+  "residual_risks": [
+    "manual moving-surface and texture-rich material verification is blocked by current checked-in assets",
+    "controller/TX16S and a real interactive pilot session remain NOT_TESTED",
+    "the LT-40 model remains provisional and lacks measured or holdout flight validation",
+    "synthetic fixtures demonstrate contracts and determinism, not physical realism",
+    "GPU timing, shadows, PBR/HDR, high-quality antialiasing and frame-pacing evidence are absent",
+    "the verified 15,962-step viewer replay is a local target artifact and is not tracked; screenshots, logs and GPU inventory are tracked"
   ]
 }
