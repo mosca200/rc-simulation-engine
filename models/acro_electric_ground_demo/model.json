@@ -138,6 +138,6 @@
     }
   ],
   "presentation": {
-    "glb_path": "../acro_electric_01/aircraft.glb"
+    "glb_path": "aircraft.glb"
   }
 }
