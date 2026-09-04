@@ -17,8 +17,20 @@
 //! 2. Terrain batches (chunked, lit + fogged)
 //! 3. Debug overlays (grid/axes, unlit)
 //! 4. Aircraft batches (lit + fogged)
+//!
+//! # Object Transforms
+//!
+//! - Aircraft uses a dedicated object uniform buffer updated per frame from
+//!   `frame.aircraft_pose().model_matrix()`.
+//! - Terrain uses identity (world-local) object transform.
+//! - Debug geometry uses identity (reference) object transform.
+//!
+//! # Surface Presentation
+//!
+//! wgpu 30 presents frames when the `SurfaceTexture` is dropped after
+//! `queue.submit()`. No explicit `present()` call is needed.
 
-use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_terrain_chunks};
+use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::texture::{SamplerConfig, create_staging_buffer};
 use crate::{
     AircraftMesh, ChaseCamera, GlbAsset, Mat4, RenderFrame, Vertex, matrix_to_wgsl_columns,
@@ -42,12 +54,10 @@ const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
 const GPU_ERROR_OTHER: u8 = 2;
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
-/// Deterministic directional light defaults.
 const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
 const DEFAULT_LIGHT_INTENSITY: f32 = 0.80;
 const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.30, 0.30, 0.30];
 
-// G1B sky/atmosphere defaults.
 const DEFAULT_ZENITH_RGB: [f32; 3] = [0.16, 0.36, 0.66];
 const DEFAULT_HORIZON_RGB: [f32; 3] = [0.68, 0.78, 0.88];
 const DEFAULT_GROUND_ATM_RGB: [f32; 3] = [0.38, 0.44, 0.40];
@@ -59,6 +69,13 @@ const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
 /// Default terrain extent for the RC flying field.
 const DEFAULT_TERRAIN_EXTENT_M: f32 = 1000.0;
 const DEFAULT_TERRAIN_CELL_SPACING_M: f32 = 5.0;
+
+/// Presentation asset: either a full GLB with per-primitive materials,
+/// or a procedural merged mesh (fallback).
+pub enum PresentationAsset<'a> {
+    Glb(&'a GlbAsset),
+    Procedural(&'a AircraftMesh),
+}
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -195,9 +212,6 @@ struct DepthTarget {
 }
 
 /// G1C: Persistent GPU material resources.
-///
-/// Each material owns its texture, sampler, and bind group.
-/// These are created once during asset upload and never recreated.
 struct GpuMaterial {
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
@@ -230,28 +244,33 @@ pub struct WgpuRenderer {
     surface_configuration: wgpu::SurfaceConfiguration,
     surface_is_configured: bool,
 
-    // Pipelines.
     sky_pipeline: wgpu::RenderPipeline,
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
 
-    // Bind group layouts (kept for potential future dynamic material updates).
     _camera_bind_group_layout: wgpu::BindGroupLayout,
     _object_bind_group_layout: wgpu::BindGroupLayout,
     _environment_bind_group_layout: wgpu::BindGroupLayout,
-    material_bind_group_layout: wgpu::BindGroupLayout,
+    _material_bind_group_layout: wgpu::BindGroupLayout,
 
     // Persistent bind groups.
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    _reference_object_buffer: wgpu::Buffer,
-    reference_object_bind_group: wgpu::BindGroup,
+
+    // FIX 2: Dedicated aircraft object buffer (updated per frame).
+    aircraft_object_buffer: wgpu::Buffer,
+    aircraft_object_bind_group: wgpu::BindGroup,
+
+    // Identity object buffer for terrain and debug geometry.
+    _identity_object_buffer: wgpu::Buffer,
+    identity_object_bind_group: wgpu::BindGroup,
+
     _environment_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
 
     // G1C: Material system.
     materials: Vec<GpuMaterial>,
-    fallback_material_index: usize,
+    _fallback_material_index: usize,
 
     // G1C: Aircraft batches (one per primitive).
     aircraft_batches: Vec<RenderBatch>,
@@ -268,14 +287,17 @@ pub struct WgpuRenderer {
     camera: ChaseCamera,
     asynchronous_gpu_error: Arc<AtomicU8>,
 
-    // Debug overlay visibility.
     show_debug_overlays: bool,
 }
 
 impl WgpuRenderer {
-    pub async fn new(
+    /// Create a renderer with a presentation asset (GLB or procedural).
+    ///
+    /// This is the primary constructor. The GLB path exercises the full
+    /// G1C textured multi-primitive pipeline.
+    pub async fn new_with_presentation(
         window: Arc<Window>,
-        aircraft: &AircraftMesh,
+        asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
@@ -356,15 +378,12 @@ impl WgpuRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        // Bind group layouts.
         let camera_bind_group_layout = camera_bind_group_layout(&device, "camera layout");
         let object_bind_group_layout = matrix_bind_group_layout(&device, "object layout");
         let environment_bind_group_layout =
             environment_bind_group_layout(&device, "environment layout");
         let material_bind_group_layout = material_bind_group_layout(&device, "material layout");
 
-        // Pipeline layouts.
-        // Group 0 = camera, group 1 = object, group 2 = environment, group 3 = material.
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("G1C sky pipeline layout"),
             bind_group_layouts: &[
@@ -394,7 +413,6 @@ impl WgpuRenderer {
                 immediate_size: 0,
             });
 
-        // Pipelines.
         let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, format);
         let triangle_pipeline = create_pipeline(
             &device,
@@ -423,50 +441,98 @@ impl WgpuRenderer {
             },
         );
 
-        // G1C: Create fallback white texture material.
+        // White fallback material.
         let fallback_material =
             create_white_fallback_material(&device, &material_bind_group_layout, &queue);
-        let materials = vec![fallback_material];
+        let mut materials = vec![fallback_material];
         let fallback_material_index = 0;
 
-        // G1C: Create aircraft batches from the single mesh (legacy path).
-        // For multi-primitive support, use `new_with_asset`.
+        // Upload aircraft batches from the presentation asset.
         let mut aircraft_batches = Vec::new();
-        if !aircraft.vertices().is_empty() {
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("aircraft presentation vertices"),
-                contents: bytemuck::cast_slice(aircraft.vertices()),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("aircraft presentation indices"),
-                contents: bytemuck::cast_slice(aircraft.indices()),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            aircraft_batches.push(RenderBatch {
-                vertex_buffer,
-                index_buffer,
-                index_count: aircraft.indices().len() as u32,
-                material_index: fallback_material_index,
-            });
+        match asset {
+            PresentationAsset::Glb(glb_asset) => {
+                for primitive in &glb_asset.primitives {
+                    let material_index = if let Some(texture) = &primitive.material.base_color_texture {
+                        // Upload texture material.
+                        let gpu_material = create_gpu_material(
+                            &device,
+                            &material_bind_group_layout,
+                            &queue,
+                            texture,
+                            &primitive.material.sampler_config,
+                        );
+                        let index = materials.len();
+                        materials.push(gpu_material);
+                        index
+                    } else {
+                        fallback_material_index
+                    };
+
+                    if !primitive.vertices.is_empty() {
+                        let vertex_buffer =
+                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("aircraft primitive vertices"),
+                                contents: bytemuck::cast_slice(&primitive.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
+                        let index_buffer =
+                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("aircraft primitive indices"),
+                                contents: bytemuck::cast_slice(&primitive.indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            });
+                        aircraft_batches.push(RenderBatch {
+                            vertex_buffer,
+                            index_buffer,
+                            index_count: primitive.indices.len() as u32,
+                            material_index,
+                        });
+                    }
+                }
+            }
+            PresentationAsset::Procedural(mesh) => {
+                if !mesh.vertices().is_empty() {
+                    let vertex_buffer =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("aircraft presentation vertices"),
+                            contents: bytemuck::cast_slice(mesh.vertices()),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                    let index_buffer =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("aircraft presentation indices"),
+                            contents: bytemuck::cast_slice(mesh.indices()),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+                    aircraft_batches.push(RenderBatch {
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: mesh.indices().len() as u32,
+                        material_index: fallback_material_index,
+                    });
+                }
+            }
         }
 
-        // G1C: Generate and upload terrain.
+        // FIX 3: Generate centered terrain (extends in both +X/-X and +Z/-Z).
         let terrain_height_field = crate::terrain::generate_rolling_terrain(
             (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
             (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
             DEFAULT_TERRAIN_CELL_SPACING_M,
             -ground_below_render_origin_m,
-            3.0, // Gentle rolling hills.
+            3.0,
         );
         let terrain_material = TerrainMaterial::default();
-        let terrain_chunk_data = generate_terrain_chunks(
+        // FIX 3: Use centered chunk generation.
+        let terrain_chunk_data = generate_centered_terrain_chunks(
             &terrain_height_field,
             DEFAULT_CHUNK_CELLS,
             &terrain_material,
         );
 
-        // Create terrain material (uses fallback texture for now).
+        // FIX 4: Terrain uses the white fallback material.
+        // The terrain base_color_factor is baked into vertex colors, so
+        // vertex_color * white_texture = vertex_color = terrain color.
         let terrain_material_index = fallback_material_index;
 
         let mut terrain_chunks = Vec::with_capacity(terrain_chunk_data.len());
@@ -497,7 +563,7 @@ impl WgpuRenderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // Uniform buffers.
+        // FIX 2: Create dedicated aircraft object buffer (COPY_DST for per-frame updates).
         let identity_object = ObjectUniform::from_matrix(&Mat4::identity());
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
@@ -508,12 +574,21 @@ impl WgpuRenderer {
             )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let reference_object_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("reference object uniform"),
-                contents: bytemuck::bytes_of(&identity_object),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+
+        // Aircraft object buffer: updated per frame with aircraft pose.
+        let aircraft_object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aircraft object uniform"),
+            contents: bytemuck::bytes_of(&identity_object),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Identity object buffer: used for terrain and debug geometry.
+        let identity_object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("identity object uniform"),
+            contents: bytemuck::bytes_of(&identity_object),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
         let default_environment = EnvironmentUniform::default_environment();
         let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("environment uniform"),
@@ -528,11 +603,17 @@ impl WgpuRenderer {
             &camera_buffer,
             "camera bind group",
         );
-        let reference_object_bind_group = matrix_bind_group(
+        let aircraft_object_bind_group = matrix_bind_group(
             &device,
             &object_bind_group_layout,
-            &reference_object_buffer,
-            "reference object bind group",
+            &aircraft_object_buffer,
+            "aircraft object bind group",
+        );
+        let identity_object_bind_group = matrix_bind_group(
+            &device,
+            &object_bind_group_layout,
+            &identity_object_buffer,
+            "identity object bind group",
         );
         let environment_bind_group = create_environment_bind_group(
             &device,
@@ -560,15 +641,17 @@ impl WgpuRenderer {
             _camera_bind_group_layout: camera_bind_group_layout,
             _object_bind_group_layout: object_bind_group_layout,
             _environment_bind_group_layout: environment_bind_group_layout,
-            material_bind_group_layout,
+            _material_bind_group_layout: material_bind_group_layout,
             camera_buffer,
             camera_bind_group,
-            _reference_object_buffer: reference_object_buffer,
-            reference_object_bind_group,
+            aircraft_object_buffer,
+            aircraft_object_bind_group,
+            _identity_object_buffer: identity_object_buffer,
+            identity_object_bind_group,
             _environment_buffer: environment_buffer,
             environment_bind_group,
             materials,
-            fallback_material_index,
+            _fallback_material_index: fallback_material_index,
             aircraft_batches,
             terrain_chunks,
             terrain_material_index,
@@ -581,78 +664,32 @@ impl WgpuRenderer {
         })
     }
 
+    /// Legacy constructor for backward compatibility with tests.
+    pub async fn new(
+        window: Arc<Window>,
+        aircraft: &AircraftMesh,
+        ground_below_render_origin_m: f32,
+    ) -> Result<Self, RendererError> {
+        Self::new_with_presentation(
+            window,
+            PresentationAsset::Procedural(aircraft),
+            ground_below_render_origin_m,
+        )
+        .await
+    }
+
     /// Create a renderer with a full GLB asset (multi-primitive support).
     pub async fn new_with_asset(
         window: Arc<Window>,
         asset: &GlbAsset,
         ground_below_render_origin_m: f32,
     ) -> Result<Self, RendererError> {
-        // First create with empty mesh, then upload asset.
-        let empty_mesh = AircraftMesh::new(vec![], vec![]).unwrap_or_else(|_| {
-            // Create a minimal valid mesh if empty fails.
-            AircraftMesh::new(
-                vec![Vertex {
-                    position: [0.0; 3],
-                    normal: [0.0, 1.0, 0.0],
-                    color: [1.0; 4],
-                    uv: [0.0; 2],
-                }],
-                vec![0, 0, 0],
-            )
-            .unwrap()
-        });
-
-        let mut renderer = Self::new(window, &empty_mesh, ground_below_render_origin_m).await?;
-
-        // Upload asset primitives.
-        renderer.aircraft_batches.clear();
-        for primitive in &asset.primitives {
-            let material_index = renderer.upload_material(&primitive.material);
-            let vertex_buffer =
-                renderer
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("aircraft primitive vertices"),
-                        contents: bytemuck::cast_slice(&primitive.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let index_buffer =
-                renderer
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("aircraft primitive indices"),
-                        contents: bytemuck::cast_slice(&primitive.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-            renderer.aircraft_batches.push(RenderBatch {
-                vertex_buffer,
-                index_buffer,
-                index_count: primitive.indices.len() as u32,
-                material_index,
-            });
-        }
-
-        Ok(renderer)
-    }
-
-    /// Upload a material to the GPU and return its index.
-    fn upload_material(&mut self, material: &crate::PrimitiveMaterial) -> usize {
-        let gpu_material = if let Some(texture) = &material.base_color_texture {
-            create_gpu_material(
-                &self.device,
-                &self.material_bind_group_layout,
-                &self.queue,
-                texture,
-                &material.sampler_config,
-            )
-        } else {
-            // Use fallback.
-            return self.fallback_material_index;
-        };
-
-        let index = self.materials.len();
-        self.materials.push(gpu_material);
-        index
+        Self::new_with_presentation(
+            window,
+            PresentationAsset::Glb(asset),
+            ground_below_render_origin_m,
+        )
+        .await
     }
 
     /// Set debug overlay visibility.
@@ -712,6 +749,15 @@ impl WgpuRenderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
+        // FIX 2: Update aircraft object uniform with the current pose model matrix.
+        let aircraft_model_matrix = aircraft_pose.model_matrix();
+        let aircraft_object_uniform = ObjectUniform::from_matrix(&aircraft_model_matrix);
+        self.queue.write_buffer(
+            &self.aircraft_object_buffer,
+            0,
+            bytemuck::bytes_of(&aircraft_object_uniform),
+        );
+
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -755,6 +801,8 @@ impl WgpuRenderer {
             // --- Sky pass (background) ---
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            // Sky uses identity object (group 1) — sky is at infinity.
+            render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
 
@@ -763,7 +811,8 @@ impl WgpuRenderer {
             render_pass.set_pipeline(&self.triangle_pipeline);
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
 
-            // G1C: Terrain chunks.
+            // Terrain chunks: identity object transform (world-local).
+            render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
             let terrain_material = &self.materials[self.terrain_material_index];
             render_pass.set_bind_group(3, &terrain_material.bind_group, &[]);
             for chunk in &self.terrain_chunks {
@@ -773,19 +822,19 @@ impl WgpuRenderer {
                 render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
             }
 
-            // G1C: Debug grid/axes (unlit, unfogged — diagnostic overlay).
+            // Debug grid/axes: identity object transform.
             if self.show_debug_overlays {
                 render_pass.set_pipeline(&self.line_pipeline);
-                render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
                 render_pass.draw(0..self.line_vertex_count, 0..1);
                 render_pass.set_pipeline(&self.triangle_pipeline);
             }
 
-            // G1C: Aircraft batches (one per primitive).
+            // FIX 2: Aircraft batches use the dedicated aircraft object bind group.
             for batch in &self.aircraft_batches {
                 let material = &self.materials[batch.material_index];
-                render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
                 render_pass.set_bind_group(3, &material.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
                 render_pass
@@ -795,6 +844,8 @@ impl WgpuRenderer {
         }
 
         let _submit_index = self.queue.submit(std::iter::once(encoder.finish()));
+        // FIX 10: In wgpu 30, dropping the SurfaceTexture after queue.submit()
+        // presents the frame. No explicit present() call is needed.
         drop(surface_texture);
 
         if reconfigure_after_present {
@@ -817,7 +868,6 @@ impl WgpuRenderer {
 // Material creation helpers
 // ---------------------------------------------------------------------------
 
-/// Create the 1x1 white fallback texture material.
 fn create_white_fallback_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -840,7 +890,6 @@ fn create_white_fallback_material(
     });
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Upload white pixel.
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
@@ -891,7 +940,6 @@ fn create_white_fallback_material(
     }
 }
 
-/// Create a GPU material from a decoded texture.
 fn create_gpu_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -918,8 +966,9 @@ fn create_gpu_material(
 
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Create staging buffer with row padding.
-    let (staged_data, bytes_per_row) = create_staging_buffer(texture_data);
+    // FIX 5: create_staging_buffer now returns Result.
+    let (staged_data, bytes_per_row) = create_staging_buffer(texture_data)
+        .expect("staging buffer creation should not fail for valid decoded textures");
 
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -1023,7 +1072,6 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
     })
 }
 
-/// G1C: Material bind group layout for texture + sampler.
 fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -1126,10 +1174,10 @@ fn create_pipeline(
                 array_stride: size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
-                    0 => Float32x3,  // position
-                    1 => Float32x3,  // normal
-                    2 => Float32x4,  // color
-                    3 => Float32x2,  // uv
+                    0 => Float32x3,
+                    1 => Float32x3,
+                    2 => Float32x4,
+                    3 => Float32x2,
                 ],
             })],
         },

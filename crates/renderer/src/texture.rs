@@ -12,6 +12,12 @@
 //! WebGPU requires `bytes_per_row` to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`
 //! (256 bytes). For images whose width * 4 is not a multiple of 256, we pad each
 //! row in a staging buffer before upload.
+//!
+//! # Overflow Safety
+//!
+//! All size arithmetic uses checked operations. Functions that compute buffer
+//! sizes return `Result` with appropriate error variants rather than silently
+//! wrapping or panicking.
 
 use image::{ImageError, ImageReader};
 use std::io::Cursor;
@@ -38,6 +44,10 @@ pub enum TextureLoadError {
     InvalidDimensions { width: u32, height: u32 },
     #[error("image byte size overflow")]
     ByteSizeOverflow,
+    #[error("padded row byte size overflow for width {width}")]
+    PaddedRowOverflow { width: u32 },
+    #[error("staging buffer byte size overflow for {width}x{height} texture")]
+    StagingBufferOverflow { width: u32, height: u32 },
 }
 
 /// Decode an image from raw bytes (PNG or JPEG supported).
@@ -79,40 +89,77 @@ pub fn decode_image(data: &[u8]) -> Result<DecodedTexture, TextureLoadError> {
 /// WebGPU requires each row to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`.
 /// For RGBA8 (4 bytes per pixel), if `width * 4` is not a multiple of 256,
 /// we must pad to the next multiple.
+///
+/// Returns `None` if the arithmetic would overflow u32.
 #[must_use]
-pub fn padded_bytes_per_row(width: u32) -> u32 {
-    let unpadded = width * 4;
+pub fn padded_bytes_per_row_checked(width: u32) -> Option<u32> {
+    let unpadded = width.checked_mul(4)?;
     let remainder = unpadded % COPY_BYTES_PER_ROW_ALIGNMENT;
     if remainder == 0 {
-        unpadded
+        Some(unpadded)
     } else {
-        unpadded + (COPY_BYTES_PER_ROW_ALIGNMENT - remainder)
+        unpadded.checked_add(COPY_BYTES_PER_ROW_ALIGNMENT - remainder)
     }
+}
+
+/// Compute the padded bytes_per_row for GPU upload.
+///
+/// # Panics
+///
+/// Panics if the arithmetic would overflow (use `padded_bytes_per_row_checked`
+/// for a non-panicking version).
+#[must_use]
+pub fn padded_bytes_per_row(width: u32) -> u32 {
+    padded_bytes_per_row_checked(width).expect("padded_bytes_per_row overflow")
 }
 
 /// Create a staging buffer with row padding for GPU upload.
 ///
 /// Returns the padded data and the padded bytes_per_row.
-#[must_use]
-pub fn create_staging_buffer(texture: &DecodedTexture) -> (Vec<u8>, u32) {
-    let padded_row_bytes = padded_bytes_per_row(texture.width);
-    let unpadded_row_bytes = texture.width * 4;
+/// All arithmetic is overflow-checked.
+pub fn create_staging_buffer(texture: &DecodedTexture) -> Result<(Vec<u8>, u32), TextureLoadError> {
+    let padded_row_bytes =
+        padded_bytes_per_row_checked(texture.width).ok_or(TextureLoadError::PaddedRowOverflow {
+            width: texture.width,
+        })?;
+    let unpadded_row_bytes =
+        texture
+            .width
+            .checked_mul(4)
+            .ok_or(TextureLoadError::PaddedRowOverflow {
+                width: texture.width,
+            })?;
     let padding_per_row = (padded_row_bytes - unpadded_row_bytes) as usize;
 
+    let total_bytes = (padded_row_bytes as u64)
+        .checked_mul(texture.height as u64)
+        .ok_or(TextureLoadError::StagingBufferOverflow {
+            width: texture.width,
+            height: texture.height,
+        })?;
+    let total_bytes =
+        usize::try_from(total_bytes).map_err(|_| TextureLoadError::StagingBufferOverflow {
+            width: texture.width,
+            height: texture.height,
+        })?;
+
     if padding_per_row == 0 {
-        // No padding needed.
-        return (texture.rgba8.clone(), padded_row_bytes);
+        return Ok((texture.rgba8.clone(), padded_row_bytes));
     }
 
-    let mut staged = Vec::with_capacity((padded_row_bytes * texture.height) as usize);
+    let mut staged = Vec::with_capacity(total_bytes);
     for row in 0..texture.height as usize {
-        let start = row * unpadded_row_bytes as usize;
-        let end = start + unpadded_row_bytes as usize;
+        let start = row
+            .checked_mul(unpadded_row_bytes as usize)
+            .expect("row offset overflow");
+        let end = start
+            .checked_add(unpadded_row_bytes as usize)
+            .expect("row end overflow");
         staged.extend_from_slice(&texture.rgba8[start..end]);
         staged.extend(std::iter::repeat_n(0u8, padding_per_row));
     }
 
-    (staged, padded_row_bytes)
+    Ok((staged, padded_row_bytes))
 }
 
 /// glTF sampler wrap mode mapping.
@@ -236,18 +283,30 @@ mod tests {
 
     #[test]
     fn padded_bytes_per_row_returns_unpadded_when_aligned() {
-        // 64 pixels * 4 bytes = 256 bytes, already aligned.
         assert_eq!(padded_bytes_per_row(64), 256);
     }
 
     #[test]
     fn padded_bytes_per_row_pads_to_alignment() {
-        // 1 pixel * 4 bytes = 4 bytes, needs padding to 256.
         assert_eq!(padded_bytes_per_row(1), 256);
-        // 63 pixels * 4 bytes = 252 bytes, needs padding to 256.
         assert_eq!(padded_bytes_per_row(63), 256);
-        // 65 pixels * 4 bytes = 260 bytes, needs padding to 512.
         assert_eq!(padded_bytes_per_row(65), 512);
+    }
+
+    #[test]
+    fn padded_bytes_per_row_checked_matches_unchecked() {
+        for width in [0, 1, 63, 64, 65, 128, 256, 1024] {
+            assert_eq!(
+                padded_bytes_per_row_checked(width),
+                Some(padded_bytes_per_row(width))
+            );
+        }
+    }
+
+    #[test]
+    fn padded_bytes_per_row_checked_overflow() {
+        assert_eq!(padded_bytes_per_row_checked(u32::MAX), None);
+        assert_eq!(padded_bytes_per_row_checked(u32::MAX / 4 + 1), None);
     }
 
     #[test]
@@ -257,10 +316,9 @@ mod tests {
             height: 2,
             rgba8: vec![0xAB; 64 * 2 * 4],
         };
-        let (staged, bytes_per_row) = create_staging_buffer(&texture);
+        let (staged, bytes_per_row) = create_staging_buffer(&texture).unwrap();
         assert_eq!(bytes_per_row, 256);
         assert_eq!(staged.len(), 256 * 2);
-        // Data should be unchanged.
         assert_eq!(&staged[..256], &texture.rgba8[..256]);
     }
 
@@ -269,17 +327,26 @@ mod tests {
         let texture = DecodedTexture {
             width: 1,
             height: 2,
-            rgba8: vec![0xAB; 8], // 4 bytes per row * 2 rows
+            rgba8: vec![0xAB; 8],
         };
-        let (staged, bytes_per_row) = create_staging_buffer(&texture);
+        let (staged, bytes_per_row) = create_staging_buffer(&texture).unwrap();
         assert_eq!(bytes_per_row, 256);
         assert_eq!(staged.len(), 256 * 2);
-        // First row: 4 bytes of data + 252 bytes of padding.
         assert_eq!(&staged[..4], &[0xAB; 4]);
         assert_eq!(&staged[4..256], &[0; 252]);
-        // Second row: same pattern.
         assert_eq!(&staged[256..260], &[0xAB; 4]);
         assert_eq!(&staged[260..512], &[0; 252]);
+    }
+
+    #[test]
+    fn create_staging_buffer_overflow_returns_error() {
+        let texture = DecodedTexture {
+            width: u32::MAX,
+            height: u32::MAX,
+            rgba8: vec![],
+        };
+        let result = create_staging_buffer(&texture);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -290,7 +357,7 @@ mod tests {
 
     #[test]
     fn decode_invalid_data_returns_error() {
-        let result = decode_image(&[0xFF, 0xD8, 0xFF]); // Truncated JPEG header.
+        let result = decode_image(&[0xFF, 0xD8, 0xFF]);
         assert!(matches!(result, Err(TextureLoadError::DecodeFailed(_))));
     }
 
@@ -312,7 +379,6 @@ mod tests {
 
     #[test]
     fn sampler_filter_from_gltf_min_collapses_mipmaps() {
-        // All NEAREST variants map to Nearest.
         assert_eq!(
             SamplerFilter::from_gltf_min(gltf::texture::MinFilter::Nearest),
             SamplerFilter::Nearest
@@ -325,7 +391,6 @@ mod tests {
             SamplerFilter::from_gltf_min(gltf::texture::MinFilter::NearestMipmapLinear),
             SamplerFilter::Nearest
         );
-        // All LINEAR variants map to Linear.
         assert_eq!(
             SamplerFilter::from_gltf_min(gltf::texture::MinFilter::Linear),
             SamplerFilter::Linear
@@ -359,5 +424,17 @@ mod tests {
         assert_eq!(config.wrap_t, SamplerWrap::Repeat);
         assert_eq!(config.min_filter, SamplerFilter::Linear);
         assert_eq!(config.mag_filter, SamplerFilter::Linear);
+    }
+
+    #[test]
+    fn row_padding_arithmetic_for_various_widths() {
+        // Width 1: 4 bytes → padded to 256.
+        assert_eq!(padded_bytes_per_row(1), 256);
+        // Width 64: 256 bytes → already aligned.
+        assert_eq!(padded_bytes_per_row(64), 256);
+        // Width 100: 400 bytes → padded to 512.
+        assert_eq!(padded_bytes_per_row(100), 512);
+        // Width 256: 1024 bytes → already aligned.
+        assert_eq!(padded_bytes_per_row(256), 1024);
     }
 }
