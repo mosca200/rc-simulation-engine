@@ -959,7 +959,7 @@ fn validate_source_refs(
     Ok(())
 }
 
-fn validate_stable_id(
+pub(crate) fn validate_stable_id(
     kind: &'static str,
     value: &str,
 ) -> Result<(), ReferenceAerodynamicEvidenceError> {
