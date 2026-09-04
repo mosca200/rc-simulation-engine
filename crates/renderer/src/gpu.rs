@@ -859,7 +859,7 @@ impl WgpuRenderer {
             depth_target,
             camera: camera_config.build(size.width, size.height),
             asynchronous_gpu_error,
-            show_debug_overlays: true,
+            show_debug_overlays: false,
         })
     }
 

@@ -62,6 +62,7 @@ pub struct RenderOptions {
     start_on_ground: bool,
     scenery: SceneryPreset,
     camera: CameraSelection,
+    debug_overlays: bool,
 }
 
 /// Presentation-side camera selection parsed from the CLI.
@@ -125,6 +126,7 @@ impl RenderOptions {
             start_on_ground: false,
             scenery: SceneryPreset::None,
             camera: CameraSelection::default(),
+            debug_overlays: false,
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -182,6 +184,9 @@ impl RenderOptions {
                 }
                 "--start-on-ground" => {
                     options.start_on_ground = true;
+                }
+                "--debug-overlays" => {
+                    options.debug_overlays = true;
                 }
                 "--scenery" => {
                     let value = arguments
@@ -384,6 +389,7 @@ struct RenderApplication {
     simulation: AircraftSimulation,
     presentation: PresentationModel,
     scenery_preset: SceneryPreset,
+    debug_overlays: bool,
     input_state: InputState,
     input_backend: GilrsInputBackend,
     replay_recorder: Option<AircraftReplayRecorder>,
@@ -465,6 +471,7 @@ impl RenderApplication {
             simulation,
             presentation,
             scenery_preset: options.scenery,
+            debug_overlays: options.debug_overlays,
             input_state,
             input_backend,
             replay_recorder,
@@ -617,7 +624,7 @@ impl ApplicationHandler for RenderApplication {
             },
             PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
         };
-        let renderer = match pollster::block_on(WgpuRenderer::new_with_presentation(
+        let mut renderer = match pollster::block_on(WgpuRenderer::new_with_presentation(
             Arc::clone(&window),
             presentation_asset,
             self.ground_below_render_origin_m,
@@ -634,6 +641,7 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
+        renderer.set_show_debug_overlays(self.debug_overlays);
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());
