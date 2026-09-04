@@ -425,6 +425,73 @@ fn evaluate_one(
     }
 }
 
+/// Test-only seam: exercises the SAME production comparison logic as [`evaluate_one`]
+/// (solve → re-evaluate → `evaluations_bitwise_equal` → outcome), but injects a signed-zero
+/// flip into the solver-cached evaluation before the comparison. This makes the production
+/// comparator deterministically reject the pair, proving the real sweep integrity path
+/// catches `+0.0` vs `-0.0` differences that `PartialEq` would accept.
+///
+/// This is NOT a duplicate of the comparator — it reuses `evaluations_bitwise_equal` directly
+/// and produces the same `LongitudinalTrimSweepOutcome` variants as the production path.
+#[cfg(test)]
+fn evaluate_one_with_signed_zero_reevaluation_probe(
+    model: &AircraftModel,
+    config: &AircraftSimulationConfig,
+    request: &LongitudinalTrimRequest,
+) -> LongitudinalTrimSweepOutcome {
+    match solve_longitudinal_trim(model, config, request) {
+        Ok(solution) => {
+            // Inject a signed-zero flip into the cached evaluation.
+            // position_world_m is always Vec3::zeros() from evaluate_candidate, so x is +0.0.
+            let mut altered_solution = solution;
+            assert_eq!(
+                altered_solution
+                    .evaluation
+                    .state
+                    .position_world_m
+                    .x
+                    .to_bits(),
+                0.0_f64.to_bits(),
+                "precondition: position_world_m.x must be +0.0"
+            );
+            altered_solution.evaluation.state.position_world_m.x = -0.0;
+
+            // Re-evaluate independently through the production runtime path.
+            match evaluate_longitudinal_trim_candidate(
+                model,
+                config,
+                request,
+                altered_solution.evaluation.variables,
+            ) {
+                // The production comparator must reject the signed-zero mismatch.
+                Some(independent)
+                    if evaluations_bitwise_equal(&independent, &altered_solution.evaluation) =>
+                {
+                    // This branch must NOT be reached: the bitwise comparator must reject
+                    // the +0.0 vs -0.0 difference.
+                    panic!(
+                        "evaluations_bitwise_equal must reject signed-zero mismatch in sweep probe"
+                    );
+                }
+                Some(independent) => LongitudinalTrimSweepOutcome::ReEvaluationMismatch(Box::new(
+                    ReEvaluationMismatchDetail {
+                        iteration_count: altered_solution.iteration_count,
+                        solver_evaluation: altered_solution.evaluation,
+                        independent_evaluation: independent,
+                    },
+                )),
+                None => LongitudinalTrimSweepOutcome::ReEvaluationUnverifiable(Box::new(
+                    ReEvaluationUnverifiableDetail {
+                        iteration_count: altered_solution.iteration_count,
+                        solver_evaluation: altered_solution.evaluation,
+                    },
+                )),
+            }
+        }
+        Err(failure) => LongitudinalTrimSweepOutcome::TrimFailure { failure },
+    }
+}
+
 #[cfg(test)]
 impl LongitudinalTrimSweepOutcome {
     /// Test-only constructor for the unverifiable variant. The public M2.6A path constructs
@@ -613,10 +680,10 @@ mod tests {
     }
 
     #[test]
-    fn sweep_signed_zero_mismatch_propagates_to_qualification_unavailable() {
-        // 1. Run a real sweep to get a genuine Success solution.
-        let request = LongitudinalTrimSweepRequest::new(
-            vec![18.0],
+    fn sweep_real_path_rejects_signed_zero_via_production_comparator() {
+        // Build a real trim request.
+        let request = LongitudinalTrimRequest::new(
+            18.0,
             TrimBounds::new(-0.15, 0.30).unwrap(),
             TrimBounds::new(-0.9, 0.9).unwrap(),
             TrimBounds::new(0.02, 1.0).unwrap(),
@@ -625,66 +692,61 @@ mod tests {
             40,
         )
         .unwrap();
-        let sweep =
-            solve_longitudinal_trim_sweep(&aircraft(), &sweep_sim_config(), &request).unwrap();
-        assert_eq!(sweep.success_count(), 1, "precondition: sweep must succeed");
 
-        // 2. Extract the successful solution's evaluation.
-        let solver_eval = match &sweep.points()[0].outcome {
-            LongitudinalTrimSweepOutcome::Success { solution } => solution.evaluation,
-            other => panic!("expected Success, got {other:?}"),
+        // Exercise the REAL sweep comparison path with a signed-zero probe.
+        // This calls solve_longitudinal_trim → evaluate_longitudinal_trim_candidate →
+        // evaluations_bitwise_equal (the production comparator), with a +0.0/-0.0
+        // difference injected into the cached evaluation.
+        let outcome = evaluate_one_with_signed_zero_reevaluation_probe(
+            &aircraft(),
+            &sweep_sim_config(),
+            &request,
+        );
+
+        // The production comparator must have rejected the signed-zero mismatch,
+        // producing ReEvaluationMismatch (NOT Success).
+        let (solver_eval, independent_eval) = match &outcome {
+            LongitudinalTrimSweepOutcome::ReEvaluationMismatch(detail) => {
+                (detail.solver_evaluation(), detail.independent_evaluation())
+            }
+            other => panic!("expected ReEvaluationMismatch from real sweep path, got {other:?}"),
         };
 
-        // 3. The independent re-evaluation would produce the same evaluation
-        //    (deterministic runtime). Flip the cached evaluation's +0.0 to -0.0
-        //    to simulate a signed-zero mismatch.
+        // Proof: PartialEq accepts the signed-zero difference (the bug).
         assert_eq!(
-            solver_eval.state.position_world_m.x.to_bits(),
-            0.0_f64.to_bits(),
-            "precondition: position_world_m.x must be +0.0"
-        );
-        let mut cached_with_neg_zero = solver_eval;
-        cached_with_neg_zero.state.position_world_m.x = -0.0;
-
-        // 4. Sanity: PartialEq considers them equal (the bug).
-        assert_eq!(
-            solver_eval, cached_with_neg_zero,
-            "PartialEq must treat +0.0 and -0.0 as equal"
+            solver_eval, independent_eval,
+            "PartialEq must treat +0.0 and -0.0 as equal — this is the bug the bitwise fix addresses"
         );
 
-        // 5. The independent re-evaluation (what the runtime would actually produce)
-        //    has +0.0. Build a mismatch detail where solver has -0.0, independent has +0.0.
-        let mismatch = LongitudinalTrimSweepOutcome::re_evaluation_mismatch_for_test(
-            0,
-            cached_with_neg_zero,
-            solver_eval,
+        // Proof: the production bitwise comparator rejected it through the real sweep path.
+        assert!(
+            !evaluations_bitwise_equal(solver_eval, independent_eval),
+            "evaluations_bitwise_equal must reject the signed-zero mismatch"
         );
 
-        // 6. Build a sweep containing this mismatch point.
-        let fake_sweep = LongitudinalTrimSweep::from_points(vec![LongitudinalTrimSweepPoint {
+        // Now build a sweep containing this real mismatch and qualify it.
+        let sweep = LongitudinalTrimSweep::from_points(vec![LongitudinalTrimSweepPoint {
             target_airspeed_mps: 18.0,
-            outcome: mismatch,
+            outcome,
         }]);
 
-        // 7. Qualify the sweep — the mismatch must propagate to QualificationUnavailable.
         let qualification = qualify_longitudinal_trim_sweep(
             &aircraft(),
             &sweep_sim_config(),
-            &fake_sweep,
+            &sweep,
             &sweep_generous_limits(),
         );
 
         assert_eq!(qualification.len(), 1);
-        let point = &qualification.points()[0];
-        match &point.outcome {
+        match &qualification.points()[0].outcome {
             LongitudinalTrimQualificationOutcome::QualificationUnavailable {
                 reason: QualificationUnavailableReason::SweepReEvaluationMismatch,
                 diagnostics: None,
             } => {
-                // Expected: sweep mismatch with no diagnostics (untrusted cached data).
+                // Expected: the real sweep mismatch propagates to QualificationUnavailable.
             }
             other => panic!(
-                "expected QualificationUnavailable::SweepReEvaluationMismatch with no diagnostics, got {other:?}"
+                "expected QualificationUnavailable::SweepReEvaluationMismatch, got {other:?}"
             ),
         }
     }
