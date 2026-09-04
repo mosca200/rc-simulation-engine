@@ -241,29 +241,6 @@ fn invalid_calibration_inside_json_is_rejected_with_typed_errors() {
 }
 
 #[test]
-fn direct_serde_deserialization_cannot_bypass_profile_validation() {
-    let valid = sample_profile().to_json().unwrap();
-    assert_eq!(
-        serde_json::from_str::<ControllerProfile>(&valid).unwrap(),
-        sample_profile()
-    );
-    let unsupported_schema = valid.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1);
-    let invalid_calibration = valid.replacen("\"raw_min\": -1.0", "\"raw_min\": 0.5", 1);
-    let duplicate_axis = valid.replacen(
-        "\"source\": \"right_stick_x\"",
-        "\"source\": \"left_stick_x\"",
-        1,
-    );
-
-    for json in [unsupported_schema, invalid_calibration, duplicate_axis] {
-        assert!(
-            serde_json::from_str::<ControllerProfile>(&json).is_err(),
-            "direct serde decode must enforce the ControllerProfile validation boundary"
-        );
-    }
-}
-
-#[test]
 fn malformed_profile_json_is_rejected_as_invalid_profile() {
     let cases = [
         "{",
@@ -376,4 +353,48 @@ fn raw_state_rejects_non_finite_values_before_mapping() {
             })
         );
     }
+}
+
+/// Regression for the profile validation boundary review finding.
+///
+/// `ControllerProfile`, `ProfileAxes`, and both calibration types do not
+/// implement `serde::Deserialize` (enforced at compile time by the
+/// `compile_fail` doc tests on those types), so `from_json` is the only
+/// decode surface. This test pins that every invalid JSON class is rejected
+/// on that surface and can never yield a usable profile.
+#[test]
+fn invalid_json_cannot_produce_a_profile_through_any_public_decode_api() {
+    let unsupported_schema = sample_profile().to_json().unwrap().replacen(
+        "\"schema_version\": 1",
+        "\"schema_version\": 2",
+        1,
+    );
+    assert!(matches!(
+        ControllerProfile::from_json(&unsupported_schema),
+        Err(InputError::UnsupportedProfileVersion { found: 2, .. })
+    ));
+
+    let invalid_calibration =
+        sample_profile()
+            .to_json()
+            .unwrap()
+            .replacen("\"raw_min\": -1.0", "\"raw_min\": 0.5", 1);
+    assert!(matches!(
+        ControllerProfile::from_json(&invalid_calibration),
+        Err(InputError::InvalidCalibrationOrder {
+            control: Control::Roll,
+        })
+    ));
+
+    let duplicated_axis = sample_profile().to_json().unwrap().replacen(
+        "\"source\": \"right_stick_x\"",
+        "\"source\": \"left_stick_x\"",
+        1,
+    );
+    assert!(matches!(
+        ControllerProfile::from_json(&duplicated_axis),
+        Err(InputError::DuplicateAxisAssignment {
+            axis: HardwareAxis::LeftStickX,
+        })
+    ));
 }
