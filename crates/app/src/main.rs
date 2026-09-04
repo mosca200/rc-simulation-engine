@@ -439,7 +439,7 @@ fn print_usage() {
         "  rcsim-app propulsion bench [--model PATH] [--throttle V --airspeed-mps MPS | sweep options] [--format table|csv|json] [--output PATH]"
     );
     println!(
-        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--start-on-ground] [--record-replay PATH]"
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field]"
     );
     println!("  rcsim-app input list");
     println!(

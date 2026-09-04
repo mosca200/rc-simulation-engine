@@ -19,6 +19,7 @@ mod math;
 mod mesh;
 mod pose;
 mod surfaces;
+pub mod scenery;
 pub mod terrain;
 pub mod texture;
 
