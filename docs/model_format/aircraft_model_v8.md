@@ -57,7 +57,10 @@ unknown/duplicate fields), never as hot-loop checks.
 ## Fingerprint
 
 Gear physics participates in the model physics fingerprint under the
-`landing-gear:v1` domain (IDs, positions, radii, stiffness, damping, all
-friction/brake mus, steering source, max steer, flags). Two aircraft
-differing only in gear hash differently. Schema version itself is part of
-the fingerprint domain, so v7/v8 equivalents do not collide.
+`landing-gear:v1` domain. Contact count and declaration order participate,
+as do positions, radii, stiffness, damping, all friction/brake coefficients,
+steering source, maximum steer angle, and steering/braking flags. Gear `id`
+strings are non-physical authoring labels and do not participate unless a
+future schema makes them part of a real physics relationship. Renaming only
+a gear ID therefore leaves the physics fingerprint unchanged. Schema version
+itself is part of the fingerprint domain, so v7/v8 equivalents do not collide.

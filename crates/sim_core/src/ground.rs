@@ -364,13 +364,17 @@ pub fn evaluate_ground_wrench(
             let force_world = contact_force_world(solution, basis);
             let force_b = world_to_body(&state.orientation_world_from_body, &force_world);
             force_body += force_b;
-            moment_body += contact.position_body_m.cross(&force_b);
+            moment_body += contact_application_point_body(contact).cross(&force_b);
         }
     }
     evaluation.force_body_n = force_body;
     evaluation.moment_body_nm = moment_body;
     evaluation.total_tangential_force_n = tangential;
     evaluation
+}
+
+fn contact_application_point_body(contact: &GearContact) -> Vec3 {
+    contact.position_body_m + Vec3::new(0.0, 0.0, contact.wheel_radius_m)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -425,7 +429,7 @@ fn evaluate_single_contact(
     let mut solution = GroundContactSolution::air();
     solution.steer_angle_rad = steer_angle_rad;
     // Wheel-bottom point: axle center plus radius along body-down (+Z body).
-    let bottom_body = contact.position_body_m + Vec3::new(0.0, 0.0, contact.wheel_radius_m);
+    let bottom_body = contact_application_point_body(contact);
     let bottom_world =
         state.position_world_m + body_to_world(&state.orientation_world_from_body, &bottom_body);
     solution.contact_position_world_m = bottom_world;

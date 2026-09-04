@@ -143,6 +143,48 @@ fn free_rolling_uses_only_rolling_resistance() {
 }
 
 #[test]
+fn wheel_radius_moves_ground_force_moment_to_the_contact_point() {
+    let mut zero_radius = single_wheel();
+    zero_radius.position_body_m = Vec3::zeros();
+    zero_radius.wheel_radius_m = 0.0;
+    let mut finite_radius = zero_radius;
+    finite_radius.wheel_radius_m = 0.2;
+
+    let surface = GroundSurface::Flat(FlatGroundPlane::default());
+    let command = GroundCommand::new(0.0, 0.0);
+    let velocity = Vec3::new(5.0, 0.0, 0.0);
+    let zero_state =
+        state_with_contact_penetration(&zero_radius, Orientation::identity(), 0.05, velocity);
+    let finite_state =
+        state_with_contact_penetration(&finite_radius, Orientation::identity(), 0.05, velocity);
+    let zero_evaluation = evaluate_ground_wrench(&zero_state, &[zero_radius], &surface, &command);
+    let finite_evaluation =
+        evaluate_ground_wrench(&finite_state, &[finite_radius], &surface, &command);
+
+    assert!(
+        (zero_evaluation.force_body_n - finite_evaluation.force_body_n).norm() < 1.0e-12,
+        "equal penetration and velocity must produce the same force"
+    );
+    assert!(
+        finite_evaluation.contacts[0].longitudinal_force_n.abs() > 0.0,
+        "the radius oracle requires a nonzero tangential contact force"
+    );
+    assert_eq!(zero_evaluation.moment_body_nm, Vec3::zeros());
+    let expected_moment =
+        Vec3::new(0.0, 0.0, finite_radius.wheel_radius_m).cross(&finite_evaluation.force_body_n);
+    assert!(
+        (expected_moment.y - finite_radius.wheel_radius_m * finite_evaluation.force_body_n.x).abs()
+            < 1.0e-12
+    );
+    assert!(
+        (finite_evaluation.moment_body_nm - expected_moment).norm() < 1.0e-12,
+        "wheel-bottom moment {:?} did not match analytic r x F {:?}",
+        finite_evaluation.moment_body_nm,
+        expected_moment
+    );
+}
+
+#[test]
 fn commanded_braking_adds_bounded_longitudinal_resistance() {
     let mut contact = single_wheel();
     contact.braked = true;
