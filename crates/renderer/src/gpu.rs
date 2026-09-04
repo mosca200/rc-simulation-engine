@@ -31,6 +31,7 @@
 //! `queue.present(surface_texture)` to schedule the acquired surface texture
 //! for presentation.
 
+use crate::scenery::{SceneryMesh, SceneryPreset};
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer};
 use crate::{
@@ -238,6 +239,13 @@ struct GpuTerrainChunk {
     _bounds: ([f32; 3], [f32; 3]),
 }
 
+/// G2A: Scenery GPU resources (merged mesh, single draw call).
+struct GpuScenery {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
     _instance: wgpu::Instance,
@@ -282,6 +290,10 @@ pub struct WgpuRenderer {
     terrain_chunks: Vec<GpuTerrainChunk>,
     terrain_material_index: usize,
 
+    // G2A: Scenery.
+    scenery: Option<GpuScenery>,
+    scenery_material_index: usize,
+
     // Debug overlays.
     line_vertex_buffer: wgpu::Buffer,
     line_vertex_count: u32,
@@ -294,7 +306,8 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    /// Create a renderer with a presentation asset (GLB or procedural).
+    /// Create a renderer with a presentation asset (GLB or procedural) and
+    /// optional scenery.
     ///
     /// This is the primary constructor. The GLB path exercises the full
     /// G1C textured multi-primitive pipeline.
@@ -302,6 +315,7 @@ impl WgpuRenderer {
         window: Arc<Window>,
         asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
+        scenery_preset: Option<SceneryPreset>,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
@@ -559,6 +573,20 @@ impl WgpuRenderer {
             });
         }
 
+        // G2A: Generate scenery and upload to GPU.
+        let scenery_material_index = fallback_material_index;
+        let scenery = scenery_preset.and_then(|preset| match preset {
+            SceneryPreset::None => None,
+            SceneryPreset::FlyingField => {
+                let params = crate::scenery::FlyingFieldParams {
+                    ground_y: -ground_below_render_origin_m,
+                    ..Default::default()
+                };
+                let scene = crate::scenery::generate_flying_field(&params);
+                Some(upload_scenery_mesh(&device, &scene.mesh))
+            }
+        });
+
         // Debug overlays.
         let references = reference_grid_and_axes_at(-ground_below_render_origin_m);
         let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -659,6 +687,8 @@ impl WgpuRenderer {
             aircraft_batches,
             terrain_chunks,
             terrain_material_index,
+            scenery,
+            scenery_material_index,
             line_vertex_buffer,
             line_vertex_count: references.vertices().len() as u32,
             depth_target,
@@ -678,6 +708,7 @@ impl WgpuRenderer {
             window,
             PresentationAsset::Procedural(aircraft),
             ground_below_render_origin_m,
+            None,
         )
         .await
     }
@@ -692,6 +723,7 @@ impl WgpuRenderer {
             window,
             PresentationAsset::Glb(asset),
             ground_below_render_origin_m,
+            None,
         )
         .await
     }
@@ -824,6 +856,17 @@ impl WgpuRenderer {
                 render_pass
                     .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
+
+            // G2A: Scenery (flying field, trees, markers).
+            if let Some(ref scenery) = self.scenery {
+                let scenery_material = &self.materials[self.scenery_material_index];
+                render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                render_pass.set_bind_group(3, &scenery_material.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
             }
 
             // Debug grid/axes: identity object transform.
@@ -1020,6 +1063,28 @@ fn create_gpu_material(
         _sampler: sampler,
         bind_group,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Scenery upload helper
+// ---------------------------------------------------------------------------
+
+fn upload_scenery_mesh(device: &wgpu::Device, mesh: &SceneryMesh) -> GpuScenery {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("scenery vertices"),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("scenery indices"),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    GpuScenery {
+        vertex_buffer,
+        index_buffer,
+        index_count: mesh.indices.len() as u32,
+    }
 }
 
 // ---------------------------------------------------------------------------

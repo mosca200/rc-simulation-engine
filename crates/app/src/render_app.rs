@@ -12,7 +12,7 @@ use platform::{
 use renderer::{
     AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbAsset, GlbLoadError,
     PresentationAsset, RenderDataError, RenderFrame, RendererError, SurfaceError, WgpuRenderer,
-    aircraft_mesh, load_glb_asset,
+    aircraft_mesh, load_glb_asset, scenery::SceneryPreset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -54,6 +54,7 @@ pub struct RenderOptions {
     altitude_m: f64,
     airspeed_mps: f64,
     replay_output_path: Option<PathBuf>,
+    scenery: SceneryPreset,
 }
 
 impl RenderOptions {
@@ -64,6 +65,7 @@ impl RenderOptions {
             altitude_m: DEFAULT_ALTITUDE_M,
             airspeed_mps: DEFAULT_AIRSPEED_MPS,
             replay_output_path: None,
+            scenery: SceneryPreset::None,
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -119,6 +121,16 @@ impl RenderOptions {
                             RenderAppError::MissingArgumentValue("--record-replay"),
                         )?));
                 }
+                "--scenery" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--scenery"))?;
+                    options.scenery = match value.as_str() {
+                        "none" => SceneryPreset::None,
+                        "flying-field" => SceneryPreset::FlyingField,
+                        _ => return Err(RenderAppError::InvalidScenery(value)),
+                    };
+                }
                 "--help" | "-h" => {
                     super::print_usage();
                     std::process::exit(0);
@@ -142,6 +154,8 @@ pub enum RenderAppError {
     InvalidAirspeed(String),
     #[error("unknown render argument: {0}")]
     UnknownArgument(String),
+    #[error("invalid scenery preset `{0}`; expected `none` or `flying-field`")]
+    InvalidScenery(String),
     #[error("failed to load render model from {path}: {source}")]
     ModelLoad {
         path: PathBuf,
@@ -222,6 +236,7 @@ enum PresentationModel {
 struct RenderApplication {
     simulation: AircraftSimulation,
     presentation: PresentationModel,
+    scenery_preset: SceneryPreset,
     input_state: InputState,
     input_backend: GilrsInputBackend,
     replay_recorder: Option<AircraftReplayRecorder>,
@@ -287,6 +302,7 @@ impl RenderApplication {
         Ok(Self {
             simulation,
             presentation,
+            scenery_preset: options.scenery,
             input_state,
             input_backend,
             replay_recorder,
@@ -432,6 +448,7 @@ impl ApplicationHandler for RenderApplication {
             Arc::clone(&window),
             presentation_asset,
             self.ground_below_render_origin_m,
+            Some(self.scenery_preset),
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
