@@ -16,6 +16,25 @@ Qualification distinguishes:
 
 A solution relying on endpoint clamping is NOT qualified.
 
+## Range Status
+
+Every domain comparison produces a typed [`RangeStatus`], computed by the public pure
+classifier `classify_range_status(value, lower, upper)` — the single classifier used for
+polar alpha domains, Reynolds family domains, and propeller J domains:
+
+| Status | Meaning | Supported? |
+|---|---|---|
+| `BelowRange` | strictly below the authored interval | NO (clamped) |
+| `AtLowerBound` | bitwise-equal to the authored lower endpoint | YES |
+| `InRange` | strictly inside the authored interval | YES |
+| `AtUpperBound` | bitwise-equal to the authored upper endpoint | YES |
+| `AboveRange` | strictly above the authored interval | NO (clamped) |
+| `NonFinite` | NaN / ±Infinity input | NO (fail-closed) |
+
+Boundary membership uses EXACT bitwise equality with the authored endpoint. No epsilon is
+introduced anywhere: an epsilon would invent support that the authored data does not
+declare. Runtime clamping is unchanged; qualification merely reveals when it is relied on.
+
 ## Geometric Alpha vs Finite-Wing Sampled Alpha
 
 For elements belonging to a `RuntimeAeroSurface` (finite-wing members), runtime samples coefficients at:
@@ -50,7 +69,13 @@ Below or above the Reynolds family range, Reynolds qualification fails. The alph
 
 ### Fixed Propeller Table
 
-J (advance ratio) support is defined by the first and last sample in the `PropellerCoefficientTable`. Endpoint = InRange. Outside = blocker.
+J (advance ratio) support is defined by the first and last sample in the `PropellerCoefficientTable`. Endpoints classify as `AtLowerBound`/`AtUpperBound` (supported). Strictly outside = blocker.
+
+The audit also records the runtime quantities available from the authoritative propulsion evaluation: throttle, axial airspeed, shaft speed (rad/s and RPM), advance ratio J, thrust, and shaft torque.
+
+### RPM Support
+
+RPM is classified ONLY when the authored model/runtime data explicitly declares an RPM support range. No such range exists in the current model data, so the audit reports `RpmDomainStatus::NotDeclared` for both fixed tables and shaft-speed maps while still recording the runtime RPM value. No RPM envelope is ever invented.
 
 ### Shaft-Speed Map
 
@@ -88,6 +113,45 @@ The caller must supply finite non-negative maxima for:
 
 No hidden defaults. NaN, ±Inf, and negative limits are rejected at construction.
 
+The acceptance rule is documented and deterministic: a residual value passes when
+`|value| <= limit`. A value EXACTLY equal to its limit passes; no epsilon is applied.
+
+## Point Outcomes
+
+Every qualified point carries a typed outcome; no string status codes are used:
+
+- `Qualified` — trim succeeded, every applicable authored domain is supported, every
+  off-axis residual limit passes, all audit values are finite, and the accepted solution
+  re-evaluates identically. Carries the full diagnostics.
+- `NotQualifiedTrimFailure` — the sweep point never produced a trim solution. Carries the
+  typed solver failure and NOTHING else: no element, propulsion, or residual diagnostics
+  are fabricated.
+- `NotQualifiedDomainViolation` — at least one authored-domain blocker exists (aero alpha,
+  Reynolds family, contributing-node alpha, propulsion J/shaft speed). ALL blockers are
+  preserved; nothing is dropped at the first violation.
+- `NotQualifiedResidualViolation` — no domain blockers, but at least one off-axis
+  residual exceeds a caller-supplied limit. ALL blockers are preserved.
+- `QualificationUnavailable` — the point produced a trim evaluation whose diagnostics
+  cannot be trusted or presented (non-finite audit value, failed deterministic
+  re-evaluation) or whose evaluation integrity was already broken at sweep level
+  (`SweepReEvaluationMismatch` / `SweepReEvaluationUnverifiable`; no diagnostics are
+  fabricated for these).
+
+Variant-selection precedence is deterministic: Domain violation > Residual violation >
+Qualified; integrity-only failures map to `QualificationUnavailable` with the partially
+valid diagnostics preserved.
+
+Blocker categories are typed (`QualificationBlockerCategory::{Domain, Residual,
+Integrity}`) via `QualificationBlocker::category()`.
+
+## Sweep Qualification
+
+`qualify_longitudinal_trim_sweep(model, config, sweep, limits)` operates on the existing
+M2.6A sweep result and returns exactly one qualification point per sweep point, in the
+sweep's (and therefore the request's) input order. Successful points are fully audited;
+trim failures map to `NotQualifiedTrimFailure`; sweep-level re-evaluation integrity
+outcomes map to `QualificationUnavailable`.
+
 ## Qualified Definition
 
 A successful trim point is **Qualified** only when ALL apply:
@@ -101,7 +165,9 @@ A successful trim point is **Qualified** only when ALL apply:
 7. All audit values are finite
 8. Accepted trim solution remains deterministically re-evaluable
 
-Otherwise: **NotQualified** with ALL applicable typed blockers. The qualification does NOT stop at the first blocker.
+Otherwise the point is `NotQualifiedDomainViolation`, `NotQualifiedResidualViolation`, or
+`QualificationUnavailable` (see Point Outcomes) with ALL applicable typed blockers
+preserved. The qualification does NOT stop at the first blocker.
 
 ## Blocker Ordering
 
