@@ -1957,6 +1957,520 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Test-only bitwise comparison helpers for qualification diagnostics.
+    // These never use structure PartialEq as the floating-point oracle.
+    // -----------------------------------------------------------------------
+
+    const fn f64_bits_eq(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits()
+    }
+
+    /// Asserts `Option<f64>` presence is identical on both sides, and when both
+    /// are `Some` the payloads are bitwise equal. Fails loudly on `Some`/`None`
+    /// mismatches instead of silently skipping them.
+    fn assert_option_f64_bits_eq(
+        a: Option<f64>,
+        b: Option<f64>,
+        field: &'static str,
+        element_index: usize,
+    ) {
+        match (a, b) {
+            (None, None) => {}
+            (Some(va), Some(vb)) => {
+                assert!(
+                    f64_bits_eq(va, vb),
+                    "{field} (element {element_index}) bit patterns differ: {:?} vs {:?}",
+                    va.to_bits(),
+                    vb.to_bits()
+                );
+            }
+            (present_a, present_b) => {
+                panic!(
+                    "{field} (element {element_index}) Some/None presence mismatch: \
+                     {present_a:?} vs {present_b:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_propulsion_audit_bits_eq(a: &PropulsionDomainAudit, b: &PropulsionDomainAudit) {
+        match (a, b) {
+            (PropulsionDomainAudit::NotPresent, PropulsionDomainAudit::NotPresent) => {}
+            (
+                PropulsionDomainAudit::Present {
+                    throttle: throttle_a,
+                    axial_airspeed_mps: axial_a,
+                    shaft_speed_rad_s: shaft_a,
+                    shaft_speed_rpm: rpm_a,
+                    advance_ratio_j: j_a,
+                    j_lower: j_lo_a,
+                    j_upper: j_hi_a,
+                    j_range_status: j_status_a,
+                    shaft_speed_domain: domain_a,
+                    rpm_domain: rpm_domain_a,
+                    thrust_n: thrust_a,
+                    torque_n_m: torque_a,
+                },
+                PropulsionDomainAudit::Present {
+                    throttle: throttle_b,
+                    axial_airspeed_mps: axial_b,
+                    shaft_speed_rad_s: shaft_b,
+                    shaft_speed_rpm: rpm_b,
+                    advance_ratio_j: j_b,
+                    j_lower: j_lo_b,
+                    j_upper: j_hi_b,
+                    j_range_status: j_status_b,
+                    shaft_speed_domain: domain_b,
+                    rpm_domain: rpm_domain_b,
+                    thrust_n: thrust_b,
+                    torque_n_m: torque_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*throttle_a, *throttle_b),
+                    "throttle bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*axial_a, *axial_b),
+                    "axial_airspeed_mps bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*shaft_a, *shaft_b),
+                    "shaft_speed_rad_s bits differ"
+                );
+                assert!(f64_bits_eq(*rpm_a, *rpm_b), "shaft_speed_rpm bits differ");
+                assert!(f64_bits_eq(*j_a, *j_b), "advance_ratio_j bits differ");
+                assert!(f64_bits_eq(*j_lo_a, *j_lo_b), "j_lower bits differ");
+                assert!(f64_bits_eq(*j_hi_a, *j_hi_b), "j_upper bits differ");
+                // Discrete range status compared normally.
+                assert_eq!(j_status_a, j_status_b, "j_range_status mismatch");
+                assert!(f64_bits_eq(*thrust_a, *thrust_b), "thrust_n bits differ");
+                assert!(f64_bits_eq(*torque_a, *torque_b), "torque_n_m bits differ");
+
+                // Optional shaft-speed domain: presence equality, then bitwise floats.
+                match (domain_a, domain_b) {
+                    (None, None) => {}
+                    (Some(da), Some(db)) => {
+                        assert!(
+                            f64_bits_eq(da.shaft_speed_lower_rad_s, db.shaft_speed_lower_rad_s),
+                            "shaft_speed_lower_rad_s bits differ"
+                        );
+                        assert!(
+                            f64_bits_eq(da.shaft_speed_upper_rad_s, db.shaft_speed_upper_rad_s),
+                            "shaft_speed_upper_rad_s bits differ"
+                        );
+                        assert_eq!(
+                            da.shaft_speed_range_status, db.shaft_speed_range_status,
+                            "shaft_speed_range_status mismatch"
+                        );
+                    }
+                    (pa, pb) => {
+                        panic!("shaft_speed_domain Some/None presence mismatch: {pa:?} vs {pb:?}")
+                    }
+                }
+
+                // RPM domain status.
+                match (rpm_domain_a, rpm_domain_b) {
+                    (RpmDomainStatus::NotDeclared, RpmDomainStatus::NotDeclared) => {}
+                    (
+                        RpmDomainStatus::Declared {
+                            lower_rpm: lo_a,
+                            upper_rpm: hi_a,
+                            status: status_a,
+                        },
+                        RpmDomainStatus::Declared {
+                            lower_rpm: lo_b,
+                            upper_rpm: hi_b,
+                            status: status_b,
+                        },
+                    ) => {
+                        assert!(f64_bits_eq(*lo_a, *lo_b), "rpm lower bits differ");
+                        assert!(f64_bits_eq(*hi_a, *hi_b), "rpm upper bits differ");
+                        assert_eq!(status_a, status_b, "rpm range status mismatch");
+                    }
+                    (pa, pb) => {
+                        panic!("rpm_domain variant mismatch: {pa:?} vs {pb:?}")
+                    }
+                }
+            }
+            (pa, pb) => panic!("propulsion audit variant mismatch: {pa:?} vs {pb:?}"),
+        }
+    }
+
+    fn assert_blocker_bits_eq(a: &QualificationBlocker, b: &QualificationBlocker, index: usize) {
+        match (a, b) {
+            (
+                QualificationBlocker::AerodynamicAlphaBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    alpha_sample_rad: sample_a,
+                    alpha_lower_rad: lower_a,
+                },
+                QualificationBlocker::AerodynamicAlphaBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    alpha_sample_rad: sample_b,
+                    alpha_lower_rad: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} alpha_lower_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::AerodynamicAlphaAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    alpha_sample_rad: sample_a,
+                    alpha_upper_rad: upper_a,
+                },
+                QualificationBlocker::AerodynamicAlphaAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    alpha_sample_rad: sample_b,
+                    alpha_upper_rad: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} alpha_upper_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    node_reynolds: re_a,
+                    alpha_sample_rad: sample_a,
+                    alpha_lower_rad: lower_a,
+                },
+                QualificationBlocker::ReynoldsContributingNodeAlphaBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    node_reynolds: re_b,
+                    alpha_sample_rad: sample_b,
+                    alpha_lower_rad: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} node_reynolds bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} alpha_lower_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    node_reynolds: re_a,
+                    alpha_sample_rad: sample_a,
+                    alpha_upper_rad: upper_a,
+                },
+                QualificationBlocker::ReynoldsContributingNodeAlphaAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    node_reynolds: re_b,
+                    alpha_sample_rad: sample_b,
+                    alpha_upper_rad: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} node_reynolds bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*sample_a, *sample_b),
+                    "blocker {index} alpha_sample_rad bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} alpha_upper_rad bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsBelowRange {
+                    element_index: ia,
+                    element_id: ida,
+                    reynolds_number: re_a,
+                    reynolds_lower: lower_a,
+                },
+                QualificationBlocker::ReynoldsBelowRange {
+                    element_index: ib,
+                    element_id: idb,
+                    reynolds_number: re_b,
+                    reynolds_lower: lower_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} reynolds_number bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} reynolds_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::ReynoldsAboveRange {
+                    element_index: ia,
+                    element_id: ida,
+                    reynolds_number: re_a,
+                    reynolds_upper: upper_a,
+                },
+                QualificationBlocker::ReynoldsAboveRange {
+                    element_index: ib,
+                    element_id: idb,
+                    reynolds_number: re_b,
+                    reynolds_upper: upper_b,
+                },
+            ) => {
+                assert_eq!(ia, ib, "blocker {index} element_index mismatch");
+                assert_eq!(ida, idb, "blocker {index} element_id mismatch");
+                assert!(
+                    f64_bits_eq(*re_a, *re_b),
+                    "blocker {index} reynolds_number bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} reynolds_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerShaftSpeedBelowRange {
+                    shaft_speed_rad_s: speed_a,
+                    shaft_speed_lower_rad_s: lower_a,
+                },
+                QualificationBlocker::PropellerShaftSpeedBelowRange {
+                    shaft_speed_rad_s: speed_b,
+                    shaft_speed_lower_rad_s: lower_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*speed_a, *speed_b),
+                    "blocker {index} shaft_speed_rad_s bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} shaft_speed_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerShaftSpeedAboveRange {
+                    shaft_speed_rad_s: speed_a,
+                    shaft_speed_upper_rad_s: upper_a,
+                },
+                QualificationBlocker::PropellerShaftSpeedAboveRange {
+                    shaft_speed_rad_s: speed_b,
+                    shaft_speed_upper_rad_s: upper_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*speed_a, *speed_b),
+                    "blocker {index} shaft_speed_rad_s bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} shaft_speed_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j_a,
+                    j_lower: lower_a,
+                },
+                QualificationBlocker::PropellerAdvanceRatioBelowRange {
+                    advance_ratio_j: j_b,
+                    j_lower: lower_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*j_a, *j_b),
+                    "blocker {index} advance_ratio_j bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*lower_a, *lower_b),
+                    "blocker {index} j_lower bits differ"
+                );
+            }
+            (
+                QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j_a,
+                    j_upper: upper_a,
+                },
+                QualificationBlocker::PropellerAdvanceRatioAboveRange {
+                    advance_ratio_j: j_b,
+                    j_upper: upper_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*j_a, *j_b),
+                    "blocker {index} advance_ratio_j bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*upper_a, *upper_b),
+                    "blocker {index} j_upper bits differ"
+                );
+            }
+            (
+                QualificationBlocker::SideForceLimitExceeded {
+                    fy_body_n: fy_a,
+                    limit_n: limit_a,
+                },
+                QualificationBlocker::SideForceLimitExceeded {
+                    fy_body_n: fy_b,
+                    limit_n: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*fy_a, *fy_b),
+                    "blocker {index} fy_body_n bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_n bits differ"
+                );
+            }
+            (
+                QualificationBlocker::RollMomentLimitExceeded {
+                    mx_body_nm: mx_a,
+                    limit_nm: limit_a,
+                },
+                QualificationBlocker::RollMomentLimitExceeded {
+                    mx_body_nm: mx_b,
+                    limit_nm: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*mx_a, *mx_b),
+                    "blocker {index} mx_body_nm bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_nm bits differ"
+                );
+            }
+            (
+                QualificationBlocker::YawMomentLimitExceeded {
+                    mz_body_nm: mz_a,
+                    limit_nm: limit_a,
+                },
+                QualificationBlocker::YawMomentLimitExceeded {
+                    mz_body_nm: mz_b,
+                    limit_nm: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*mz_a, *mz_b),
+                    "blocker {index} mz_body_nm bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_nm bits differ"
+                );
+            }
+            (
+                QualificationBlocker::LateralAccelerationLimitExceeded {
+                    ay_world_mps2: ay_a,
+                    limit_mps2: limit_a,
+                },
+                QualificationBlocker::LateralAccelerationLimitExceeded {
+                    ay_world_mps2: ay_b,
+                    limit_mps2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*ay_a, *ay_b),
+                    "blocker {index} ay_world_mps2 bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_mps2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::RollAngularAccelerationLimitExceeded {
+                    angular_accel_body_x_rad_s2: ax_a,
+                    limit_rad_s2: limit_a,
+                },
+                QualificationBlocker::RollAngularAccelerationLimitExceeded {
+                    angular_accel_body_x_rad_s2: ax_b,
+                    limit_rad_s2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*ax_a, *ax_b),
+                    "blocker {index} angular_accel_body_x bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_rad_s2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::YawAngularAccelerationLimitExceeded {
+                    angular_accel_body_z_rad_s2: az_a,
+                    limit_rad_s2: limit_a,
+                },
+                QualificationBlocker::YawAngularAccelerationLimitExceeded {
+                    angular_accel_body_z_rad_s2: az_b,
+                    limit_rad_s2: limit_b,
+                },
+            ) => {
+                assert!(
+                    f64_bits_eq(*az_a, *az_b),
+                    "blocker {index} angular_accel_body_z bits differ"
+                );
+                assert!(
+                    f64_bits_eq(*limit_a, *limit_b),
+                    "blocker {index} limit_rad_s2 bits differ"
+                );
+            }
+            (
+                QualificationBlocker::NonFiniteAuditValue { field: field_a },
+                QualificationBlocker::NonFiniteAuditValue { field: field_b },
+            ) => {
+                assert_eq!(
+                    field_a, field_b,
+                    "blocker {index} NonFiniteAuditValue field mismatch"
+                );
+            }
+            (
+                QualificationBlocker::ReEvaluationFailure,
+                QualificationBlocker::ReEvaluationFailure,
+            ) => {}
+            (ba, bb) => {
+                panic!("blocker {index} variant/ordering mismatch: {ba:?} vs {bb:?}");
+            }
+        }
+    }
+
     #[test]
     fn qualification_determinism_is_bitwise() {
         let solution = solved_solution();
@@ -1998,75 +2512,106 @@ mod tests {
         // Residual audit: every f64 field compared via to_bits().
         let ra_a = diag_a.residual_audit();
         let ra_b = diag_b.residual_audit();
-        assert_eq!(ra_a.fx_body_n.to_bits(), ra_b.fx_body_n.to_bits());
-        assert_eq!(ra_a.fy_body_n.to_bits(), ra_b.fy_body_n.to_bits());
-        assert_eq!(ra_a.fz_body_n.to_bits(), ra_b.fz_body_n.to_bits());
-        assert_eq!(ra_a.mx_body_nm.to_bits(), ra_b.mx_body_nm.to_bits());
-        assert_eq!(ra_a.my_body_nm.to_bits(), ra_b.my_body_nm.to_bits());
-        assert_eq!(ra_a.mz_body_nm.to_bits(), ra_b.mz_body_nm.to_bits());
-        assert_eq!(
-            ra_a.linear_accel_world_x_mps2.to_bits(),
-            ra_b.linear_accel_world_x_mps2.to_bits()
-        );
-        assert_eq!(
-            ra_a.linear_accel_world_y_mps2.to_bits(),
-            ra_b.linear_accel_world_y_mps2.to_bits()
-        );
-        assert_eq!(
-            ra_a.linear_accel_world_z_mps2.to_bits(),
-            ra_b.linear_accel_world_z_mps2.to_bits()
-        );
-        assert_eq!(
-            ra_a.angular_accel_body_x_rad_s2.to_bits(),
-            ra_b.angular_accel_body_x_rad_s2.to_bits()
-        );
-        assert_eq!(
-            ra_a.angular_accel_body_y_rad_s2.to_bits(),
-            ra_b.angular_accel_body_y_rad_s2.to_bits()
-        );
-        assert_eq!(
-            ra_a.angular_accel_body_z_rad_s2.to_bits(),
-            ra_b.angular_accel_body_z_rad_s2.to_bits()
-        );
-        assert_eq!(
-            ra_a.longitudinal_force_n.to_bits(),
-            ra_b.longitudinal_force_n.to_bits()
-        );
-        assert_eq!(
-            ra_a.vertical_force_n.to_bits(),
-            ra_b.vertical_force_n.to_bits()
-        );
-        assert_eq!(
-            ra_a.pitch_moment_nm.to_bits(),
-            ra_b.pitch_moment_nm.to_bits()
-        );
+        assert!(f64_bits_eq(ra_a.fx_body_n, ra_b.fx_body_n));
+        assert!(f64_bits_eq(ra_a.fy_body_n, ra_b.fy_body_n));
+        assert!(f64_bits_eq(ra_a.fz_body_n, ra_b.fz_body_n));
+        assert!(f64_bits_eq(ra_a.mx_body_nm, ra_b.mx_body_nm));
+        assert!(f64_bits_eq(ra_a.my_body_nm, ra_b.my_body_nm));
+        assert!(f64_bits_eq(ra_a.mz_body_nm, ra_b.mz_body_nm));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_x_mps2,
+            ra_b.linear_accel_world_x_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_y_mps2,
+            ra_b.linear_accel_world_y_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.linear_accel_world_z_mps2,
+            ra_b.linear_accel_world_z_mps2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_x_rad_s2,
+            ra_b.angular_accel_body_x_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_y_rad_s2,
+            ra_b.angular_accel_body_y_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.angular_accel_body_z_rad_s2,
+            ra_b.angular_accel_body_z_rad_s2
+        ));
+        assert!(f64_bits_eq(
+            ra_a.longitudinal_force_n,
+            ra_b.longitudinal_force_n
+        ));
+        assert!(f64_bits_eq(ra_a.vertical_force_n, ra_b.vertical_force_n));
+        assert!(f64_bits_eq(ra_a.pitch_moment_nm, ra_b.pitch_moment_nm));
 
-        // Aero audits: every f64 field compared via to_bits().
+        // Aero audits: every f64 field compared via to_bits(); all Option<f64>
+        // fields are presence-checked first and bitwise-compared when Some.
         assert_eq!(diag_a.aero_audits().len(), diag_b.aero_audits().len());
-        for (aa, ab) in diag_a.aero_audits().iter().zip(diag_b.aero_audits().iter()) {
-            assert_eq!(aa.alpha_geom_rad.to_bits(), ab.alpha_geom_rad.to_bits());
-            assert_eq!(aa.alpha_sample_rad.to_bits(), ab.alpha_sample_rad.to_bits());
-            assert_eq!(aa.alpha_lower_rad.to_bits(), ab.alpha_lower_rad.to_bits());
-            assert_eq!(aa.alpha_upper_rad.to_bits(), ab.alpha_upper_rad.to_bits());
-            assert_eq!(
-                aa.section_airspeed_mps.to_bits(),
-                ab.section_airspeed_mps.to_bits()
+        for (idx, (aa, ab)) in diag_a
+            .aero_audits()
+            .iter()
+            .zip(diag_b.aero_audits().iter())
+            .enumerate()
+        {
+            assert!(f64_bits_eq(aa.alpha_geom_rad, ab.alpha_geom_rad));
+            assert!(f64_bits_eq(aa.alpha_sample_rad, ab.alpha_sample_rad));
+            assert!(f64_bits_eq(aa.alpha_lower_rad, ab.alpha_lower_rad));
+            assert!(f64_bits_eq(aa.alpha_upper_rad, ab.alpha_upper_rad));
+            assert!(f64_bits_eq(
+                aa.section_airspeed_mps,
+                ab.section_airspeed_mps
+            ));
+            assert_option_f64_bits_eq(
+                aa.reynolds_number,
+                ab.reynolds_number,
+                "reynolds_number",
+                idx,
             );
-            if let (Some(re_a), Some(re_b)) = (aa.reynolds_number, ab.reynolds_number) {
-                assert_eq!(re_a.to_bits(), re_b.to_bits());
-            }
-            if let (Some(lo_a), Some(lo_b)) = (aa.reynolds_lower, ab.reynolds_lower) {
-                assert_eq!(lo_a.to_bits(), lo_b.to_bits());
-            }
-            if let (Some(hi_a), Some(hi_b)) = (aa.reynolds_upper, ab.reynolds_upper) {
-                assert_eq!(hi_a.to_bits(), hi_b.to_bits());
-            }
+            assert_option_f64_bits_eq(aa.reynolds_lower, ab.reynolds_lower, "reynolds_lower", idx);
+            assert_option_f64_bits_eq(aa.reynolds_upper, ab.reynolds_upper, "reynolds_upper", idx);
+            assert_option_f64_bits_eq(
+                aa.reynolds_lower_node_alpha_lower_rad,
+                ab.reynolds_lower_node_alpha_lower_rad,
+                "reynolds_lower_node_alpha_lower_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_lower_node_alpha_upper_rad,
+                ab.reynolds_lower_node_alpha_upper_rad,
+                "reynolds_lower_node_alpha_upper_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_upper_node_alpha_lower_rad,
+                ab.reynolds_upper_node_alpha_lower_rad,
+                "reynolds_upper_node_alpha_lower_rad",
+                idx,
+            );
+            assert_option_f64_bits_eq(
+                aa.reynolds_upper_node_alpha_upper_rad,
+                ab.reynolds_upper_node_alpha_upper_rad,
+                "reynolds_upper_node_alpha_upper_rad",
+                idx,
+            );
         }
 
-        // Blockers: same count and same variant ordering (discrete comparison).
+        // Propulsion audit: complete bitwise comparison.
+        assert_propulsion_audit_bits_eq(diag_a.propulsion_audit(), diag_b.propulsion_audit());
+
+        // Blockers: bitwise comparison of every f64 payload; variant ordering preserved.
         assert_eq!(diag_a.blockers().len(), diag_b.blockers().len());
-        for (ba, bb) in diag_a.blockers().iter().zip(diag_b.blockers().iter()) {
-            assert_eq!(ba, bb, "blocker mismatch — determinism broken");
+        for (idx, (ba, bb)) in diag_a
+            .blockers()
+            .iter()
+            .zip(diag_b.blockers().iter())
+            .enumerate()
+        {
+            assert_blocker_bits_eq(ba, bb, idx);
         }
     }
 }
