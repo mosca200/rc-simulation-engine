@@ -77,10 +77,11 @@ pub use reference_xfoil_runtime::{
     XfoilRuntimePolarFamily, XfoilRuntimePolarFamilyError, build_xfoil_reynolds_polar_family,
 };
 pub use runtime::{
-    AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationMetadata,
-    RuntimeAeroDownwashInteraction, RuntimeAeroElement, RuntimeAeroPolarBinding,
-    RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion,
-    RuntimeLandingGearContact, RuntimePolar, RuntimePropellerSlipstreamInteraction,
+    AircraftModel, AircraftModelFingerprint, ControlActuator, PresentationArticulatedSurface,
+    PresentationMetadata, PresentationSurface, RuntimeAeroDownwashInteraction, RuntimeAeroElement,
+    RuntimeAeroPolarBinding, RuntimeAeroSurface, RuntimeControlSurfaceBinding,
+    RuntimeElectricPropulsion, RuntimeLandingGearContact, RuntimePolar,
+    RuntimePropellerSlipstreamInteraction,
     RuntimeReynoldsPolarFamily,
 };
 pub use xfoil_aircraft_family_binding::{

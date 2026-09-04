@@ -159,4 +159,28 @@ pub struct PropulsionFileV0 {
 #[serde(deny_unknown_fields)]
 pub struct PresentationFileV0 {
     pub glb_path: String,
+    #[serde(default)]
+    pub articulated_surfaces: Vec<PresentationArticulatedSurfaceFileV0>,
+}
+
+/// Non-physical mapping from one GLB primitive to a simulated control-surface binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationArticulatedSurfaceFileV0 {
+    pub visual_primitive_index: usize,
+    pub surface: PresentationSurfaceFileV0,
+    pub control_surface_binding_id: String,
+    pub hinge_origin_render_body_m: [f64; 3],
+    pub hinge_axis_render_body: [f64; 3],
+    pub visual_gain: f64,
+}
+
+/// Stable visual slots used by presentation metadata only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationSurfaceFileV0 {
+    LeftAileron,
+    RightAileron,
+    Elevator,
+    Rudder,
 }

@@ -259,6 +259,25 @@ reverse thrust, windmilling, and battery state are outside v0.
 
 ## Optional presentation metadata
 
+Presentation metadata is non-physical and may declare only a GLB path or explicit articulated
+primitive mappings:
+
+```json
+"presentation": {
+  "glb_path": "aircraft.glb",
+  "articulated_surfaces": [
+    {
+      "visual_primitive_index": 3,
+      "surface": "elevator",
+      "control_surface_binding_id": "pitch-surface-binding",
+      "hinge_origin_render_body_m": [0.0, 0.0, 0.65],
+      "hinge_axis_render_body": [1.0, 0.0, 0.0],
+      "visual_gain": 1.0
+    }
+  ]
+}
+```
+
 `presentation.glb_path` is a nonempty UTF-8 relative-path string. Validation rejects:
 
 - empty or whitespace-only strings;
@@ -266,9 +285,17 @@ reverse thrust, windmilling, and battery state are outside v0.
 - Windows drive prefixes such as `C:`;
 - a `..` component using either slash style.
 
-The path is retained verbatim. S6 does not open it, require it to exist, interpret GLB, or depend on
-gltf, wgpu, or a renderer. Presentation metadata has no physical effect and is excluded from the
-physics fingerprint.
+`articulated_surfaces` defaults to an empty array. Each entry maps one exact GLB primitive index to
+one of `left_aileron`, `right_aileron`, `elevator`, or `rudder`, references an exact existing
+physics control-surface binding ID, and provides a finite f32-representable render-body hinge origin,
+nonzero hinge axis, and finite visual gain. Duplicate primitive indices, unknown bindings, and
+surface/actuator mismatches fail loading. No name matching or declaration-order fallback occurs.
+Because schema v0 has no control-surface bindings, its array must remain empty; authored
+articulation is available to schema v1 and later models that can resolve the referenced binding.
+
+The path is retained verbatim. Model loading does not open it, require it to exist, interpret GLB,
+or depend on gltf, wgpu, or a renderer. All presentation fields have no physical effect and are
+excluded from the physics fingerprint.
 
 ## Loader API and runtime representation
 

@@ -150,6 +150,136 @@ pub fn aircraft_mesh() -> AircraftMesh {
     AircraftMesh { vertices, indices }
 }
 
+/// G1E: separate movable-surface meshes for the procedural fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArticulatedAircraftMesh {
+    pub rigid: AircraftMesh,
+    pub surfaces: [Option<AircraftMesh>; crate::VISUAL_SLOT_COUNT],
+}
+
+impl ArticulatedAircraftMesh {
+    #[must_use]
+    pub fn surface(&self, surface: crate::SurfaceId) -> Option<&AircraftMesh> {
+        self.surfaces[surface.index()].as_ref()
+    }
+}
+
+#[must_use]
+pub fn articulated_aircraft_mesh() -> ArticulatedAircraftMesh {
+    let mut rv = Vec::with_capacity(24 * 5);
+    let mut ri = Vec::with_capacity(36 * 5);
+    add_box(
+        &mut rv,
+        &mut ri,
+        [-0.11, -0.10, -0.56],
+        [0.11, 0.10, 0.60],
+        [0.20, 0.34, 0.82],
+    );
+    add_box(
+        &mut rv,
+        &mut ri,
+        [-0.42, -0.035, -0.18],
+        [-0.10, 0.035, 0.20],
+        [0.94, 0.78, 0.16],
+    );
+    add_box(
+        &mut rv,
+        &mut ri,
+        [0.10, -0.035, -0.18],
+        [0.42, 0.035, 0.20],
+        [0.18, 0.70, 0.94],
+    );
+    add_box(
+        &mut rv,
+        &mut ri,
+        [-0.38, -0.025, 0.30],
+        [0.38, 0.025, 0.47],
+        [0.86, 0.32, 0.72],
+    );
+    add_box(
+        &mut rv,
+        &mut ri,
+        [-0.035, 0.08, 0.10],
+        [0.035, 0.38, 0.42],
+        [0.18, 0.82, 0.26],
+    );
+    let rigid = AircraftMesh {
+        vertices: rv,
+        indices: ri,
+    };
+    let mut surfaces: [Option<AircraftMesh>; crate::VISUAL_SLOT_COUNT] =
+        [None, None, None, None, None];
+    surfaces[crate::SurfaceId::LeftAileron.index()] = Some(colored_box(
+        [-0.82, -0.035, -0.18],
+        [-0.10, 0.035, 0.20],
+        [0.94, 0.78, 0.16],
+    ));
+    surfaces[crate::SurfaceId::RightAileron.index()] = Some(colored_box(
+        [0.10, -0.035, -0.18],
+        [0.82, 0.035, 0.20],
+        [0.18, 0.70, 0.94],
+    ));
+    surfaces[crate::SurfaceId::Elevator.index()] = Some(colored_box(
+        [-0.38, -0.025, 0.47],
+        [0.38, 0.025, 0.70],
+        [0.86, 0.32, 0.72],
+    ));
+    surfaces[crate::SurfaceId::Rudder.index()] = Some(colored_box(
+        [-0.035, 0.38, 0.42],
+        [0.035, 0.68, 0.69],
+        [0.18, 0.82, 0.26],
+    ));
+    ArticulatedAircraftMesh { rigid, surfaces }
+}
+
+#[must_use]
+pub fn articulated_binding_table() -> crate::SurfaceBindingTable {
+    crate::SurfaceBindingTable::empty()
+        .with_hinge(
+            crate::SurfaceHinge::new(
+                crate::SurfaceId::LeftAileron,
+                [-0.10, 0.0, 0.01],
+                [1.0, 0.0, 0.0],
+                1.0,
+            )
+            .expect("hinge"),
+        )
+        .with_hinge(
+            crate::SurfaceHinge::new(
+                crate::SurfaceId::RightAileron,
+                [0.10, 0.0, 0.01],
+                [1.0, 0.0, 0.0],
+                1.0,
+            )
+            .expect("hinge"),
+        )
+        .with_hinge(
+            crate::SurfaceHinge::new(
+                crate::SurfaceId::Elevator,
+                [0.0, 0.0, 0.47],
+                [1.0, 0.0, 0.0],
+                1.0,
+            )
+            .expect("hinge"),
+        )
+        .with_hinge(
+            crate::SurfaceHinge::new(
+                crate::SurfaceId::Rudder,
+                [0.0, 0.38, 0.42],
+                [0.0, 1.0, 0.0],
+                1.0,
+            )
+            .expect("hinge"),
+        )
+}
+
+fn colored_box(minimum: [f32; 3], maximum: [f32; 3], color: [f32; 3]) -> AircraftMesh {
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    add_box(&mut vertices, &mut indices, minimum, maximum, color);
+    AircraftMesh { vertices, indices }
+}
+
 const DEFAULT_GROUND_Y_RENDER_M: f32 = -30.04;
 const DEFAULT_GRID_Y_RENDER_M: f32 = -30.0;
 

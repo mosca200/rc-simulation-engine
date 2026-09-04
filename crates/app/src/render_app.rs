@@ -4,15 +4,19 @@ use crate::render_snapshot::{
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
 };
-use model::{AircraftModel, AircraftModelFingerprint, ModelLoadError, load_aircraft_model};
+use model::{
+    AircraftModel, AircraftModelFingerprint, ModelLoadError, PresentationMetadata,
+    PresentationSurface, load_aircraft_model,
+};
 use platform::{
     GilrsInputBackend, InputError, InputMapping, InputSource, InputState, KeyboardInputState,
     KeyboardKey,
 };
 use renderer::{
-    AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderDataError, RenderFrame, RenderTerrainMode, RendererError,
-    SurfaceError, WgpuRenderer, aircraft_mesh, load_glb_asset,
+    AircraftMesh, FixedStepAccumulator, FixedStepAccumulatorError, GlbArticulationError,
+    GlbArticulationPlan, GlbAsset, GlbLoadError, PresentationAsset, RenderDataError,
+    RenderTerrainMode, RendererError, SurfaceError, SurfaceHinge, SurfaceId, WgpuRenderer,
+    aircraft_mesh, load_glb_asset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -167,6 +171,8 @@ pub enum RenderAppError {
         model_id: String,
         reason: &'static str,
     },
+    #[error("invalid articulated GLB presentation mapping: {0}")]
+    PresentationArticulation(#[from] GlbArticulationError),
     #[error("failed to initialize AircraftSimulation for render mode: {0}")]
     AircraftSimulation(#[from] AircraftSimulationError),
     #[error("failed to configure the render atmosphere: {0}")]
@@ -225,10 +231,11 @@ pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
     Ok(())
 }
 
-/// FIX 1: The presentation asset is preserved as a GlbAsset when available,
-/// ensuring the production viewer uses the G1C textured multi-primitive path.
 enum PresentationModel {
-    Glb(GlbAsset),
+    Glb {
+        asset: GlbAsset,
+        articulation: GlbArticulationPlan,
+    },
     Procedural(AircraftMesh),
 }
 
@@ -261,6 +268,7 @@ impl RenderApplication {
                 path: model_path.clone(),
                 source,
             })?;
+        let presentation = resolve_presentation_model(&model_path, model.presentation())?;
         let model_id = model.model_id().to_owned();
         let model_fingerprint = model.physics_fingerprint();
         let (initial_state, ground_below_render_origin_m, terrain_mode, initial_ground) =
@@ -280,11 +288,6 @@ impl RenderApplication {
                     GroundEvaluation::zero(),
                 )
             };
-        // Preserve the rigid G1C GLB path; this integration branch does not own G1E.
-        let presentation = resolve_presentation_model(
-            &model_path,
-            model.presentation().map(|value| value.glb_path()),
-        )?;
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
@@ -390,7 +393,10 @@ impl RenderApplication {
                     }
                 };
             self.render_snapshots
-                .push(AircraftRenderSnapshot::post_step(&snapshot));
+                .push(AircraftRenderSnapshot::post_step(
+                    &snapshot,
+                    self.simulation.model(),
+                ));
         }
         if step_plan.dropped_time_s() > 0.0 {
             warn!(
@@ -400,6 +406,7 @@ impl RenderApplication {
         }
 
         let alpha = interpolation_alpha(step_plan.remainder(), self.fixed_step.physics_dt());
+        let snapshot = self.render_snapshots.interpolated_snapshot(alpha);
         let pose = match self
             .render_snapshots
             .interpolated_pose(alpha, self.render_origin_world_ned_m)
@@ -410,7 +417,7 @@ impl RenderApplication {
                 return;
             }
         };
-        let frame = RenderFrame::new(pose);
+        let frame = snapshot.render_frame(pose);
         let render_result = self
             .renderer
             .as_mut()
@@ -455,9 +462,14 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
-        // FIX 1: Use PresentationAsset to select GlbAsset or procedural path.
         let presentation_asset = match &self.presentation {
-            PresentationModel::Glb(asset) => PresentationAsset::Glb(asset),
+            PresentationModel::Glb {
+                asset,
+                articulation,
+            } => PresentationAsset::ArticulatedGlb {
+                asset,
+                articulation,
+            },
             PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
         };
         let renderer = match pollster::block_on(WgpuRenderer::new_with_presentation(
@@ -561,22 +573,46 @@ fn resolve_presentation_path(model_path: &Path, glb_path: &str) -> PathBuf {
         .join(glb_path)
 }
 
-/// FIX 1: Resolve the presentation model, preserving GlbAsset for the
-/// production renderer path. Falls back to procedural mesh when no GLB
-/// presentation asset is declared.
 fn resolve_presentation_model(
     model_path: &Path,
-    glb_path: Option<&str>,
+    presentation: Option<&PresentationMetadata>,
 ) -> Result<PresentationModel, RenderAppError> {
-    let Some(glb_path) = glb_path else {
+    let Some(presentation) = presentation else {
         return Ok(PresentationModel::Procedural(aircraft_mesh()));
     };
-    let path = resolve_presentation_path(model_path, glb_path);
+    let path = resolve_presentation_path(model_path, presentation.glb_path());
     let asset = load_glb_asset(&path).map_err(|source| RenderAppError::PresentationAsset {
         path,
         source: Box::new(source),
     })?;
-    Ok(PresentationModel::Glb(asset))
+    let articulation = articulation_plan(presentation, asset.primitives.len())?;
+    Ok(PresentationModel::Glb {
+        asset,
+        articulation,
+    })
+}
+
+fn articulation_plan(
+    presentation: &PresentationMetadata,
+    primitive_count: usize,
+) -> Result<GlbArticulationPlan, GlbArticulationError> {
+    let mappings = presentation.articulated_surfaces().iter().map(|mapping| {
+        let surface = match mapping.surface() {
+            PresentationSurface::LeftAileron => SurfaceId::LeftAileron,
+            PresentationSurface::RightAileron => SurfaceId::RightAileron,
+            PresentationSurface::Elevator => SurfaceId::Elevator,
+            PresentationSurface::Rudder => SurfaceId::Rudder,
+        };
+        let hinge = SurfaceHinge::new(
+            surface,
+            mapping.hinge_origin_render_body_m(),
+            mapping.hinge_axis_render_body(),
+            mapping.visual_gain(),
+        )
+        .expect("model loading validates presentation hinge metadata");
+        (mapping.visual_primitive_index(), hinge)
+    });
+    GlbArticulationPlan::from_mappings(primitive_count, mappings)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -747,6 +783,17 @@ mod tests {
             .join(relative)
     }
 
+    fn acro_model_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/acro_electric_01/model.json")
+    }
+
+    fn acro_model_with_presentation_path(glb_path: &str) -> model::AircraftModel {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(acro_model_path()).unwrap()).unwrap();
+        value["presentation"]["glb_path"] = serde_json::json!(glb_path);
+        model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap()
+    }
+
     #[test]
     fn throttle_parser_accepts_bounds_and_rejects_invalid_values() {
         for value in ["0", "0.5", "1"] {
@@ -853,13 +900,9 @@ mod tests {
             model::AircraftClassification::SyntheticTest
         );
         assert!(model.reference_aircraft().is_none());
-        let presentation = resolve_presentation_model(
-            &model_path,
-            model.presentation().map(|value| value.glb_path()),
-        )
-        .unwrap();
+        let presentation = resolve_presentation_model(&model_path, model.presentation()).unwrap();
         match presentation {
-            PresentationModel::Glb(asset) => {
+            PresentationModel::Glb { asset, .. } => {
                 assert!(!asset.primitives.is_empty());
                 assert!(asset.total_vertex_count() > 0);
             }
@@ -919,7 +962,6 @@ mod tests {
         );
     }
 
-    // FIX 8: Proof that the production path uses GlbAsset.
     #[test]
     fn resolve_presentation_model_without_glb_returns_procedural() {
         let model_path = Path::new("models/nonexistent/model.json");
@@ -930,7 +972,8 @@ mod tests {
     #[test]
     fn resolve_presentation_model_with_missing_glb_returns_explicit_error() {
         let model_path = Path::new("models/nonexistent/model.json");
-        let result = resolve_presentation_model(model_path, Some("missing.glb"));
+        let model = acro_model_with_presentation_path("missing.glb");
+        let result = resolve_presentation_model(model_path, model.presentation());
         assert!(matches!(
             result,
             Err(RenderAppError::PresentationAsset { .. })
@@ -939,16 +982,20 @@ mod tests {
 
     #[test]
     fn resolve_presentation_model_with_real_glb_returns_glb_asset() {
-        let model_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/acro_electric_01/model.json");
+        let model_path = acro_model_path();
         if !model_path.exists() {
             return; // Skip if model not available in CI.
         }
-        let result = resolve_presentation_model(&model_path, Some("aircraft.glb")).unwrap();
+        let model = load_aircraft_model(&model_path).unwrap();
+        let result = resolve_presentation_model(&model_path, model.presentation()).unwrap();
         match result {
-            PresentationModel::Glb(asset) => {
+            PresentationModel::Glb {
+                asset,
+                articulation,
+            } => {
                 assert!(!asset.primitives.is_empty());
                 assert!(asset.total_vertex_count() > 0);
+                assert_eq!(articulation.len(), asset.primitives.len());
             }
             PresentationModel::Procedural(_) => {
                 panic!("expected Glb variant for real GLB model");
@@ -960,17 +1007,20 @@ mod tests {
     fn declared_valid_missing_and_invalid_assets_have_explicit_outcomes() {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../models/acro_electric_01/model.json");
-        let valid = resolve_presentation_model(&model_path, Some("aircraft.glb")).unwrap();
+        let valid_model = load_aircraft_model(&model_path).unwrap();
+        let valid = resolve_presentation_model(&model_path, valid_model.presentation()).unwrap();
         match valid {
-            PresentationModel::Glb(asset) => assert!(!asset.primitives.is_empty()),
+            PresentationModel::Glb { asset, .. } => assert!(!asset.primitives.is_empty()),
             PresentationModel::Procedural(_) => panic!("expected Glb for valid asset"),
         }
+        let missing = acro_model_with_presentation_path("missing.glb");
         assert!(matches!(
-            resolve_presentation_model(&model_path, Some("missing.glb")),
+            resolve_presentation_model(&model_path, missing.presentation()),
             Err(RenderAppError::PresentationAsset { .. })
         ));
+        let invalid = acro_model_with_presentation_path("README.md");
         assert!(matches!(
-            resolve_presentation_model(&model_path, Some("README.md")),
+            resolve_presentation_model(&model_path, invalid.presentation()),
             Err(RenderAppError::PresentationAsset { .. })
         ));
     }
@@ -983,7 +1033,7 @@ mod tests {
                 assert!(!mesh.vertices().is_empty());
                 assert!(!mesh.indices().is_empty());
             }
-            PresentationModel::Glb(_) => panic!("expected procedural fallback"),
+            PresentationModel::Glb { .. } => panic!("expected procedural fallback"),
         }
     }
 
@@ -993,12 +1043,53 @@ mod tests {
             .join("../../models/acro_electric_01/model.json");
         let model = load_aircraft_model(&model_path).unwrap();
         let before = model.physics_fingerprint();
-        let _presentation = resolve_presentation_model(
-            &model_path,
-            model.presentation().map(|value| value.glb_path()),
-        )
-        .unwrap();
+        let _presentation = resolve_presentation_model(&model_path, model.presentation()).unwrap();
         assert_eq!(model.physics_fingerprint(), before);
+    }
+
+    #[test]
+    fn opaque_metadata_builds_explicit_glb_plan_without_changing_fingerprint() {
+        let model_path = acro_model_path();
+        let original = load_aircraft_model(&model_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&model_path).unwrap()).unwrap();
+        for (binding, id) in value["control_surface_bindings"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(["p", "q", "r", "s"])
+        {
+            binding["id"] = serde_json::json!(id);
+        }
+        value["presentation"]["articulated_surfaces"] = serde_json::json!([
+            {"visual_primitive_index":1,"surface":"left_aileron","control_surface_binding_id":"p","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":2,"surface":"right_aileron","control_surface_binding_id":"q","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":3,"surface":"elevator","control_surface_binding_id":"r","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[1.0,0.0,0.0],"visual_gain":1.0},
+            {"visual_primitive_index":4,"surface":"rudder","control_surface_binding_id":"s","hinge_origin_render_body_m":[0.0,0.0,0.0],"hinge_axis_render_body":[0.0,1.0,0.0],"visual_gain":1.0}
+        ]);
+        let explicit = model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap();
+        let plan = articulation_plan(explicit.presentation().unwrap(), 6).unwrap();
+        assert!(matches!(plan.part(0), renderer::GlbPrimitivePart::Rigid));
+        assert!(matches!(plan.part(5), renderer::GlbPrimitivePart::Rigid));
+        for (index, surface) in [
+            SurfaceId::LeftAileron,
+            SurfaceId::RightAileron,
+            SurfaceId::Elevator,
+            SurfaceId::Rudder,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                plan.part(index + 1),
+                renderer::GlbPrimitivePart::Articulated { surface: actual, .. }
+                    if *actual == surface
+            ));
+        }
+        assert_eq!(
+            explicit.physics_fingerprint(),
+            original.physics_fingerprint()
+        );
     }
 
     #[test]
