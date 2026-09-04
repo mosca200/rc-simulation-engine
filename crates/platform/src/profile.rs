@@ -169,9 +169,10 @@ fn centered_value(
 
 /// Versioned, JSON-serializable controller profile.
 ///
-/// `from_json` is the only decode entry point and rejects unsupported schema
-/// versions, invalid calibrations, and duplicate axis assignments with typed
-/// errors. `to_json` renders the stable pretty-printed format consumed by the
+/// Both direct serde deserialization and `from_json` reject unsupported schema
+/// versions, invalid calibrations, and duplicate axis assignments. `from_json`
+/// preserves typed domain errors; direct serde callers receive a decode error.
+/// `to_json` renders the stable pretty-printed format consumed by the
 /// application layer. The profile layer never reads or writes files; path
 /// policy belongs to the application.
 #[derive(Debug, Clone, PartialEq, Serialize)]
