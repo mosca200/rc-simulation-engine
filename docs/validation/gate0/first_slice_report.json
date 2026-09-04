@@ -143,7 +143,7 @@
       "title": "Minimal outdoor scene",
       "gate": "MANUAL",
       "status": "PARTIAL",
-      "detail": "ground-plane and sky-clear implementations exist, but no visual observation has been performed",
+      "detail": "ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator",
       "evidence": {
         "ground_triangles": "2",
         "visual_verification": "NOT_TESTED"
@@ -206,7 +206,7 @@
       "title": "Basic user flight session",
       "gate": "MANUAL",
       "status": "NOT_TESTED",
-      "detail": "no real interactive user flight session has been observed and recorded",
+      "detail": "not evaluated by the headless validator; manual evidence is tracked separately",
       "evidence": {}
     },
     {
@@ -227,12 +227,12 @@
       "detail": "short release acceptance measurement classified PASS",
       "evidence": {
         "classification": "PASS",
-        "max_us": "24.900000",
-        "mean_us": "7.552970",
+        "max_us": "70.400000",
+        "mean_us": "7.328520",
         "measured_steps": "10000",
         "p50_us": "7.300000",
-        "p95_us": "9.100000",
-        "p99_us": "9.300000",
+        "p95_us": "7.400000",
+        "p99_us": "9.000000",
         "physics_budget_us": "2000.000",
         "warmup_steps": "1000"
       }
@@ -292,7 +292,7 @@
       "title": "Graphical viewer verification",
       "gate": "MANUAL",
       "status": "NOT_TESTED",
-      "detail": "the renderer has not been visually observed in a persisted, reviewable verification",
+      "detail": "not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report",
       "evidence": {}
     },
     {
@@ -325,13 +325,13 @@
     "manual_gate_status": "PARTIAL",
     "real_world_gate_status": "PARTIAL",
     "open_gaps": [
-      "minimal_outdoor_scene: ground-plane and sky-clear implementations exist, but no visual observation has been performed",
+      "minimal_outdoor_scene: ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator",
       "real_controller_hardware: no physical controller was connected or exercised; devices: 0 is not acceptance evidence",
       "radiomaster_tx16s: Radiomaster TX16S hardware has not been tested",
-      "basic_user_flight_session: no real interactive user flight session has been observed and recorded",
+      "basic_user_flight_session: not evaluated by the headless validator; manual evidence is tracked separately",
       "real_pilot_review: the structured pilot-review protocol exists but no real pilot session has occurred",
       "real_world_calibration: no measured aircraft reference, propulsion bench data, flight telemetry, or calibrated inertia is available",
-      "graphical_viewer_verification: the renderer has not been visually observed in a persisted, reviewable verification"
+      "graphical_viewer_verification: not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report"
     ]
   }
 }

@@ -15,7 +15,7 @@ use crate::{
         LongitudinalTrimEvaluation, LongitudinalTrimFailure, LongitudinalTrimRequest,
         LongitudinalTrimRequestError, LongitudinalTrimSolution, LongitudinalTrimTolerances,
         LongitudinalTrimVariables, TrimBounds, evaluate_longitudinal_trim_candidate,
-        solve_longitudinal_trim,
+        evaluations_bitwise_equal, solve_longitudinal_trim,
     },
 };
 use model::AircraftModel;
@@ -398,7 +398,7 @@ fn evaluate_one(
             request,
             solution.evaluation.variables,
         ) {
-            Some(independent) if independent == solution.evaluation => {
+            Some(independent) if evaluations_bitwise_equal(&independent, &solution.evaluation) => {
                 LongitudinalTrimSweepOutcome::Success {
                     solution: Box::new(solution),
                 }

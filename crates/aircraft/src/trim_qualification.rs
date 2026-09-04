@@ -37,7 +37,9 @@ use crate::{
         downwashed_section_kinematics, physical_section_kinematics, propeller_slipstream,
         solve_surface_induced_alpha_with_physical_flow, surface_downwash_with_slipstream,
     },
-    trim::{LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate},
+    trim::{
+        LongitudinalTrimSolution, evaluate_longitudinal_trim_candidate, evaluations_bitwise_equal,
+    },
 };
 use model::AircraftModel;
 use sim_core::{
@@ -692,7 +694,7 @@ pub fn qualify_longitudinal_trim_solution(
 
     let re_eval_matches = match &request_check {
         Ok(req) => match evaluate_longitudinal_trim_candidate(model, config, req, *variables) {
-            Some(independent) => independent == *eval,
+            Some(independent) => evaluations_bitwise_equal(&independent, eval),
             None => false,
         },
         Err(_) => false,

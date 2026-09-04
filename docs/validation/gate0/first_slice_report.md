@@ -24,14 +24,14 @@
 | `telemetry_pipeline` | `Technical` | **PASS** | 2,000 contiguous finite replay-derived telemetry frames validated in memory |
 | `model_versioning` | `Technical` | **PASS** | schema, model ID, physics fingerprint, and canonical replay identity agree |
 | `glb_presentation` | `Technical` | **PASS** | declared GLB exists and parsed to a finite, non-empty indexed triangle mesh |
-| `minimal_outdoor_scene` | `Manual` | **PARTIAL** | ground-plane and sky-clear implementations exist, but no visual observation has been performed |
+| `minimal_outdoor_scene` | `Manual` | **PARTIAL** | ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator |
 | `sim_render_separation` | `Technical` | **PASS** | renderer dependency boundary excludes simulation ownership and physics remains fixed-step |
 | `sim_render_snapshot_interpolation` | `Technical` | **PASS** | two-snapshot f64 interpolation, alpha clamp, shortest-path normalized SLERP, and origin-before-f32 verified |
 | `physics_frame_rate_independence` | `Technical` | **PASS** | 60 Hz-like, 144 Hz-like, and variable frame patterns produced identical physics |
 | `input_pipeline` | `Technical` | **PASS** | normalization, deadzone, inversion, throttle endpoints, mapping, keyboard fallback, and fixed-step sampling verified without hardware |
 | `real_controller_hardware` | `Manual` | **NOT_TESTED** | no physical controller was connected or exercised; devices: 0 is not acceptance evidence |
 | `radiomaster_tx16s` | `Manual` | **NOT_TESTED** | Radiomaster TX16S hardware has not been tested |
-| `basic_user_flight_session` | `Manual` | **NOT_TESTED** | no real interactive user flight session has been observed and recorded |
+| `basic_user_flight_session` | `Manual` | **NOT_TESTED** | not evaluated by the headless validator; manual evidence is tracked separately |
 | `live_input_replay_recording` | `Technical` | **PASS** | applied PilotInput equals recorded input and pre-step N maps to post-step N+1 hash |
 | `physics_performance` | `Technical` | **PASS** | short release acceptance measurement classified PASS |
 | `hot_loop_allocations` | `Technical` | **PASS** | P2 evidence level VERIFIED: allocation-counter measured zero allocations across 100 Acro Electric steps after initialization |
@@ -39,7 +39,7 @@
 | `pilot_review_protocol` | `RealWorld` | **PASS** | versioned structured protocol exists and explicitly records that it has not been executed |
 | `real_pilot_review` | `RealWorld` | **NOT_TESTED** | the structured pilot-review protocol exists but no real pilot session has occurred |
 | `real_world_calibration` | `RealWorld` | **NOT_TESTED** | no measured aircraft reference, propulsion bench data, flight telemetry, or calibrated inertia is available |
-| `graphical_viewer_verification` | `Manual` | **NOT_TESTED** | the renderer has not been visually observed in a persisted, reviewable verification |
+| `graphical_viewer_verification` | `Manual` | **NOT_TESTED** | not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report |
 | `headless_execution` | `Technical` | **PASS** | acceptance path uses direct Rust APIs and initializes no GPU, window, renderer object, hardware backend, or child process |
 | `regression_dataset` | `Technical` | **PASS** | canonical dataset exists, is versioned, contiguous, identity-bound, and all hashes pass |
 
@@ -71,18 +71,18 @@
 
 ## Manual NOT_TESTED / PARTIAL
 
-- `minimal_outdoor_scene`: **PARTIAL** — ground-plane and sky-clear implementations exist, but no visual observation has been performed
+- `minimal_outdoor_scene`: **PARTIAL** — ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator
 - `real_controller_hardware`: **NOT_TESTED** — no physical controller was connected or exercised; devices: 0 is not acceptance evidence
 - `radiomaster_tx16s`: **NOT_TESTED** — Radiomaster TX16S hardware has not been tested
-- `basic_user_flight_session`: **NOT_TESTED** — no real interactive user flight session has been observed and recorded
-- `graphical_viewer_verification`: **NOT_TESTED** — the renderer has not been visually observed in a persisted, reviewable verification
+- `basic_user_flight_session`: **NOT_TESTED** — not evaluated by the headless validator; manual evidence is tracked separately
+- `graphical_viewer_verification`: **NOT_TESTED** — not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report
 
 ## Open gaps
 
-- minimal_outdoor_scene: ground-plane and sky-clear implementations exist, but no visual observation has been performed
+- minimal_outdoor_scene: ground-plane and sky-clear implementations exist; visual observation is not evaluated by the headless validator
 - real_controller_hardware: no physical controller was connected or exercised; devices: 0 is not acceptance evidence
 - radiomaster_tx16s: Radiomaster TX16S hardware has not been tested
-- basic_user_flight_session: no real interactive user flight session has been observed and recorded
+- basic_user_flight_session: not evaluated by the headless validator; manual evidence is tracked separately
 - real_pilot_review: the structured pilot-review protocol exists but no real pilot session has occurred
 - real_world_calibration: no measured aircraft reference, propulsion bench data, flight telemetry, or calibrated inertia is available
-- graphical_viewer_verification: the renderer has not been visually observed in a persisted, reviewable verification
+- graphical_viewer_verification: not evaluated by the headless validator; manual evidence is tracked separately in the Gate 0 report
