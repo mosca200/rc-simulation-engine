@@ -586,4 +586,106 @@ mod tests {
             other => panic!("expected ReEvaluationMismatch, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Integration test: sweep signed-zero proof through qualification
+    // -----------------------------------------------------------------------
+
+    use crate::AircraftSimulationConfig;
+    use crate::trim_qualification::{
+        LongitudinalTrimQualificationLimits, LongitudinalTrimQualificationOutcome,
+        QualificationUnavailableReason, qualify_longitudinal_trim_sweep,
+    };
+    use sim_core::AeroEnvironment;
+    use sim_math::Vec3;
+
+    fn sweep_sim_config() -> AircraftSimulationConfig {
+        AircraftSimulationConfig::new(
+            0.002,
+            Vec3::new(0.0, 0.0, 9.80665),
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn sweep_generous_limits() -> LongitudinalTrimQualificationLimits {
+        LongitudinalTrimQualificationLimits::new(1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6).unwrap()
+    }
+
+    #[test]
+    fn sweep_signed_zero_mismatch_propagates_to_qualification_unavailable() {
+        // 1. Run a real sweep to get a genuine Success solution.
+        let request = LongitudinalTrimSweepRequest::new(
+            vec![18.0],
+            TrimBounds::new(-0.15, 0.30).unwrap(),
+            TrimBounds::new(-0.9, 0.9).unwrap(),
+            TrimBounds::new(0.02, 1.0).unwrap(),
+            LongitudinalTrimVariables::new(0.08, 0.1, 0.45).unwrap(),
+            LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap(),
+            40,
+        )
+        .unwrap();
+        let sweep =
+            solve_longitudinal_trim_sweep(&aircraft(), &sweep_sim_config(), &request).unwrap();
+        assert_eq!(sweep.success_count(), 1, "precondition: sweep must succeed");
+
+        // 2. Extract the successful solution's evaluation.
+        let solver_eval = match &sweep.points()[0].outcome {
+            LongitudinalTrimSweepOutcome::Success { solution } => solution.evaluation,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // 3. The independent re-evaluation would produce the same evaluation
+        //    (deterministic runtime). Flip the cached evaluation's +0.0 to -0.0
+        //    to simulate a signed-zero mismatch.
+        assert_eq!(
+            solver_eval.state.position_world_m.x.to_bits(),
+            0.0_f64.to_bits(),
+            "precondition: position_world_m.x must be +0.0"
+        );
+        let mut cached_with_neg_zero = solver_eval;
+        cached_with_neg_zero.state.position_world_m.x = -0.0;
+
+        // 4. Sanity: PartialEq considers them equal (the bug).
+        assert_eq!(
+            solver_eval, cached_with_neg_zero,
+            "PartialEq must treat +0.0 and -0.0 as equal"
+        );
+
+        // 5. The independent re-evaluation (what the runtime would actually produce)
+        //    has +0.0. Build a mismatch detail where solver has -0.0, independent has +0.0.
+        let mismatch = LongitudinalTrimSweepOutcome::re_evaluation_mismatch_for_test(
+            0,
+            cached_with_neg_zero,
+            solver_eval,
+        );
+
+        // 6. Build a sweep containing this mismatch point.
+        let fake_sweep = LongitudinalTrimSweep::from_points(vec![LongitudinalTrimSweepPoint {
+            target_airspeed_mps: 18.0,
+            outcome: mismatch,
+        }]);
+
+        // 7. Qualify the sweep — the mismatch must propagate to QualificationUnavailable.
+        let qualification = qualify_longitudinal_trim_sweep(
+            &aircraft(),
+            &sweep_sim_config(),
+            &fake_sweep,
+            &sweep_generous_limits(),
+        );
+
+        assert_eq!(qualification.len(), 1);
+        let point = &qualification.points()[0];
+        match &point.outcome {
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                reason: QualificationUnavailableReason::SweepReEvaluationMismatch,
+                diagnostics: None,
+            } => {
+                // Expected: sweep mismatch with no diagnostics (untrusted cached data).
+            }
+            other => panic!(
+                "expected QualificationUnavailable::SweepReEvaluationMismatch with no diagnostics, got {other:?}"
+            ),
+        }
+    }
 }

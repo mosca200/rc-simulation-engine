@@ -1798,4 +1798,275 @@ mod tests {
         );
         assert_eq!(classify_range_status(-0.0, -1.0, 0.0), RangeStatus::InRange);
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: bitwise re-evaluation enforcement
+    // -----------------------------------------------------------------------
+
+    use crate::AircraftSimulationConfig;
+    use crate::trim::{
+        LongitudinalTrimRequest, LongitudinalTrimSolution, LongitudinalTrimTolerances,
+        LongitudinalTrimVariables, TrimBounds, solve_longitudinal_trim,
+    };
+    use sim_core::AeroEnvironment;
+    use sim_math::Vec3;
+
+    const QUAL_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/synthetic_non_reference_trim_v4.json");
+
+    fn qual_aircraft() -> model::AircraftModel {
+        model::AircraftModelLoader::from_json_str(QUAL_FIXTURE).unwrap()
+    }
+
+    fn qual_sim_config() -> AircraftSimulationConfig {
+        AircraftSimulationConfig::new(
+            0.002,
+            Vec3::new(0.0, 0.0, 9.80665),
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn generous_limits() -> LongitudinalTrimQualificationLimits {
+        LongitudinalTrimQualificationLimits::new(1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6, 1.0e6).unwrap()
+    }
+
+    fn solved_solution() -> LongitudinalTrimSolution {
+        let request = LongitudinalTrimRequest::new(
+            18.0,
+            TrimBounds::new(-0.15, 0.30).unwrap(),
+            TrimBounds::new(-0.9, 0.9).unwrap(),
+            TrimBounds::new(0.02, 1.0).unwrap(),
+            LongitudinalTrimVariables::new(0.08, 0.1, 0.45).unwrap(),
+            LongitudinalTrimTolerances::new(1.0e-6, 1.0e-7).unwrap(),
+            40,
+        )
+        .unwrap();
+        solve_longitudinal_trim(&qual_aircraft(), &qual_sim_config(), &request).unwrap()
+    }
+
+    /// Alters one `+0.0` field in the cached evaluation to `-0.0`.
+    /// `position_world_m` is always `Vec3::zeros()` from `evaluate_candidate`,
+    /// so `x` is guaranteed `+0.0` before the flip.
+    fn flip_cached_position_x_to_neg_zero(
+        solution: &LongitudinalTrimSolution,
+    ) -> LongitudinalTrimSolution {
+        let mut altered = *solution;
+        assert_eq!(
+            altered.evaluation.state.position_world_m.x.to_bits(),
+            0.0_f64.to_bits(),
+            "precondition: position_world_m.x must be +0.0 from evaluate_candidate"
+        );
+        altered.evaluation.state.position_world_m.x = -0.0;
+        altered
+    }
+
+    #[test]
+    fn qualification_rejects_signed_zero_reevaluation_mismatch() {
+        let solution = solved_solution();
+        let altered = flip_cached_position_x_to_neg_zero(&solution);
+
+        // Sanity: PartialEq considers them equal (the bug the bitwise fix addresses).
+        assert_eq!(
+            solution.evaluation, altered.evaluation,
+            "PartialEq must treat +0.0 and -0.0 as equal — this is the bug"
+        );
+
+        let point = qualify_longitudinal_trim_solution(
+            &qual_aircraft(),
+            &qual_sim_config(),
+            &altered,
+            &generous_limits(),
+            18.0,
+        );
+
+        match &point.outcome {
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                reason: QualificationUnavailableReason::ReEvaluationFailure,
+                ..
+            } => {
+                // Expected: the bitwise re-evaluation detected the signed-zero mismatch.
+            }
+            other => {
+                panic!("expected QualificationUnavailable::ReEvaluationFailure, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_preserves_diagnostics_on_signed_zero_reevaluation_failure() {
+        let solution = solved_solution();
+        let altered = flip_cached_position_x_to_neg_zero(&solution);
+
+        let point = qualify_longitudinal_trim_solution(
+            &qual_aircraft(),
+            &qual_sim_config(),
+            &altered,
+            &generous_limits(),
+            18.0,
+        );
+
+        match &point.outcome {
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                reason: QualificationUnavailableReason::ReEvaluationFailure,
+                diagnostics,
+            } => {
+                // Diagnostics must be preserved (Some), not None.
+                let diag = diagnostics
+                    .as_ref()
+                    .expect("diagnostics must be preserved for integrity-failed audits");
+
+                // ReEvaluationFailure blocker must be present.
+                assert!(
+                    diag.blockers()
+                        .iter()
+                        .any(|b| matches!(b, QualificationBlocker::ReEvaluationFailure)),
+                    "ReEvaluationFailure blocker must be present in preserved diagnostics"
+                );
+
+                // ReEvaluationFailure is an Integrity blocker.
+                // Verify integrity blockers come AFTER domain and residual blockers
+                // in the preserved blocker list (documented precedence).
+                let mut saw_integrity = false;
+                for blocker in diag.blockers() {
+                    if blocker.category() == QualificationBlockerCategory::Integrity {
+                        saw_integrity = true;
+                    } else if saw_integrity {
+                        panic!(
+                            "found {:?} blocker after integrity blocker — ordering violated",
+                            blocker.category()
+                        );
+                    }
+                }
+
+                // Residual audit must be populated (not zeroed).
+                assert_ne!(
+                    diag.residual_audit().longitudinal_force_n.to_bits(),
+                    f64::NAN.to_bits()
+                );
+
+                // Aero audits must be populated.
+                assert!(
+                    !diag.aero_audits().is_empty(),
+                    "aero audits must be preserved"
+                );
+            }
+            other => {
+                panic!("expected QualificationUnavailable::ReEvaluationFailure, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_determinism_is_bitwise() {
+        let solution = solved_solution();
+        let limits = generous_limits();
+        let model = qual_aircraft();
+        let config = qual_sim_config();
+
+        let point_a = qualify_longitudinal_trim_solution(&model, &config, &solution, &limits, 18.0);
+        let point_b = qualify_longitudinal_trim_solution(&model, &config, &solution, &limits, 18.0);
+
+        // Target airspeed: bitwise.
+        assert_eq!(
+            point_a.target_airspeed_mps.to_bits(),
+            point_b.target_airspeed_mps.to_bits()
+        );
+
+        // Extract diagnostics from both runs.
+        let diag_a = match &point_a.outcome {
+            LongitudinalTrimQualificationOutcome::Qualified(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(d) => d,
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                diagnostics: Some(d),
+                ..
+            } => d,
+            _ => panic!("unexpected outcome for determinism comparison"),
+        };
+        let diag_b = match &point_b.outcome {
+            LongitudinalTrimQualificationOutcome::Qualified(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedDomainViolation(d)
+            | LongitudinalTrimQualificationOutcome::NotQualifiedResidualViolation(d) => d,
+            LongitudinalTrimQualificationOutcome::QualificationUnavailable {
+                diagnostics: Some(d),
+                ..
+            } => d,
+            _ => panic!("unexpected outcome for determinism comparison"),
+        };
+
+        // Residual audit: every f64 field compared via to_bits().
+        let ra_a = diag_a.residual_audit();
+        let ra_b = diag_b.residual_audit();
+        assert_eq!(ra_a.fx_body_n.to_bits(), ra_b.fx_body_n.to_bits());
+        assert_eq!(ra_a.fy_body_n.to_bits(), ra_b.fy_body_n.to_bits());
+        assert_eq!(ra_a.fz_body_n.to_bits(), ra_b.fz_body_n.to_bits());
+        assert_eq!(ra_a.mx_body_nm.to_bits(), ra_b.mx_body_nm.to_bits());
+        assert_eq!(ra_a.my_body_nm.to_bits(), ra_b.my_body_nm.to_bits());
+        assert_eq!(ra_a.mz_body_nm.to_bits(), ra_b.mz_body_nm.to_bits());
+        assert_eq!(
+            ra_a.linear_accel_world_x_mps2.to_bits(),
+            ra_b.linear_accel_world_x_mps2.to_bits()
+        );
+        assert_eq!(
+            ra_a.linear_accel_world_y_mps2.to_bits(),
+            ra_b.linear_accel_world_y_mps2.to_bits()
+        );
+        assert_eq!(
+            ra_a.linear_accel_world_z_mps2.to_bits(),
+            ra_b.linear_accel_world_z_mps2.to_bits()
+        );
+        assert_eq!(
+            ra_a.angular_accel_body_x_rad_s2.to_bits(),
+            ra_b.angular_accel_body_x_rad_s2.to_bits()
+        );
+        assert_eq!(
+            ra_a.angular_accel_body_y_rad_s2.to_bits(),
+            ra_b.angular_accel_body_y_rad_s2.to_bits()
+        );
+        assert_eq!(
+            ra_a.angular_accel_body_z_rad_s2.to_bits(),
+            ra_b.angular_accel_body_z_rad_s2.to_bits()
+        );
+        assert_eq!(
+            ra_a.longitudinal_force_n.to_bits(),
+            ra_b.longitudinal_force_n.to_bits()
+        );
+        assert_eq!(
+            ra_a.vertical_force_n.to_bits(),
+            ra_b.vertical_force_n.to_bits()
+        );
+        assert_eq!(
+            ra_a.pitch_moment_nm.to_bits(),
+            ra_b.pitch_moment_nm.to_bits()
+        );
+
+        // Aero audits: every f64 field compared via to_bits().
+        assert_eq!(diag_a.aero_audits().len(), diag_b.aero_audits().len());
+        for (aa, ab) in diag_a.aero_audits().iter().zip(diag_b.aero_audits().iter()) {
+            assert_eq!(aa.alpha_geom_rad.to_bits(), ab.alpha_geom_rad.to_bits());
+            assert_eq!(aa.alpha_sample_rad.to_bits(), ab.alpha_sample_rad.to_bits());
+            assert_eq!(aa.alpha_lower_rad.to_bits(), ab.alpha_lower_rad.to_bits());
+            assert_eq!(aa.alpha_upper_rad.to_bits(), ab.alpha_upper_rad.to_bits());
+            assert_eq!(
+                aa.section_airspeed_mps.to_bits(),
+                ab.section_airspeed_mps.to_bits()
+            );
+            if let (Some(re_a), Some(re_b)) = (aa.reynolds_number, ab.reynolds_number) {
+                assert_eq!(re_a.to_bits(), re_b.to_bits());
+            }
+            if let (Some(lo_a), Some(lo_b)) = (aa.reynolds_lower, ab.reynolds_lower) {
+                assert_eq!(lo_a.to_bits(), lo_b.to_bits());
+            }
+            if let (Some(hi_a), Some(hi_b)) = (aa.reynolds_upper, ab.reynolds_upper) {
+                assert_eq!(hi_a.to_bits(), hi_b.to_bits());
+            }
+        }
+
+        // Blockers: same count and same variant ordering (discrete comparison).
+        assert_eq!(diag_a.blockers().len(), diag_b.blockers().len());
+        for (ba, bb) in diag_a.blockers().iter().zip(diag_b.blockers().iter()) {
+            assert_eq!(ba, bb, "blocker mismatch — determinism broken");
+        }
+    }
 }
