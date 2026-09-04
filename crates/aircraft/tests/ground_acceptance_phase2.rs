@@ -4,7 +4,6 @@ mod common_ground;
 use aircraft::AircraftSimulation;
 use common_ground::{ground_test_config, load_ground_test_model, parked_state};
 use sim_core::PilotInput;
-use sim_math::Vec3;
 
 fn assert_finite(snapshot: &aircraft::AircraftSnapshot) {
     let rigid = snapshot.rigid_body_state();
@@ -39,6 +38,8 @@ fn full_takeoff_airborne_descent_touchdown_chain() {
     let mut saw_ground_roll = false;
     let mut saw_liftoff = false;
     let mut saw_touchdown_after_flight = false;
+    let mut flare_commanded_before_touchdown = false;
+    let mut saw_flare_elevator_deflection = false;
     let mut peak_altitude_m = 0.0f64;
 
     // Phase 1: settle for 1 s (500 steps) — must stay supported or settle.
@@ -86,10 +87,14 @@ fn full_takeoff_airborne_descent_touchdown_chain() {
         "must gain altitude (peak {peak_altitude_m})"
     );
 
-    // Phase 5: descent at low throttle until touchdown (up to 30 s).
+    // Phase 5: descent at low throttle, then command a real elevator flare
+    // below one metre before touchdown (up to 30 s total).
     let descend = PilotInput::new(0.0, 0.0, 0.0, 0.15);
+    let flare = PilotInput::new(0.0, 0.25, 0.0, 0.15);
     for _ in 0..15000 {
-        let snapshot = simulation.step(&descend);
+        let altitude_m = -simulation.state().rigid_body().position_world_m.z;
+        let flare_active = altitude_m <= 1.0;
+        let snapshot = simulation.step(if flare_active { &flare } else { &descend });
         assert_finite(&snapshot);
         // No tunneling: never far below the geometric rest plane.
         assert!(
@@ -97,6 +102,11 @@ fn full_takeoff_airborne_descent_touchdown_chain() {
             "tunneled: z = {}",
             snapshot.rigid_body_state().position_world_m.z
         );
+        if flare_active && !snapshot.weight_on_wheels() {
+            flare_commanded_before_touchdown = true;
+            saw_flare_elevator_deflection |=
+                snapshot.control_surface_positions().elevator_angle_rad() > 0.01;
+        }
         if snapshot.weight_on_wheels() {
             saw_touchdown_after_flight = true;
             assert!(snapshot.total_ground_normal_force_n() > 0.0);
@@ -104,9 +114,17 @@ fn full_takeoff_airborne_descent_touchdown_chain() {
         }
     }
     assert!(saw_touchdown_after_flight, "must touch down after flight");
+    assert!(
+        flare_commanded_before_touchdown,
+        "flare must be commanded while still airborne"
+    );
+    assert!(
+        saw_flare_elevator_deflection,
+        "flare command must move the bound elevator before touchdown"
+    );
 
-    // Phase 6: flare/rollout to rest stays finite and supported.
-    let rollout = PilotInput::new(0.0, 0.05, 0.0, 0.0);
+    // Phase 6: neutral-elevator rollout stays finite and supported.
+    let rollout = PilotInput::new(0.0, 0.0, 0.0, 0.0);
     for _ in 0..2000 {
         let snapshot = simulation.step(&rollout);
         assert_finite(&snapshot);
@@ -119,5 +137,4 @@ fn full_takeoff_airborne_descent_touchdown_chain() {
         let snapshot = simulation.step(&rollout);
         assert_finite(&snapshot);
     }
-    let _ = Vec3::zeros();
 }

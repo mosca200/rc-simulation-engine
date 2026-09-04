@@ -355,13 +355,13 @@ pub fn evaluate_ground_wrench(
     let count = gear.len().min(MAX_GEAR_CONTACTS);
     for (index, contact) in gear.iter().enumerate().take(count) {
         let steer = steering_angle_rad(contact, command);
-        let solution = evaluate_single_contact(state, contact, surface, steer, command);
+        let (solution, basis) = evaluate_single_contact(state, contact, surface, steer, command);
         evaluation.contacts[index] = solution;
         if solution.in_contact {
             evaluation.active_contacts += 1;
             evaluation.total_normal_force_n += solution.normal_force_n;
             tangential += solution.longitudinal_force_n.abs() + solution.lateral_force_n.abs();
-            let force_world = contact_force_world(solution, state, steer);
+            let force_world = contact_force_world(solution, basis);
             let force_b = world_to_body(&state.orientation_world_from_body, &force_world);
             force_body += force_b;
             moment_body += contact.position_body_m.cross(&force_b);
@@ -373,13 +373,55 @@ pub fn evaluate_ground_wrench(
     evaluation
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WheelTangentBasis {
+    forward_world: Vec3,
+    lateral_world: Vec3,
+    normal_world: Vec3,
+}
+
+fn wheel_tangent_basis(
+    orientation_world_from_body: &sim_math::Orientation,
+    ground_normal_world: Vec3,
+    steer_angle_rad: f64,
+) -> WheelTangentBasis {
+    const MIN_BASIS_NORM_SQUARED: f64 = 1.0e-24;
+
+    let normal_world = ground_normal_world.normalize();
+    let (sin_s, cos_s) = steer_angle_rad.sin_cos();
+    let wheel_forward_body = Vec3::new(cos_s, sin_s, 0.0);
+    let wheel_forward_world = body_to_world(orientation_world_from_body, &wheel_forward_body);
+    let mut forward_world =
+        wheel_forward_world - normal_world * wheel_forward_world.dot(&normal_world);
+
+    if forward_world.norm_squared() <= MIN_BASIS_NORM_SQUARED {
+        // A wheel whose authored forward direction is normal to the ground has
+        // no unique rolling direction. Fall back deterministically to projected
+        // world North, then world East if the normal itself is North-aligned.
+        let world_north = Vec3::new(1.0, 0.0, 0.0);
+        forward_world = world_north - normal_world * world_north.dot(&normal_world);
+        if forward_world.norm_squared() <= MIN_BASIS_NORM_SQUARED {
+            let world_east = Vec3::new(0.0, 1.0, 0.0);
+            forward_world = world_east - normal_world * world_east.dot(&normal_world);
+        }
+    }
+
+    forward_world = forward_world.normalize();
+    let lateral_world = forward_world.cross(&normal_world).normalize();
+    WheelTangentBasis {
+        forward_world,
+        lateral_world,
+        normal_world,
+    }
+}
+
 fn evaluate_single_contact(
     state: &RigidBodyState,
     contact: &GearContact,
     surface: &GroundSurface,
     steer_angle_rad: f64,
     command: &GroundCommand,
-) -> GroundContactSolution {
+) -> (GroundContactSolution, WheelTangentBasis) {
     let mut solution = GroundContactSolution::air();
     solution.steer_angle_rad = steer_angle_rad;
     // Wheel-bottom point: axle center plus radius along body-down (+Z body).
@@ -387,64 +429,58 @@ fn evaluate_single_contact(
     let bottom_world =
         state.position_world_m + body_to_world(&state.orientation_world_from_body, &bottom_body);
     solution.contact_position_world_m = bottom_world;
-    let (ground_height, _) = surface.height_and_normal(&bottom_world);
+    let (ground_height, ground_normal_world) = surface.height_and_normal(&bottom_world);
+    let basis = wheel_tangent_basis(
+        &state.orientation_world_from_body,
+        ground_normal_world,
+        steer_angle_rad,
+    );
     let penetration = bottom_world.z - ground_height;
     if penetration <= 0.0 {
-        return solution;
+        return (solution, basis);
     }
     solution.penetration_m = penetration;
     let velocity_world = contact_point_velocity_world(state, &bottom_body);
     let velocity_body = world_to_body(&state.orientation_world_from_body, &velocity_world);
     solution.contact_velocity_body_mps = velocity_body;
-    // Unilateral compliant normal law along world-down:
-    // F_n = k * penetration + c * v_down_world, clamped to push-only.
-    // v_down_world = +d(penetration)/dt, so sinking (v_down > 0) increases
+    // Unilateral compliant law along the ground outward normal:
+    // F_n = k * penetration + c * v_penetration, clamped to push-only.
+    // v_penetration = -velocity dot normal, so sinking (> 0) increases
     // the upward push (damping opposes penetration rate) while fast
     // separation drives F_n negative and clamps to zero (never pulls).
     let spring = contact.stiffness_n_per_m * penetration;
-    let damper = contact.damping_n_s_per_m * velocity_world.z;
+    let penetration_velocity_mps = -velocity_world.dot(&basis.normal_world);
+    let damper = contact.damping_n_s_per_m * penetration_velocity_mps;
     let normal = (spring + damper).max(0.0);
     if normal <= 0.0 {
-        return solution;
+        return (solution, basis);
     }
     solution.in_contact = true;
     solution.normal_force_n = normal;
-    // Wheel-frame slip: rotate body slip about body-Z by steer angle.
-    let (sin_s, cos_s) = steer_angle_rad.sin_cos();
-    let long_mps = cos_s * velocity_body.x + sin_s * velocity_body.y;
-    let lat_mps = -sin_s * velocity_body.x + cos_s * velocity_body.y;
+    let long_mps = velocity_world.dot(&basis.forward_world);
+    let lat_mps = velocity_world.dot(&basis.lateral_world);
     let long_cap = contact.long_mu * normal;
     let lat_cap = contact.lat_mu * normal;
     let roll_cap = (contact.rolling_mu * normal).min(long_cap);
-    let brake_cap = if contact.braked {
+    let requested_brake_cap = if contact.braked {
         contact.brake_mu * command.brake_command * normal
     } else {
         0.0
     };
-    // Brake augments the longitudinal envelope only (never lateral grip).
-    let mut long_force =
-        -regularized_coulomb(long_mps, long_cap) - regularized_coulomb(long_mps, roll_cap);
-    long_force += -regularized_coulomb(long_mps, brake_cap);
+    // Without wheel angular speed there is no defensible longitudinal slip
+    // ratio. Free rolling therefore uses only rolling resistance. Commanded
+    // braking adds authority, while the tire longitudinal coefficient remains
+    // the total traction envelope.
+    let longitudinal_resistance_cap = (roll_cap + requested_brake_cap).min(long_cap);
+    let long_force = -regularized_coulomb(long_mps, longitudinal_resistance_cap);
     let lat_force = -regularized_coulomb(lat_mps, lat_cap);
-    // Clamp longitudinal total so resistance/brake can never propel.
-    let combined = long_cap + roll_cap + brake_cap;
-    long_force = long_force.clamp(-combined, combined);
     solution.longitudinal_force_n = long_force;
     solution.lateral_force_n = lat_force;
-    solution
+    (solution, basis)
 }
 
-fn contact_force_world(
-    solution: GroundContactSolution,
-    state: &RigidBodyState,
-    steer_angle_rad: f64,
-) -> Vec3 {
-    // Normal points up (world -Z). Wheel-frame tangential forces rotate back
-    // by steer angle into body axes, then into world coordinates.
-    let (sin_s, cos_s) = steer_angle_rad.sin_cos();
-    let fx = cos_s * solution.longitudinal_force_n - sin_s * solution.lateral_force_n;
-    let fy = sin_s * solution.longitudinal_force_n + cos_s * solution.lateral_force_n;
-    let tangential_world =
-        body_to_world(&state.orientation_world_from_body, &Vec3::new(fx, fy, 0.0));
-    Vec3::new(0.0, 0.0, -solution.normal_force_n) + tangential_world
+fn contact_force_world(solution: GroundContactSolution, basis: WheelTangentBasis) -> Vec3 {
+    basis.normal_world * solution.normal_force_n
+        + basis.forward_world * solution.longitudinal_force_n
+        + basis.lateral_world * solution.lateral_force_n
 }

@@ -64,19 +64,70 @@ fn v8_with_tricycle_gear_resolves_in_order() {
 }
 
 #[test]
-fn gear_params_change_physics_fingerprint() {
+fn gear_id_is_a_non_physical_label_in_the_fingerprint() {
     let mut baseline = v7_fixture_as_v8();
     baseline["landing_gear"] = json!([valid_gear_contact()]);
     let mut changed = baseline.clone();
-    changed["landing_gear"][0]["normal_stiffness_n_per_m"] = json!(9000.0);
+    changed["landing_gear"][0]["id"] = json!("renamed-nose-gear");
     let baseline_fp = load(&baseline).unwrap().physics_fingerprint();
     let changed_fp = load(&changed).unwrap().physics_fingerprint();
-    assert_ne!(baseline_fp, changed_fp);
-    let mut friction_changed = baseline.clone();
-    friction_changed["landing_gear"][0]["lateral_friction_coefficient"] = json!(0.5);
+    assert_eq!(baseline_fp, changed_fp);
+}
+
+#[test]
+fn every_gear_physics_parameter_and_declaration_order_changes_fingerprint() {
+    let mut contact = valid_gear_contact();
+    contact["max_brake_friction_coefficient"] = json!(0.7);
+    contact["braked"] = json!(true);
+
+    let mut baseline = v7_fixture_as_v8();
+    baseline["landing_gear"] = json!([contact]);
+    let baseline_fp = load(&baseline).unwrap().physics_fingerprint();
+
+    let mutations = [
+        ("position_body_m", json!([0.7, 0.0, 0.35])),
+        ("wheel_radius_m", json!(0.06)),
+        ("normal_stiffness_n_per_m", json!(9000.0)),
+        ("normal_damping_n_s_per_m", json!(450.0)),
+        ("longitudinal_friction_coefficient", json!(0.5)),
+        ("lateral_friction_coefficient", json!(0.8)),
+        ("rolling_resistance_coefficient", json!(0.03)),
+        ("max_brake_friction_coefficient", json!(0.6)),
+        ("max_steer_angle_rad", json!(0.35)),
+    ];
+    for (field, replacement) in mutations {
+        let mut changed = baseline.clone();
+        changed["landing_gear"][0][field] = replacement;
+        assert_ne!(
+            baseline_fp,
+            load(&changed).unwrap().physics_fingerprint(),
+            "changing {field} must change the physics fingerprint"
+        );
+    }
+
+    let mut fixed = baseline.clone();
+    fixed["landing_gear"][0]["steering"] = json!("fixed");
+    fixed["landing_gear"][0]["max_steer_angle_rad"] = json!(0.0);
+    fixed["landing_gear"][0]["steerable"] = json!(false);
+    assert_ne!(baseline_fp, load(&fixed).unwrap().physics_fingerprint());
+
+    let mut unbraked = baseline.clone();
+    unbraked["landing_gear"][0]["max_brake_friction_coefficient"] = json!(0.0);
+    unbraked["landing_gear"][0]["braked"] = json!(false);
+    assert_ne!(baseline_fp, load(&unbraked).unwrap().physics_fingerprint());
+
+    let first = baseline["landing_gear"][0].clone();
+    let mut second = first.clone();
+    second["id"] = json!("main-gear");
+    second["position_body_m"] = json!([-0.25, 0.0, 0.35]);
+    let mut ordered = v7_fixture_as_v8();
+    ordered["landing_gear"] = json!([first.clone(), second.clone()]);
+    let mut reordered = v7_fixture_as_v8();
+    reordered["landing_gear"] = json!([second, first]);
     assert_ne!(
-        baseline_fp,
-        load(&friction_changed).unwrap().physics_fingerprint()
+        load(&ordered).unwrap().physics_fingerprint(),
+        load(&reordered).unwrap().physics_fingerprint(),
+        "gear declaration order is part of deterministic physics ordering"
     );
 }
 

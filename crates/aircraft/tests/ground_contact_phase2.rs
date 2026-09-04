@@ -7,7 +7,7 @@ use sim_core::{
     FlatGroundPlane, GearContact, GroundCommand, GroundSurface, PilotInput, RigidBodyState,
     SteeringSource, contact_point_velocity_world, evaluate_ground_wrench, steering_angle_rad,
 };
-use sim_math::{Orientation, Vec3};
+use sim_math::{Orientation, Vec3, body_to_world};
 
 fn single_wheel() -> GearContact {
     GearContact {
@@ -31,6 +31,22 @@ fn level_state(cg_down_m: f64, velocity_world: Vec3) -> RigidBodyState {
         position_world_m: Vec3::new(0.0, 0.0, cg_down_m),
         linear_velocity_world_mps: velocity_world,
         orientation_world_from_body: Orientation::identity(),
+        angular_velocity_body_radps: Vec3::zeros(),
+    }
+}
+
+fn state_with_contact_penetration(
+    contact: &GearContact,
+    orientation_world_from_body: Orientation,
+    penetration_m: f64,
+    velocity_world: Vec3,
+) -> RigidBodyState {
+    let bottom_body = contact.position_body_m + Vec3::new(0.0, 0.0, contact.wheel_radius_m);
+    let bottom_offset_world = body_to_world(&orientation_world_from_body, &bottom_body);
+    RigidBodyState {
+        position_world_m: Vec3::new(0.0, 0.0, penetration_m - bottom_offset_world.z),
+        linear_velocity_world_mps: velocity_world,
+        orientation_world_from_body,
         angular_velocity_body_radps: Vec3::zeros(),
     }
 }
@@ -108,6 +124,107 @@ fn damping_opposes_penetration_velocity() {
     assert!((sinking_force - 650.0).abs() < 1.0e-9);
     assert!((rising_force - 150.0).abs() < 1.0e-9);
     assert!(sinking_force > rising_force);
+}
+
+#[test]
+fn free_rolling_uses_only_rolling_resistance() {
+    let contact = single_wheel();
+    let surface = GroundSurface::Flat(FlatGroundPlane::default());
+    let state = level_state(-0.30, Vec3::new(5.0, 0.0, 0.0));
+    let evaluation =
+        evaluate_ground_wrench(&state, &[contact], &surface, &GroundCommand::new(0.0, 0.0));
+    let normal = 400.0;
+    let expected = -contact.rolling_mu * normal;
+    assert!((evaluation.contacts[0].longitudinal_force_n - expected).abs() < 1.0e-12);
+    assert!(
+        evaluation.contacts[0].longitudinal_force_n.abs() < 0.1 * contact.long_mu * normal,
+        "free rolling must not receive the full sliding-friction force"
+    );
+}
+
+#[test]
+fn commanded_braking_adds_bounded_longitudinal_resistance() {
+    let mut contact = single_wheel();
+    contact.braked = true;
+    contact.brake_mu = 0.8;
+    let surface = GroundSurface::Flat(FlatGroundPlane::default());
+    let state = level_state(-0.30, Vec3::new(5.0, 0.0, 0.0));
+    let free = evaluate_ground_wrench(&state, &[contact], &surface, &GroundCommand::new(0.0, 0.0));
+    let braking =
+        evaluate_ground_wrench(&state, &[contact], &surface, &GroundCommand::new(0.0, 1.0));
+    let longitudinal_envelope = contact.long_mu * braking.total_normal_force_n;
+    assert!(
+        braking.contacts[0].longitudinal_force_n.abs()
+            > free.contacts[0].longitudinal_force_n.abs()
+    );
+    assert!(braking.contacts[0].longitudinal_force_n.abs() <= longitudinal_envelope + 1.0e-12);
+    assert!((braking.contacts[0].longitudinal_force_n + longitudinal_envelope).abs() < 1.0e-12);
+}
+
+#[test]
+fn longitudinal_resistance_opposes_reverse_motion_and_is_zero_at_rest() {
+    let contact = single_wheel();
+    let surface = GroundSurface::Flat(FlatGroundPlane::default());
+    let command = GroundCommand::new(0.0, 0.0);
+    let reverse = level_state(-0.30, Vec3::new(-5.0, 0.0, 0.0));
+    let reverse_evaluation = evaluate_ground_wrench(&reverse, &[contact], &surface, &command);
+    assert!(reverse_evaluation.contacts[0].longitudinal_force_n > 0.0);
+    assert!(
+        reverse_evaluation
+            .force_body_n
+            .dot(&reverse.linear_velocity_world_mps)
+            <= 0.0,
+        "rolling resistance must never propel reverse motion"
+    );
+
+    let rest = level_state(-0.30, Vec3::zeros());
+    let rest_evaluation = evaluate_ground_wrench(&rest, &[contact], &surface, &command);
+    assert_eq!(rest_evaluation.contacts[0].longitudinal_force_n, 0.0);
+    assert_eq!(rest_evaluation.contacts[0].lateral_force_n, 0.0);
+    assert!(
+        rest_evaluation
+            .force_body_n
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(
+        rest_evaluation
+            .moment_body_nm
+            .iter()
+            .all(|value| value.is_finite())
+    );
+}
+
+#[test]
+fn friction_force_is_tangent_to_ground_at_arbitrary_attitude() {
+    let contact = single_wheel();
+    let surface = GroundSurface::Flat(FlatGroundPlane::default());
+    let command = GroundCommand::new(0.0, 0.0);
+    let pitch = Orientation::from_axis_angle(&Vec3::y_axis(), 0.4);
+    let roll = Orientation::from_axis_angle(&Vec3::x_axis(), -0.35);
+    let attitudes = [
+        Orientation::identity(),
+        pitch,
+        roll,
+        pitch * roll,
+        Orientation::from_axis_angle(&Vec3::y_axis(), std::f64::consts::FRAC_PI_2),
+    ];
+    for orientation in attitudes {
+        let state =
+            state_with_contact_penetration(&contact, orientation, 0.05, Vec3::new(5.0, 2.0, 0.0));
+        let evaluation = evaluate_ground_wrench(&state, &[contact], &surface, &command);
+        assert_eq!(evaluation.active_contacts, 1);
+        assert!((evaluation.total_normal_force_n - 400.0).abs() < 1.0e-9);
+        let force_world =
+            body_to_world(&state.orientation_world_from_body, &evaluation.force_body_n);
+        let normal_world = Vec3::new(0.0, 0.0, -1.0);
+        let tangential_force = force_world - normal_world * evaluation.total_normal_force_n;
+        assert!(tangential_force.norm() > 0.0);
+        assert!(
+            tangential_force.dot(&normal_world).abs() < 1.0e-10,
+            "friction leaked into the ground normal at orientation {orientation:?}: {tangential_force:?}"
+        );
+    }
 }
 
 #[test]

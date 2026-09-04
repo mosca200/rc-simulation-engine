@@ -87,6 +87,14 @@ pub fn ground_test_model_value() -> Value {
                         { "alpha_rad": 0.0, "cl": 0.35, "cd": 0.03, "cm": 0.0 },
                         { "alpha_rad": 0.20, "cl": 1.1, "cd": 0.10, "cm": 0.0 }
                     ]
+                },
+                {
+                    "id": "symmetric-tail",
+                    "samples": [
+                        { "alpha_rad": -0.40, "cl": -1.2, "cd": 0.025, "cm": 0.0 },
+                        { "alpha_rad": 0.0, "cl": 0.0, "cd": 0.015, "cm": 0.0 },
+                        { "alpha_rad": 0.40, "cl": 1.2, "cd": 0.025, "cm": 0.0 }
+                    ]
                 }
             ],
             "polar_families": [],
@@ -98,6 +106,14 @@ pub fn ground_test_model_value() -> Value {
                     "area_m2": 0.8,
                     "chord_m": 0.3,
                     "polar_binding": { "kind": "polar", "polar_id": "flat-plate" }
+                },
+                {
+                    "id": "horizontal-tail-elevator",
+                    "position_body_m": [-0.9, 0.0, 0.0],
+                    "orientation_body_from_element_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    "area_m2": 0.2,
+                    "chord_m": 0.2,
+                    "polar_binding": { "kind": "polar", "polar_id": "symmetric-tail" }
                 }
             ],
             "surfaces": []
@@ -123,7 +139,14 @@ pub fn ground_test_model_value() -> Value {
                 }
             }
         },
-        "control_surface_bindings": [],
+        "control_surface_bindings": [
+            {
+                "id": "elevator-binding",
+                "element_id": "horizontal-tail-elevator",
+                "actuator": "elevator",
+                "deflection_gain": -1.0
+            }
+        ],
         "aero_downwash_interactions": [],
         "propeller_slipstream_interactions": [],
         "propulsion": {

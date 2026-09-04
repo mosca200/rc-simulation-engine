@@ -1052,8 +1052,6 @@ impl AircraftModelFingerprint {
             hasher.update(b"landing-gear:v1");
             update_len(&mut hasher, model.landing_gear.len());
             for contact in &model.landing_gear {
-                hasher.update(contact.id.as_bytes());
-                hasher.update(&[0u8]);
                 update_vector(&mut hasher, contact.contact.position_body_m.as_slice());
                 update_f64(&mut hasher, contact.contact.wheel_radius_m);
                 update_f64(&mut hasher, contact.contact.stiffness_n_per_m);

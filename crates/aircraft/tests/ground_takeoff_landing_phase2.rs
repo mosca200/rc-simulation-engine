@@ -1,10 +1,57 @@
 //! Phase 2 takeoff, landing, determinism, and allocation tests.
 mod common_ground;
 
-use aircraft::AircraftSimulation;
+use aircraft::{
+    AircraftSimulation, effective_aero_elements_for_positions, evaluate_aerodynamic_wrench,
+};
 use common_ground::{ground_test_config, load_ground_test_model, parked_state};
-use sim_core::PilotInput;
+use sim_core::{PilotInput, evaluate_steady_controls};
 use sim_math::Vec3;
+
+#[test]
+fn elevator_binding_changes_tail_geometry_and_pitching_wrench() {
+    let model = load_ground_test_model();
+    let config = ground_test_config();
+    let neutral_positions =
+        evaluate_steady_controls(model.controls(), &PilotInput::new(0.0, 0.0, 0.0, 0.0));
+    let rotate_positions =
+        evaluate_steady_controls(model.controls(), &PilotInput::new(0.0, 0.35, 0.0, 0.0));
+    assert!(rotate_positions.elevator_angle_rad() > neutral_positions.elevator_angle_rad());
+
+    let tail_index = model
+        .aero_elements()
+        .iter()
+        .position(|element| element.id() == "horizontal-tail-elevator")
+        .expect("fixture must contain the elevator-controlled tail");
+    let neutral_elements = effective_aero_elements_for_positions(&model, &neutral_positions);
+    let rotate_elements = effective_aero_elements_for_positions(&model, &rotate_positions);
+    assert_ne!(
+        neutral_elements[tail_index].orientation_body_from_element(),
+        rotate_elements[tail_index].orientation_body_from_element(),
+        "elevator input must change effective tail geometry"
+    );
+
+    let mut flight_state = parked_state(3.0);
+    flight_state.linear_velocity_world_mps = Vec3::new(12.0, 0.0, 0.0);
+    let neutral_wrench = evaluate_aerodynamic_wrench(
+        &flight_state,
+        &neutral_elements,
+        &model,
+        config.aero_environment(),
+    );
+    let rotate_wrench = evaluate_aerodynamic_wrench(
+        &flight_state,
+        &rotate_elements,
+        &model,
+        config.aero_environment(),
+    );
+    assert!(
+        rotate_wrench.moment_body_nm.y > neutral_wrench.moment_body_nm.y + 0.1,
+        "positive elevator command must create a measurable nose-up aerodynamic response: neutral {}, rotate {}",
+        neutral_wrench.moment_body_nm.y,
+        rotate_wrench.moment_body_nm.y
+    );
+}
 
 #[test]
 fn takeoff_emerges_from_physics_without_trigger() {
@@ -21,6 +68,8 @@ fn takeoff_emerges_from_physics_without_trigger() {
     let mut normal_decayed = false;
     let mut initial_normal = 0.0;
     let mut liftoff_step = None;
+    let mut saw_elevator_deflection = false;
+    let mut saw_nose_up_rate = false;
     for step in 0..6000 {
         let snapshot = simulation.step(&rollout);
         assert!(
@@ -30,6 +79,8 @@ fn takeoff_emerges_from_physics_without_trigger() {
                 .iter()
                 .all(|v| v.is_finite())
         );
+        saw_elevator_deflection |= snapshot.control_surface_positions().elevator_angle_rad() > 0.01;
+        saw_nose_up_rate |= snapshot.rigid_body_state().angular_velocity_body_radps.y > 0.01;
         if snapshot.weight_on_wheels() {
             saw_weight_on_wheels = true;
             if initial_normal == 0.0 {
@@ -45,6 +96,14 @@ fn takeoff_emerges_from_physics_without_trigger() {
         }
     }
     assert!(saw_weight_on_wheels, "must start with weight on wheels");
+    assert!(
+        saw_elevator_deflection,
+        "rotation command must move the elevator servo"
+    );
+    assert!(
+        saw_nose_up_rate,
+        "elevator rotation must produce a nose-up response"
+    );
     assert!(normal_decayed, "normal load must decay as lift builds");
     let liftoff = liftoff_step.expect("all contacts must eventually release");
     assert!(
