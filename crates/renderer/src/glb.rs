@@ -1,5 +1,31 @@
-use crate::mesh::{SAFE_NORMAL, SAFE_UV, Vertex};
-use crate::{AircraftMesh, MeshError};
+//! G1C: glTF/GLB asset loading with base-color texture support.
+//!
+//! Loads the G1A/G1B/G1C subset of glTF 2.0:
+//! - POSITION (required)
+//! - NORMAL (optional with fallback)
+//! - COLOR_0 (optional)
+//! - TEXCOORD_0 (optional)
+//! - pbrMetallicRoughness.baseColorFactor
+//! - pbrMetallicRoughness.baseColorTexture (G1C)
+//!
+//! # Texture Color Space
+//!
+//! Base-color textures are uploaded as sRGB (`Rgba8UnormSrgb`). The shader
+//! does not apply manual gamma correction — hardware sRGB sampling handles it.
+//!
+//! # Material Architecture
+//!
+//! Each primitive preserves its material identity. A primitive may reference:
+//! - A base color factor (RGBA)
+//! - A base color texture (with sampler settings)
+//!
+//! The combination formula is:
+//! ```text
+//! base_rgba = baseColorFactor * vertex_COLOR_0 * textureSample(baseColorTexture, TEXCOORD_0)
+//! ```
+
+use crate::mesh::{MeshError, SAFE_NORMAL, SAFE_UV, Vertex};
+use crate::texture::{DecodedTexture, SamplerConfig, TextureLoadError, decode_image};
 use gltf::buffer::Source;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -17,7 +43,7 @@ pub enum GlbLoadError {
     },
     #[error("GLB asset {path} does not contain an embedded binary buffer")]
     MissingBinaryBuffer { path: PathBuf },
-    #[error("GLB asset {path} uses an external buffer URI, which P1 does not support")]
+    #[error("GLB asset {path} uses an external buffer URI, which is not supported")]
     ExternalBuffer { path: PathBuf },
     #[error("GLB asset {path} contains no triangle mesh primitives")]
     MissingTrianglePrimitive { path: PathBuf },
@@ -54,37 +80,165 @@ pub enum GlbLoadError {
         #[source]
         source: MeshError,
     },
+    #[error(
+        "GLB asset {path} primitive {primitive_index} requests TEXCOORD_{requested} but only TEXCOORD_0 is supported"
+    )]
+    UnsupportedTexCoord {
+        path: PathBuf,
+        primitive_index: usize,
+        requested: u32,
+    },
+    #[error("GLB asset {path} has malformed image data for texture {texture_index}: {source}")]
+    MalformedImage {
+        path: PathBuf,
+        texture_index: usize,
+        #[source]
+        source: TextureLoadError,
+    },
+    #[error("GLB asset {path} image {image_index} has no buffer view data")]
+    MissingImageBufferView { path: PathBuf, image_index: usize },
 }
 
 /// Per-primitive material data extracted from the glTF document.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PrimitiveMaterial {
-    base_color: [f32; 4],
+///
+/// G1C: Now includes optional base-color texture with sampler configuration.
+#[derive(Debug, Clone)]
+pub struct PrimitiveMaterial {
+    pub base_color_factor: [f32; 4],
+    pub base_color_texture: Option<DecodedTexture>,
+    pub sampler_config: SamplerConfig,
 }
 
 impl PrimitiveMaterial {
-    fn from_gltf_material(material: &gltf::Material) -> Self {
-        let base_color = material.pbr_metallic_roughness().base_color_factor();
-        Self { base_color }
+    fn from_gltf_material(
+        material: &gltf::Material,
+        binary: &[u8],
+        path: &Path,
+        primitive_index: usize,
+    ) -> Result<Self, GlbLoadError> {
+        let pbr = material.pbr_metallic_roughness();
+        let base_color_factor = pbr.base_color_factor();
+
+        let base_color_texture = if let Some(info) = pbr.base_color_texture() {
+            // Check for unsupported texCoord set.
+            if info.tex_coord() != 0 {
+                return Err(GlbLoadError::UnsupportedTexCoord {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                    requested: info.tex_coord(),
+                });
+            }
+
+            let texture = info.texture();
+            let source = texture.source();
+            let texture_index = source.index();
+            let source_data = extract_image_data(source, binary, path)?;
+            let decoded = decode_image(&source_data).map_err(|decode_error| {
+                GlbLoadError::MalformedImage {
+                    path: path.to_path_buf(),
+                    texture_index,
+                    source: decode_error,
+                }
+            })?;
+
+            Some(decoded)
+        } else {
+            None
+        };
+
+        let sampler_config = if let Some(info) = pbr.base_color_texture() {
+            SamplerConfig::from_gltf_sampler(&info.texture().sampler())
+        } else {
+            SamplerConfig::default_sampler()
+        };
+
+        Ok(Self {
+            base_color_factor,
+            base_color_texture,
+            sampler_config,
+        })
     }
 
-    fn default_color() -> Self {
+    fn default_material() -> Self {
         Self {
-            base_color: GLTF_DEFAULT_BASE_COLOR,
+            base_color_factor: GLTF_DEFAULT_BASE_COLOR,
+            base_color_texture: None,
+            sampler_config: SamplerConfig::default_sampler(),
         }
     }
 }
 
-/// Loads the deliberately small G1A subset of glTF 2.0 from a binary GLB.
+/// Extract raw image data from a glTF image source.
+fn extract_image_data(
+    image: gltf::Image,
+    binary: &[u8],
+    path: &Path,
+) -> Result<Vec<u8>, GlbLoadError> {
+    match image.source() {
+        gltf::image::Source::View { view, .. } => {
+            let buffer = view.buffer();
+            if !matches!(buffer.source(), Source::Bin) {
+                return Err(GlbLoadError::ExternalBuffer {
+                    path: path.to_path_buf(),
+                });
+            }
+            let start = view.offset();
+            let end = start + view.length();
+            if end > binary.len() {
+                return Err(GlbLoadError::MissingImageBufferView {
+                    path: path.to_path_buf(),
+                    image_index: image.index(),
+                });
+            }
+            Ok(binary[start..end].to_vec())
+        }
+        gltf::image::Source::Uri { .. } => Err(GlbLoadError::ExternalBuffer {
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
+/// A single renderable primitive with its own material.
+#[derive(Debug, Clone)]
+pub struct RenderPrimitive {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub material: PrimitiveMaterial,
+}
+
+/// A loaded GLB asset with one or more primitives.
 ///
-/// Reads POSITION (required), NORMAL (optional with fallback), COLOR_0 (optional),
-/// TEXCOORD_0 (optional), and `pbrMetallicRoughness.baseColorFactor` per primitive.
-pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadError> {
+/// G1C: Replaces the old single-mesh representation. Each primitive preserves
+/// its material identity for correct multi-material rendering.
+#[derive(Debug, Clone)]
+pub struct GlbAsset {
+    pub primitives: Vec<RenderPrimitive>,
+}
+
+impl GlbAsset {
+    /// Total vertex count across all primitives.
+    #[must_use]
+    pub fn total_vertex_count(&self) -> usize {
+        self.primitives.iter().map(|p| p.vertices.len()).sum()
+    }
+
+    /// Total index count across all primitives.
+    #[must_use]
+    pub fn total_index_count(&self) -> usize {
+        self.primitives.iter().map(|p| p.indices.len()).sum()
+    }
+}
+
+/// Loads a GLB asset with full primitive/material/texture preservation.
+///
+/// This is the primary entry point for G1C asset loading.
+pub fn load_glb_asset(path: impl AsRef<Path>) -> Result<GlbAsset, GlbLoadError> {
     let path = path.as_ref();
     let document = gltf::Gltf::open(path).map_err(|source| GlbLoadError::Parse {
         path: path.to_path_buf(),
         source,
     })?;
+
     if document
         .buffers()
         .any(|buffer| matches!(buffer.source(), Source::Uri(_)))
@@ -93,6 +247,7 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             path: path.to_path_buf(),
         });
     }
+
     let binary = document
         .blob
         .as_deref()
@@ -100,8 +255,7 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             path: path.to_path_buf(),
         })?;
 
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+    let mut primitives = Vec::new();
     let mut triangle_primitive_count = 0_usize;
 
     for (primitive_index, primitive) in document
@@ -113,6 +267,7 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             continue;
         }
         triangle_primitive_count += 1;
+
         let reader = primitive.reader(|buffer| match buffer.source() {
             Source::Bin => Some(binary),
             Source::Uri(_) => None,
@@ -172,43 +327,65 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             });
         }
 
+        // Check for unsupported TEXCOORD_1 or higher on the primitive.
+        for attr in primitive.attributes() {
+            match attr.0 {
+                gltf::Semantic::TexCoords(set) if set != 0 => {
+                    return Err(GlbLoadError::UnsupportedTexCoord {
+                        path: path.to_path_buf(),
+                        primitive_index,
+                        requested: set,
+                    });
+                }
+                _ => {}
+            }
+        }
+
         let material = primitive
             .material()
             .index()
             .and_then(|index| document.materials().nth(index))
-            .map(|material| PrimitiveMaterial::from_gltf_material(&material))
-            .unwrap_or_else(PrimitiveMaterial::default_color);
+            .map(|material| {
+                PrimitiveMaterial::from_gltf_material(&material, binary, path, primitive_index)
+            })
+            .transpose()?
+            .unwrap_or_else(PrimitiveMaterial::default_material);
 
-        let normals = match normals {
+        let computed_normals = match normals {
             Some(explicit) => explicit.into_iter().map(normalize_or_safe).collect(),
             None => generate_area_weighted_vertex_normals(&positions, &primitive_indices),
         };
 
-        let base = u32::try_from(vertices.len()).map_err(|_| GlbLoadError::TooManyVertices {
-            path: path.to_path_buf(),
-        })?;
-
-        vertices.extend(positions.into_iter().enumerate().map(|(index, position)| {
+        let mut vertices = Vec::with_capacity(positions.len());
+        for (index, position) in positions.into_iter().enumerate() {
             let vertex_color = colors
                 .as_ref()
                 .map_or([1.0_f32, 1.0, 1.0, 1.0], |colors| colors[index]);
+
+            // G1C: Vertex color stores baseColorFactor * vertex_COLOR_0.
+            // The texture is sampled separately in the shader.
             let combined_color = [
-                material.base_color[0] * vertex_color[0],
-                material.base_color[1] * vertex_color[1],
-                material.base_color[2] * vertex_color[2],
-                material.base_color[3] * vertex_color[3],
+                material.base_color_factor[0] * vertex_color[0],
+                material.base_color_factor[1] * vertex_color[1],
+                material.base_color_factor[2] * vertex_color[2],
+                material.base_color_factor[3] * vertex_color[3],
             ];
-            Vertex {
+
+            vertices.push(Vertex {
                 position,
-                normal: normals[index],
+                normal: computed_normals[index],
                 color: combined_color,
                 uv: tex_coords
                     .as_ref()
                     .map_or(SAFE_UV, |tex_coords| tex_coords[index]),
-            }
-        }));
+            });
+        }
 
-        indices.extend(primitive_indices.iter().map(|&index| base + index));
+        primitives.push(RenderPrimitive {
+            vertices,
+            indices: primitive_indices,
+            material,
+        });
     }
 
     if triangle_primitive_count == 0 {
@@ -216,7 +393,43 @@ pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<AircraftMesh, GlbLoadErro
             path: path.to_path_buf(),
         });
     }
-    AircraftMesh::new(vertices, indices).map_err(|source| GlbLoadError::InvalidMesh {
+
+    Ok(GlbAsset { primitives })
+}
+
+/// Legacy API: Load a GLB and merge all primitives into a single mesh.
+///
+/// This preserves backward compatibility with G1A/G1B code that expects
+/// a single `AircraftMesh`. Materials are baked into vertex colors.
+///
+/// For new code that needs texture support, use `load_glb_asset` instead.
+pub fn load_glb_mesh(path: impl AsRef<Path>) -> Result<crate::AircraftMesh, GlbLoadError> {
+    let path_ref = path.as_ref();
+    let asset = load_glb_asset(path_ref)?;
+    merge_primitives_to_mesh(&asset.primitives, path_ref)
+}
+
+/// Merge multiple primitives into a single AircraftMesh.
+///
+/// This is used by the legacy `load_glb_mesh` API. Textures are ignored;
+/// only baseColorFactor * vertex_COLOR_0 is baked into vertex colors.
+fn merge_primitives_to_mesh(
+    primitives: &[RenderPrimitive],
+    path: &Path,
+) -> Result<crate::AircraftMesh, GlbLoadError> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    for primitive in primitives {
+        let base = u32::try_from(vertices.len()).map_err(|_| GlbLoadError::TooManyVertices {
+            path: path.to_path_buf(),
+        })?;
+
+        vertices.extend(primitive.vertices.iter().copied());
+        indices.extend(primitive.indices.iter().map(|&index| base + index));
+    }
+
+    crate::AircraftMesh::new(vertices, indices).map_err(|source| GlbLoadError::InvalidMesh {
         path: path.to_path_buf(),
         source,
     })
@@ -433,8 +646,9 @@ mod tests {
 
     #[test]
     fn material_base_color_factor_defaults_to_white() {
-        let material = PrimitiveMaterial::default_color();
-        assert_eq!(material.base_color, [1.0, 1.0, 1.0, 1.0]);
+        let material = PrimitiveMaterial::default_material();
+        assert_eq!(material.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
+        assert!(material.base_color_texture.is_none());
     }
 
     #[test]
@@ -542,6 +756,27 @@ mod tests {
             let length_sq = normal[0].powi(2) + normal[1].powi(2) + normal[2].powi(2);
             assert!((length_sq - 1.0).abs() < 1.0e-5);
             assert!(normal[2].abs() > 0.9);
+        }
+    }
+
+    #[test]
+    fn load_glb_asset_preserves_primitive_count() {
+        let asset = load_glb_asset(acro_asset()).unwrap();
+        assert!(!asset.primitives.is_empty());
+    }
+
+    #[test]
+    fn load_glb_asset_vertices_are_finite() {
+        let asset = load_glb_asset(acro_asset()).unwrap();
+        for primitive in &asset.primitives {
+            assert!(primitive.vertices.iter().all(|v| {
+                v.position
+                    .into_iter()
+                    .chain(v.normal)
+                    .chain(v.color)
+                    .chain(v.uv)
+                    .all(f32::is_finite)
+            }));
         }
     }
 }

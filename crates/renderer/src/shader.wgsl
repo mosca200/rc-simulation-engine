@@ -1,5 +1,4 @@
-// G1B: Procedural sky, horizon haze, distance fog.
-// G1A: Material + directional lighting foundation.
+// G1C: Base-color texture support + G1B sky/atmosphere + G1A material/lighting.
 // Deliberately simple. No PBR, no clouds, no HDR, no shadows.
 
 // ---------------------------------------------------------------------------
@@ -47,6 +46,13 @@ var<uniform> object: ObjectUniform;
 
 @group(2) @binding(0)
 var<uniform> environment: EnvironmentUniform;
+
+// G1C: Material texture and sampler.
+// Group 3 is the material bind group, containing the base color texture and sampler.
+@group(3) @binding(0)
+var base_color_texture: texture_2d<f32>;
+@group(3) @binding(1)
+var base_color_sampler: sampler;
 
 // ---------------------------------------------------------------------------
 // Vertex IO
@@ -154,7 +160,7 @@ fn fog_factor(distance: f32, density: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Scene vertex shader (aircraft, ground)
+// Scene vertex shader (aircraft, ground, terrain)
 // ---------------------------------------------------------------------------
 
 @vertex
@@ -170,14 +176,20 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Lit fragment: ambient + Lambert + distance fog.
+// Lit fragment: texture * vertex_color * lighting + distance fog.
 //
-// lit_rgb = base_color.rgb * (ambient + directional_intensity * max(dot(N, L), 0))
-// final_rgb = mix(lit_rgb, fog_color, fog_factor)
-// alpha     = base_color.a  (preserved, not lit or fogged)
+// G1C color pipeline:
+//   1. Sample base color texture (sRGB, hardware converts to linear).
+//   2. Multiply by vertex color (which already contains baseColorFactor * COLOR_0).
+//   3. Apply Lambert lighting.
+//   4. Apply distance fog.
 //
-// Fog color converges to the atmospheric horizon color so distant objects
-// visually merge with the horizon haze.
+// Formula:
+//   texture_rgba = textureSample(base_color_texture, base_color_sampler, uv)
+//   base_rgba = input.color * texture_rgba
+//   lit_rgb = base_rgba.rgb * (ambient + directional * max(dot(N, L), 0))
+//   final_rgb = mix(lit_rgb, fog_color, fog_factor)
+//   alpha = base_rgba.a (preserved, not lit or fogged)
 //
 // Deterministic defaults:
 //   ambient       = vec3(0.30)
@@ -187,10 +199,18 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 //   fog_color     = sky_horizon color
 @fragment
 fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
+    // G1C: Sample base color texture.
+    // The texture is sRGB, so hardware converts to linear during sampling.
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+
+    // Combine: vertex_color (contains baseColorFactor * COLOR_0) * texture.
+    let base_rgba = input.color * texture_rgba;
+
+    // Lighting.
     let n = normalize(input.world_normal);
     let l = normalize(environment.light_direction.xyz);
     let diffuse = max(dot(n, l), 0.0);
-    let lit_rgb = input.color.rgb * (environment.ambient.xyz + environment.light_direction.w * diffuse);
+    let lit_rgb = base_rgba.rgb * (environment.ambient.xyz + environment.light_direction.w * diffuse);
 
     // Distance fog.
     let camera_pos = camera.camera_position.xyz;
@@ -200,7 +220,7 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     let fog_color = environment.sky_horizon.xyz;
     let final_rgb = mix(lit_rgb, fog_color, fog);
 
-    return vec4<f32>(final_rgb, input.color.a);
+    return vec4<f32>(final_rgb, base_rgba.a);
 }
 
 // ---------------------------------------------------------------------------

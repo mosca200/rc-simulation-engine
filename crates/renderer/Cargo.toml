@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 bytemuck.workspace = true
 gltf.workspace = true
+image.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
 winit.workspace = true

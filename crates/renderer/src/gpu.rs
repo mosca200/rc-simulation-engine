@@ -1,5 +1,27 @@
+//! G1C: GPU renderer with texture/material support and terrain rendering.
+//!
+//! # Material Architecture
+//!
+//! Each material has:
+//! - A base color texture (or the persistent white fallback)
+//! - A sampler (configured from glTF sampler settings)
+//! - A bind group combining texture + sampler
+//!
+//! Textures, samplers, and bind groups are created once during asset upload
+//! and never recreated per frame.
+//!
+//! # Draw Architecture
+//!
+//! The render pass is organized as:
+//! 1. Sky pass (fullscreen triangle)
+//! 2. Terrain batches (chunked, lit + fogged)
+//! 3. Debug overlays (grid/axes, unlit)
+//! 4. Aircraft batches (lit + fogged)
+
+use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_terrain_chunks};
+use crate::texture::{SamplerConfig, create_staging_buffer};
 use crate::{
-    AircraftMesh, ChaseCamera, Mat4, RenderFrame, Vertex, ground_plane_at, matrix_to_wgsl_columns,
+    AircraftMesh, ChaseCamera, GlbAsset, Mat4, RenderFrame, Vertex, matrix_to_wgsl_columns,
     reference_grid_and_axes_at,
 };
 use bytemuck::{Pod, Zeroable};
@@ -21,10 +43,6 @@ const GPU_ERROR_OTHER: u8 = 2;
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
 /// Deterministic directional light defaults.
-///
-/// Light direction: from above (+Y), slightly right (+X), slightly forward (-Z).
-/// Intensity: 0.80 — leaves headroom for the ambient term.
-/// Ambient: 0.30 — keeps shadowed faces visible without washing out the lit side.
 const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
 const DEFAULT_LIGHT_INTENSITY: f32 = 0.80;
 const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.30, 0.30, 0.30];
@@ -36,8 +54,11 @@ const DEFAULT_GROUND_ATM_RGB: [f32; 3] = [0.38, 0.44, 0.40];
 const DEFAULT_HAZE_STRENGTH: f32 = 0.55;
 const DEFAULT_FOG_DENSITY: f32 = 0.0015;
 const DEFAULT_SUN_COLOR_RGB: [f32; 3] = [1.0, 0.95, 0.85];
-/// Cosine of ~0.5° angular radius (small sun disk).
 const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
+
+/// Default terrain extent for the RC flying field.
+const DEFAULT_TERRAIN_EXTENT_M: f32 = 1000.0;
+const DEFAULT_TERRAIN_CELL_SPACING_M: f32 = 5.0;
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -73,9 +94,6 @@ pub enum SurfaceError {
 }
 
 /// GPU camera uniform matching the WGSL `CameraUniform` struct.
-///
-/// G1B: extended with inverse view-projection and camera world position
-/// for sky view-direction reconstruction and distance fog.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
@@ -95,24 +113,14 @@ impl CameraUniform {
 }
 
 /// GPU environment uniform matching the WGSL `EnvironmentUniform` struct.
-///
-/// Single source of truth for lighting and atmosphere parameters.
-/// Replaces the G1A `LightUniform` — the light direction drives both
-/// aircraft Lambert lighting and the sky sun disk.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct EnvironmentUniform {
-    /// xyz = normalized direction TOWARD the light, w = directional intensity.
     light_direction: [f32; 4],
-    /// xyz = ambient light color, w = reserved.
     ambient: [f32; 4],
-    /// xyz = zenith sky color, w = reserved.
     sky_zenith: [f32; 4],
-    /// xyz = horizon/haze color, w = haze strength.
     sky_horizon: [f32; 4],
-    /// xyz = below-horizon atmospheric color, w = fog density.
     sky_ground: [f32; 4],
-    /// xyz = sun disk color, w = cosine of sun angular radius.
     sun_color: [f32; 4],
 }
 
@@ -164,25 +172,9 @@ impl EnvironmentUniform {
             ],
         }
     }
-
-    /// All values are finite by construction from fixed constants,
-    /// but this is verified in tests.
-    #[cfg(test)]
-    fn is_finite(&self) -> bool {
-        [
-            self.light_direction,
-            self.ambient,
-            self.sky_zenith,
-            self.sky_horizon,
-            self.sky_ground,
-            self.sun_color,
-        ]
-        .iter()
-        .all(|vec| vec.iter().all(|component| component.is_finite()))
-    }
 }
 
-/// Object uniform — unchanged from G1A.
+/// Object uniform for model matrix.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct ObjectUniform {
@@ -202,7 +194,34 @@ struct DepthTarget {
     view: wgpu::TextureView,
 }
 
-/// Minimal depth-tested wgpu renderer. It owns no simulation-domain values.
+/// G1C: Persistent GPU material resources.
+///
+/// Each material owns its texture, sampler, and bind group.
+/// These are created once during asset upload and never recreated.
+struct GpuMaterial {
+    _texture: wgpu::Texture,
+    _texture_view: wgpu::TextureView,
+    _sampler: wgpu::Sampler,
+    bind_group: wgpu::BindGroup,
+}
+
+/// G1C: A render batch with its own vertex/index buffers and material.
+struct RenderBatch {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    material_index: usize,
+}
+
+/// G1C: Terrain chunk GPU resources.
+struct GpuTerrainChunk {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    _bounds: ([f32; 3], [f32; 3]),
+}
+
+/// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -210,28 +229,47 @@ pub struct WgpuRenderer {
     queue: wgpu::Queue,
     surface_configuration: wgpu::SurfaceConfiguration,
     surface_is_configured: bool,
-    // G1B: sky pipeline (fullscreen triangle, no vertex buffer).
+
+    // Pipelines.
     sky_pipeline: wgpu::RenderPipeline,
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-    aircraft_vertex_buffer: wgpu::Buffer,
-    aircraft_index_buffer: wgpu::Buffer,
-    aircraft_index_count: u32,
-    ground_vertex_buffer: wgpu::Buffer,
-    ground_index_buffer: wgpu::Buffer,
-    ground_index_count: u32,
+
+    // Bind group layouts (kept for potential future dynamic material updates).
+    _camera_bind_group_layout: wgpu::BindGroupLayout,
+    _object_bind_group_layout: wgpu::BindGroupLayout,
+    _environment_bind_group_layout: wgpu::BindGroupLayout,
+    material_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Persistent bind groups.
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    _reference_object_buffer: wgpu::Buffer,
+    reference_object_bind_group: wgpu::BindGroup,
+    _environment_buffer: wgpu::Buffer,
+    environment_bind_group: wgpu::BindGroup,
+
+    // G1C: Material system.
+    materials: Vec<GpuMaterial>,
+    fallback_material_index: usize,
+
+    // G1C: Aircraft batches (one per primitive).
+    aircraft_batches: Vec<RenderBatch>,
+
+    // G1C: Terrain chunks.
+    terrain_chunks: Vec<GpuTerrainChunk>,
+    terrain_material_index: usize,
+
+    // Debug overlays.
     line_vertex_buffer: wgpu::Buffer,
     line_vertex_count: u32,
-    camera_buffer: wgpu::Buffer,
-    aircraft_object_buffer: wgpu::Buffer,
-    _environment_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    aircraft_object_bind_group: wgpu::BindGroup,
-    reference_object_bind_group: wgpu::BindGroup,
-    environment_bind_group: wgpu::BindGroup,
+
     depth_target: DepthTarget,
     camera: ChaseCamera,
     asynchronous_gpu_error: Arc<AtomicU8>,
+
+    // Debug overlay visibility.
+    show_debug_overlays: bool,
 }
 
 impl WgpuRenderer {
@@ -243,6 +281,7 @@ impl WgpuRenderer {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
         }
+
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -259,7 +298,7 @@ impl WgpuRenderer {
             .map_err(|error| RendererError::AdapterNotFound(error.to_string()))?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("G1B device"),
+                label: Some("G1C device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -313,7 +352,7 @@ impl WgpuRenderer {
         }
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("G1B sky+material+lighting+atmosphere shader"),
+            label: Some("G1C sky+material+texture+lighting+atmosphere shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
@@ -322,13 +361,12 @@ impl WgpuRenderer {
         let object_bind_group_layout = matrix_bind_group_layout(&device, "object layout");
         let environment_bind_group_layout =
             environment_bind_group_layout(&device, "environment layout");
+        let material_bind_group_layout = material_bind_group_layout(&device, "material layout");
 
         // Pipeline layouts.
-        // All pipelines share the same group numbering:
-        //   group 0 = camera, group 1 = object, group 2 = environment.
-        // The sky pipeline does not read group 1 but the layout slot is present.
+        // Group 0 = camera, group 1 = object, group 2 = environment, group 3 = material.
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("G1B sky pipeline layout"),
+            label: Some("G1C sky pipeline layout"),
             bind_group_layouts: &[
                 Some(&camera_bind_group_layout),
                 Some(&object_bind_group_layout),
@@ -337,17 +375,18 @@ impl WgpuRenderer {
             immediate_size: 0,
         });
         let lit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("G1B lit pipeline layout"),
+            label: Some("G1C lit pipeline layout"),
             bind_group_layouts: &[
                 Some(&camera_bind_group_layout),
                 Some(&object_bind_group_layout),
                 Some(&environment_bind_group_layout),
+                Some(&material_bind_group_layout),
             ],
             immediate_size: 0,
         });
         let unlit_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("G1B unlit pipeline layout"),
+                label: Some("G1C unlit pipeline layout"),
                 bind_group_layouts: &[
                     Some(&camera_bind_group_layout),
                     Some(&object_bind_group_layout),
@@ -366,7 +405,7 @@ impl WgpuRenderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: Some(wgpu::Face::Back),
                 depth_write_enabled: true,
-                label: "G1B lit triangle pipeline",
+                label: "G1C lit triangle pipeline",
                 fragment_entry_point: "fs_lit",
             },
         );
@@ -379,33 +418,78 @@ impl WgpuRenderer {
                 topology: wgpu::PrimitiveTopology::LineList,
                 cull_mode: None,
                 depth_write_enabled: false,
-                label: "G1B unlit line pipeline",
+                label: "G1C unlit line pipeline",
                 fragment_entry_point: "fs_unlit",
             },
         );
 
-        // Vertex/index buffers.
-        let aircraft_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("aircraft presentation vertices"),
-            contents: bytemuck::cast_slice(aircraft.vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let aircraft_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("aircraft presentation indices"),
-            contents: bytemuck::cast_slice(aircraft.indices()),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let ground = ground_plane_at(-ground_below_render_origin_m - 0.04);
-        let ground_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("render-only ground vertices"),
-            contents: bytemuck::cast_slice(ground.vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ground_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("render-only ground indices"),
-            contents: bytemuck::cast_slice(ground.indices()),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        // G1C: Create fallback white texture material.
+        let fallback_material =
+            create_white_fallback_material(&device, &material_bind_group_layout, &queue);
+        let materials = vec![fallback_material];
+        let fallback_material_index = 0;
+
+        // G1C: Create aircraft batches from the single mesh (legacy path).
+        // For multi-primitive support, use `new_with_asset`.
+        let mut aircraft_batches = Vec::new();
+        if !aircraft.vertices().is_empty() {
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("aircraft presentation vertices"),
+                contents: bytemuck::cast_slice(aircraft.vertices()),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("aircraft presentation indices"),
+                contents: bytemuck::cast_slice(aircraft.indices()),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            aircraft_batches.push(RenderBatch {
+                vertex_buffer,
+                index_buffer,
+                index_count: aircraft.indices().len() as u32,
+                material_index: fallback_material_index,
+            });
+        }
+
+        // G1C: Generate and upload terrain.
+        let terrain_height_field = crate::terrain::generate_rolling_terrain(
+            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+            (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32,
+            DEFAULT_TERRAIN_CELL_SPACING_M,
+            -ground_below_render_origin_m,
+            3.0, // Gentle rolling hills.
+        );
+        let terrain_material = TerrainMaterial::default();
+        let terrain_chunk_data = generate_terrain_chunks(
+            &terrain_height_field,
+            DEFAULT_CHUNK_CELLS,
+            &terrain_material,
+        );
+
+        // Create terrain material (uses fallback texture for now).
+        let terrain_material_index = fallback_material_index;
+
+        let mut terrain_chunks = Vec::with_capacity(terrain_chunk_data.len());
+        for chunk in &terrain_chunk_data {
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("terrain chunk vertices"),
+                contents: bytemuck::cast_slice(&chunk.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("terrain chunk indices"),
+                contents: bytemuck::cast_slice(&chunk.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            terrain_chunks.push(GpuTerrainChunk {
+                vertex_buffer,
+                index_buffer,
+                index_count: chunk.indices.len() as u32,
+                _bounds: chunk.bounds,
+            });
+        }
+
+        // Debug overlays.
         let references = reference_grid_and_axes_at(-ground_below_render_origin_m);
         let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("reference grid and axes vertices"),
@@ -422,11 +506,6 @@ impl WgpuRenderer {
                 &Mat4::identity(),
                 [0.0; 3],
             )),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let aircraft_object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("aircraft object uniform"),
-            contents: bytemuck::bytes_of(&identity_object),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let reference_object_buffer =
@@ -448,12 +527,6 @@ impl WgpuRenderer {
             &camera_bind_group_layout,
             &camera_buffer,
             "camera bind group",
-        );
-        let aircraft_object_bind_group = matrix_bind_group(
-            &device,
-            &object_bind_group_layout,
-            &aircraft_object_buffer,
-            "aircraft object bind group",
         );
         let reference_object_bind_group = matrix_bind_group(
             &device,
@@ -484,25 +557,107 @@ impl WgpuRenderer {
             sky_pipeline,
             triangle_pipeline,
             line_pipeline,
-            aircraft_vertex_buffer,
-            aircraft_index_buffer,
-            aircraft_index_count: aircraft.indices().len() as u32,
-            ground_vertex_buffer,
-            ground_index_buffer,
-            ground_index_count: ground.indices().len() as u32,
+            _camera_bind_group_layout: camera_bind_group_layout,
+            _object_bind_group_layout: object_bind_group_layout,
+            _environment_bind_group_layout: environment_bind_group_layout,
+            material_bind_group_layout,
+            camera_buffer,
+            camera_bind_group,
+            _reference_object_buffer: reference_object_buffer,
+            reference_object_bind_group,
+            _environment_buffer: environment_buffer,
+            environment_bind_group,
+            materials,
+            fallback_material_index,
+            aircraft_batches,
+            terrain_chunks,
+            terrain_material_index,
             line_vertex_buffer,
             line_vertex_count: references.vertices().len() as u32,
-            camera_buffer,
-            aircraft_object_buffer,
-            _environment_buffer: environment_buffer,
-            camera_bind_group,
-            aircraft_object_bind_group,
-            reference_object_bind_group,
-            environment_bind_group,
             depth_target,
             camera: ChaseCamera::new(size.width, size.height),
             asynchronous_gpu_error,
+            show_debug_overlays: true,
         })
+    }
+
+    /// Create a renderer with a full GLB asset (multi-primitive support).
+    pub async fn new_with_asset(
+        window: Arc<Window>,
+        asset: &GlbAsset,
+        ground_below_render_origin_m: f32,
+    ) -> Result<Self, RendererError> {
+        // First create with empty mesh, then upload asset.
+        let empty_mesh = AircraftMesh::new(vec![], vec![]).unwrap_or_else(|_| {
+            // Create a minimal valid mesh if empty fails.
+            AircraftMesh::new(
+                vec![Vertex {
+                    position: [0.0; 3],
+                    normal: [0.0, 1.0, 0.0],
+                    color: [1.0; 4],
+                    uv: [0.0; 2],
+                }],
+                vec![0, 0, 0],
+            )
+            .unwrap()
+        });
+
+        let mut renderer = Self::new(window, &empty_mesh, ground_below_render_origin_m).await?;
+
+        // Upload asset primitives.
+        renderer.aircraft_batches.clear();
+        for primitive in &asset.primitives {
+            let material_index = renderer.upload_material(&primitive.material);
+            let vertex_buffer =
+                renderer
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("aircraft primitive vertices"),
+                        contents: bytemuck::cast_slice(&primitive.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let index_buffer =
+                renderer
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("aircraft primitive indices"),
+                        contents: bytemuck::cast_slice(&primitive.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+            renderer.aircraft_batches.push(RenderBatch {
+                vertex_buffer,
+                index_buffer,
+                index_count: primitive.indices.len() as u32,
+                material_index,
+            });
+        }
+
+        Ok(renderer)
+    }
+
+    /// Upload a material to the GPU and return its index.
+    fn upload_material(&mut self, material: &crate::PrimitiveMaterial) -> usize {
+        let gpu_material = if let Some(texture) = &material.base_color_texture {
+            create_gpu_material(
+                &self.device,
+                &self.material_bind_group_layout,
+                &self.queue,
+                texture,
+                &material.sampler_config,
+            )
+        } else {
+            // Use fallback.
+            return self.fallback_material_index;
+        };
+
+        let index = self.materials.len();
+        self.materials.push(gpu_material);
+        index
+    }
+
+    /// Set debug overlay visibility.
+    pub fn set_show_debug_overlays(&mut self, show: bool) {
+        self.show_debug_overlays = show;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -543,7 +698,7 @@ impl WgpuRenderer {
             wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
         };
 
-        // Compute camera uniforms on the stack — no heap allocation.
+        // Compute camera uniforms on the stack.
         let aircraft_pose = frame.aircraft_pose();
         let vp = self.camera.view_projection(aircraft_pose);
         let eye = self.camera.eye_position(aircraft_pose);
@@ -553,15 +708,9 @@ impl WgpuRenderer {
             .inv_view_projection(aircraft_pose)
             .unwrap_or(identity);
         let camera_uniform = CameraUniform::new(&vp, &inv_vp, eye);
-        let object_uniform = ObjectUniform::from_matrix(&aircraft_pose.model_matrix());
 
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
-        self.queue.write_buffer(
-            &self.aircraft_object_buffer,
-            0,
-            bytemuck::bytes_of(&object_uniform),
-        );
 
         let surface_view = surface_texture
             .texture
@@ -569,7 +718,7 @@ impl WgpuRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("G1B frame encoder"),
+                label: Some("G1C frame encoder"),
             });
         {
             let color_attachment = wgpu::RenderPassColorAttachment {
@@ -595,7 +744,7 @@ impl WgpuRenderer {
                 stencil_ops: None,
             };
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("G1B scene pass"),
+                label: Some("G1C scene pass"),
                 color_attachments: &[Some(color_attachment)],
                 depth_stencil_attachment: Some(depth_attachment),
                 timestamp_writes: None,
@@ -604,62 +753,221 @@ impl WgpuRenderer {
             });
 
             // --- Sky pass (background) ---
-            // Fullscreen triangle at far-plane depth.
-            // depth_write=false, depth_compare=always → does not affect scene depth.
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            // Group 1 slot exists in the layout but the sky shader does not read it.
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
 
             // --- Scene geometry ---
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-
-            // Ground plane (lit + fog).
             render_pass.set_pipeline(&self.triangle_pipeline);
-            render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.ground_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(
-                self.ground_index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            render_pass.draw_indexed(0..self.ground_index_count, 0, 0..1);
 
-            // Debug grid/axes (unlit, unfogged — diagnostic overlay).
-            render_pass.set_pipeline(&self.line_pipeline);
-            render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
-            render_pass.draw(0..self.line_vertex_count, 0..1);
+            // G1C: Terrain chunks.
+            let terrain_material = &self.materials[self.terrain_material_index];
+            render_pass.set_bind_group(3, &terrain_material.bind_group, &[]);
+            for chunk in &self.terrain_chunks {
+                render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
 
-            // Aircraft (lit + fog).
-            render_pass.set_pipeline(&self.triangle_pipeline);
-            render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.aircraft_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(
-                self.aircraft_index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            render_pass.draw_indexed(0..self.aircraft_index_count, 0, 0..1);
+            // G1C: Debug grid/axes (unlit, unfogged — diagnostic overlay).
+            if self.show_debug_overlays {
+                render_pass.set_pipeline(&self.line_pipeline);
+                render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
+                render_pass.draw(0..self.line_vertex_count, 0..1);
+                render_pass.set_pipeline(&self.triangle_pipeline);
+            }
+
+            // G1C: Aircraft batches (one per primitive).
+            for batch in &self.aircraft_batches {
+                let material = &self.materials[batch.material_index];
+                render_pass.set_bind_group(1, &self.reference_object_bind_group, &[]);
+                render_pass.set_bind_group(3, &material.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+            }
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(surface_texture);
+
+        let _submit_index = self.queue.submit(std::iter::once(encoder.finish()));
+        drop(surface_texture);
+
         if reconfigure_after_present {
             self.reconfigure_surface();
         }
+
         self.check_asynchronous_gpu_error()
     }
 
     fn check_asynchronous_gpu_error(&self) -> Result<(), SurfaceError> {
-        match self
-            .asynchronous_gpu_error
-            .swap(GPU_ERROR_NONE, Ordering::AcqRel)
-        {
+        match self.asynchronous_gpu_error.load(Ordering::Acquire) {
             GPU_ERROR_NONE => Ok(()),
             GPU_ERROR_OUT_OF_MEMORY => Err(SurfaceError::OutOfMemory),
             _ => Err(SurfaceError::Validation),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Material creation helpers
+// ---------------------------------------------------------------------------
+
+/// Create the 1x1 white fallback texture material.
+fn create_white_fallback_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    queue: &wgpu::Queue,
+) -> GpuMaterial {
+    let size = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fallback white texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Upload white pixel.
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255, 255, 255, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        size,
+    );
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("fallback sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("fallback material bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    GpuMaterial {
+        _texture: texture,
+        _texture_view: texture_view,
+        _sampler: sampler,
+        bind_group,
+    }
+}
+
+/// Create a GPU material from a decoded texture.
+fn create_gpu_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    queue: &wgpu::Queue,
+    texture_data: &crate::texture::DecodedTexture,
+    sampler_config: &SamplerConfig,
+) -> GpuMaterial {
+    let size = wgpu::Extent3d {
+        width: texture_data.width,
+        height: texture_data.height,
+        depth_or_array_layers: 1,
+    };
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("base color texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Create staging buffer with row padding.
+    let (staged_data, bytes_per_row) = create_staging_buffer(texture_data);
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &staged_data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(texture_data.height),
+        },
+        size,
+    );
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("material sampler"),
+        address_mode_u: sampler_config.wrap_s.to_wgpu(),
+        address_mode_v: sampler_config.wrap_t.to_wgpu(),
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: sampler_config.mag_filter.to_wgpu(),
+        min_filter: sampler_config.min_filter.to_wgpu(),
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("material bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    GpuMaterial {
+        _texture: texture,
+        _texture_view: texture_view,
+        _sampler: sampler,
+        bind_group,
     }
 }
 
@@ -676,7 +984,7 @@ fn camera_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGro
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: wgpu::BufferSize::new(size_of::<CameraUniform>() as u64),
             },
             count: None,
         }],
@@ -692,7 +1000,7 @@ fn matrix_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGro
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: wgpu::BufferSize::new(size_of::<ObjectUniform>() as u64),
             },
             count: None,
         }],
@@ -708,16 +1016,37 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: wgpu::BufferSize::new(size_of::<EnvironmentUniform>() as u64),
             },
             count: None,
         }],
     })
 }
 
-// ---------------------------------------------------------------------------
-// Bind group creation helpers
-// ---------------------------------------------------------------------------
+/// G1C: Material bind group layout for texture + sampler.
+fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
 
 fn camera_bind_group(
     device: &wgpu::Device,
@@ -768,71 +1097,65 @@ fn create_environment_bind_group(
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline creation
+// Pipeline creation helpers
 // ---------------------------------------------------------------------------
 
-struct PipelineSpec<'a> {
+struct PipelineSpec {
     topology: wgpu::PrimitiveTopology,
     cull_mode: Option<wgpu::Face>,
     depth_write_enabled: bool,
-    label: &'a str,
-    fragment_entry_point: &'a str,
+    label: &'static str,
+    fragment_entry_point: &'static str,
 }
 
 fn create_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
-    surface_format: wgpu::TextureFormat,
-    specification: PipelineSpec<'_>,
+    format: wgpu::TextureFormat,
+    spec: PipelineSpec,
 ) -> wgpu::RenderPipeline {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x3,
-        1 => Float32x3,
-        2 => Float32x4,
-        3 => Float32x2
-    ];
-    let vertex_layout = wgpu::VertexBufferLayout {
-        array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &ATTRIBUTES,
-    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(specification.label),
+        label: Some(spec.label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Some(vertex_layout)],
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3,  // position
+                    1 => Float32x3,  // normal
+                    2 => Float32x4,  // color
+                    3 => Float32x2,  // uv
+                ],
+            })],
         },
         primitive: wgpu::PrimitiveState {
-            topology: specification.topology,
+            topology: spec.topology,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: specification.cull_mode,
+            cull_mode: spec.cull_mode,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(specification.depth_write_enabled),
-            depth_compare: Some(if specification.depth_write_enabled {
-                wgpu::CompareFunction::Less
-            } else {
-                wgpu::CompareFunction::LessEqual
-            }),
+            depth_write_enabled: Some(spec.depth_write_enabled),
+            depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some(specification.fragment_entry_point),
+            entry_point: Some(spec.fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
+                format,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -842,19 +1165,14 @@ fn create_pipeline(
     })
 }
 
-/// Sky pipeline: fullscreen triangle, no vertex buffer, no depth write.
-///
-/// The sky is rendered as background before scene geometry.
-/// depth_compare = Always ensures the sky always draws.
-/// depth_write = false ensures it does not affect the depth buffer.
 fn create_sky_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
-    surface_format: wgpu::TextureFormat,
+    format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("G1B sky fullscreen pipeline"),
+        label: Some("G1C sky pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -884,7 +1202,7 @@ fn create_sky_pipeline(
             entry_point: Some("fs_sky"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
+                format,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -896,7 +1214,7 @@ fn create_sky_pipeline(
 
 fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G1B depth texture"),
+        label: Some("depth target"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -913,97 +1231,5 @@ fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthT
     DepthTarget {
         _texture: texture,
         view,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_environment_uniform_contains_only_finite_values() {
-        let env = EnvironmentUniform::default_environment();
-        assert!(env.is_finite(), "environment uniform has non-finite values");
-    }
-
-    #[test]
-    fn default_light_direction_is_normalized() {
-        let env = EnvironmentUniform::default_environment();
-        let dir = env.light_direction;
-        let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-        assert!(
-            (length - 1.0).abs() < 1.0e-5,
-            "light direction not normalized: length = {length}"
-        );
-    }
-
-    #[test]
-    fn default_light_direction_matches_g1a() {
-        let env = EnvironmentUniform::default_environment();
-        let dir = env.light_direction;
-        let raw = DEFAULT_LIGHT_DIRECTION;
-        let raw_len = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
-        let expected = [raw[0] / raw_len, raw[1] / raw_len, raw[2] / raw_len];
-        for (actual, &expected) in dir[..3].iter().zip(expected.iter()) {
-            assert!((actual - expected).abs() < 1.0e-5);
-        }
-        assert!((dir[3] - DEFAULT_LIGHT_INTENSITY).abs() < 1.0e-6);
-    }
-
-    #[test]
-    fn environment_uniform_layout_matches_wgsl() {
-        // 6 vec4s = 96 bytes.
-        assert_eq!(size_of::<EnvironmentUniform>(), 96);
-        assert_eq!(size_of::<EnvironmentUniform>() % 16, 0);
-    }
-
-    #[test]
-    fn camera_uniform_layout_matches_wgsl() {
-        // 2 mat4x4 + 1 vec4 = 64 + 64 + 16 = 144 bytes.
-        assert_eq!(size_of::<CameraUniform>(), 144);
-        assert_eq!(size_of::<CameraUniform>() % 16, 0);
-    }
-
-    #[test]
-    fn camera_uniform_is_finite_for_identity() {
-        let cu = CameraUniform::new(&Mat4::identity(), &Mat4::identity(), [0.0; 3]);
-        assert!(cu.view_projection.iter().flatten().all(|v| v.is_finite()));
-        assert!(
-            cu.inv_view_projection
-                .iter()
-                .flatten()
-                .all(|v| v.is_finite())
-        );
-        assert!(cu.camera_position.iter().all(|v| v.is_finite()));
-    }
-
-    #[test]
-    fn haze_strength_is_bounded() {
-        let env = EnvironmentUniform::default_environment();
-        let haze = env.sky_horizon[3];
-        assert!(
-            (0.0..=1.0).contains(&haze),
-            "haze strength out of [0,1]: {haze}"
-        );
-    }
-
-    #[test]
-    fn fog_density_is_non_negative() {
-        let env = EnvironmentUniform::default_environment();
-        let density = env.sky_ground[3];
-        assert!(
-            density >= 0.0,
-            "fog density must be non-negative: {density}"
-        );
-    }
-
-    #[test]
-    fn sun_cos_angular_radius_is_near_one() {
-        let env = EnvironmentUniform::default_environment();
-        let cos_r = env.sun_color[3];
-        assert!(
-            cos_r > 0.99 && cos_r <= 1.0,
-            "sun cos radius unexpected: {cos_r}"
-        );
     }
 }

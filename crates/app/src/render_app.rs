@@ -151,7 +151,7 @@ pub enum RenderAppError {
     PresentationAsset {
         path: PathBuf,
         #[source]
-        source: GlbLoadError,
+        source: Box<GlbLoadError>,
     },
     #[error("failed to initialize AircraftSimulation for render mode: {0}")]
     AircraftSimulation(#[from] AircraftSimulationError),
@@ -522,7 +522,10 @@ fn resolve_aircraft_mesh(
         return Ok(aircraft_mesh());
     };
     let path = resolve_presentation_path(model_path, glb_path);
-    load_glb_mesh(&path).map_err(|source| RenderAppError::PresentationAsset { path, source })
+    load_glb_mesh(&path).map_err(|source| RenderAppError::PresentationAsset {
+        path,
+        source: Box::new(source),
+    })
 }
 
 fn render_initial_state(altitude_m: f64, airspeed_mps: f64) -> RigidBodyState {

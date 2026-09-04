@@ -23,6 +23,7 @@ bytemuck = { version = "1.23", features = ["derive"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
 gltf = { version = "1.4", default-features = false, features = ["utils"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 nalgebra = { version = "0.34", features = ["serde-serialize"] }
 pollster = "0.4"
 serde = { version = "1.0", features = ["derive"] }
