@@ -602,6 +602,7 @@ fn vector_to_array(vector: Vec3) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use replay::{AircraftReplayPlayer, AircraftReplayRecording};
 
     #[test]
     fn throttle_parser_accepts_bounds_and_rejects_invalid_values() {
@@ -727,5 +728,91 @@ mod tests {
                 panic!("expected Glb variant for real GLB model");
             }
         }
+    }
+
+    #[test]
+    fn declared_valid_missing_and_invalid_assets_have_explicit_outcomes() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let valid = resolve_presentation_model(&model_path, Some("aircraft.glb")).unwrap();
+        match valid {
+            PresentationModel::Glb(asset) => assert!(!asset.primitives.is_empty()),
+            PresentationModel::Procedural(_) => panic!("expected Glb for valid asset"),
+        }
+        assert!(matches!(
+            resolve_presentation_model(&model_path, Some("missing.glb")),
+            Err(RenderAppError::PresentationAsset { .. })
+        ));
+        assert!(matches!(
+            resolve_presentation_model(&model_path, Some("README.md")),
+            Err(RenderAppError::PresentationAsset { .. })
+        ));
+    }
+
+    #[test]
+    fn absent_presentation_metadata_uses_procedural_fallback() {
+        let result = resolve_presentation_model(Path::new("model.json"), None).unwrap();
+        match result {
+            PresentationModel::Procedural(mesh) => {
+                assert!(!mesh.vertices().is_empty());
+                assert!(!mesh.indices().is_empty());
+            }
+            PresentationModel::Glb(_) => panic!("expected procedural fallback"),
+        }
+    }
+
+    #[test]
+    fn presentation_asset_does_not_change_acro_physics_fingerprint() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        let before = model.physics_fingerprint();
+        let _presentation = resolve_presentation_model(
+            &model_path,
+            model.presentation().map(|value| value.glb_path()),
+        )
+        .unwrap();
+        assert_eq!(model.physics_fingerprint(), before);
+    }
+
+    #[test]
+    fn live_recording_uses_exact_sampled_input_and_s8a_step_semantics() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/acro_electric_01/model.json");
+        let model = load_aircraft_model(&model_path).unwrap();
+        let config = AircraftSimulationConfig::from_physics_hz(
+            DEFAULT_PHYSICS_HZ,
+            AeroEnvironment::new(1.225, Vec3::zeros()).unwrap(),
+        )
+        .unwrap();
+        let initial_state = RigidBodyState {
+            position_world_m: Vec3::new(0.0, 0.0, -100.0),
+            linear_velocity_world_mps: Vec3::new(18.0, 0.0, 0.0),
+            orientation_world_from_body: Orientation::identity(),
+            angular_velocity_body_radps: Vec3::zeros(),
+        };
+        let mut simulation = AircraftSimulation::new(model.clone(), config, initial_state).unwrap();
+        let mut recorder = Some(AircraftReplayRecorder::new(&simulation).unwrap());
+        let mut input_state = InputState::default();
+        input_state.set_key(KeyboardKey::PitchUp, true);
+        input_state.set_key(KeyboardKey::ThrottleIncrease, true);
+        let mut applied = Vec::new();
+        for _ in 0..3 {
+            let input = input_state.sample(0.002).unwrap();
+            applied.push(input);
+            advance_aircraft(&mut simulation, &mut recorder, input).unwrap();
+        }
+        let recording = recorder.take().unwrap().finish();
+        for (step_index, (frame, expected_input)) in
+            recording.frames().iter().zip(applied).enumerate()
+        {
+            assert_eq!(frame.step_index(), step_index as u64);
+            assert_eq!(frame.pilot_input(), expected_input);
+        }
+        let json = recording.to_json_pretty().unwrap();
+        let decoded = AircraftReplayRecording::from_json(&json).unwrap();
+        let mut replayed = decoded.reconstruct_simulation(model).unwrap();
+        let player = AircraftReplayPlayer::new(&decoded, &replayed).unwrap();
+        assert_eq!(player.verify_all(&mut replayed).unwrap(), 3);
     }
 }

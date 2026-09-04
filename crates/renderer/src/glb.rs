@@ -918,14 +918,38 @@ mod test_glb_builder {
                 // Compute min/max for the second primitive's positions.
                 let second = self.second_primitive.as_ref().unwrap();
                 let s_min = [
-                    second.positions.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min),
-                    second.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min),
-                    second.positions.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[0])
+                        .fold(f32::INFINITY, f32::min),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[1])
+                        .fold(f32::INFINITY, f32::min),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[2])
+                        .fold(f32::INFINITY, f32::min),
                 ];
                 let s_max = [
-                    second.positions.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max),
-                    second.positions.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max),
-                    second.positions.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[0])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[1])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                    second
+                        .positions
+                        .iter()
+                        .map(|p| p[2])
+                        .fold(f32::NEG_INFINITY, f32::max),
                 ];
                 accessors.push(format!(
                     r#"{{"bufferView":{},"componentType":5126,"count":{},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}}"#,

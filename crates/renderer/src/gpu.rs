@@ -27,11 +27,12 @@
 //!
 //! # Surface Presentation
 //!
-//! wgpu 30 presents frames when the `SurfaceTexture` is dropped after
-//! `queue.submit()`. No explicit `present()` call is needed.
+//! After `queue.submit()`, frames are presented by calling
+//! `queue.present(surface_texture)` to schedule the acquired surface texture
+//! for presentation.
 
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
-use crate::texture::{SamplerConfig, create_staging_buffer};
+use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer};
 use crate::{
     AircraftMesh, ChaseCamera, GlbAsset, Mat4, RenderFrame, Vertex, matrix_to_wgsl_columns,
     reference_grid_and_axes_at,
@@ -91,6 +92,8 @@ pub enum RendererError {
     SurfaceWithoutAlphaModes,
     #[error("ground distance below the render origin must be finite and positive")]
     InvalidGroundReference,
+    #[error("failed to upload texture to GPU: {0}")]
+    TextureUpload(#[source] TextureLoadError),
 }
 
 /// Presentation failures normalized from wgpu 30's `CurrentSurfaceTexture` API.
@@ -452,21 +455,22 @@ impl WgpuRenderer {
         match asset {
             PresentationAsset::Glb(glb_asset) => {
                 for primitive in &glb_asset.primitives {
-                    let material_index = if let Some(texture) = &primitive.material.base_color_texture {
-                        // Upload texture material.
-                        let gpu_material = create_gpu_material(
-                            &device,
-                            &material_bind_group_layout,
-                            &queue,
-                            texture,
-                            &primitive.material.sampler_config,
-                        );
-                        let index = materials.len();
-                        materials.push(gpu_material);
-                        index
-                    } else {
-                        fallback_material_index
-                    };
+                    let material_index =
+                        if let Some(texture) = &primitive.material.base_color_texture {
+                            // Upload texture material.
+                            let gpu_material = create_gpu_material(
+                                &device,
+                                &material_bind_group_layout,
+                                &queue,
+                                texture,
+                                &primitive.material.sampler_config,
+                            )?;
+                            let index = materials.len();
+                            materials.push(gpu_material);
+                            index
+                        } else {
+                            fallback_material_index
+                        };
 
                     if !primitive.vertices.is_empty() {
                         let vertex_buffer =
@@ -844,9 +848,7 @@ impl WgpuRenderer {
         }
 
         let _submit_index = self.queue.submit(std::iter::once(encoder.finish()));
-        // FIX 10: In wgpu 30, dropping the SurfaceTexture after queue.submit()
-        // presents the frame. No explicit present() call is needed.
-        drop(surface_texture);
+        self.queue.present(surface_texture);
 
         if reconfigure_after_present {
             self.reconfigure_surface();
@@ -946,7 +948,7 @@ fn create_gpu_material(
     queue: &wgpu::Queue,
     texture_data: &crate::texture::DecodedTexture,
     sampler_config: &SamplerConfig,
-) -> GpuMaterial {
+) -> Result<GpuMaterial, RendererError> {
     let size = wgpu::Extent3d {
         width: texture_data.width,
         height: texture_data.height,
@@ -967,8 +969,8 @@ fn create_gpu_material(
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // FIX 5: create_staging_buffer now returns Result.
-    let (staged_data, bytes_per_row) = create_staging_buffer(texture_data)
-        .expect("staging buffer creation should not fail for valid decoded textures");
+    let (staged_data, bytes_per_row) =
+        create_staging_buffer(texture_data).map_err(RendererError::TextureUpload)?;
 
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -1012,12 +1014,12 @@ fn create_gpu_material(
         ],
     });
 
-    GpuMaterial {
+    Ok(GpuMaterial {
         _texture: texture,
         _texture_view: texture_view,
         _sampler: sampler,
         bind_group,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
