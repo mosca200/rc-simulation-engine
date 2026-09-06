@@ -13,5 +13,15 @@ thiserror.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
+[dev-dependencies]
+# G3A: static WGSL validation (the crate wgpu 30 embeds as `naga`); pinned to
+# the exact lock version so the parse test can never drift from the runtime.
+naga = "=30.0.1"
+# G3A-R: headless GPU tests (texture upload readback + offscreen fs_terrain
+# render) need a tiny executor to drive wgpu's async adapter/device creation.
+# The tests are #[ignore]d so CPU-only CI stays green; run them locally with
+# `cargo test -p renderer --lib -- --ignored`.
+pollster.workspace = true
+
 [lints]
 workspace = true

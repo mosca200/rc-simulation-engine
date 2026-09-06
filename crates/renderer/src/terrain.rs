@@ -41,10 +41,18 @@
 //!
 //! # Material Strategy
 //!
-//! The terrain material base_color_factor is baked into vertex colors at chunk
-//! generation time. The shader's texture * vertex_color pipeline with a white
-//! fallback texture produces the correct terrain color. This avoids a separate
-//! terrain shading path while keeping the material pipeline uniform.
+//! G3A: the terrain is a textured PBR surface. `TerrainMaterial` carries the
+//! metallic/roughness/normal-strength factors and per-map UV offsets that are
+//! uploaded once into the dedicated terrain material bind group; the shader
+//! entry `fs_terrain` reuses the G1D PBR response with a sampled albedo,
+//! tangent-space normal map, and roughness map, all tiled in world-space
+//! metres.
+//!
+//! The `base_color_factor` is baked into vertex colors at chunk generation
+//! time. In the textured configuration the default base is white: the shader
+//! multiplies the (G2D-modulated) vertex color by the albedo texture sample,
+//! so the texture is the chromatic authority while G2D stays the macro
+//! brightness/tint variation on top of it.
 
 use crate::mesh::{SAFE_NORMAL, Vertex};
 use std::f32::consts::PI;
@@ -54,6 +62,78 @@ use std::f32::consts::PI;
 /// At 4.0m per tile, a 512x512 texture covers a 2km x 2km field with
 /// reasonable ground detail without appearing stretched.
 pub const DEFAULT_TERRAIN_TEXTURE_SCALE_M: f32 = 4.0;
+
+// ---------------------------------------------------------------------------
+// G3A-R: three-frequency stack tuning (central, documented constants)
+// ---------------------------------------------------------------------------
+
+/// Macro layer tile scale in metres: breaks the large uniform field patches
+/// (order 30-80 m). The same albedo texture is sampled at this much larger
+/// tile scale and blended softly underneath the base layer.
+pub const DEFAULT_TERRAIN_MACRO_SCALE_M: f32 = 48.0;
+
+/// Detail layer tile scale in metres: perceptible grass texture close to the
+/// camera/runway (order 0.25-0.5 m), faded out with distance.
+pub const DEFAULT_TERRAIN_DETAIL_SCALE_M: f32 = 0.40;
+
+/// Macro layer UV anchor (tile units) so its borders never align with the
+/// base tile grid.
+pub const DEFAULT_TERRAIN_MACRO_UV_OFFSET: [f32; 2] = [0.170, 0.390];
+
+/// Detail layer UV anchor (tile units) so its borders never align with the
+/// base tile grid.
+pub const DEFAULT_TERRAIN_DETAIL_UV_OFFSET: [f32; 2] = [0.163, 0.037];
+
+/// Anti-repetition second-sample scale factor: the rotated sample tiles at
+/// `base_scale * ar_scale` metres, so its tile borders run at a different
+/// frequency and angle from the base grid.
+pub const DEFAULT_TERRAIN_AR_SCALE: f32 = 1.370;
+
+/// Anti-repetition second-sample rotation (degrees). Non-axis-aligned so the
+/// rotated tile borders never line up with either world axis.
+pub const DEFAULT_TERRAIN_AR_ANGLE_DEGREES: f32 = 27.0;
+
+/// Anti-repetition second-sample UV offset (tile units).
+pub const DEFAULT_TERRAIN_AR_OFFSET: [f32; 2] = [0.315, 0.571];
+
+/// Distance (metres) at which the detail normal layer starts fading.
+pub const DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_NEAR_M: f32 = 20.0;
+
+/// Distance (metres) at which the detail normal layer is fully faded out;
+/// beyond this only base/macro structure remains.
+pub const DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_FAR_M: f32 = 80.0;
+
+/// CPU mirror of the WGSL detail fade: 1.0 at/near `near_m`, 0.0 at/beyond
+/// `far_m`, with a smoothstep (zero-derivative) falloff so no popping can
+/// occur. Shared documentation authority for the shader's smoothstep.
+#[must_use]
+pub fn detail_normal_fade_weight(distance_m: f32, near_m: f32, far_m: f32) -> f32 {
+    debug_assert!(
+        near_m >= 0.0 && far_m > near_m,
+        "fade range must be ascending"
+    );
+    let t = ((distance_m - near_m) / (far_m - near_m).max(1e-6)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
+/// CPU mirror of the WGSL anti-repetition UV transform: rotate the base
+/// world-space UV by `angle_degrees`, scale it by `ar_scale`, and shift it
+/// by `ar_offset` (tile units). Pure and deterministic — the same world
+/// position always resolves to the same second-sample UV, across chunks.
+#[must_use]
+pub fn rotated_secondary_uv(
+    uv: [f32; 2],
+    ar_scale: f32,
+    angle_degrees: f32,
+    ar_offset: [f32; 2],
+) -> [f32; 2] {
+    let radians = angle_degrees * PI / 180.0;
+    let (sin, cos) = radians.sin_cos();
+    [
+        (cos * uv[0] - sin * uv[1]) * ar_scale + ar_offset[0],
+        (sin * uv[0] + cos * uv[1]) * ar_scale + ar_offset[1],
+    ]
+}
 
 /// Default chunk size in cells.
 ///
@@ -183,23 +263,89 @@ impl TerrainHeightField {
 
 /// Terrain material configuration.
 ///
-/// The `base_color_factor` is baked into terrain vertex colors at chunk
-/// generation time. The shader multiplies vertex color by the (white fallback)
-/// texture, producing the correct terrain color without a separate shading path.
+/// G3A: the default configuration is the textured grass surface. The
+/// `base_color_factor` is baked into terrain vertex colors at chunk generation
+/// time; the `fs_terrain` shader multiplies the vertex color by the sampled
+/// albedo texture, so the texture is the chromatic authority while the G2D
+/// macro variation (baked into the vertex color) modulates it.
+///
+/// G3A-R: the uniform additionally carries the three-frequency stack
+/// (macro/base/detail scales and per-layer UV anchors), the anti-repetition
+/// second-sample transform (rotation/scale/offset applied in world-space UV),
+/// and the detail normal distance fade range. All values are world-anchored
+/// metres/tile-units, so they are invariant to camera and chunking.
 #[derive(Debug, Clone)]
 pub struct TerrainMaterial {
     /// Base color factor (RGBA). Baked into vertex colors during chunk generation.
     pub base_color_factor: [f32; 4],
     /// Texture scale in metres for UV tiling.
     pub texture_scale_m: f32,
+    /// G3A: PBR metallic factor (glTF metallic workflow). Terrain is a
+    /// dielectric; the default is 0.0.
+    pub metallic: f32,
+    /// G3A: base perceptual roughness. The sampled roughness map is multiplied
+    /// by this factor before the shader's MIN_ROUGHNESS floor.
+    pub roughness: f32,
+    /// G3A: tangent-space normal strength in [0, 1] applied to the sampled
+    /// normal map (1.0 = the committed asset amplitude).
+    pub normal_strength: f32,
+    /// Presentation-only debug channel selector (FINAL by default).
+    pub debug_mode: crate::TerrainDebugMode,
+    /// G3A: albedo map UV anchor (in tile units) added to the world-space UV.
+    pub albedo_uv_offset: [f32; 2],
+    /// G3A: normal map UV anchor (in tile units) added to the world-space UV.
+    pub normal_uv_offset: [f32; 2],
+    /// G3A: roughness map UV anchor (in tile units) added to the world-space UV.
+    pub roughness_uv_offset: [f32; 2],
+    /// G3A-R: macro layer tile scale in metres (order 30-80 m).
+    pub macro_scale_m: f32,
+    /// G3A-R: detail layer tile scale in metres (order 0.25-0.5 m).
+    pub detail_scale_m: f32,
+    /// G3A-R: macro layer UV anchor (tile units).
+    pub macro_uv_offset: [f32; 2],
+    /// G3A-R: detail layer UV anchor (tile units).
+    pub detail_uv_offset: [f32; 2],
+    /// G3A-R: anti-repetition rotated second-sample scale factor.
+    pub ar_scale: f32,
+    /// G3A-R: anti-repetition rotated second-sample angle (degrees).
+    pub ar_angle_degrees: f32,
+    /// G3A-R: anti-repetition rotated second-sample UV offset (tile units).
+    pub ar_offset: [f32; 2],
+    /// G3A-R: distance in metres at which the detail normal layer starts
+    /// fading (full detail closer than this).
+    pub detail_normal_fade_near_m: f32,
+    /// G3A-R: distance in metres at which the detail normal layer is fully
+    /// faded out (only base/macro structure remains beyond this).
+    pub detail_normal_fade_far_m: f32,
 }
 
 impl Default for TerrainMaterial {
     fn default() -> Self {
         Self {
-            // Default grass-like green.
-            base_color_factor: [0.25, 0.45, 0.18, 1.0],
+            // G3A: the white base turns the baked vertex color into the G2D
+            // macro-variation carrier; the albedo texture is the chromatic
+            // authority in the textured pipeline.
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
             texture_scale_m: DEFAULT_TERRAIN_TEXTURE_SCALE_M,
+            metallic: 0.0,
+            roughness: 0.9,
+            normal_strength: 1.0,
+            debug_mode: crate::TerrainDebugMode::Final,
+            // Deliberately non-integer anchors (in tile units) so the three
+            // maps' tile borders never align, breaking perceived repetition.
+            albedo_uv_offset: [0.0, 0.0],
+            normal_uv_offset: [0.271, 0.137],
+            roughness_uv_offset: [0.413, 0.303],
+            // G3A-R: three-frequency stack defaults (see the constants above).
+            macro_scale_m: DEFAULT_TERRAIN_MACRO_SCALE_M,
+            detail_scale_m: DEFAULT_TERRAIN_DETAIL_SCALE_M,
+            macro_uv_offset: DEFAULT_TERRAIN_MACRO_UV_OFFSET,
+            detail_uv_offset: DEFAULT_TERRAIN_DETAIL_UV_OFFSET,
+            ar_scale: DEFAULT_TERRAIN_AR_SCALE,
+            ar_angle_degrees: DEFAULT_TERRAIN_AR_ANGLE_DEGREES,
+            ar_offset: DEFAULT_TERRAIN_AR_OFFSET,
+            detail_normal_fade_near_m: DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_NEAR_M,
+            detail_normal_fade_far_m: DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_FAR_M,
         }
     }
 }
@@ -328,13 +474,19 @@ impl TerrainChunk {
                 let v2 = v0 + (cells_x + 1);
                 let v3 = v2 + 1;
 
+                // G3A-R fix: the quad is emitted with the front face pointing
+                // UP (+Y, away from the earth). With `front_face = Ccw` and
+                // back-face culling the triangles must wind CCW when viewed
+                // from above (+X right, +Z down on screen); the previous
+                // (v0, v1, v2) order wound CW from above, so the culled
+                // terrain never rasterized despite being in view.
                 indices.push(v0);
-                indices.push(v1);
                 indices.push(v2);
+                indices.push(v1);
 
-                indices.push(v1);
-                indices.push(v3);
                 indices.push(v2);
+                indices.push(v3);
+                indices.push(v1);
             }
         }
 
@@ -735,7 +887,11 @@ mod tests {
     }
 
     #[test]
-    fn terrain_chunk_triangle_winding_is_ccw_from_above() {
+    fn terrain_chunk_triangle_front_faces_point_up() {
+        // G3A-R: with `front_face = Ccw` and back-face culling, the field's
+        // front faces must point UP (+Y, away from the earth) or the culled
+        // terrain never rasterizes. The triangle normal via the right-hand
+        // rule over the ordered winding must therefore have a positive Y.
         let terrain = generate_flat_terrain(2, 2, 1.0, 0.0);
         let material = TerrainMaterial::default();
         let chunk = TerrainChunk::generate(&terrain, 0, 0, 2, &material, [0.0; 2]);
@@ -748,13 +904,14 @@ mod tests {
         let v1 = chunk.vertices[i1].position;
         let v2 = chunk.vertices[i2].position;
 
-        let e1 = [v1[0] - v0[0], 0.0, v1[2] - v0[2]];
-        let e2 = [v2[0] - v0[0], 0.0, v2[2] - v0[2]];
+        let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+        let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
 
-        let cross_y = e1[0] * e2[2] - e1[2] * e2[0];
+        // cross(e1, e2).y = e1[2] * e2[0] - e1[0] * e2[2].
+        let cross_y = e1[2] * e2[0] - e1[0] * e2[2];
         assert!(
             cross_y > 0.0,
-            "expected CCW winding, got cross_y = {}",
+            "front face normal must point up (+Y), got cross_y = {}",
             cross_y
         );
     }
@@ -1078,6 +1235,7 @@ mod tests {
         let material = TerrainMaterial {
             base_color_factor: [0.25, 0.5, 0.75, 1.0],
             texture_scale_m: 4.0,
+            ..Default::default()
         };
         let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &material, [0.0; 2]);
 
@@ -1731,5 +1889,451 @@ mod tests {
                 .iter()
                 .all(|c| !c.vertices.is_empty() && !c.indices.is_empty())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // G3A: textured terrain material regression tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn g3a_material_configuration_is_deterministic_and_finite() {
+        // Pinned production defaults: dielectric, matte, full-strength normal,
+        // world-space tiling at 4 m, white baked base carrying G2D variation.
+        let material = TerrainMaterial::default();
+        assert_eq!(material.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(material.texture_scale_m, DEFAULT_TERRAIN_TEXTURE_SCALE_M);
+        assert_eq!(material.metallic, 0.0);
+        assert_eq!(material.roughness, 0.9);
+        assert_eq!(material.normal_strength, 1.0);
+        for offset in [
+            material.albedo_uv_offset,
+            material.normal_uv_offset,
+            material.roughness_uv_offset,
+            material.macro_uv_offset,
+            material.detail_uv_offset,
+            material.ar_offset,
+        ] {
+            assert!(offset.iter().all(|v| v.is_finite()));
+        }
+
+        // Custom configurations stay finite and produce finite chunk output.
+        let custom = TerrainMaterial {
+            base_color_factor: [0.2, 0.4, 0.6, 0.5],
+            texture_scale_m: 8.0,
+            metallic: 0.0,
+            roughness: 0.75,
+            normal_strength: 0.6,
+            debug_mode: crate::TerrainDebugMode::Final,
+            albedo_uv_offset: [0.1, 0.2],
+            normal_uv_offset: [0.3, 0.4],
+            roughness_uv_offset: [0.5, 0.6],
+            macro_scale_m: 60.0,
+            detail_scale_m: 0.5,
+            macro_uv_offset: [0.7, 0.8],
+            detail_uv_offset: [0.9, 0.1],
+            ar_scale: 2.0,
+            ar_angle_degrees: 15.0,
+            ar_offset: [0.2, 0.3],
+            detail_normal_fade_near_m: 10.0,
+            detail_normal_fade_far_m: 50.0,
+        };
+        let terrain = generate_rolling_terrain(16, 16, 2.0, 0.0, 1.0);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &custom, [0.0; 2]);
+        assert!(
+            chunk
+                .vertices
+                .iter()
+                .all(|v| v.color.iter().chain(v.uv.iter()).all(|c| c.is_finite()))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G3A-R: three-frequency stack / anti-repetition / distance-fade tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn g3ar_material_defaults_are_pinned() {
+        // Central-tuning authority: changing any value here changes the visual
+        // slice contract, so the defaults are asserted explicitly.
+        let material = TerrainMaterial::default();
+        assert_eq!(material.macro_scale_m, 48.0);
+        assert_eq!(material.detail_scale_m, 0.40);
+        assert_eq!(material.macro_uv_offset, [0.170, 0.390]);
+        assert_eq!(material.detail_uv_offset, [0.163, 0.037]);
+        assert_eq!(material.ar_scale, 1.370);
+        assert_eq!(material.ar_angle_degrees, 27.0);
+        assert_eq!(material.ar_offset, [0.315, 0.571]);
+        assert_eq!(material.detail_normal_fade_near_m, 20.0);
+        assert_eq!(material.detail_normal_fade_far_m, 80.0);
+    }
+
+    #[test]
+    fn g3ar_detail_fade_is_monotonic_and_bounded() {
+        // Full detail at/inside `near`, zero at/beyond `far`, monotone and
+        // zero-derivative at both ends (no popping): the smoothstep contract
+        // the shader implements.
+        let near = 20.0;
+        let far = 80.0;
+        assert_eq!(detail_normal_fade_weight(0.0, near, far), 1.0);
+        assert_eq!(detail_normal_fade_weight(near, near, far), 1.0);
+        assert_eq!(detail_normal_fade_weight(far, near, far), 0.0);
+        assert_eq!(detail_normal_fade_weight(10_000.0, near, far), 0.0);
+
+        let mut previous = 1.0f32;
+        let mut samples = Vec::new();
+        for i in 0..=60 {
+            let distance = near + (far - near) * (i as f32 / 60.0);
+            let weight = detail_normal_fade_weight(distance, near, far);
+            assert!(
+                (0.0..=1.0).contains(&weight) && weight.is_finite(),
+                "fade weight out of range at {distance}: {weight}"
+            );
+            assert!(
+                weight <= previous + 1e-6,
+                "fade weight must be non-increasing: {weight} after {previous}"
+            );
+            previous = weight;
+            samples.push((distance, weight));
+        }
+        // Monotonicity must be strict somewhere in the middle (a flat plateau
+        // at 1.0 or 0.0 would mean the fade does nothing). At t=1/6 the
+        // smoothstep has already lost ~7%; at t=5/6 it keeps ~7%.
+        let first = samples[10].1;
+        let last = samples[50].1;
+        assert!(
+            first > 0.90 && last < 0.10,
+            "fade must actually transition: {first} -> {last}"
+        );
+        assert!(
+            samples[30].1 > 0.25 && samples[30].1 < 0.75,
+            "mid-fade must be smooth, got {}",
+            samples[30].1
+        );
+    }
+
+    #[test]
+    fn g3ar_fade_is_continuous_around_near_and_far() {
+        let near = 20.0;
+        let far = 80.0;
+        let inside = detail_normal_fade_weight(near - 0.01, near, far);
+        let at_near = detail_normal_fade_weight(near, near, far);
+        let at_far = detail_normal_fade_weight(far, near, far);
+        let outside = detail_normal_fade_weight(far + 0.01, near, far);
+        assert!((inside - at_near).abs() < 1e-3, "kink at `near`");
+        assert!((at_far - outside).abs() < 1e-3, "kink at `far`");
+    }
+
+    #[test]
+    fn g3ar_rotated_secondary_uv_is_deterministic() {
+        let uv = [12.25, -5.5];
+        let a = rotated_secondary_uv(uv, 1.37, 27.0, [0.315, 0.571]);
+        let b = rotated_secondary_uv(uv, 1.37, 27.0, [0.315, 0.571]);
+        assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits));
+        assert!(a.iter().all(|v| v.is_finite()));
+
+        // A zero rotation with identity scale/offset must be the identity.
+        let identity = rotated_secondary_uv(uv, 1.0, 0.0, [0.0, 0.0]);
+        assert!((identity[0] - uv[0]).abs() < 1e-6);
+        assert!((identity[1] - uv[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn g3ar_rotated_secondary_uv_is_chunk_boundary_continuous() {
+        // The transform is a pure function of the world-space UV, so the same
+        // world position reached through different chunkings must resolve to
+        // the same rotated UV — no second-sample seam at chunk borders.
+        let terrain = generate_rolling_terrain(128, 128, 2.0, 0.0, 2.0);
+        let material = TerrainMaterial::default();
+        let coarse = generate_centered_terrain_chunks(&terrain, 64, &material);
+        let fine = generate_centered_terrain_chunks(&terrain, 32, &material);
+
+        for world in [(10.0, 20.0), (36.0, -12.0), (0.0, 0.0), (-64.0, 48.0)] {
+            let vertex_c = find_vertex(&coarse, world.0, world.1);
+            let vertex_f = find_vertex(&fine, world.0, world.1);
+            assert_eq!(vertex_c.uv, vertex_f.uv, "uv mismatch at {world:?}");
+            let ar_c = rotated_secondary_uv(
+                vertex_c.uv,
+                material.ar_scale,
+                material.ar_angle_degrees,
+                material.ar_offset,
+            );
+            let ar_f = rotated_secondary_uv(
+                vertex_f.uv,
+                material.ar_scale,
+                material.ar_angle_degrees,
+                material.ar_offset,
+            );
+            assert_eq!(
+                ar_c.map(f32::to_bits),
+                ar_f.map(f32::to_bits),
+                "rotated second-sample mismatch at {world:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn g3ar_detail_and_macro_stacks_stay_finite_with_custom_material() {
+        // The full G3A-R configuration must stay finite through chunk
+        // generation and keep the geometry fields untouched.
+        let terrain = generate_rolling_terrain(32, 32, 2.0, 0.0, 3.0);
+        let custom = TerrainMaterial {
+            macro_scale_m: 55.0,
+            detail_scale_m: 0.3,
+            ar_angle_degrees: 33.0,
+            ar_scale: 1.8,
+            detail_normal_fade_near_m: 25.0,
+            detail_normal_fade_far_m: 120.0,
+            ..Default::default()
+        };
+        let reference = TerrainMaterial::default();
+        let chunks_custom = generate_terrain_chunks(&terrain, 16, &custom, [-32.0, -32.0]);
+        let chunks_ref = generate_terrain_chunks(&terrain, 16, &reference, [-32.0, -32.0]);
+        assert_eq!(chunks_custom.len(), chunks_ref.len());
+        for (a, b) in chunks_custom.iter().zip(chunks_ref.iter()) {
+            assert_eq!(a.indices, b.indices);
+            for (va, vb) in a.vertices.iter().zip(b.vertices.iter()) {
+                // Visual-layering parameters must never touch geometry fields.
+                assert_eq!(va.position, vb.position);
+                assert_eq!(va.normal, vb.normal);
+                assert_eq!(va.uv, vb.uv);
+                assert!(va.color.iter().all(|c| c.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_uv_mapping_is_world_space_anchored() {
+        // uv = render_position / texture_scale_m, unchanged from G2D; the
+        // mapping authority is the world position, not the chunk.
+        let material = TerrainMaterial {
+            texture_scale_m: 4.0,
+            ..Default::default()
+        };
+        let terrain = generate_flat_terrain(8, 8, 2.0, 0.0);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+        for vertex in &chunk.vertices {
+            assert_eq!(
+                vertex.uv,
+                [vertex.position[0] / 4.0, vertex.position[2] / 4.0]
+            );
+        }
+    }
+
+    #[test]
+    fn g3a_uv_and_color_are_chunk_size_independent() {
+        // Same world position under two different chunkings must resolve to
+        // identical UV and identical G2D color (both anchored to render-space).
+        for terrain in [
+            generate_flat_terrain(128, 128, 2.0, 0.0),
+            generate_rolling_terrain(128, 128, 2.0, 0.0, 2.0),
+        ] {
+            let material = TerrainMaterial::default();
+            let coarse = generate_centered_terrain_chunks(&terrain, 64, &material);
+            let fine = generate_centered_terrain_chunks(&terrain, 32, &material);
+
+            // Probe positions must lie exactly on grid vertices (spacing 2 m);
+            // centered generation covers negative render coordinates too.
+            for world in [(10.0, 20.0), (36.0, -12.0), (0.0, 0.0), (-64.0, 48.0)] {
+                let (wx, wz) = world;
+                let vertex_c = find_vertex(&coarse, wx, wz);
+                let vertex_f = find_vertex(&fine, wx, wz);
+                assert_eq!(vertex_c.uv, vertex_f.uv, "uv mismatch at {world:?}");
+                assert_eq!(
+                    vertex_c.color.map(f32::to_bits),
+                    vertex_f.color.map(f32::to_bits),
+                    "color mismatch at {world:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_adjacent_chunk_boundary_uv_and_color_match() {
+        // Shared boundary vertices between adjacent chunks must carry the same
+        // world-space UV and G2D color — no tile or tone seam.
+        for terrain in [
+            generate_flat_terrain(64, 64, 1.0, 0.0),
+            generate_rolling_terrain(64, 64, 1.0, 0.0, 2.0),
+        ] {
+            let material = TerrainMaterial::default();
+            let chunk_00 = TerrainChunk::generate(&terrain, 0, 0, 32, &material, [0.0; 2]);
+            let chunk_10 = TerrainChunk::generate(&terrain, 1, 0, 32, &material, [0.0; 2]);
+            let chunk_01 = TerrainChunk::generate(&terrain, 0, 1, 32, &material, [0.0; 2]);
+
+            // X boundary: right edge of (0,0) vs left edge of (1,0).
+            let mut pairs = Vec::new();
+            for v in &chunk_00.vertices {
+                if (v.position[0] - 32.0).abs() < 1e-4 {
+                    for w in &chunk_10.vertices {
+                        if (w.position[0] - 32.0).abs() < 1e-4 && w.position[2] == v.position[2] {
+                            pairs.push((v, w));
+                        }
+                    }
+                }
+            }
+            // Z boundary: far edge of (0,0) vs near edge of (0,1).
+            for v in &chunk_00.vertices {
+                if (v.position[2] - 32.0).abs() < 1e-4 {
+                    for w in &chunk_01.vertices {
+                        if (w.position[2] - 32.0).abs() < 1e-4 && w.position[0] == v.position[0] {
+                            pairs.push((v, w));
+                        }
+                    }
+                }
+            }
+            assert!(
+                pairs.len() >= 32,
+                "expected shared X and Z boundary vertices, got {}",
+                pairs.len()
+            );
+            for (v, w) in pairs {
+                assert_eq!(v.uv, w.uv, "boundary UV mismatch at {:?}", v.position);
+                assert_eq!(
+                    v.color.map(f32::to_bits),
+                    w.color.map(f32::to_bits),
+                    "boundary color mismatch at {:?}",
+                    v.position
+                );
+            }
+        }
+    }
+
+    /// CPU mirror of the `fs_terrain` derivative TBN reconstruction.
+    ///
+    /// The WGSL fragment shader computes the tangent frame from screen-space
+    /// derivatives of `world_position` and `uv`. Its CPU analogue: with
+    /// `dp1/duv1` from the +X grid neighbour and `dp2/duv2` from the +Z grid
+    /// neighbour, the determinant guard and the `(duv2.y * dp1 - duv1.y * dp2)
+    /// / det` reconstruction reduce exactly to `dp1 / duu` and `dp2 / dvv`.
+    fn derivative_tbn(
+        dp1: [f32; 3],
+        dp2: [f32; 3],
+        duv1: [f32; 2],
+        duv2: [f32; 2],
+    ) -> ([f32; 3], [f32; 3], f32) {
+        let det = duv1[0] * duv2[1] - duv1[1] * duv2[0];
+        let has_basis = det.abs() > 1e-8;
+        let inv_det = if has_basis { 1.0 / det } else { 0.0 };
+        let normalize_or_world = |v: [f32; 3], fallback: [f32; 3]| -> [f32; 3] {
+            let length_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+            if !has_basis || length_sq <= 0.0 {
+                fallback
+            } else {
+                let inv = length_sq.sqrt().recip();
+                [v[0] * inv, v[1] * inv, v[2] * inv]
+            }
+        };
+        let tangent_raw = [
+            (duv2[1] * dp1[0] - duv1[1] * dp2[0]) * inv_det,
+            (duv2[1] * dp1[1] - duv1[1] * dp2[1]) * inv_det,
+            (duv2[1] * dp1[2] - duv1[1] * dp2[2]) * inv_det,
+        ];
+        let bitangent_raw = [
+            (-duv2[0] * dp1[0] + duv1[0] * dp2[0]) * inv_det,
+            (-duv2[0] * dp1[1] + duv1[0] * dp2[1]) * inv_det,
+            (-duv2[0] * dp1[2] + duv1[0] * dp2[2]) * inv_det,
+        ];
+        (
+            normalize_or_world(tangent_raw, [1.0, 0.0, 0.0]),
+            normalize_or_world(bitangent_raw, [0.0, 0.0, 1.0]),
+            det,
+        )
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_finite_and_unit_length() {
+        // Every interior vertex of a rolling chunk must yield a finite,
+        // unit-length tangent/bitangent pair under the derivative
+        // reconstruction used by fs_terrain. Note that for a sloped height
+        // field dP/du and dP/dv are not mutually orthogonal (that only holds
+        // on the flat plane), so no orthonormality is asserted here — the
+        // invariant is finiteness, unit length and the +X tracking of the
+        // tangent.
+        let terrain = generate_rolling_terrain(32, 32, 2.0, 0.0, 2.0);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 32, &material, [0.0; 2]);
+
+        let vertex_at = |x: u32, z: u32| &chunk.vertices[(z * 33 + x) as usize];
+        for z in 1..32 {
+            for x in 1..32 {
+                let p = vertex_at(x, z).position;
+                let p_x = vertex_at(x + 1, z).position;
+                let p_z = vertex_at(x, z + 1).position;
+                let uv = vertex_at(x, z).uv;
+                let uv_x = vertex_at(x + 1, z).uv;
+                let uv_z = vertex_at(x, z + 1).uv;
+
+                let dp1 = [p_x[0] - p[0], p_x[1] - p[1], p_x[2] - p[2]];
+                let dp2 = [p_z[0] - p[0], p_z[1] - p[1], p_z[2] - p[2]];
+                let duv1 = [uv_x[0] - uv[0], uv_x[1] - uv[1]];
+                let duv2 = [uv_z[0] - uv[0], uv_z[1] - uv[1]];
+
+                let (tangent, bitangent, det) = derivative_tbn(dp1, dp2, duv1, duv2);
+                assert!(
+                    det.is_finite() && det > 0.0,
+                    "det must be positive, got {det}"
+                );
+                for axis in [tangent, bitangent] {
+                    assert!(
+                        axis.iter().all(|c| c.is_finite()),
+                        "non-finite TBN axis at ({x}, {z})"
+                    );
+                    let length = (axis[0].powi(2) + axis[1].powi(2) + axis[2].powi(2)).sqrt();
+                    assert!(
+                        (length - 1.0).abs() < 1e-4,
+                        "TBN axis not unit length at ({x}, {z}): {length}"
+                    );
+                }
+                // Tangent follows the +X grid edge (uv.x = x / scale); the
+                // rolling amplitude tilts it up to ~0.8 forward, so the
+                // hemisphere check stays sober.
+                assert!(
+                    tangent[0] > 0.75 && tangent[1].abs() < 0.8,
+                    "tangent must track +X at ({x}, {z}): {tangent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_is_exact_on_flat_terrain() {
+        // On the flat plane dP/du = (spacing, 0, 0)/du and dP/dv normalize to
+        // exactly [1, 0, 0] and [0, 0, 1]: unit length, orthogonal.
+        let terrain = generate_flat_terrain(8, 8, 2.0, -1.0);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+
+        let vertex_at = |x: u32, z: u32| &chunk.vertices[(z * 9 + x) as usize];
+        for z in 0..8 {
+            for x in 0..8 {
+                let p = vertex_at(x, z).position;
+                let p_x = vertex_at(x + 1, z).position;
+                let p_z = vertex_at(x, z + 1).position;
+                let uv = vertex_at(x, z).uv;
+                let uv_x = vertex_at(x + 1, z).uv;
+                let uv_z = vertex_at(x, z + 1).uv;
+
+                let (tangent, bitangent, det) = derivative_tbn(
+                    [p_x[0] - p[0], p_x[1] - p[1], p_x[2] - p[2]],
+                    [p_z[0] - p[0], p_z[1] - p[1], p_z[2] - p[2]],
+                    [uv_x[0] - uv[0], uv_x[1] - uv[1]],
+                    [uv_z[0] - uv[0], uv_z[1] - uv[1]],
+                );
+                assert!(det > 0.0);
+                assert_eq!(tangent, [1.0, 0.0, 0.0]);
+                assert_eq!(bitangent, [0.0, 0.0, 1.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_degenerate_fallback_is_finite() {
+        // A degenerate basis (det ~ 0, e.g. a zero-area fragment) must fall
+        // back to the world-aligned frame instead of producing NaN.
+        let (tangent, bitangent, det) =
+            derivative_tbn([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0]);
+        assert_eq!(det, 0.0);
+        assert_eq!(tangent, [1.0, 0.0, 0.0]);
+        assert_eq!(bitangent, [0.0, 0.0, 1.0]);
     }
 }

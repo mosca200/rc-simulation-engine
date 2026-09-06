@@ -1,4 +1,6 @@
 target/
+# G3A-R: local runtime smoke artifacts (logs + temporary screenshots).
+tmp/
 *.profraw
 *.pdb
 .idea/
