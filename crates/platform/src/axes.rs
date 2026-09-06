@@ -40,9 +40,12 @@ impl fmt::Display for Control {
 
 /// Stable hardware axis identifier used in controller profiles.
 ///
-/// Each variant corresponds to one explicitly supported `gilrs::Axis` variant.
-/// `gilrs::Axis::Unknown` is deliberately excluded and is never reported by the
-/// backend.
+/// Each variant corresponds to one explicitly supported analog hardware
+/// source: either a `gilrs::Axis` variant or one of the four analog trigger
+/// `gilrs::Button` variants, which some gilrs platform backends (notably the
+/// Windows Gaming Input backend) use to represent physical raw axes such as
+/// trigger sliders. `gilrs::Axis::Unknown` is deliberately excluded and is
+/// never reported by the backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HardwareAxis {
     LeftStickX,
@@ -53,11 +56,15 @@ pub enum HardwareAxis {
     RightZ,
     DPadX,
     DPadY,
+    LeftTrigger,
+    LeftTrigger2,
+    RightTrigger,
+    RightTrigger2,
 }
 
 impl HardwareAxis {
     /// All supported hardware axes in a fixed deterministic order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::LeftStickX,
         Self::LeftStickY,
         Self::LeftZ,
@@ -66,6 +73,10 @@ impl HardwareAxis {
         Self::RightZ,
         Self::DPadX,
         Self::DPadY,
+        Self::LeftTrigger,
+        Self::LeftTrigger2,
+        Self::RightTrigger,
+        Self::RightTrigger2,
     ];
 
     /// Stable serialized name used in controller profiles.
@@ -80,6 +91,10 @@ impl HardwareAxis {
             Self::RightZ => "right_z",
             Self::DPadX => "dpad_x",
             Self::DPadY => "dpad_y",
+            Self::LeftTrigger => "left_trigger",
+            Self::LeftTrigger2 => "left_trigger2",
+            Self::RightTrigger => "right_trigger",
+            Self::RightTrigger2 => "right_trigger2",
         }
     }
 }
@@ -103,6 +118,10 @@ impl FromStr for HardwareAxis {
             "right_z" => Ok(Self::RightZ),
             "dpad_x" => Ok(Self::DPadX),
             "dpad_y" => Ok(Self::DPadY),
+            "left_trigger" => Ok(Self::LeftTrigger),
+            "left_trigger2" => Ok(Self::LeftTrigger2),
+            "right_trigger" => Ok(Self::RightTrigger),
+            "right_trigger2" => Ok(Self::RightTrigger2),
             other => Err(InputError::UnknownHardwareAxis(other.to_owned())),
         }
     }
@@ -187,6 +206,29 @@ mod tests {
             "stick_99".parse::<HardwareAxis>(),
             Err(InputError::UnknownHardwareAxis("stick_99".to_owned()))
         );
+    }
+
+    #[test]
+    fn analog_trigger_axes_have_stable_names_and_round_trip() {
+        let triggers = [
+            (HardwareAxis::LeftTrigger, "left_trigger"),
+            (HardwareAxis::LeftTrigger2, "left_trigger2"),
+            (HardwareAxis::RightTrigger, "right_trigger"),
+            (HardwareAxis::RightTrigger2, "right_trigger2"),
+        ];
+        for (axis, name) in triggers {
+            assert_eq!(axis.as_str(), name);
+            assert_eq!(name.parse::<HardwareAxis>().unwrap(), axis);
+            let serialized = serde_json::to_string(&axis).unwrap();
+            assert_eq!(serialized, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<HardwareAxis>(&serialized).unwrap(),
+                axis
+            );
+        }
+        for axis in triggers.map(|(axis, _)| axis) {
+            assert!(HardwareAxis::ALL.contains(&axis));
+        }
     }
 
     #[test]

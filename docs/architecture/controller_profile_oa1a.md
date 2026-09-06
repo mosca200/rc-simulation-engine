@@ -24,14 +24,28 @@ keyboard fallback remain unchanged and keep their public APIs.
 left_stick_x  left_stick_y  left_z
 right_stick_x right_stick_y right_z
 dpad_x        dpad_y
+left_trigger  left_trigger2 right_trigger right_trigger2
 ```
 
-Each variant maps one-to-one to an explicitly supported `gilrs::Axis` variant;
-`gilrs::Axis::Unknown` is never used. A `RawControllerState` snapshot contains only axes the
-device actually reports (`Gamepad::axis_data` is the gate). An axis missing from the snapshot is
-unavailable, never silently zero. `RawControllerState` rejects non-finite values at insertion.
+Each variant maps one-to-one to an explicitly supported analog gilrs source.
+The stick/Z/D-pad variants map to `gilrs::Axis` variants; `gilrs::Axis::Unknown` is never used.
+The four trigger variants map to the analog `gilrs::Button` variants
+(`LeftTrigger`, `LeftTrigger2`, `RightTrigger`, `RightTrigger2`): some gilrs platform backends
+(notably the Windows Gaming Input backend, where a `RawGameController` exposes native axis
+indexes such as `AXIS_LT`/`AXIS_RT`/`AXIS_LT2`/`AXIS_RT2`) preserve those physical axes as
+analog button data instead of `gilrs::Axis` values. The raw layer reads them through
+`Gamepad::button_data(..).value()` without reducing them to pressed/not-pressed, so they are
+first-class calibratable hardware sources exactly like the stick axes; no device-specific
+offset or scaling is applied. Which physical trigger (if any) corresponds to a given
+transmitter's throttle is a per-device calibration decision, not a backend assumption.
 
-No custom HID parsing exists in OA1A; the backend uses only standard gilrs axis access.
+A `RawControllerState` snapshot contains only axes the device actually reports
+(`Gamepad::axis_data` / `Gamepad::button_data` is the gate). An axis missing from the snapshot
+is unavailable, never silently zero. `RawControllerState` rejects non-finite values at
+insertion.
+
+No custom HID parsing exists in OA1A; the backend uses only standard gilrs axis and analog
+button access.
 
 ## Device identity and matching
 

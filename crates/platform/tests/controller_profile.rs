@@ -398,3 +398,59 @@ fn invalid_json_cannot_produce_a_profile_through_any_public_decode_api() {
         })
     ));
 }
+
+#[test]
+fn analog_trigger_axis_can_serve_as_throttle_and_round_trips() {
+    let axes = ProfileAxes::new(
+        CenteredAxisProfile::new(
+            HardwareAxis::LeftStickX,
+            CenteredCalibration::new(Control::Roll, -1.0, 0.0, 1.0, false, 0.05).unwrap(),
+        ),
+        CenteredAxisProfile::new(
+            HardwareAxis::LeftStickY,
+            CenteredCalibration::new(Control::Pitch, -1.0, 0.0, 1.0, false, 0.05).unwrap(),
+        ),
+        CenteredAxisProfile::new(
+            HardwareAxis::RightStickX,
+            CenteredCalibration::new(Control::Yaw, -1.0, 0.0, 1.0, false, 0.05).unwrap(),
+        ),
+        ThrottleAxisProfile::new(
+            HardwareAxis::RightTrigger2,
+            ThrottleCalibration::new(0.0, 1.0, false).unwrap(),
+        ),
+    );
+    let profile = ControllerProfile::new(sample_device(), axes).unwrap();
+    let json = profile.to_json().unwrap();
+    assert!(json.contains("\"source\": \"right_trigger2\""));
+    let decoded = ControllerProfile::from_json(&json).unwrap();
+    assert_eq!(decoded, profile);
+    assert_eq!(
+        decoded.axes().throttle().source(),
+        HardwareAxis::RightTrigger2
+    );
+
+    let mut state = RawControllerState::new();
+    state.insert(HardwareAxis::LeftStickX, 0.0).unwrap();
+    state.insert(HardwareAxis::LeftStickY, 0.0).unwrap();
+    state.insert(HardwareAxis::RightStickX, 0.0).unwrap();
+    state.insert(HardwareAxis::RightTrigger2, 0.5).unwrap();
+    let input = profile.to_pilot_input(&state).unwrap();
+    assert!((input.throttle() - 0.5).abs() < 1.0e-12);
+
+    let mut missing_trigger = RawControllerState::new();
+    missing_trigger
+        .insert(HardwareAxis::LeftStickX, 0.0)
+        .unwrap();
+    missing_trigger
+        .insert(HardwareAxis::LeftStickY, 0.0)
+        .unwrap();
+    missing_trigger
+        .insert(HardwareAxis::RightStickX, 0.0)
+        .unwrap();
+    assert_eq!(
+        profile.to_pilot_input(&missing_trigger),
+        Err(InputError::UnavailableHardwareAxis {
+            axis: HardwareAxis::RightTrigger2,
+        })
+    );
+}

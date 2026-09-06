@@ -1,7 +1,7 @@
 use crate::{
     ControllerAxes, DeviceIdentity, HardwareAxis, InputError, RawControllerState, match_device,
 };
-use gilrs::{Axis, EventType, Gamepad, GamepadId, Gilrs, GilrsBuilder};
+use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs, GilrsBuilder};
 
 /// Enumeration snapshot of one connected input device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,13 +168,14 @@ impl GilrsInputBackend {
         else {
             return Ok(None);
         };
-        let mut state = RawControllerState::new();
-        for axis in HardwareAxis::ALL {
-            let gilrs_axis = gilrs_axis_of(axis);
-            if gamepad.axis_data(gilrs_axis).is_some() {
-                state.insert(axis, f64::from(gamepad.value(gilrs_axis)))?;
-            }
-        }
+        let state = collect_raw_state(|axis| match gilrs_source_of(axis) {
+            GilrsSource::Axis(gilrs_axis) => gamepad
+                .axis_data(gilrs_axis)
+                .map(|_| f64::from(gamepad.value(gilrs_axis))),
+            GilrsSource::AnalogTrigger(button) => gamepad
+                .button_data(button)
+                .map(|data| f64::from(data.value())),
+        })?;
         Ok(Some(state))
     }
 
@@ -210,17 +211,50 @@ fn device_info(id: GamepadId, gamepad: Gamepad<'_>) -> InputDeviceInfo {
     }
 }
 
-fn gilrs_axis_of(axis: HardwareAxis) -> Axis {
+/// The gilrs analog source backing one [`HardwareAxis`].
+///
+/// Platform backends such as gilrs' Windows Gaming Input backend expose some
+/// physical raw axes (for example trigger sliders) as analog button data
+/// instead of `gilrs::Axis` values, so a hardware axis can be backed by
+/// either representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GilrsSource {
+    Axis(Axis),
+    AnalogTrigger(Button),
+}
+
+fn gilrs_source_of(axis: HardwareAxis) -> GilrsSource {
     match axis {
-        HardwareAxis::LeftStickX => Axis::LeftStickX,
-        HardwareAxis::LeftStickY => Axis::LeftStickY,
-        HardwareAxis::LeftZ => Axis::LeftZ,
-        HardwareAxis::RightStickX => Axis::RightStickX,
-        HardwareAxis::RightStickY => Axis::RightStickY,
-        HardwareAxis::RightZ => Axis::RightZ,
-        HardwareAxis::DPadX => Axis::DPadX,
-        HardwareAxis::DPadY => Axis::DPadY,
+        HardwareAxis::LeftStickX => GilrsSource::Axis(Axis::LeftStickX),
+        HardwareAxis::LeftStickY => GilrsSource::Axis(Axis::LeftStickY),
+        HardwareAxis::LeftZ => GilrsSource::Axis(Axis::LeftZ),
+        HardwareAxis::RightStickX => GilrsSource::Axis(Axis::RightStickX),
+        HardwareAxis::RightStickY => GilrsSource::Axis(Axis::RightStickY),
+        HardwareAxis::RightZ => GilrsSource::Axis(Axis::RightZ),
+        HardwareAxis::DPadX => GilrsSource::Axis(Axis::DPadX),
+        HardwareAxis::DPadY => GilrsSource::Axis(Axis::DPadY),
+        HardwareAxis::LeftTrigger => GilrsSource::AnalogTrigger(Button::LeftTrigger),
+        HardwareAxis::LeftTrigger2 => GilrsSource::AnalogTrigger(Button::LeftTrigger2),
+        HardwareAxis::RightTrigger => GilrsSource::AnalogTrigger(Button::RightTrigger),
+        HardwareAxis::RightTrigger2 => GilrsSource::AnalogTrigger(Button::RightTrigger2),
     }
+}
+
+/// Builds a raw state snapshot from per-axis device reports.
+///
+/// `report` returns `None` for hardware sources the device does not expose;
+/// those axes stay absent from the snapshot instead of being invented as
+/// zero. This is the pure core of [`GilrsInputBackend::poll_raw_axes`].
+fn collect_raw_state(
+    report: impl Fn(HardwareAxis) -> Option<f64>,
+) -> Result<RawControllerState, InputError> {
+    let mut state = RawControllerState::new();
+    for axis in HardwareAxis::ALL {
+        if let Some(value) = report(axis) {
+            state.insert(axis, value)?;
+        }
+    }
+    Ok(state)
 }
 
 fn encode_uuid(bytes: [u8; 16]) -> String {
@@ -230,4 +264,95 @@ fn encode_uuid(bytes: [u8; 16]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing into a String cannot fail");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_axes_map_to_their_gilrs_axis() {
+        let expected = [
+            (HardwareAxis::LeftStickX, Axis::LeftStickX),
+            (HardwareAxis::LeftStickY, Axis::LeftStickY),
+            (HardwareAxis::LeftZ, Axis::LeftZ),
+            (HardwareAxis::RightStickX, Axis::RightStickX),
+            (HardwareAxis::RightStickY, Axis::RightStickY),
+            (HardwareAxis::RightZ, Axis::RightZ),
+            (HardwareAxis::DPadX, Axis::DPadX),
+            (HardwareAxis::DPadY, Axis::DPadY),
+        ];
+        for (axis, gilrs_axis) in expected {
+            assert_eq!(gilrs_source_of(axis), GilrsSource::Axis(gilrs_axis));
+        }
+    }
+
+    #[test]
+    fn analog_triggers_map_to_their_gilrs_button() {
+        let expected = [
+            (HardwareAxis::LeftTrigger, Button::LeftTrigger),
+            (HardwareAxis::LeftTrigger2, Button::LeftTrigger2),
+            (HardwareAxis::RightTrigger, Button::RightTrigger),
+            (HardwareAxis::RightTrigger2, Button::RightTrigger2),
+        ];
+        for (axis, button) in expected {
+            assert_eq!(gilrs_source_of(axis), GilrsSource::AnalogTrigger(button));
+        }
+    }
+
+    #[test]
+    fn present_analog_trigger_is_included_with_its_raw_value() {
+        let state = collect_raw_state(|axis| match axis {
+            HardwareAxis::LeftStickX => Some(-1.0),
+            HardwareAxis::RightTrigger2 => Some(0.75),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(state.get(HardwareAxis::LeftStickX), Some(-1.0));
+        assert_eq!(state.get(HardwareAxis::RightTrigger2), Some(0.75));
+        assert_eq!(state.len(), 2);
+    }
+
+    #[test]
+    fn absent_analog_trigger_is_missing_not_zero() {
+        let state = collect_raw_state(|axis| match axis {
+            HardwareAxis::LeftStickY => Some(0.25),
+            _ => None,
+        })
+        .unwrap();
+        for trigger in [
+            HardwareAxis::LeftTrigger,
+            HardwareAxis::LeftTrigger2,
+            HardwareAxis::RightTrigger,
+            HardwareAxis::RightTrigger2,
+        ] {
+            assert_eq!(state.get(trigger), None);
+            assert!(!state.contains(trigger));
+        }
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn every_reported_axis_lands_in_the_snapshot() {
+        let state = collect_raw_state(|axis| Some(f64::from(axis as u8))).unwrap();
+        assert_eq!(state.len(), HardwareAxis::ALL.len());
+        for axis in HardwareAxis::ALL {
+            assert_eq!(state.get(axis), Some(f64::from(axis as u8)));
+        }
+    }
+
+    #[test]
+    fn non_finite_reported_values_are_rejected() {
+        let error = collect_raw_state(|axis| match axis {
+            HardwareAxis::LeftTrigger2 => Some(f64::NAN),
+            _ => None,
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            InputError::NonFiniteRawAxis {
+                axis: "left_trigger2"
+            }
+        );
+    }
 }
