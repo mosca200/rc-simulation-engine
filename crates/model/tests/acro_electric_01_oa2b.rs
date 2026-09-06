@@ -1,5 +1,5 @@
 //! OA2B regression coverage for the production synthetic aircraft.
-use model::{AIRCRAFT_MODEL_SCHEMA_VERSION_V8, load_aircraft_model};
+use model::{AIRCRAFT_MODEL_SCHEMA_VERSION_V9, load_aircraft_model};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -47,12 +47,13 @@ fn airborne_data_projection(value: &Value) -> Value {
 }
 
 #[test]
-fn acro_electric_01_is_v8_with_a_symmetric_tricycle_gear_set() {
+fn acro_electric_01_is_v9_with_symmetric_gear_and_airframe_contacts() {
     let path = acro_model_path();
     let model = load_aircraft_model(&path).expect("OA2B Acro Electric 01 must load");
-    assert_eq!(model.schema_version(), AIRCRAFT_MODEL_SCHEMA_VERSION_V8);
+    assert_eq!(model.schema_version(), AIRCRAFT_MODEL_SCHEMA_VERSION_V9);
     assert_eq!(model.model_id(), "acro-electric-01");
     assert_eq!(model.landing_gear().len(), 3);
+    assert_eq!(model.airframe_contacts().len(), 3);
     let left_main = model
         .landing_gear()
         .iter()
@@ -75,6 +76,25 @@ fn acro_electric_01_is_v8_with_a_symmetric_tricycle_gear_set() {
         left_main.contact().position_body_m.z,
         right_main.contact().position_body_m.z
     );
+    assert_eq!(model.airframe_contacts()[0].id(), "belly");
+    let left_tip = model
+        .airframe_contacts()
+        .iter()
+        .find(|contact| contact.id() == "left-wing-tip")
+        .unwrap()
+        .contact();
+    let right_tip = model
+        .airframe_contacts()
+        .iter()
+        .find(|contact| contact.id() == "right-wing-tip")
+        .unwrap()
+        .contact();
+    assert_eq!(left_tip.position_body_m.x, right_tip.position_body_m.x);
+    assert_eq!(left_tip.position_body_m.y, -right_tip.position_body_m.y);
+    assert_eq!(left_tip.position_body_m.z, right_tip.position_body_m.z);
+    assert_eq!(left_tip.stiffness_n_per_m, right_tip.stiffness_n_per_m);
+    assert_eq!(left_tip.damping_n_s_per_m, right_tip.damping_n_s_per_m);
+    assert_eq!(left_tip.friction_mu, right_tip.friction_mu);
 }
 
 #[test]

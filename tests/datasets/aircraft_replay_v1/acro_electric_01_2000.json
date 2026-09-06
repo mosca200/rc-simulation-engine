@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "model_id": "acro-electric-01",
-  "model_physics_fingerprint": "522bb2ed72632fe0d62b02b9ff4237dd02bde47eabaae25d568fd8368ccadeb0",
+  "model_physics_fingerprint": "07c48378ad0f8de786f0927c1bba206681c4153deb50174bf0c518d6eae5ba73",
   "simulation_config": {
     "dt_s": 0.002,
     "gravity_world_mps2": [
