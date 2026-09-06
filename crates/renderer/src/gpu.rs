@@ -36,7 +36,8 @@ use crate::shadow::{
     SHADOW_RECEIVER_DEPTH_BIAS, stable_directional_shadow_transform,
 };
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
-use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer};
+use crate::terrain_textures::generated as terrain_assets;
+use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer, decode_image};
 use crate::{
     AircraftMesh, CameraConfig, CameraMode, GlbAsset, Mat4, RenderFrame, Vertex,
     matrix_to_wgsl_columns, reference_grid_and_axes_at,
@@ -292,6 +293,41 @@ impl MaterialUniform {
     }
 }
 
+/// G3A: terrain material uniform matching the WGSL `TerrainMaterialUniform`
+/// struct (four 16-byte vec4 slots, 64 bytes total).
+///
+/// The per-map UV anchors (in tile units) decorrelate the three samples so
+/// their tile borders never align; offsets are added to the world-space UV.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct TerrainMaterialUniform {
+    metallic: f32,
+    roughness: f32,
+    normal_strength: f32,
+    _padding: f32,
+    albedo_uv_offset: [f32; 2],
+    normal_uv_offset: [f32; 2],
+    roughness_uv_offset: [f32; 2],
+    // 6 floats: keeps the struct at 64 bytes (four WGSL vec4 slots),
+    // matching the shader's vec4-aligned `padding2`.
+    _padding2: [f32; 6],
+}
+
+impl TerrainMaterialUniform {
+    fn from_terrain_material(material: &TerrainMaterial) -> Self {
+        Self {
+            metallic: material.metallic.clamp(0.0, 1.0),
+            roughness: material.roughness.clamp(0.0, 1.0),
+            normal_strength: material.normal_strength.clamp(0.0, 1.0),
+            _padding: 0.0,
+            albedo_uv_offset: material.albedo_uv_offset,
+            normal_uv_offset: material.normal_uv_offset,
+            roughness_uv_offset: material.roughness_uv_offset,
+            _padding2: [0.0; 6],
+        }
+    }
+}
+
 struct DepthTarget {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -311,6 +347,23 @@ struct GpuMaterial {
     _texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
     // G1D: metallic/roughness uniform buffer (static, written once at upload).
+    _material_uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+/// G3A: persistent GPU terrain material (dedicated bind group at group 4).
+///
+/// Owns the albedo (sRGB), normal (linear), and roughness (linear) textures
+/// plus one shared repeat/linear sampler and the static material uniform.
+/// Created once at renderer initialization, never recreated per frame.
+struct GpuTerrainMaterial {
+    _albedo_texture: wgpu::Texture,
+    _albedo_texture_view: wgpu::TextureView,
+    _normal_texture: wgpu::Texture,
+    _normal_texture_view: wgpu::TextureView,
+    _roughness_texture: wgpu::Texture,
+    _roughness_texture_view: wgpu::TextureView,
+    _sampler: wgpu::Sampler,
     _material_uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -383,12 +436,16 @@ pub struct WgpuRenderer {
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    // G3A: terrain pipeline (dedicated fs_terrain entry, group-4 material).
+    terrain_pipeline: wgpu::RenderPipeline,
 
     _camera_bind_group_layout: wgpu::BindGroupLayout,
     _object_bind_group_layout: wgpu::BindGroupLayout,
     _environment_bind_group_layout: wgpu::BindGroupLayout,
     _shadow_pass_bind_group_layout: wgpu::BindGroupLayout,
     _material_bind_group_layout: wgpu::BindGroupLayout,
+    // G3A: extended terrain material layout (albedo/normal/roughness + uniform).
+    _terrain_material_bind_group_layout: wgpu::BindGroupLayout,
 
     // Persistent bind groups.
     camera_buffer: wgpu::Buffer,
@@ -422,7 +479,8 @@ pub struct WgpuRenderer {
 
     // G1C: Terrain chunks.
     terrain_chunks: Vec<GpuTerrainChunk>,
-    terrain_material_index: usize,
+    // G3A: textured terrain material (replaces the white-fallback terrain).
+    terrain_material: GpuTerrainMaterial,
 
     // G2A: Scenery.
     scenery: Option<GpuScenery>,
@@ -540,6 +598,8 @@ impl WgpuRenderer {
         let shadow_pass_bind_group_layout =
             shadow_pass_bind_group_layout(&device, "directional shadow pass layout");
         let material_bind_group_layout = material_bind_group_layout(&device, "material layout");
+        let terrain_material_bind_group_layout =
+            terrain_material_bind_group_layout(&device, "G3A terrain material layout");
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("G1C sky pipeline layout"),
@@ -579,6 +639,21 @@ impl WgpuRenderer {
                 ],
                 immediate_size: 0,
             });
+        // G3A: the terrain pipeline shares groups 0-2 with the lit pipeline and
+        // carries its own group-4 terrain material layout. Group 3 is unused by
+        // the terrain shaders (no shared material slot conflicts).
+        let terrain_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("G3A terrain pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                    Some(&environment_bind_group_layout),
+                    None,
+                    Some(&terrain_material_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
 
         let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, format);
         let triangle_pipeline = create_pipeline(
@@ -608,6 +683,22 @@ impl WgpuRenderer {
             },
         );
         let shadow_pipeline = create_shadow_pipeline(&device, &shader, &shadow_pipeline_layout);
+
+        // G3A: dedicated terrain pipeline — same raster state as the lit
+        // triangle pipeline, `fs_terrain` fragment entry, group-4 material.
+        let terrain_pipeline = create_pipeline(
+            &device,
+            &shader,
+            &terrain_pipeline_layout,
+            format,
+            PipelineSpec {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write_enabled: true,
+                label: "G3A terrain lit triangle pipeline",
+                fragment_entry_point: "fs_terrain",
+            },
+        );
 
         // White fallback material.
         let fallback_material =
@@ -797,10 +888,18 @@ impl WgpuRenderer {
             &terrain_material,
         );
 
-        // FIX 4: Terrain uses the white fallback material.
-        // The terrain base_color_factor is baked into vertex colors, so
-        // vertex_color * white_texture = vertex_color = terrain color.
-        let terrain_material_index = fallback_material_index;
+        // FIX 4 (superseded by G3A): the terrain previously reused the white
+        // fallback material because the base color was baked into vertex
+        // colors. G3A decodes the committed grass maps once at initialization
+        // (they are embedded in the binary via include_bytes!) into the
+        // dedicated terrain material; the white G2D vertex color still
+        // modulates the sampled albedo as the macro-variation carrier.
+        let terrain_material_gpu = create_terrain_material(
+            &device,
+            &terrain_material_bind_group_layout,
+            &queue,
+            &terrain_material,
+        )?;
 
         let mut terrain_chunks = Vec::with_capacity(terrain_chunk_data.len());
         for chunk in &terrain_chunk_data {
@@ -948,11 +1047,13 @@ impl WgpuRenderer {
             triangle_pipeline,
             line_pipeline,
             shadow_pipeline,
+            terrain_pipeline,
             _camera_bind_group_layout: camera_bind_group_layout,
             _object_bind_group_layout: object_bind_group_layout,
             _environment_bind_group_layout: environment_bind_group_layout,
             _shadow_pass_bind_group_layout: shadow_pass_bind_group_layout,
             _material_bind_group_layout: material_bind_group_layout,
+            _terrain_material_bind_group_layout: terrain_material_bind_group_layout,
             camera_buffer,
             camera_bind_group,
             aircraft_object_buffer,
@@ -971,7 +1072,7 @@ impl WgpuRenderer {
             surface_object_buffers,
             surface_object_bind_groups,
             terrain_chunks,
-            terrain_material_index,
+            terrain_material: terrain_material_gpu,
             scenery,
             scenery_material_index,
             line_vertex_buffer,
@@ -1227,10 +1328,11 @@ impl WgpuRenderer {
             render_pass.set_pipeline(&self.triangle_pipeline);
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
 
-            // Terrain chunks: identity object transform (world-local).
+            // G3A: terrain chunks use the dedicated terrain pipeline and its own
+            // bind group (identity object transform, world-local).
             render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-            let terrain_material = &self.materials[self.terrain_material_index];
-            render_pass.set_bind_group(3, &terrain_material.bind_group, &[]);
+            render_pass.set_pipeline(&self.terrain_pipeline);
+            render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
             for chunk in &self.terrain_chunks {
                 render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
                 render_pass
@@ -1238,9 +1340,11 @@ impl WgpuRenderer {
                 render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
             }
 
-            // G2A: Scenery (flying field, trees, markers).
+            // G2A: Scenery (flying field, trees, markers). Drawn with the
+            // shared lit pipeline — the terrain pipeline is terrain-only.
             if let Some(ref scenery) = self.scenery {
                 let scenery_material = &self.materials[self.scenery_material_index];
+                render_pass.set_pipeline(&self.triangle_pipeline);
                 render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
                 render_pass.set_bind_group(3, &scenery_material.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
@@ -1494,6 +1598,201 @@ fn create_gpu_material(
 }
 
 // ---------------------------------------------------------------------------
+// G3A: terrain material creation
+// ---------------------------------------------------------------------------
+
+/// Create the textured terrain material from the embedded grass maps.
+///
+/// Decodes the committed PNGs once at initialization and uploads three
+/// persistent textures: albedo (sRGB, hardware converts on sampling), normal
+/// (linear RGBA), roughness (linear R8). One repeat/linear sampler serves all
+/// three maps; the static uniform carries the PBR factors and per-map UV
+/// anchors. No resource is created or recreated per frame.
+fn create_terrain_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    queue: &wgpu::Queue,
+    material: &TerrainMaterial,
+) -> Result<GpuTerrainMaterial, RendererError> {
+    let albedo = decode_image(terrain_assets::TERRAIN_ALBEDO_PNG)
+        .map_err(RendererError::TextureUpload)?;
+    let normal = decode_image(terrain_assets::TERRAIN_NORMAL_PNG)
+        .map_err(RendererError::TextureUpload)?;
+    let roughness = decode_image(terrain_assets::TERRAIN_ROUGHNESS_PNG)
+        .map_err(RendererError::TextureUpload)?;
+
+    let size = wgpu::Extent3d {
+        width: albedo.width,
+        height: albedo.height,
+        depth_or_array_layers: 1,
+    };
+
+    let albedo_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("G3A terrain albedo texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let albedo_texture_view = albedo_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let (albedo_data, albedo_row_bytes) =
+        create_staging_buffer(&albedo).map_err(RendererError::TextureUpload)?;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &albedo_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &albedo_data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(albedo_row_bytes),
+            rows_per_image: Some(albedo.height),
+        },
+        size,
+    );
+
+    let normal_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("G3A terrain normal texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let normal_texture_view = normal_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let (normal_data, normal_row_bytes) =
+        create_staging_buffer(&normal).map_err(RendererError::TextureUpload)?;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &normal_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &normal_data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(normal_row_bytes),
+            rows_per_image: Some(normal.height),
+        },
+        size,
+    );
+
+    // Roughness: single R8 channel extracted from the gray PNG decode.
+    let roughness_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("G3A terrain roughness texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let roughness_texture_view =
+        roughness_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let roughness_row_bytes = crate::texture::padded_bytes_per_row_checked(roughness.width)
+        .ok_or(RendererError::TextureUpload(TextureLoadError::PaddedRowOverflow {
+            width: roughness.width,
+        }))?;
+    let mut staged_roughness =
+        Vec::with_capacity((roughness_row_bytes as usize) * (roughness.height as usize));
+    for row in 0..roughness.height as usize {
+        let start = row * roughness.width as usize * 4;
+        staged_roughness.extend(
+            roughness.rgba8[start..start + roughness.width as usize * 4]
+                .iter()
+                .step_by(4)
+                .copied(),
+        );
+        staged_roughness.extend(std::iter::repeat_n(
+            0u8,
+            roughness_row_bytes as usize - roughness.width as usize,
+        ));
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &roughness_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &staged_roughness,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(roughness_row_bytes),
+            rows_per_image: Some(roughness.height),
+        },
+        size,
+    );
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("G3A terrain sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
+    // G3A: terrain PBR factors + UV anchors, written once at load time.
+    let material_uniform_buffer =
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("G3A terrain material uniform"),
+            contents: bytemuck::bytes_of(&TerrainMaterialUniform::from_terrain_material(material)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("G3A terrain material bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&albedo_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&normal_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&roughness_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: material_uniform_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    Ok(GpuTerrainMaterial {
+        _albedo_texture: albedo_texture,
+        _albedo_texture_view: albedo_texture_view,
+        _normal_texture: normal_texture,
+        _normal_texture_view: normal_texture_view,
+        _roughness_texture: roughness_texture,
+        _roughness_texture_view: roughness_texture_view,
+        _sampler: sampler,
+        _material_uniform: material_uniform_buffer,
+        bind_group,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Scenery upload helper
 // ---------------------------------------------------------------------------
 
@@ -1646,6 +1945,75 @@ fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindG
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(size_of::<MaterialUniform>() as u64),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// G3A: terrain material bind group layout (group 4, bindings 0..4).
+///
+/// One filtering sampler serves all three maps; the uniform carries the PBR
+/// factors and per-map world-space UV anchors. Distinct from the shared
+/// material layout so the aircraft/scenery pipeline is untouched.
+fn terrain_material_bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            // Albedo (sRGB).
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Shared sampler.
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // Normal (linear).
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Roughness (linear).
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Terrain material uniform (PBR factors + UV anchors).
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        size_of::<TerrainMaterialUniform>() as u64,
+                    ),
                 },
                 count: None,
             },
@@ -2290,6 +2658,139 @@ mod directional_shadow_regression_tests {
         assert!(
             source.contains("return textureSampleCompare("),
             "directional shadows must use the comparison sampler path"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terrain_material_uniform_tests {
+    use super::*;
+
+    #[test]
+    fn terrain_material_uniform_layout_is_64_bytes() {
+        // WGSL: four vec4 slots (metallic/roughness/normal_strength/pad,
+        // three vec2 anchors, pad2). Must match the shader struct exactly.
+        assert_eq!(
+            size_of::<TerrainMaterialUniform>(),
+            64,
+            "TerrainMaterialUniform must occupy exactly four WGSL vec4 slots"
+        );
+    }
+
+    #[test]
+    fn terrain_material_uniform_roundtrips_through_bytes() {
+        let material = TerrainMaterial::default();
+        let uniform = TerrainMaterialUniform::from_terrain_material(&material);
+        assert_eq!(uniform.metallic, 0.0);
+        assert_eq!(uniform.roughness, 0.9);
+        assert_eq!(uniform.normal_strength, 1.0);
+        assert_eq!(uniform.albedo_uv_offset, [0.0, 0.0]);
+        assert_eq!(uniform.normal_uv_offset, [0.271, 0.137]);
+        assert_eq!(uniform.roughness_uv_offset, [0.413, 0.303]);
+
+        let decoded: TerrainMaterialUniform =
+            *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
+        assert_eq!(decoded.metallic, 0.0);
+        assert_eq!(decoded.roughness, 0.9);
+        assert_eq!(decoded.normal_uv_offset, [0.271, 0.137]);
+        assert!(decoded.roughness.is_finite());
+        assert!(decoded.normal_strength.is_finite());
+    }
+
+    #[test]
+    fn terrain_material_uniform_clamps_factors_at_load() {
+        // Factors outside [0, 1] are clamped once at load; the shader then
+        // applies its own MIN_ROUGHNESS floor, keeping every response finite.
+        let material = TerrainMaterial {
+            metallic: 1.7,
+            roughness: 0.02,
+            normal_strength: 1.4,
+            ..Default::default()
+        };
+        let uniform = TerrainMaterialUniform::from_terrain_material(&material);
+        assert_eq!(uniform.metallic, 1.0);
+        assert_eq!(uniform.roughness, 0.02);
+        assert_eq!(uniform.normal_strength, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod terrain_gpu_integration_guards {
+    //! G3A structural guards: the terrain shader/renderer integration points
+    //! that must not drift in later slices.
+
+    #[test]
+    fn shader_terrain_entry_reuses_pbr_and_stays_textured() {
+        let source = include_str!("shader.wgsl");
+        assert!(
+            source.contains("fn fs_terrain(input: VertexOutput)"),
+            "terrain fragment entry must exist"
+        );
+        assert!(
+            source.contains("fn lit_pbr_response("),
+            "terrain must reuse the shared PBR response"
+        );
+        let terrain_block = source
+            .split("fn fs_terrain(input: VertexOutput)")
+            .nth(1)
+            .expect("terrain fragment entry must exist");
+        assert!(
+            terrain_block.contains("input.color * albedo_rgba"),
+            "G2D vertex color must modulate the albedo texture"
+        );
+        assert!(
+            terrain_block.contains("terrain_material.roughness * roughness_sample"),
+            "roughness map must scale the material base roughness"
+        );
+        assert!(
+            terrain_block.contains("dpdx(input.world_position)"),
+            "terrain TBN must be derivative-based (chunk-independent)"
+        );
+        assert!(
+            terrain_block.contains("directional_shadow_visibility(")
+                || terrain_block.contains("lit_pbr_response("),
+            "terrain must keep G2B shadow receiving via the shared path"
+        );
+    }
+
+    #[test]
+    fn renderer_terrain_resources_are_created_once() {
+        let source = include_str!("gpu.rs");
+        assert!(
+            source.contains("fn create_terrain_material("),
+            "terrain material creation must be a startup helper"
+        );
+        assert!(
+            source.contains("\"fs_terrain\""),
+            "terrain pipeline must use the fs_terrain entry point"
+        );
+        assert!(
+            source.contains("set_bind_group(4, &self.terrain_material.bind_group, &[]);"),
+            "terrain draws must bind their own material at group 4"
+        );
+
+        let (initialization_path, after_render) = source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path");
+        let (frame_path, _) = after_render
+            .split_once("fn check_asynchronous_gpu_error")
+            .expect("frame path must end before asynchronous error handling");
+        for (needle, label) in [
+            ("create_terrain_material(", "terrain material"),
+            ("decode_image(", "terrain map decode"),
+            ("terrain_material_bind_group_layout(", "terrain layout"),
+            ("create_texture(", "texture"),
+            ("create_sampler(", "sampler"),
+            ("create_bind_group(", "bind group"),
+        ] {
+            assert!(
+                !frame_path.contains(needle),
+                "frame path must not recreate the {label} resource"
+            );
+        }
+        assert!(
+            initialization_path.contains("let terrain_material_gpu = create_terrain_material("),
+            "terrain material must be created once at startup"
         );
     }
 }

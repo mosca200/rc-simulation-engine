@@ -13,5 +13,10 @@ thiserror.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
+[dev-dependencies]
+# G3A: static WGSL validation (the crate wgpu 30 embeds as `naga`); pinned to
+# the exact lock version so the parse test can never drift from the runtime.
+naga = "=30.0.1"
+
 [lints]
 workspace = true

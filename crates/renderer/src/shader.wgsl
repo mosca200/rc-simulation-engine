@@ -8,9 +8,13 @@
 //   - legacy-compat irradiance scale (see fs_lit) so the diffuse response
 //     matches the established Lambert look exactly
 //
-// G2B adds one stable directional shadow map. Still deliberately out of scope:
-// no cascades, HDR, IBL, normal maps, or clouds. Ambient is flat and mostly
-// applied to the diffuse response so aircraft remain readable in shadow.
+// G2B adds one stable directional shadow map. G3A adds a textured terrain
+// material (albedo/normal/roughness maps with world-space tiling) on a
+// dedicated terrain pipeline that reuses this exact PBR response; the shared
+// `lit_pbr_response` helper keeps the two fragment paths bit-compatible.
+// Still deliberately out of scope: cascades, HDR, IBL, or clouds. Ambient is
+// flat and mostly applied to the diffuse response so aircraft remain readable
+// in shadow.
 
 // ---------------------------------------------------------------------------
 // Uniforms
@@ -67,6 +71,24 @@ struct MaterialUniform {
     reserved: vec2<f32>,
 };
 
+// G3A: terrain material state (terrain pipeline only, group 4).
+// metallic/roughness/normal_strength: PBR factors; roughness is multiplied by
+//   the roughness map sample, normal_strength scales the tangent-space XY.
+// padding: alignment to the next vec2.
+// *_uv_offset: per-map world-space UV anchors (tile units) that decorrelate
+//   the three maps' tile borders.
+// padding2: alignment to 64 bytes (four vec4 slots).
+struct TerrainMaterialUniform {
+    metallic: f32,
+    roughness: f32,
+    normal_strength: f32,
+    padding: f32,
+    albedo_uv_offset: vec2<f32>,
+    normal_uv_offset: vec2<f32>,
+    roughness_uv_offset: vec2<f32>,
+    padding2: vec4<f32>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
@@ -91,6 +113,20 @@ var base_color_texture: texture_2d<f32>;
 var base_color_sampler: sampler;
 @group(3) @binding(2)
 var<uniform> material: MaterialUniform;
+
+// G3A: terrain detail maps (bound only by the dedicated terrain pipeline,
+// group 4). Albedo is sRGB (hardware converts on sampling); normal and
+// roughness are linear data. One sampler serves all three maps.
+@group(4) @binding(0)
+var terrain_albedo_texture: texture_2d<f32>;
+@group(4) @binding(1)
+var terrain_sampler: sampler;
+@group(4) @binding(2)
+var terrain_normal_texture: texture_2d<f32>;
+@group(4) @binding(3)
+var terrain_roughness_texture: texture_2d<f32>;
+@group(4) @binding(4)
+var<uniform> terrain_material: TerrainMaterialUniform;
 
 // ---------------------------------------------------------------------------
 // Vertex IO
@@ -338,25 +374,20 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
 //   intensity     = 0.80
 //   fog_density   = 0.0015
 //   fog_color     = sky_horizon color
-@fragment
-fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
-    // G1C: Sample base color texture.
-    // The texture is sRGB, so hardware converts to linear during sampling.
-    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
-
-    // Combine: vertex_color (contains baseColorFactor * COLOR_0) * texture.
-    let base_rgba = input.color * texture_rgba;
-
-    // G1D: material parameters with documented safety clamps. The roughness
-    // floor prevents degenerate highlights; both uniforms are guaranteed
-    // finite by the CPU-side clamp at load time.
-    let metallic = clamp(material.metallic, 0.0, 1.0);
-    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
-
+// G3A: shared PBR response used by both fragment paths (`fs_lit` and
+// `fs_terrain`). Returns the lit color BEFORE fog. The operands and order
+// exactly mirror the pre-G3A `fs_lit` body, so the established look is
+// bit-compatible.
+fn lit_pbr_response(
+    base_rgba: vec4<f32>,
+    n: vec3<f32>,
+    world_position: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+) -> vec3<f32> {
     // BRDF basis vectors (all guarded against zero-length inputs).
-    let n = safe_normalize(input.world_normal);
     let l = safe_normalize(environment.light_direction.xyz);
-    let v = safe_normalize(camera.camera_position.xyz - input.world_position);
+    let v = safe_normalize(camera.camera_position.xyz - world_position);
     let h = safe_normalize(v + l);
 
     let ndot_l = max(dot(n, l), 0.0);
@@ -387,7 +418,7 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     // Direct lighting (see legacy-compat irradiance scale above).
     let irradiance = PI * environment.light_direction.w;
     let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
-    let shadow_visibility = directional_shadow_visibility(input.world_position);
+    let shadow_visibility = directional_shadow_visibility(world_position);
     let direct = direct_unshadowed * shadow_visibility;
 
     // Ambient: applied predominantly to the diffuse (non-metal) response,
@@ -397,14 +428,120 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient = mix(ambient_diffuse, ambient_specular, metallic);
 
     let lit_rgb = direct + ambient;
+    return lit_rgb;
+}
 
-    // Distance fog (after lighting, unchanged from G1B/G1C).
+// Distance fog for a world position, shared by both lit fragment paths.
+fn apply_distance_fog(lit_rgb: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
     let camera_pos = camera.camera_position.xyz;
-    let distance = length(input.world_position - camera_pos);
+    let distance = length(world_position - camera_pos);
     let density = environment.sky_ground.w;
     let fog = fog_factor(distance, density);
     let fog_color = environment.sky_horizon.xyz;
     let final_rgb = mix(lit_rgb, fog_color, fog);
+    return final_rgb;
+}
+
+@fragment
+fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
+    // G1C: Sample base color texture.
+    // The texture is sRGB, so hardware converts to linear during sampling.
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+
+    // Combine: vertex_color (contains baseColorFactor * COLOR_0) * texture.
+    let base_rgba = input.color * texture_rgba;
+
+    // G1D: material parameters with documented safety clamps. The roughness
+    // floor prevents degenerate highlights; both uniforms are guaranteed
+    // finite by the CPU-side clamp at load time.
+    let metallic = clamp(material.metallic, 0.0, 1.0);
+    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+
+    let n = safe_normalize(input.world_normal);
+    let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+
+    return vec4<f32>(final_rgb, base_rgba.a);
+}
+
+// G3A: terrain-only fragment entry (dedicated terrain pipeline, group 4).
+// Same PBR + G2B shadow + fog pipeline as `fs_lit`, preceded by the
+// world-space grass detail stack:
+//   1. albedo texture sample × vertex color (G2D macro variation carrier);
+//   2. tangent-space normal map perturbing the geometric normal through a
+//      fragment TBN reconstructed from screen-space derivatives;
+//   3. roughness map scaling the material base roughness.
+// The TBN is fragment-local (derivative-based), so the terrain needs no
+// per-vertex tangent attribute and no buffer-layout change; it is exact on
+// the flat plane and falls back to the world-aligned frame on degenerate
+// fragments, keeping the math finite.
+@fragment
+fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
+    // G3A: albedo sample in world-space UV plus its per-map anchor; the
+    // vertex color (G2D macro variation over a white material base) modulates.
+    let albedo_rgba = textureSample(
+        terrain_albedo_texture,
+        terrain_sampler,
+        input.uv + terrain_material.albedo_uv_offset,
+    );
+    let base_rgba = input.color * albedo_rgba;
+
+    let metallic = clamp(terrain_material.metallic, 0.0, 1.0);
+
+    // G3A: texture-driven roughness around the material base factor.
+    let roughness_sample = textureSample(
+        terrain_roughness_texture,
+        terrain_sampler,
+        input.uv + terrain_material.roughness_uv_offset,
+    )
+    .r;
+    let roughness = clamp(
+        terrain_material.roughness * roughness_sample,
+        MIN_ROUGHNESS,
+        1.0,
+    );
+
+    // G3A: tangent-space normal with strength applied; Z is rebuilt so the
+    // vector stays unit length (linear map data, decoded to [-1, 1]).
+    let normal_sample = textureSample(
+        terrain_normal_texture,
+        terrain_sampler,
+        input.uv + terrain_material.normal_uv_offset,
+    )
+    .rgb;
+    let n_ts_raw = normal_sample * 2.0 - vec3<f32>(1.0);
+    let n_ts_xy = n_ts_raw.xy * clamp(terrain_material.normal_strength, 0.0, 1.0);
+    let n_ts = normalize(vec3<f32>(
+        n_ts_xy,
+        sqrt(max(1.0 - dot(n_ts_xy, n_ts_xy), 0.0)),
+    ));
+
+    // G3A: fragment TBN from screen-space derivatives of the interpolated
+    // world position and UV. `uv` is world-anchored, so the frame is
+    // chunk-independent and seamless across chunk boundaries. Degenerate
+    // fragments fall back to the world-aligned basis instead of NaN.
+    let dp1 = dpdx(input.world_position);
+    let dp2 = dpdy(input.world_position);
+    let duv1 = dpdx(input.uv);
+    let duv2 = dpdy(input.uv);
+    let det = duv1.x * duv2.y - duv1.y * duv2.x;
+    let has_basis = abs(det) > 1e-8;
+    let inv_det = select(0.0, 1.0 / det, has_basis);
+    let tangent = select(
+        vec3<f32>(1.0, 0.0, 0.0),
+        normalize((duv2.y * dp1 - duv1.y * dp2) * inv_det),
+        has_basis,
+    );
+    let bitangent = select(
+        vec3<f32>(0.0, 0.0, 1.0),
+        normalize((-duv2.x * dp1 + duv1.x * dp2) * inv_det),
+        has_basis,
+    );
+    let geom_normal = safe_normalize(input.world_normal);
+    let n = safe_normalize(tangent * n_ts.x + bitangent * n_ts.y + geom_normal * n_ts.z);
+
+    let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
     return vec4<f32>(final_rgb, base_rgba.a);
 }
