@@ -12,6 +12,12 @@
 // material (albedo/normal/roughness maps with world-space tiling) on a
 // dedicated terrain pipeline that reuses this exact PBR response; the shared
 // `lit_pbr_response` helper keeps the two fragment paths bit-compatible.
+// G3A-R upgrades the terrain material to production visual closure: a full
+// deterministic mip chain with trilinear + anisotropic sampling, a
+// three-frequency stack (macro/base/detail world-space UVs), an
+// anti-repetition rotated second sample, a distance-faded detail normal
+// layer, multi-scale roughness, and presentation-only debug channels driven
+// by a uniform selector (no shader recompiles).
 // Still deliberately out of scope: cascades, HDR, IBL, or clouds. Ambient is
 // flat and mostly applied to the diffuse response so aircraft remain readable
 // in shadow.
@@ -71,21 +77,35 @@ struct MaterialUniform {
     reserved: vec2<f32>,
 };
 
-// G3A: terrain material state (terrain pipeline only, group 4).
+// G3A-R: terrain material state (terrain pipeline only, group 4).
 // metallic/roughness/normal_strength: PBR factors; roughness is multiplied by
-//   the roughness map sample, normal_strength scales the tangent-space XY.
-// padding: alignment to the next vec2.
-// *_uv_offset: per-map world-space UV anchors (tile units) that decorrelate
-//   the three maps' tile borders.
-// padding2: alignment to 64 bytes (four vec4 slots).
+//   the multi-scale roughness stack, normal_strength scales the tangent-space
+//   XY of the base + detail normal stack.
+// debug_mode: presentation-only channel selector (0 = FINAL).
+// base/detail/macro_scale_m: three-frequency stack tile scales in metres.
+// *_uv_offset: per-layer world-space UV anchors (tile units) that decorrelate
+//   each layer's tile borders.
+// ar_angle_cos_sin: (cos, sin) of the anti-repetition second-sample rotation.
+// ar_scale_offset: (scale, offset.x, offset.y) of the rotated second sample.
+// detail_fade_near_far: detail-layer distance fade range in metres (xy).
+// padding: alignment to 128 bytes (eight vec4 slots).
 struct TerrainMaterialUniform {
     metallic: f32,
     roughness: f32,
     normal_strength: f32,
-    padding: f32,
+    debug_mode: u32,
+    base_scale_m: f32,
+    detail_scale_m: f32,
+    macro_scale_m: f32,
+    padding1: f32,
     albedo_uv_offset: vec2<f32>,
     normal_uv_offset: vec2<f32>,
     roughness_uv_offset: vec2<f32>,
+    detail_uv_offset: vec2<f32>,
+    macro_uv_offset: vec2<f32>,
+    ar_angle_cos_sin: vec2<f32>,
+    ar_scale_offset: vec4<f32>,
+    detail_fade_near_far: vec4<f32>,
     padding2: vec4<f32>,
 };
 
@@ -464,53 +484,124 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(final_rgb, base_rgba.a);
 }
 
-// G3A: terrain-only fragment entry (dedicated terrain pipeline, group 4).
+// G3A-R: terrain-only fragment entry (dedicated terrain pipeline, group 4).
 // Same PBR + G2B shadow + fog pipeline as `fs_lit`, preceded by the
-// world-space grass detail stack:
-//   1. albedo texture sample × vertex color (G2D macro variation carrier);
-//   2. tangent-space normal map perturbing the geometric normal through a
-//      fragment TBN reconstructed from screen-space derivatives;
-//   3. roughness map scaling the material base roughness.
+// production grass detail stack:
+//   1. three-frequency albedo stack (macro tone / base + anti-repetition
+//      rotated second sample / distance-faded detail grain) x vertex color
+//      (G2D macro variation carrier);
+//   2. tangent-space normal stack (base + distance-faded detail) perturbing
+//      the geometric normal through a fragment TBN reconstructed from
+//      screen-space derivatives, with high-frequency detail fading with
+//      distance so oblique views stay stable (no shimmer, no popping);
+//   3. multi-scale roughness stack (base + macro + detail) scaling the
+//      material base roughness.
 // The TBN is fragment-local (derivative-based), so the terrain needs no
 // per-vertex tangent attribute and no buffer-layout change; it is exact on
 // the flat plane and falls back to the world-aligned frame on degenerate
-// fragments, keeping the math finite.
+// fragments, keeping the math finite. All UVs are world-anchored, so the
+// whole stack is invariant to camera and chunking.
 @fragment
 fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
-    // G3A: albedo sample in world-space UV plus its per-map anchor; the
-    // vertex color (G2D macro variation over a white material base) modulates.
-    let albedo_rgba = textureSample(
-        terrain_albedo_texture,
-        terrain_sampler,
-        input.uv + terrain_material.albedo_uv_offset,
-    );
-    let base_rgba = input.color * albedo_rgba;
+    // G3A-R: three-frequency world-space UVs. `uv` is the world-anchored
+    // base UV (render position / base tile scale); each layer divides the
+    // tile scale out and adds its own anchor so layer borders never align.
+    let uv = input.uv;
+    let base_uv = uv + terrain_material.albedo_uv_offset;
+    let base_scale = terrain_material.base_scale_m;
+    let macro_uv = uv * (base_scale / terrain_material.macro_scale_m)
+        + terrain_material.macro_uv_offset;
+    let detail_uv = uv * (base_scale / terrain_material.detail_scale_m)
+        + terrain_material.detail_uv_offset;
+
+    // G3A-R: anti-repetition rotated second sample. Rotating the base UV by
+    // the fixed 2D angle, scaling it, and shifting it makes the second sample
+    // tile at a different frequency and angle than the base grid, so no
+    // single 4 m tile border ever repeats recognizably across the field.
+    let ar_scale = terrain_material.ar_scale_offset.x;
+    let ar_offset = terrain_material.ar_scale_offset.yz;
+    let ar_cos = terrain_material.ar_angle_cos_sin.x;
+    let ar_sin = terrain_material.ar_angle_cos_sin.y;
+    let ar_uv = vec2<f32>(
+            ar_cos * uv.x - ar_sin * uv.y,
+            ar_sin * uv.x + ar_cos * uv.y,
+        ) * ar_scale + ar_offset;
+
+    // G3A-R: detail distance fade — 1.0 close, 0.0 far, smoothstep
+    // (zero-derivative ends, no popping).
+    let camera_position = camera.camera_position.xyz;
+    let distance = length(input.world_position - camera_position);
+    let fade_near = terrain_material.detail_fade_near_far.x;
+    let fade_far = terrain_material.detail_fade_near_far.y;
+    let detail_fade = 1.0 - smoothstep(fade_near, fade_far, distance);
+
+    // --- Albedo stack -------------------------------------------------------
+    let albedo_base = textureSample(terrain_albedo_texture, terrain_sampler, base_uv);
+    let albedo_ar = textureSample(terrain_albedo_texture, terrain_sampler, ar_uv);
+    let albedo_macro_s = textureSample(terrain_albedo_texture, terrain_sampler, macro_uv);
+    let albedo_detail_s = textureSample(terrain_albedo_texture, terrain_sampler, detail_uv);
+
+    // Base + rotated second sample 50/50: tile borders of the two samples run
+    // at different angles/frequencies, breaking the 4 m grid's repetition.
+    var albedo = mix(albedo_base, albedo_ar, TERRAIN_ALBEDO_AR_BLEND);
+    // Soft macro tone: multiplicative luminance modulation around the sample
+    // mean, so large patches breathe without a hue shift or contrast boost.
+    let macro_luminance = dot(albedo_macro_s.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let macro_gain = 1.0 + (macro_luminance - 0.5) * TERRAIN_MACRO_ALBEDO_GAIN * 2.0;
+    albedo = vec4<f32>(albedo.rgb * macro_gain, albedo.a);
+    // Fine near-field grain, mean-preserving, distance-faded.
+    albedo = mix(albedo, albedo_detail_s, TERRAIN_DETAIL_ALBEDO_BLEND * detail_fade);
+
+    let base_rgba = input.color * vec4<f32>(albedo.rgb, 1.0);
 
     let metallic = clamp(terrain_material.metallic, 0.0, 1.0);
 
-    // G3A: texture-driven roughness around the material base factor.
-    let roughness_sample = textureSample(
+    // G3A-R: multi-scale roughness stack around the material base factor.
+    // The base/macro/detail weights sum to 1 at full detail, so the mean is
+    // preserved; the detail term is distance-faded and the weights are
+    // renormalized so the surface never turns wet/specular at distance.
+    let r_base = textureSample(
         terrain_roughness_texture,
         terrain_sampler,
-        input.uv + terrain_material.roughness_uv_offset,
+        uv + terrain_material.roughness_uv_offset,
     )
     .r;
+    let r_macro_s = textureSample(terrain_roughness_texture, terrain_sampler, macro_uv).r;
+    let r_detail_s = textureSample(terrain_roughness_texture, terrain_sampler, detail_uv).r;
+    let detail_weight = TERRAIN_ROUGHNESS_DETAIL_WEIGHT * detail_fade;
+    let r_stack = (r_base * TERRAIN_ROUGHNESS_BASE_WEIGHT
+        + r_macro_s * TERRAIN_ROUGHNESS_MACRO_WEIGHT
+        + r_detail_s * detail_weight)
+        / (TERRAIN_ROUGHNESS_BASE_WEIGHT + TERRAIN_ROUGHNESS_MACRO_WEIGHT + detail_weight);
     let roughness = clamp(
-        terrain_material.roughness * roughness_sample,
+        terrain_material.roughness * r_stack,
         MIN_ROUGHNESS,
         1.0,
     );
 
-    // G3A: tangent-space normal with strength applied; Z is rebuilt so the
-    // vector stays unit length (linear map data, decoded to [-1, 1]).
-    let normal_sample = textureSample(
+    // G3A-R: tangent-space normal stack; Z is rebuilt so the vector stays
+    // unit length (linear map data, decoded to [-1, 1]). The detail normal
+    // contributes only near the camera (detail_fade), stabilizing distant
+    // oblique views without popping.
+    let normal_base_raw = textureSample(
         terrain_normal_texture,
         terrain_sampler,
-        input.uv + terrain_material.normal_uv_offset,
+        uv + terrain_material.normal_uv_offset,
     )
-    .rgb;
-    let n_ts_raw = normal_sample * 2.0 - vec3<f32>(1.0);
-    let n_ts_xy = n_ts_raw.xy * clamp(terrain_material.normal_strength, 0.0, 1.0);
+    .rgb
+        * 2.0
+        - vec3<f32>(1.0);
+    let normal_detail_raw = textureSample(
+        terrain_normal_texture,
+        terrain_sampler,
+        detail_uv,
+    )
+    .rgb
+        * 2.0
+        - vec3<f32>(1.0);
+    let strength = clamp(terrain_material.normal_strength, 0.0, 1.0);
+    let n_ts_xy = normal_base_raw.xy * strength
+        + normal_detail_raw.xy * (strength * TERRAIN_DETAIL_NORMAL_BLEND * detail_fade);
     let n_ts = normalize(vec3<f32>(
         n_ts_xy,
         sqrt(max(1.0 - dot(n_ts_xy, n_ts_xy), 0.0)),
@@ -543,8 +634,36 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
     let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
-    return vec4<f32>(final_rgb, base_rgba.a);
+    // G3A-R: presentation-only debug channels. The uniform selector is
+    // defaulted to 0 (FINAL) by the renderer; the lit path above is computed
+    // identically regardless of the selector, so the production output is
+    // untouched when debugging is disabled.
+    var output_rgb = final_rgb;
+    let mode = terrain_material.debug_mode;
+    if (mode == 1u) {
+        output_rgb = albedo.rgb;
+    } else if (mode == 2u) {
+        output_rgb = n_ts * 0.5 + vec3<f32>(0.5);
+    } else if (mode == 3u) {
+        output_rgb = vec3<f32>(roughness);
+    } else if (mode == 4u) {
+        output_rgb = albedo_macro_s.rgb;
+    } else if (mode == 5u) {
+        output_rgb = albedo_detail_s.rgb;
+    }
+    return vec4<f32>(output_rgb, base_rgba.a);
 }
+
+// G3A-R: terrain stack tuning constants (WGSL side of the central values in
+// `terrain.rs`). Low-contrast by design: the field must read as a maintained
+// flying field, not a wild biome.
+const TERRAIN_MACRO_ALBEDO_GAIN: f32 = 0.20;
+const TERRAIN_ALBEDO_AR_BLEND: f32 = 0.5;
+const TERRAIN_DETAIL_ALBEDO_BLEND: f32 = 0.25;
+const TERRAIN_DETAIL_NORMAL_BLEND: f32 = 0.55;
+const TERRAIN_ROUGHNESS_BASE_WEIGHT: f32 = 0.70;
+const TERRAIN_ROUGHNESS_MACRO_WEIGHT: f32 = 0.10;
+const TERRAIN_ROUGHNESS_DETAIL_WEIGHT: f32 = 0.20;
 
 // ---------------------------------------------------------------------------
 // Unlit fragment: pass-through vertex color for debug geometry (grid, axes).
