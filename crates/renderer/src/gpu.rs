@@ -387,6 +387,7 @@ pub struct WgpuRenderer {
     _camera_bind_group_layout: wgpu::BindGroupLayout,
     _object_bind_group_layout: wgpu::BindGroupLayout,
     _environment_bind_group_layout: wgpu::BindGroupLayout,
+    _shadow_pass_bind_group_layout: wgpu::BindGroupLayout,
     _material_bind_group_layout: wgpu::BindGroupLayout,
 
     // Persistent bind groups.
@@ -404,6 +405,7 @@ pub struct WgpuRenderer {
     _environment_buffer: wgpu::Buffer,
     shadow_matrix_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
+    shadow_pass_bind_group: wgpu::BindGroup,
     shadow_light_direction: [f32; 3],
 
     // G1C: Material system.
@@ -535,6 +537,8 @@ impl WgpuRenderer {
         let object_bind_group_layout = matrix_bind_group_layout(&device, "object layout");
         let environment_bind_group_layout =
             environment_bind_group_layout(&device, "environment layout");
+        let shadow_pass_bind_group_layout =
+            shadow_pass_bind_group_layout(&device, "directional shadow pass layout");
         let material_bind_group_layout = material_bind_group_layout(&device, "material layout");
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -571,7 +575,7 @@ impl WgpuRenderer {
                 bind_group_layouts: &[
                     Some(&camera_bind_group_layout),
                     Some(&object_bind_group_layout),
-                    Some(&environment_bind_group_layout),
+                    Some(&shadow_pass_bind_group_layout),
                 ],
                 immediate_size: 0,
             });
@@ -920,6 +924,12 @@ impl WgpuRenderer {
             &shadow_matrix_buffer,
             "environment bind group",
         );
+        let shadow_pass_bind_group = create_shadow_pass_bind_group(
+            &device,
+            &shadow_pass_bind_group_layout,
+            &shadow_matrix_buffer,
+            "directional shadow pass bind group",
+        );
 
         let depth_target = create_depth_target(
             &device,
@@ -941,6 +951,7 @@ impl WgpuRenderer {
             _camera_bind_group_layout: camera_bind_group_layout,
             _object_bind_group_layout: object_bind_group_layout,
             _environment_bind_group_layout: environment_bind_group_layout,
+            _shadow_pass_bind_group_layout: shadow_pass_bind_group_layout,
             _material_bind_group_layout: material_bind_group_layout,
             camera_buffer,
             camera_bind_group,
@@ -951,6 +962,7 @@ impl WgpuRenderer {
             _environment_buffer: environment_buffer,
             shadow_matrix_buffer,
             environment_bind_group,
+            shadow_pass_bind_group,
             shadow_light_direction,
             materials,
             _fallback_material_index: fallback_material_index,
@@ -1133,7 +1145,7 @@ impl WgpuRenderer {
             // Group 0 is unused by `vs_shadow`, but binding the existing camera
             // group keeps the depth pipeline layout contiguous and portable.
             shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            shadow_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+            shadow_pass.set_bind_group(2, &self.shadow_pass_bind_group, &[]);
 
             shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
             for chunk in &self.terrain_chunks {
@@ -1587,6 +1599,25 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
     })
 }
 
+/// G2B caster-pass group 2. It intentionally exposes only binding 3 from the
+/// existing shadow uniform contract, so the depth target is never also bound
+/// as a sampled texture while the directional pass writes it.
+fn shadow_pass_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(size_of::<ShadowUniform>() as u64),
+            },
+            count: None,
+        }],
+    })
+}
+
 fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -1684,6 +1715,22 @@ fn create_environment_bind_group(
                 resource: shadow_matrix_buffer.as_entire_binding(),
             },
         ],
+    })
+}
+
+fn create_shadow_pass_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    shadow_matrix_buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 3,
+            resource: shadow_matrix_buffer.as_entire_binding(),
+        }],
     })
 }
 
@@ -2175,18 +2222,46 @@ mod directional_shadow_regression_tests {
     }
 
     #[test]
-    fn shadow_resources_are_not_created_from_the_frame_path() {
+    fn shadow_caster_pass_avoids_depth_texture_aliasing_and_resource_recreation() {
         let source = include_str!("gpu.rs");
-        let (_, after_render) = source
+        let (initialization_path, after_render) = source
             .split_once("pub fn render(&mut self, frame: &RenderFrame)")
             .expect("renderer source must expose the frame path");
         let (frame_path, _) = after_render
             .split_once("fn check_asynchronous_gpu_error")
             .expect("frame path must end before asynchronous error handling");
+        let (_, after_shadow_pass_label) = frame_path
+            .split_once("label: Some(\"G2B directional shadow depth pass\"),")
+            .expect("frame path must contain the directional shadow pass");
+        let (shadow_pass_path, _) = after_shadow_pass_label
+            .split_once("// --- Sky pass")
+            .expect("shadow pass must end before the main scene sky pass");
+
+        assert!(
+            initialization_path
+                .contains("let shadow_pass_bind_group = create_shadow_pass_bind_group("),
+            "the matrix-only shadow-pass bind group must be persistent"
+        );
+        assert!(
+            initialization_path.contains("let shadow_target = create_shadow_target(&device);"),
+            "the shadow depth target must remain persistent"
+        );
+        assert!(
+            shadow_pass_path.contains("set_bind_group(2, &self.shadow_pass_bind_group, &[]);"),
+            "caster pass must bind the matrix-only group at group 2"
+        );
+        assert!(
+            !shadow_pass_path.contains("&self.environment_bind_group"),
+            "caster pass must not bind the sampled depth texture while writing it"
+        );
         for forbidden_creation in [
             "create_shadow_target(",
             "create_shadow_pipeline(",
             "create_environment_bind_group(",
+            "create_shadow_pass_bind_group(",
+            "create_texture(",
+            "create_bind_group(",
+            "create_render_pipeline(",
         ] {
             assert!(
                 !frame_path.contains(forbidden_creation),

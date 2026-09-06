@@ -52,11 +52,17 @@ pipeline at its established groups `0..3`:
 | 2 | 2 | linear comparison sampler |
 | 2 | 3 | `ShadowUniform` (light view-projection + receiver bias) |
 
-The shadow vertex path reads the light matrix from this same boundary and uses
-the object transform at group 1. Group 0 is bound with the existing camera
-group only to keep the pipeline layout contiguous; the shadow vertex shader
-does not read it. The pass needs neither material data nor a new global bind
-group.
+The main/lighting pass uses this complete group 2 and can therefore sample the
+shadow texture normally. The shadow caster pipeline instead uses a persistent,
+matrix-only group-2 layout with **only binding 3** (`ShadowUniform`, vertex
+visible), backed by the same `shadow_matrix_buffer`. It never binds the full
+environment group while its depth target is a render attachment, avoiding a
+read/write alias between `RENDER_ATTACHMENT` and `TEXTURE_BINDING`.
+
+The shadow vertex path retains `@group(2) @binding(3)` and uses the object
+transform at group 1. Group 0 is bound with the existing camera group only to
+keep the pipeline layout contiguous; the shadow vertex shader does not read it.
+The pass needs neither material data nor a new global bind group.
 
 ## Frustum and temporal stability
 
@@ -132,7 +138,8 @@ Pure renderer tests cover:
 - finite result for a nearly world-up light direction;
 - valid frustum, map, and bias constants;
 - structural guard that the frame path only updates persistent shadow buffers,
-  not shadow resources;
+  not shadow resources, and that the caster pass binds its matrix-only group
+  instead of the full sampled environment group;
 - WGSL source guards for direct-only shadow modulation, unshadowed ambient,
   fog after lighting, and comparison sampling.
 
