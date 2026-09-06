@@ -5,6 +5,10 @@ brand, stick mode, USB VID/PID, or hardware-axis layout. A controller profile re
 device identity, four explicit hardware-axis assignments, measured endpoints, centered positions,
 inversion choices, and centered-control deadzone.
 
+On Windows, the simulator uses gilrs' WGI/RawGameController backend to support generic
+USB/HID RC transmitters as well as XInput controllers. TX16S detection and calibration with
+this backend still require the hardware test below.
+
 The RadioMaster TX16S workflow below is prepared for a real Windows test, but the TX16S is **not
 validated** until that physical test has been run and its result recorded.
 
