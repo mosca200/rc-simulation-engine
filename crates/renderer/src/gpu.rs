@@ -1614,10 +1614,10 @@ fn create_terrain_material(
     queue: &wgpu::Queue,
     material: &TerrainMaterial,
 ) -> Result<GpuTerrainMaterial, RendererError> {
-    let albedo = decode_image(terrain_assets::TERRAIN_ALBEDO_PNG)
-        .map_err(RendererError::TextureUpload)?;
-    let normal = decode_image(terrain_assets::TERRAIN_NORMAL_PNG)
-        .map_err(RendererError::TextureUpload)?;
+    let albedo =
+        decode_image(terrain_assets::TERRAIN_ALBEDO_PNG).map_err(RendererError::TextureUpload)?;
+    let normal =
+        decode_image(terrain_assets::TERRAIN_NORMAL_PNG).map_err(RendererError::TextureUpload)?;
     let roughness = decode_image(terrain_assets::TERRAIN_ROUGHNESS_PNG)
         .map_err(RendererError::TextureUpload)?;
 
@@ -1698,10 +1698,11 @@ fn create_terrain_material(
     });
     let roughness_texture_view =
         roughness_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let roughness_row_bytes = crate::texture::padded_bytes_per_row_checked(roughness.width)
-        .ok_or(RendererError::TextureUpload(TextureLoadError::PaddedRowOverflow {
+    let roughness_row_bytes = crate::texture::padded_bytes_per_row_checked(roughness.width).ok_or(
+        RendererError::TextureUpload(TextureLoadError::PaddedRowOverflow {
             width: roughness.width,
-        }))?;
+        }),
+    )?;
     let mut staged_roughness =
         Vec::with_capacity((roughness_row_bytes as usize) * (roughness.height as usize));
     for row in 0..roughness.height as usize {
@@ -1745,12 +1746,11 @@ fn create_terrain_material(
     });
 
     // G3A: terrain PBR factors + UV anchors, written once at load time.
-    let material_uniform_buffer =
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("G3A terrain material uniform"),
-            contents: bytemuck::bytes_of(&TerrainMaterialUniform::from_terrain_material(material)),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+    let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("G3A terrain material uniform"),
+        contents: bytemuck::bytes_of(&TerrainMaterialUniform::from_terrain_material(material)),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("G3A terrain material bind group"),
@@ -1957,10 +1957,7 @@ fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindG
 /// One filtering sampler serves all three maps; the uniform carries the PBR
 /// factors and per-map world-space UV anchors. Distinct from the shared
 /// material layout so the aircraft/scenery pipeline is untouched.
-fn terrain_material_bind_group_layout(
-    device: &wgpu::Device,
-    label: &str,
-) -> wgpu::BindGroupLayout {
+fn terrain_material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[
@@ -2012,7 +2009,7 @@ fn terrain_material_bind_group_layout(
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(
-                        size_of::<TerrainMaterialUniform>() as u64,
+                        size_of::<TerrainMaterialUniform>() as u64
                     ),
                 },
                 count: None,
@@ -2688,8 +2685,7 @@ mod terrain_material_uniform_tests {
         assert_eq!(uniform.normal_uv_offset, [0.271, 0.137]);
         assert_eq!(uniform.roughness_uv_offset, [0.413, 0.303]);
 
-        let decoded: TerrainMaterialUniform =
-            *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
+        let decoded: TerrainMaterialUniform = *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
         assert_eq!(decoded.metallic, 0.0);
         assert_eq!(decoded.roughness, 0.9);
         assert_eq!(decoded.normal_uv_offset, [0.271, 0.137]);

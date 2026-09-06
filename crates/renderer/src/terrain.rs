@@ -1804,10 +1804,12 @@ mod tests {
         };
         let terrain = generate_rolling_terrain(16, 16, 2.0, 0.0, 1.0);
         let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &custom, [0.0; 2]);
-        assert!(chunk
-            .vertices
-            .iter()
-            .all(|v| v.color.iter().chain(v.uv.iter()).all(|c| c.is_finite())));
+        assert!(
+            chunk
+                .vertices
+                .iter()
+                .all(|v| v.color.iter().chain(v.uv.iter()).all(|c| c.is_finite()))
+        );
     }
 
     #[test]
@@ -1874,9 +1876,7 @@ mod tests {
             for v in &chunk_00.vertices {
                 if (v.position[0] - 32.0).abs() < 1e-4 {
                     for w in &chunk_10.vertices {
-                        if (w.position[0] - 32.0).abs() < 1e-4
-                            && w.position[2] == v.position[2]
-                        {
+                        if (w.position[0] - 32.0).abs() < 1e-4 && w.position[2] == v.position[2] {
                             pairs.push((v, w));
                         }
                     }
@@ -1886,9 +1886,7 @@ mod tests {
             for v in &chunk_00.vertices {
                 if (v.position[2] - 32.0).abs() < 1e-4 {
                     for w in &chunk_01.vertices {
-                        if (w.position[2] - 32.0).abs() < 1e-4
-                            && w.position[0] == v.position[0]
-                        {
+                        if (w.position[2] - 32.0).abs() < 1e-4 && w.position[0] == v.position[0] {
                             pairs.push((v, w));
                         }
                     }
@@ -1982,7 +1980,10 @@ mod tests {
                 let duv2 = [uv_z[0] - uv[0], uv_z[1] - uv[1]];
 
                 let (tangent, bitangent, det) = derivative_tbn(dp1, dp2, duv1, duv2);
-                assert!(det.is_finite() && det > 0.0, "det must be positive, got {det}");
+                assert!(
+                    det.is_finite() && det > 0.0,
+                    "det must be positive, got {det}"
+                );
                 for axis in [tangent, bitangent] {
                     assert!(
                         axis.iter().all(|c| c.is_finite()),

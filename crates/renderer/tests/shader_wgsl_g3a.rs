@@ -23,7 +23,10 @@ fn shader_wgsl_parses_and_validates() {
 fn shader_defines_the_g3a_terrain_entry_points() {
     // Normalize CRLF so the assertions hold on any checkout.
     let source = include_str!("../src/shader.wgsl").replace("\r\n", "\n");
-    assert!(source.contains("fn fs_terrain("), "terrain fragment must exist");
+    assert!(
+        source.contains("fn fs_terrain("),
+        "terrain fragment must exist"
+    );
     assert!(
         source.contains("fn lit_pbr_response("),
         "terrain must share the PBR response"

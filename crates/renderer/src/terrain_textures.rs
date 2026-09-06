@@ -102,7 +102,8 @@ pub struct TerrainTextureSet {
 pub mod generated {
     pub const TERRAIN_ALBEDO_PNG: &[u8] = include_bytes!("../assets/terrain_grass_albedo.png");
     pub const TERRAIN_NORMAL_PNG: &[u8] = include_bytes!("../assets/terrain_grass_normal.png");
-    pub const TERRAIN_ROUGHNESS_PNG: &[u8] = include_bytes!("../assets/terrain_grass_roughness.png");
+    pub const TERRAIN_ROUGHNESS_PNG: &[u8] =
+        include_bytes!("../assets/terrain_grass_roughness.png");
 }
 
 /// Generate the full deterministic terrain texture set.
@@ -164,9 +165,8 @@ fn grass_pixel(size: u32, x: u32, y: u32) -> ([u8; 4], f32) {
 
     // Blade-level mottle: tiny per-channel tint jitter.
     let mottle = octave_noise(size, ALBEDO_CELL_MICRO, x, y, SEED_ALBEDO_MOTTLE) - 0.5;
-    let mottle_green = (octave_noise(size, ALBEDO_CELL_MICRO, x, y, SEED_ALBEDO_MOTTLE ^ 0x0F)
-        - 0.5)
-        * 0.7;
+    let mottle_green =
+        (octave_noise(size, ALBEDO_CELL_MICRO, x, y, SEED_ALBEDO_MOTTLE ^ 0x0F) - 0.5) * 0.7;
 
     let mut rgb = [0.0f32; 3];
     for channel in 0..3 {
@@ -302,9 +302,7 @@ fn encode_u8x4(rgb: [f32; 3]) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::generated::{
-        TERRAIN_ALBEDO_PNG, TERRAIN_NORMAL_PNG, TERRAIN_ROUGHNESS_PNG,
-    };
+    use super::generated::{TERRAIN_ALBEDO_PNG, TERRAIN_NORMAL_PNG, TERRAIN_ROUGHNESS_PNG};
     use super::*;
     use crate::texture::decode_image;
 
@@ -456,8 +454,14 @@ mod tests {
             / (set.normal_rgba.len() / 4) as f64;
         // The field is slope-dominated, so Z stays comfortably in the upper
         // half-band (normal keeps pointing mostly up).
-        assert!(z_min >= 125, "normal Z must never flip below tangent-planar");
-        assert!(z_mean > 200.0, "normal must stay mostly up, mean Z {z_mean}");
+        assert!(
+            z_min >= 125,
+            "normal Z must never flip below tangent-planar"
+        );
+        assert!(
+            z_mean > 200.0,
+            "normal must stay mostly up, mean Z {z_mean}"
+        );
 
         // XY shows real micro-relief but stays in a credible amplitude band.
         let xy_dev_min: u8 = set
@@ -489,7 +493,7 @@ mod tests {
     #[test]
     fn normal_texels_are_encoded_unit_vectors() {
         let set = generate_terrain_textures(TERRAIN_TEXTURE_SIZE);
-        for pixel in set.normal_rgba.chunks_exact(4) {
+        for pixel in set.normal_rgba.as_chunks::<4>().0 {
             let nx = (pixel[0] as f32 / 127.5) - 1.0;
             let ny = (pixel[1] as f32 / 127.5) - 1.0;
             let nz = (pixel[2] as f32 / 127.5) - 1.0;
@@ -514,9 +518,18 @@ mod tests {
             sum += value as u64;
         }
         let mean = sum as f64 / set.roughness_r8.len() as f64;
-        assert!((170.0..=220.0).contains(&mean), "roughness mean {mean} out of range");
-        assert!(min < 150, "roughness must show wet/dry variation, min {min}");
-        assert!(max > 190, "roughness must show wet/dry variation, max {max}");
+        assert!(
+            (170.0..=220.0).contains(&mean),
+            "roughness mean {mean} out of range"
+        );
+        assert!(
+            min < 150,
+            "roughness must show wet/dry variation, min {min}"
+        );
+        assert!(
+            max > 190,
+            "roughness must show wet/dry variation, max {max}"
+        );
     }
 
     #[test]
@@ -574,7 +587,7 @@ mod tests {
                 }
                 let mut seam = 0u8;
                 for row in 0..n {
-                    let a = data[row * n * stride + 0 * stride + channel];
+                    let a = data[row * n * stride + channel];
                     let b = data[row * n * stride + (n - 1) * stride + channel];
                     seam = seam.max(a.abs_diff(b));
                 }
