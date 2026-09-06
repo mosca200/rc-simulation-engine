@@ -38,6 +38,17 @@
 //! - a recognizable windsock (pole, top boom, striped horizontal sock);
 //! - deterministic per-tree variation (height, canopy radius, yaw/lean,
 //!   silhouette, canopy green) derived from the tree seed and index.
+//!
+//! # G2E: boundary vegetation belt
+//!
+//! A distant, clustered belt of low-poly vegetation frames the field at
+//! [`BOUNDARY_VEGETATION_INNER_RADIUS_M`]..[`BOUNDARY_VEGETATION_OUTER_RADIUS_M`]
+//! around the field centre: group → gap → group along the boundary ring,
+//! denser opposite the flightline, with deterministic apertures toward the
+//! horizon. Four cheap silhouettes (conifer, rounded deciduous, narrow tall,
+//! shrub) are varied per instance (height, width, yaw, desaturated green)
+//! and merged into the same single [`SceneryMesh`] — still one draw call,
+//! still zero per-frame generation.
 
 use crate::mesh::{SAFE_NORMAL, SAFE_UV, Vertex};
 
@@ -66,6 +77,21 @@ pub const DEFAULT_TREE_SEED: u64 = 42;
 
 /// Minimum distance from runway safety rectangle to any tree centre.
 pub const TREE_MIN_DISTANCE_FROM_RUNWAY_M: f32 = 20.0;
+
+/// Boundary vegetation belt: minimum distance from the field centre.
+///
+/// The belt lives in the outer band of the field, well beyond the runway
+/// safety rectangle, flightline, pilot stations and windsock, so it never
+/// competes with the aircraft or the operational area.
+pub const BOUNDARY_VEGETATION_INNER_RADIUS_M: f32 = 160.0;
+
+/// Boundary vegetation belt: maximum distance from the field centre.
+///
+/// Stays comfortably inside [`FIELD_HALF_EXTENT_M`].
+pub const BOUNDARY_VEGETATION_OUTER_RADIUS_M: f32 = 230.0;
+
+/// Number of boundary vegetation clusters around the belt.
+const BOUNDARY_CLUSTER_COUNT: usize = 18;
 
 /// Explicit upper bound on merged flying-field geometry in triangles.
 ///
@@ -131,6 +157,21 @@ pub enum SceneryVisualKind {
     Marker,
     Fence,
     Windsock,
+    /// Low-poly distant vegetation belt (G2E).
+    BoundaryVegetation,
+}
+
+/// Low-poly silhouette used by a boundary vegetation instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoundarySilhouette {
+    /// Five-segment cone (classic conifer).
+    Conifer,
+    /// Rounded two-ring dome (deciduous).
+    Deciduous,
+    /// Five-segment steep cone (narrow tall tree).
+    Tall,
+    /// Squat low cone (shrub / hedge cluster).
+    Shrub,
 }
 
 /// A named scenery configuration.
@@ -165,6 +206,26 @@ pub struct SceneryObject {
     pub position: [f32; 3],
     pub rotation_yaw_rad: f32,
     pub scale: f32,
+    /// Silhouette index for [`SceneryVisualKind::BoundaryVegetation`]
+    /// (0 = Conifer, 1 = Deciduous, 2 = Tall, 3 = Shrub); 0 otherwise.
+    /// Retained for tests/debug.
+    pub variant_id: u8,
+}
+
+/// One deterministic boundary vegetation instance (position + visual params).
+#[derive(Debug, Clone, Copy)]
+pub struct BoundaryVegetationVariant {
+    /// [x, z] in render space; Y is the shared ground reference.
+    pub position: [f32; 2],
+    pub silhouette: BoundarySilhouette,
+    /// Multiplier on the silhouette base height (0.80..1.20).
+    pub height_scale: f32,
+    /// Multiplier on the silhouette base width (0.85..1.15).
+    pub width_scale: f32,
+    /// Subtle apex lean, radians.
+    pub yaw_rad: f32,
+    /// Desaturated, haze-blended green.
+    pub color: [f32; 4],
 }
 
 /// Merged scenery mesh ready for GPU upload.
@@ -238,6 +299,29 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
             position: [x, params.ground_y, z],
             rotation_yaw_rad: variant.yaw_rad,
             scale: variant.height_scale,
+            variant_id: 0,
+        });
+    }
+
+    // G2E: boundary vegetation belt — clustered, deterministic, distant.
+    // Denser opposite the flightline, sparse toward the flightline/windsock
+    // quadrant, with deterministic apertures. All instances merge into the
+    // same single SceneryMesh below (one draw call).
+    let boundary_variants = deterministic_boundary_vegetation_layout(params.tree_seed);
+    for variant in &boundary_variants {
+        append_boundary_vegetation(
+            &mut all_vertices,
+            &mut all_indices,
+            variant.position,
+            params.ground_y,
+            variant,
+        );
+        objects.push(SceneryObject {
+            kind: SceneryVisualKind::BoundaryVegetation,
+            position: [variant.position[0], params.ground_y, variant.position[1]],
+            rotation_yaw_rad: variant.yaw_rad,
+            scale: variant.height_scale,
+            variant_id: variant.silhouette as u8,
         });
     }
 
@@ -258,6 +342,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
                 position: [x, params.ground_y, z],
                 rotation_yaw_rad: 0.0,
                 scale: 1.0,
+                variant_id: 0,
             });
         }
     }
@@ -279,6 +364,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         position: [FLIGHTLINE_X_M, params.ground_y, 0.0],
         rotation_yaw_rad: 0.0,
         scale: 1.0,
+        variant_id: 0,
     });
     for &z in &PILOT_MARKER_Z_M {
         generate_pilot_marker(
@@ -294,6 +380,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
             position: [PILOT_MARKER_X_M, params.ground_y, z],
             rotation_yaw_rad: 0.0,
             scale: 1.0,
+            variant_id: 0,
         });
     }
 
@@ -310,6 +397,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         position: [15.0, params.ground_y, RUNWAY_HALF_LENGTH_M + 10.0],
         rotation_yaw_rad: 0.0,
         scale: 1.0,
+        variant_id: 0,
     });
 
     SceneryScene {
@@ -648,6 +736,249 @@ fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
         return SAFE_NORMAL;
     }
     [normal[0] / length, normal[1] / length, normal[2] / length]
+}
+
+// ── G2E: boundary vegetation ───────────────────────────────────────────────
+
+/// Deterministic clustered boundary vegetation layout.
+///
+/// Instances are placed around the field centre in an annular belt
+/// [`BOUNDARY_VEGETATION_INNER_RADIUS_M`]..[`BOUNDARY_VEGETATION_OUTER_RADIUS_M`]
+/// (well inside [`FIELD_HALF_EXTENT_M`]) using a simple slot-based strategy:
+///
+/// - the ring is split into [`BOUNDARY_CLUSTER_COUNT`] angular slots; each
+///   slot is one cluster whose members spread around the slot centre, so the
+///   layout reads as group → gap → group along the boundary (members of a
+///   cluster stay within ~±0.075 rad of the slot centre, wider than any
+///   inter-cluster gap);
+/// - a few slots are empty apertures toward the horizon
+///   (`APERTURE_PROBABILITY`), keeping the field visually open;
+/// - side density modulation: denser opposite the flightline (+X side,
+///   `cos < -0.25`), sparser toward the flightline/windsock quadrant
+///   (`cos > 0.10`);
+/// - per-instance variation: silhouette, height, width, yaw and a
+///   desaturated green tint, all deterministic functions of the seed.
+///
+/// No random crate, no thread RNG, no time, no camera: the layout is a pure
+/// function of `seed`.
+#[must_use]
+fn deterministic_boundary_vegetation_layout(seed: u64) -> Vec<BoundaryVegetationVariant> {
+    const TWO_PI: f32 = 2.0 * std::f32::consts::PI;
+    const MEMBER_SPREAD_RAD: f32 = 0.075;
+    const APERTURE_PROBABILITY: f32 = 0.16;
+
+    let mut results = Vec::new();
+    let mut state = seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(0x6e2b_2f5b_1c3d_9a41);
+    let mut unit = move || {
+        let value = to_unit(scramble(state));
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        value
+    };
+
+    let step = TWO_PI / BOUNDARY_CLUSTER_COUNT as f32;
+    for slot in 0..BOUNDARY_CLUSTER_COUNT {
+        // Slot anchor centred in the slot; members scatter around it. Anchors
+        // are evenly spaced (no jitter) so adjacent clusters can never bleed
+        // into each other and the gap structure stays well-defined.
+        let anchor = (slot as f32 + 0.5) * step;
+
+        // Aperture: leave some slots empty to open the horizon.
+        if unit() < APERTURE_PROBABILITY {
+            continue;
+        }
+
+        // Side density modulation (flightline side is +X, angle 0).
+        let cos_anchor = anchor.cos();
+        let member_count = if cos_anchor < -0.25 {
+            10 + (unit() * 5.0) as usize // dense band opposite the flightline
+        } else if cos_anchor > 0.10 {
+            3 + (unit() * 3.0) as usize // sparse toward flightline/windsock
+        } else {
+            6 + (unit() * 4.0) as usize // moderate
+        };
+
+        // Cluster ring radius + angular spread, per cluster.
+        let cluster_radius = lerp(
+            BOUNDARY_VEGETATION_INNER_RADIUS_M + 6.0,
+            BOUNDARY_VEGETATION_OUTER_RADIUS_M - 6.0,
+            unit(),
+        );
+        let spread = MEMBER_SPREAD_RAD * (0.8 + 0.4 * unit());
+
+        for _ in 0..member_count {
+            let angle = anchor + (unit() * 2.0 - 1.0) * spread;
+            let radius = (cluster_radius + (unit() * 2.0 - 1.0) * 7.0).clamp(
+                BOUNDARY_VEGETATION_INNER_RADIUS_M,
+                BOUNDARY_VEGETATION_OUTER_RADIUS_M,
+            );
+            results.push(BoundaryVegetationVariant {
+                position: [radius * angle.cos(), radius * angle.sin()],
+                silhouette: match (unit() * 4.0) as u8 {
+                    0 => BoundarySilhouette::Conifer,
+                    1 => BoundarySilhouette::Deciduous,
+                    2 => BoundarySilhouette::Tall,
+                    _ => BoundarySilhouette::Shrub,
+                },
+                height_scale: 0.80 + 0.40 * unit(),
+                width_scale: 0.85 + 0.30 * unit(),
+                yaw_rad: -0.15 + 0.30 * unit(),
+                color: boundary_green(unit(), unit(), unit(), unit()),
+            });
+        }
+    }
+
+    results
+}
+
+/// Desaturated boundary green with a per-instance haze blend.
+///
+/// Less saturated and less contrasted than the near-field canopies: the belt
+/// is background scenery and must stay behind the aircraft visually.
+#[must_use]
+fn boundary_green(hue_r: f32, hue_g: f32, hue_b: f32, haze: f32) -> [f32; 4] {
+    let haze_mix = 0.30 + 0.20 * haze;
+    [
+        lerp(0.16 + 0.14 * hue_r, 0.34, haze_mix),
+        lerp(0.26 + 0.10 * hue_g, 0.38, haze_mix),
+        lerp(0.12 + 0.06 * hue_b, 0.32, haze_mix),
+        1.0,
+    ]
+}
+
+/// Append one boundary vegetation instance into the merged mesh.
+fn append_boundary_vegetation(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    position: [f32; 2],
+    ground_y: f32,
+    variant: &BoundaryVegetationVariant,
+) {
+    let base = [position[0], ground_y, position[1]];
+    match variant.silhouette {
+        BoundarySilhouette::Conifer => append_cone_vegetation(
+            vertices,
+            indices,
+            base,
+            1.3 * variant.width_scale,
+            6.0 * variant.height_scale,
+            variant.color,
+            variant.yaw_rad,
+        ),
+        BoundarySilhouette::Tall => append_cone_vegetation(
+            vertices,
+            indices,
+            base,
+            0.9 * variant.width_scale,
+            8.0 * variant.height_scale,
+            variant.color,
+            variant.yaw_rad,
+        ),
+        BoundarySilhouette::Deciduous => append_dome_vegetation(
+            vertices,
+            indices,
+            base,
+            1.6 * variant.width_scale,
+            5.0 * variant.height_scale,
+            variant.color,
+            variant.yaw_rad,
+        ),
+        BoundarySilhouette::Shrub => append_cone_vegetation(
+            vertices,
+            indices,
+            base,
+            2.0 * variant.width_scale,
+            2.0 * variant.height_scale,
+            variant.color,
+            0.0,
+        ),
+    }
+}
+
+/// Append a low-poly cone silhouette (conifer / narrow tall / squat shrub).
+///
+/// Five-segment cone from the ground to a leaned apex plus the base cap:
+/// 10 triangles, no trunk — at boundary distance trunks are invisible and
+/// skipping them keeps the belt far cheaper than the near trees.
+fn append_cone_vegetation(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    base: [f32; 3],
+    radius: f32,
+    height: f32,
+    color: [f32; 4],
+    yaw_rad: f32,
+) {
+    const SEGMENTS: u32 = 5;
+    let base_ring = canopy_ring(base[0], base[1], base[2], radius, SEGMENTS);
+    let apex = [base[0] + radius * yaw_rad, base[1] + height, base[2]];
+    for i in 0..SEGMENTS {
+        let next = (i + 1) % SEGMENTS;
+        push_triangle(
+            vertices,
+            indices,
+            apex,
+            base_ring[i as usize],
+            base_ring[next as usize],
+            color,
+        );
+    }
+    push_cap(vertices, indices, base, &base_ring, color);
+}
+
+/// Append a low-poly rounded deciduous silhouette.
+///
+/// Two stacked rings plus a leaned apex, five segments: 20 triangles.
+fn append_dome_vegetation(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    base: [f32; 3],
+    radius: f32,
+    height: f32,
+    color: [f32; 4],
+    yaw_rad: f32,
+) {
+    const SEGMENTS: u32 = 5;
+    let bottom = canopy_ring(base[0], base[1], base[2], radius, SEGMENTS);
+    let mid = canopy_ring(
+        base[0],
+        base[1] + height * 0.55,
+        base[2],
+        radius * 0.72,
+        SEGMENTS,
+    );
+    let apex = [base[0] + radius * yaw_rad, base[1] + height, base[2]];
+    for i in 0..SEGMENTS {
+        let next = (i + 1) % SEGMENTS;
+        push_triangle(
+            vertices,
+            indices,
+            bottom[i as usize],
+            bottom[next as usize],
+            mid[next as usize],
+            color,
+        );
+        push_triangle(
+            vertices,
+            indices,
+            bottom[i as usize],
+            mid[next as usize],
+            mid[i as usize],
+            color,
+        );
+        push_triangle(
+            vertices,
+            indices,
+            mid[i as usize],
+            mid[next as usize],
+            apex,
+            color,
+        );
+    }
+    push_cap(vertices, indices, base, &bottom, color);
 }
 
 // ── Marker pole ────────────────────────────────────────────────────────────
@@ -1517,11 +1848,17 @@ mod tests {
     #[test]
     fn generated_flying_field_is_not_empty_and_reports_geometry() {
         let scene = default_scene();
+        let boundary_count = scene
+            .objects
+            .iter()
+            .filter(|obj| obj.kind == SceneryVisualKind::BoundaryVegetation)
+            .count();
         println!(
-            "flying field: {} vertices, {} indices, {} triangles",
+            "flying field: {} vertices, {} indices, {} triangles, {} boundary vegetation instances",
             scene.mesh.vertices.len(),
             scene.mesh.indices.len(),
-            scene.mesh.triangle_count()
+            scene.mesh.triangle_count(),
+            boundary_count
         );
         assert!(!scene.mesh.vertices.is_empty());
         assert!(!scene.mesh.indices.is_empty());
@@ -1760,6 +2097,280 @@ mod tests {
         assert!(
             triangles <= MAX_FLYING_FIELD_TRIANGLES as usize,
             "scene exceeded budget: {triangles} > {MAX_FLYING_FIELD_TRIANGLES}"
+        );
+    }
+
+    // ── G2E: boundary vegetation ──────────────────────────────────────────
+
+    fn boundary_layout() -> Vec<BoundaryVegetationVariant> {
+        deterministic_boundary_vegetation_layout(DEFAULT_TREE_SEED)
+    }
+
+    fn dist_xz(a: [f32; 2], b: [f32; 2]) -> f32 {
+        let dx = a[0] - b[0];
+        let dz = a[1] - b[1];
+        (dx * dx + dz * dz).sqrt()
+    }
+
+    fn radius_xz(p: [f32; 2]) -> f32 {
+        (p[0] * p[0] + p[1] * p[1]).sqrt()
+    }
+
+    /// Closest distance from point `p` to segment `(a, b)` in the XZ plane.
+    fn dist_to_segment_xz(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let ap = [p[0] - a[0], p[1] - a[1]];
+        let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+        let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0);
+        dist_xz(p, [a[0] + t * ab[0], a[1] + t * ab[1]])
+    }
+
+    #[test]
+    fn boundary_vegetation_layout_is_deterministic() {
+        let a = boundary_layout();
+        let b = deterministic_boundary_vegetation_layout(DEFAULT_TREE_SEED);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.position, y.position);
+            assert_eq!(x.height_scale.to_bits(), y.height_scale.to_bits());
+            assert_eq!(x.width_scale.to_bits(), y.width_scale.to_bits());
+            assert_eq!(x.yaw_rad.to_bits(), y.yaw_rad.to_bits());
+            assert_eq!(x.color, y.color);
+            assert_eq!(x.silhouette, y.silhouette);
+        }
+    }
+
+    #[test]
+    fn different_seed_changes_boundary_layout() {
+        let a = deterministic_boundary_vegetation_layout(DEFAULT_TREE_SEED);
+        let b = deterministic_boundary_vegetation_layout(999);
+        assert!(a.len() >= 60, "belt too sparse: {}", a.len());
+        assert!(b.len() >= 60, "belt too sparse: {}", b.len());
+        let n = a.len().min(b.len());
+        let differing = a
+            .iter()
+            .zip(b.iter())
+            .filter(|(x, y)| dist_xz(x.position, y.position) > 1.0)
+            .count();
+        assert!(
+            differing > n / 2,
+            "different seeds should produce substantially different boundary layouts: {differing}/{n}"
+        );
+    }
+
+    #[test]
+    fn boundary_vegetation_stays_within_field_extent() {
+        let layout = boundary_layout();
+        for variant in &layout {
+            let [x, z] = variant.position;
+            assert!(
+                (-FIELD_HALF_EXTENT_M..=FIELD_HALF_EXTENT_M).contains(&x),
+                "boundary vegetation outside field: x={x}"
+            );
+            assert!(
+                (-FIELD_HALF_EXTENT_M..=FIELD_HALF_EXTENT_M).contains(&z),
+                "boundary vegetation outside field: z={z}"
+            );
+            let r = radius_xz(variant.position);
+            assert!(
+                r >= BOUNDARY_VEGETATION_INNER_RADIUS_M - 0.01,
+                "instance too close to the field centre: r={r}"
+            );
+            assert!(
+                r <= BOUNDARY_VEGETATION_OUTER_RADIUS_M + 0.01,
+                "instance beyond the belt: r={r}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_vegetation_keeps_central_area_clear() {
+        let layout = boundary_layout();
+        let windsock = [15.0, RUNWAY_HALF_LENGTH_M + 10.0];
+        let flight_a = [13.0, -FLIGHTLINE_HALF_LENGTH_M];
+        let flight_b = [13.0, FLIGHTLINE_HALF_LENGTH_M];
+        for variant in &layout {
+            let p = variant.position;
+            assert!(
+                radius_xz(p) >= 140.0,
+                "vegetation too close to the operational area: r={}",
+                radius_xz(p)
+            );
+            assert!(
+                dist_xz(p, windsock) >= 80.0,
+                "vegetation too close to the windsock: d={}",
+                dist_xz(p, windsock)
+            );
+            assert!(
+                dist_to_segment_xz(p, flight_a, flight_b) >= 80.0,
+                "vegetation too close to the flightline: d={}",
+                dist_to_segment_xz(p, flight_a, flight_b)
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_belt_is_denser_opposite_flightline() {
+        let layout = boundary_layout();
+        let (mut dense, mut sparse) = (0_usize, 0_usize);
+        for variant in &layout {
+            let cos = variant.position[0] / radius_xz(variant.position);
+            if cos < -0.25 {
+                dense += 1;
+            } else if cos > 0.10 {
+                sparse += 1;
+            }
+        }
+        assert!(
+            dense > sparse,
+            "belt must be denser opposite the flightline (+X): dense={dense} sparse={sparse}"
+        );
+        assert!(dense > 0 && sparse > 0, "density bands must both exist");
+    }
+
+    #[test]
+    fn multiple_boundary_silhouettes_exist() {
+        let layout = boundary_layout();
+        let silhouettes: HashSet<BoundarySilhouette> =
+            layout.iter().map(|variant| variant.silhouette).collect();
+        assert!(
+            silhouettes.len() >= 3,
+            "expected at least 3 silhouettes, got {}",
+            silhouettes.len()
+        );
+        // Registered object metadata exposes the same variety.
+        let scene = default_scene();
+        let ids: HashSet<u8> = scene
+            .objects
+            .iter()
+            .filter(|obj| obj.kind == SceneryVisualKind::BoundaryVegetation)
+            .map(|obj| obj.variant_id)
+            .collect();
+        assert!(
+            ids.len() >= 3,
+            "expected ≥3 silhouette ids, got {}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn boundary_variation_is_not_uniform_and_stays_in_range() {
+        let layout = boundary_layout();
+        assert!(layout.len() >= 60, "belt too sparse: {}", layout.len());
+        let unique_heights: HashSet<u32> = layout
+            .iter()
+            .map(|variant| variant.height_scale.to_bits())
+            .collect();
+        let unique_widths: HashSet<u32> = layout
+            .iter()
+            .map(|variant| variant.width_scale.to_bits())
+            .collect();
+        let unique_yaws: HashSet<u32> = layout
+            .iter()
+            .map(|variant| variant.yaw_rad.to_bits())
+            .collect();
+        let unique_colors: HashSet<[u32; 4]> = layout
+            .iter()
+            .map(|variant| variant.color.map(f32::to_bits))
+            .collect();
+        for variant in &layout {
+            assert!((0.80..=1.20).contains(&variant.height_scale));
+            assert!((0.85..=1.15).contains(&variant.width_scale));
+            assert!((-0.15..=0.15).contains(&variant.yaw_rad));
+        }
+        assert!(
+            unique_heights.len() > layout.len() / 2,
+            "heights too uniform ({} unique)",
+            unique_heights.len()
+        );
+        assert!(
+            unique_widths.len() > layout.len() / 2,
+            "widths too uniform ({} unique)",
+            unique_widths.len()
+        );
+        assert!(
+            unique_yaws.len() > layout.len() / 2,
+            "yaw too uniform ({} unique)",
+            unique_yaws.len()
+        );
+        assert!(
+            unique_colors.len() > layout.len() / 2,
+            "greens too uniform ({} unique)",
+            unique_colors.len()
+        );
+    }
+
+    #[test]
+    fn boundary_vegetation_is_clustered_with_gaps() {
+        let layout = boundary_layout();
+        assert!(layout.len() >= 60, "belt too sparse: {}", layout.len());
+        const GAP_RAD: f32 = 0.16;
+        const TWO_PI: f32 = 2.0 * std::f32::consts::PI;
+        let mut angles: Vec<f32> = layout
+            .iter()
+            .map(|variant| variant.position[1].atan2(variant.position[0]))
+            .collect();
+        angles.sort_by(f32::total_cmp);
+        let n = angles.len();
+        let mut deltas: Vec<f32> = angles.windows(2).map(|w| w[1] - w[0]).collect();
+        deltas.push(angles[0] + TWO_PI - angles[n - 1]);
+
+        let gaps = deltas.iter().filter(|&&d| d > GAP_RAD + 1.0e-4).count();
+        let groups = gaps + 1;
+        let mut run = 1_usize;
+        let mut max_run = 1_usize;
+        for &d in &deltas {
+            if d > GAP_RAD {
+                run = 1;
+            } else {
+                run += 1;
+                max_run = max_run.max(run);
+            }
+        }
+        assert!(
+            gaps >= 4,
+            "expected several boundary apertures/gaps, got {gaps}"
+        );
+        assert!(
+            groups >= 8,
+            "expected group→gap→group structure, got {groups} groups"
+        );
+        assert!(
+            max_run >= 5,
+            "expected a dense cluster, got longest run {max_run}"
+        );
+    }
+
+    #[test]
+    fn boundary_instances_are_registered_in_objects() {
+        let scene = default_scene();
+        let layout = boundary_layout();
+        let registered: Vec<&SceneryObject> = scene
+            .objects
+            .iter()
+            .filter(|obj| obj.kind == SceneryVisualKind::BoundaryVegetation)
+            .collect();
+        assert_eq!(registered.len(), layout.len());
+        for (obj, variant) in registered.iter().zip(layout.iter()) {
+            assert_eq!(obj.position[0], variant.position[0]);
+            assert_eq!(obj.position[1], DEFAULT_GROUND_Y);
+            assert_eq!(obj.position[2], variant.position[1]);
+            assert_eq!(obj.rotation_yaw_rad, variant.yaw_rad);
+            assert_eq!(obj.scale, variant.height_scale);
+            assert_eq!(obj.variant_id, variant.silhouette as u8);
+        }
+    }
+
+    #[test]
+    fn boundary_geometry_stays_within_preferred_budget() {
+        // Hard ceiling (8 000) is enforced by the G2C budget test; G2E
+        // additionally keeps the merged scene near its preferred target so
+        // future presentation work keeps headroom.
+        let scene = default_scene();
+        let triangles = scene.mesh.triangle_count();
+        assert!(
+            triangles <= 6_500,
+            "G2E scene should stay near the preferred budget: {triangles} triangles"
         );
     }
 }
