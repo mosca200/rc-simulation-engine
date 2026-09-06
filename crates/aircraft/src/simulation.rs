@@ -268,6 +268,18 @@ impl AircraftSimulation {
         &self.last_ground
     }
 
+    /// Refreshes the observational ground diagnostic for the committed state.
+    ///
+    /// This does not advance controls, integrate physics, or change simulation time.
+    pub fn refresh_ground_diagnostics(&mut self, command: GroundCommand) {
+        self.last_ground = evaluate_ground_wrench(
+            &self.state.rigid_body,
+            &self.gear_contacts,
+            &self.ground_surface,
+            &command,
+        );
+    }
+
     /// Advances controls once, holds actuators/throttle fixed, then evaluates all four RK4 stages.
     #[must_use]
     pub fn step(&mut self, input: &PilotInput) -> AircraftSnapshot {
@@ -357,12 +369,7 @@ impl AircraftSimulation {
         // This is observation only; the integrated trajectory already includes
         // stage-correct ground forces. Allocation-free (fixed array).
         let committed_command = GroundCommand::new(input.yaw(), self.brake_command);
-        self.last_ground = evaluate_ground_wrench(
-            &self.state.rigid_body,
-            &self.gear_contacts,
-            &self.ground_surface,
-            &committed_command,
-        );
+        self.refresh_ground_diagnostics(committed_command);
 
         AircraftSnapshot {
             step_index: self.step_index,

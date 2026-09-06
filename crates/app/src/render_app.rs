@@ -702,6 +702,7 @@ struct RenderApplication {
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
     ground_below_render_origin_m: f32,
+    ground_start: bool,
     terrain_mode: RenderTerrainMode,
     camera_config: CameraConfig,
     render_snapshots: AircraftRenderSnapshotBuffer,
@@ -717,6 +718,7 @@ impl RenderApplication {
         let altitude_m = options.altitude_m;
         let airspeed_mps = options.airspeed_mps;
         let initial_throttle = options.throttle;
+        let ground_start = options.start_on_ground;
         let model_path = options.model_path;
         let model =
             load_aircraft_model(&model_path).map_err(|source| RenderAppError::ModelLoad {
@@ -727,7 +729,7 @@ impl RenderApplication {
         let model_id = model.model_id().to_owned();
         let model_fingerprint = model.physics_fingerprint();
         let (initial_state, ground_below_render_origin_m, terrain_mode, initial_ground) =
-            if options.start_on_ground {
+            if ground_start {
                 let initialized = supported_ground_start(&model)?;
                 (
                     initialized.state,
@@ -748,7 +750,11 @@ impl RenderApplication {
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
         let config = AircraftSimulationConfig::from_physics_hz(DEFAULT_PHYSICS_HZ, environment)?;
-        let simulation = AircraftSimulation::new(model, config, initial_state)?;
+        let mut simulation = AircraftSimulation::new(model, config, initial_state)?;
+        if ground_start {
+            simulation.refresh_ground_diagnostics(GroundCommand::new(0.0, 0.0));
+            debug_assert_eq!(simulation.last_ground_evaluation(), &initial_ground);
+        }
         let replay_recorder = options
             .replay_output_path
             .as_ref()
@@ -764,7 +770,7 @@ impl RenderApplication {
             &model_fingerprint,
             &initial_state,
             initial_throttle,
-            options.start_on_ground,
+            ground_start,
             initial_ground.weight_on_wheels(),
             terrain_mode,
         );
@@ -782,6 +788,7 @@ impl RenderApplication {
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
             ground_below_render_origin_m,
+            ground_start,
             terrain_mode,
             camera_config: options.camera.into_camera_config(),
             render_snapshots,
@@ -860,12 +867,15 @@ impl RenderApplication {
             return Ok(FlightResetOutcome::RefusedWhileRecording);
         }
 
-        let reset_simulation = AircraftSimulation::new(
+        let mut reset_simulation = AircraftSimulation::new(
             self.simulation.model().clone(),
             *self.simulation.config(),
             self.initial_rigid_state,
         )
         .map_err(RenderRuntimeError::FlightResetSimulation)?;
+        if self.ground_start {
+            reset_simulation.refresh_ground_diagnostics(GroundCommand::new(0.0, 0.0));
+        }
         let reset_fixed_step = FixedStepAccumulator::new(
             PHYSICS_DT,
             MAXIMUM_FRAME_DELTA,
@@ -1448,6 +1458,12 @@ mod tests {
         options
     }
 
+    fn render_options_for_test() -> RenderOptions {
+        let mut options = RenderOptions::parse(std::iter::empty()).unwrap();
+        options.model_path = acro_model_path();
+        options
+    }
+
     fn acro_model_with_presentation_path(glb_path: &str) -> model::AircraftModel {
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(acro_model_path()).unwrap()).unwrap();
@@ -1776,6 +1792,37 @@ mod tests {
         assert!(
             (initialized.ground_evaluation.total_normal_force_n - weight_n).abs()
                 <= 1.0e-10 * weight_n
+        );
+    }
+
+    #[test]
+    fn play_initial_ground_diagnostics_match_supported_start() {
+        let model = load_aircraft_model(acro_model_path()).unwrap();
+        let expected = supported_ground_start(&model).unwrap().ground_evaluation;
+        let application = RenderApplication::new(play_options_for_test()).unwrap();
+
+        assert_eq!(application.simulation.last_ground_evaluation(), &expected);
+        assert!(
+            application
+                .simulation
+                .last_ground_evaluation()
+                .weight_on_wheels()
+        );
+        assert!(
+            application
+                .simulation
+                .last_ground_evaluation()
+                .active_contacts
+                > 0
+        );
+    }
+
+    #[test]
+    fn airborne_render_initial_ground_diagnostics_remain_zero() {
+        let application = RenderApplication::new(render_options_for_test()).unwrap();
+        assert_eq!(
+            application.simulation.last_ground_evaluation(),
+            &GroundEvaluation::zero()
         );
     }
 
@@ -2135,6 +2182,8 @@ mod tests {
     fn flight_reset_reconstructs_all_mutable_flight_state() {
         let mut application = RenderApplication::new(play_options_for_test()).unwrap();
         let initial_rigid_state = application.initial_rigid_state;
+        let initial_ground = application.simulation.last_ground_evaluation().clone();
+        assert!(initial_ground.weight_on_wheels());
         let expected_simulation = AircraftSimulation::new(
             application.simulation.model().clone(),
             *application.simulation.config(),
@@ -2193,7 +2242,7 @@ mod tests {
         assert_eq!(application.simulation.brake_command(), 0.0);
         assert_eq!(
             application.simulation.last_ground_evaluation(),
-            &GroundEvaluation::zero()
+            &initial_ground
         );
         assert_eq!(application.render_snapshots, expected_snapshots);
         assert_eq!(application.fixed_step.remainder(), Duration::ZERO);
