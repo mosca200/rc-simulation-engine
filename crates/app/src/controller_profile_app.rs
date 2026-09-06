@@ -81,6 +81,7 @@ pub(crate) fn save_controller_profile(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CalibratedControllerEvent {
+    Connected,
     Disconnected,
     Reconnected,
 }
@@ -88,6 +89,7 @@ pub(crate) enum CalibratedControllerEvent {
 impl CalibratedControllerEvent {
     pub(crate) const fn message(self) -> &'static str {
         match self {
+            Self::Connected => "Controller connected.",
             Self::Disconnected => "Controller disconnected — controls neutralized.",
             Self::Reconnected => "Controller reconnected.",
         }
@@ -146,8 +148,12 @@ impl CalibratedControllerState {
             }
         };
         self.input = input;
-        let event = if !self.connected && self.ever_connected {
-            Some(CalibratedControllerEvent::Reconnected)
+        let event = if !self.connected {
+            if self.ever_connected {
+                Some(CalibratedControllerEvent::Reconnected)
+            } else {
+                Some(CalibratedControllerEvent::Connected)
+            }
         } else {
             None
         };
@@ -346,7 +352,10 @@ mod tests {
         let requested = identity("Test Transmitter", "profile-uuid");
         let mut state = CalibratedControllerState::new(profile());
         assert_eq!(state.match_requested_device(&[requested]), Ok(0));
-        assert_eq!(state.accept_raw_state(&raw_state(0.8, 0.7)), Ok(None));
+        assert_eq!(
+            state.accept_raw_state(&raw_state(0.8, 0.7)),
+            Ok(Some(CalibratedControllerEvent::Connected))
+        );
         assert_ne!(state.input(), PilotInput::neutral());
 
         assert_eq!(
@@ -366,7 +375,10 @@ mod tests {
         state
             .match_requested_device(std::slice::from_ref(&requested))
             .unwrap();
-        state.accept_raw_state(&raw_state(0.4, 0.6)).unwrap();
+        assert_eq!(
+            state.accept_raw_state(&raw_state(0.4, 0.6)),
+            Ok(Some(CalibratedControllerEvent::Connected))
+        );
         state.neutralize();
 
         assert_eq!(

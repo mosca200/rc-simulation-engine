@@ -18,7 +18,7 @@ use model::{
 };
 use platform::{
     DeviceIdentity, GilrsInputBackend, InputDeviceInfo, InputError, InputMapping, InputSource,
-    InputState, KeyboardInputState, KeyboardKey,
+    InputState, KeyboardInputState, KeyboardKey, RawControllerState,
 };
 use renderer::{
     AircraftMesh, CameraConfig, FixedStepAccumulator, FixedStepAccumulatorError,
@@ -483,6 +483,95 @@ fn poll_calibrated_hardware(
     }
 }
 
+/// Pure calibrated-startup connection transition.
+///
+/// Returns `Ok(Some(()))` only when `candidates` contains the requested
+/// controller and `raw` (already selected and polled by the caller) validates
+/// as calibrated input. Returns `Ok(None)` whenever the controller is not
+/// (yet) available — transient WGI enumeration, a wrong-only device list,
+/// ambiguity, or no raw sample yet — so startup stays neutral and
+/// [`poll_calibrated_hardware`] keeps retrying the same decision every frame.
+/// Absence at startup is never an error; `Err` is reserved for genuine input
+/// failures.
+fn calibrate_startup_connect(
+    state: &mut CalibratedControllerState,
+    candidates: &[DeviceIdentity],
+    raw: Option<RawControllerState>,
+) -> Result<Option<()>, InputError> {
+    if state.match_requested_device(candidates).is_err() {
+        return Ok(None);
+    }
+    let Some(raw_state) = raw else {
+        return Ok(None);
+    };
+    state.accept_raw_state(&raw_state)?;
+    Ok(Some(()))
+}
+
+/// Best-effort connect of the requested controller right after profile load.
+///
+/// Absent/ambiguous devices simply yield `Ok(None)` (waiting, neutral);
+/// the runtime loop is the single authority for every later connect,
+/// disconnect, and reconnect.
+fn try_connect_requested_controller(
+    state: &mut CalibratedControllerState,
+    backend: &mut GilrsInputBackend,
+) -> Result<Option<InputDeviceInfo>, InputError> {
+    let devices = backend.devices();
+    let identities: Vec<DeviceIdentity> = devices.iter().map(InputDeviceInfo::identity).collect();
+    if state.match_requested_device(&identities).is_err() {
+        return Ok(None);
+    }
+    let selected = match backend.select_device(state.requested_device()) {
+        Ok(selected) => selected,
+        Err(_) => return Ok(None),
+    };
+    let raw_state = match backend.poll_raw_axes()? {
+        Some(raw_state) => raw_state,
+        None => return Ok(None),
+    };
+    calibrate_startup_connect(state, &identities, Some(raw_state))?;
+    Ok(Some(selected))
+}
+
+/// Startup status block for calibrated input.
+///
+/// `matched` carries the matched device when the requested controller was
+/// already available at startup; `None` renders the explicit "waiting for
+/// requested controller" state with neutral pilot input.
+fn format_calibrated_startup_status(
+    profile_path: &Path,
+    state: &CalibratedControllerState,
+    matched: Option<(usize, DeviceIdentity)>,
+) -> String {
+    match matched {
+        Some((id, identity)) => format!(
+            "Controller profile:\n{}\n\
+             Profile schema:\n{}\n\
+             Input mode:\ncalibrated controller profile\n\
+             Requested controller:\n{}\n\
+             Matched controller:\nsession_id={id} {}\n\
+             Controller status:\nconnected\n\
+             Pilot input:\ncalibrated",
+            profile_path.display(),
+            state.profile().schema_version(),
+            format_device_identity(state.requested_device()),
+            format_device_identity(&identity),
+        ),
+        None => format!(
+            "Controller profile:\n{}\n\
+             Profile schema:\n{}\n\
+             Input mode:\ncalibrated controller profile\n\
+             Requested controller:\n{}\n\
+             Controller status:\nwaiting for requested controller\n\
+             Pilot input:\nneutral",
+            profile_path.display(),
+            state.profile().schema_version(),
+            format_device_identity(state.requested_device()),
+        ),
+    }
+}
+
 fn initialize_viewer_input(
     profile_path: Option<&Path>,
     initial_throttle: f64,
@@ -507,36 +596,19 @@ fn initialize_viewer_input(
         ));
     };
 
+    // Profile loading and validation remain fatal: a bad profile is a
+    // configuration error. Absence of the requested hardware is not.
     let profile = load_controller_profile(profile_path)
         .map_err(RenderRuntimeError::ControllerProfileInitialization)?;
     let mut state = CalibratedControllerState::new(profile);
-    let devices = backend.devices();
-    let identities: Vec<DeviceIdentity> = devices.iter().map(InputDeviceInfo::identity).collect();
-    state
-        .match_requested_device(&identities)
+    let matched = try_connect_requested_controller(&mut state, backend)
         .map_err(RenderRuntimeError::InputInitialization)?;
-    let matched = backend
-        .select_device(state.requested_device())
-        .map_err(RenderRuntimeError::InputInitialization)?;
-    let raw_state = backend
-        .poll_raw_axes()?
-        .ok_or(InputError::RequestedDeviceNotFound)
-        .map_err(RenderRuntimeError::InputInitialization)?;
-    state
-        .accept_raw_state(&raw_state)
-        .map_err(RenderRuntimeError::InputInitialization)?;
-
-    let startup_status = format!(
-        "Controller profile:\n{}\n\
-         Profile schema:\n{}\n\
-         Requested controller:\n{}\n\
-         Matched controller:\nsession_id={} {}\n\
-         Input mode:\ncalibrated controller profile",
-        profile_path.display(),
-        state.profile().schema_version(),
-        format_device_identity(state.requested_device()),
-        matched.id(),
-        format_device_identity(&matched.identity()),
+    let startup_status = format_calibrated_startup_status(
+        profile_path,
+        &state,
+        matched
+            .as_ref()
+            .map(|device| (device.id(), device.identity())),
     );
     Ok((ViewerInputMode::Calibrated(Box::new(state)), startup_status))
 }
@@ -1239,6 +1311,10 @@ fn apply_pilot_position(camera: CameraSelection, position_render_m: [f32; 3]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform::{
+        CenteredAxisProfile, CenteredCalibration, Control, ControllerProfile, HardwareAxis,
+        ProfileAxes, RawControllerState, ThrottleAxisProfile, ThrottleCalibration,
+    };
     use replay::{AircraftReplayPlayer, AircraftReplayRecording};
 
     fn repository_model_path(relative: &str) -> PathBuf {
@@ -1855,5 +1931,207 @@ mod tests {
         assert_eq!(options.scenery, SceneryPreset::FlyingField);
         assert!(matches!(options.camera, CameraSelection::Pilot { .. }));
         assert!((options.throttle - 0.5).abs() < 1e-9);
+    }
+
+    // ── OA1 calibrated startup (hardware-independent) ──────────────────────
+
+    fn requested_identity() -> DeviceIdentity {
+        DeviceIdentity::new(
+            "TX16S",
+            Some("tx16s-0123456789abcdef".to_owned()),
+            Some(0x3511),
+            Some(0x0123),
+        )
+    }
+
+    fn other_identity() -> DeviceIdentity {
+        DeviceIdentity::new(
+            "Other Radio",
+            Some("other-0123456789abcdef".to_owned()),
+            Some(0x0001),
+            Some(0x0001),
+        )
+    }
+
+    fn calibrated_profile() -> ControllerProfile {
+        ControllerProfile::new(
+            requested_identity(),
+            ProfileAxes::new(
+                CenteredAxisProfile::new(
+                    HardwareAxis::LeftStickX,
+                    CenteredCalibration::new(Control::Roll, -1.0, 0.0, 1.0, false, 0.0).unwrap(),
+                ),
+                CenteredAxisProfile::new(
+                    HardwareAxis::LeftStickY,
+                    CenteredCalibration::new(Control::Pitch, -1.0, 0.0, 1.0, false, 0.0).unwrap(),
+                ),
+                CenteredAxisProfile::new(
+                    HardwareAxis::RightStickX,
+                    CenteredCalibration::new(Control::Yaw, -1.0, 0.0, 1.0, false, 0.0).unwrap(),
+                ),
+                ThrottleAxisProfile::new(
+                    HardwareAxis::RightStickY,
+                    ThrottleCalibration::new(-1.0, 1.0, false).unwrap(),
+                ),
+            ),
+        )
+        .unwrap()
+    }
+
+    fn raw_state(roll: f64, throttle: f64) -> RawControllerState {
+        let mut state = RawControllerState::new();
+        state.insert(HardwareAxis::LeftStickX, roll).unwrap();
+        state.insert(HardwareAxis::LeftStickY, 0.0).unwrap();
+        state.insert(HardwareAxis::RightStickX, 0.0).unwrap();
+        state.insert(HardwareAxis::RightStickY, throttle).unwrap();
+        state
+    }
+
+    #[test]
+    fn calibrated_startup_with_zero_devices_is_not_fatal_and_stays_neutral() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        // A transient zero-device WGI snapshot must yield "waiting", never an error.
+        assert_eq!(calibrate_startup_connect(&mut state, &[], None), Ok(None));
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn calibrated_input_stays_neutral_while_requested_controller_is_absent() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        assert_eq!(calibrate_startup_connect(&mut state, &[], None), Ok(None));
+        assert_eq!(state.input(), PilotInput::neutral());
+        // Still absent even when other controllers are enumerable with raw data.
+        assert_eq!(
+            calibrate_startup_connect(&mut state, &[other_identity()], Some(raw_state(0.5, 0.5))),
+            Ok(None)
+        );
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn wrong_device_cannot_take_ownership_of_calibrated_input() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        assert_eq!(
+            calibrate_startup_connect(&mut state, &[other_identity()], Some(raw_state(0.9, 0.9))),
+            Ok(None)
+        );
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn ambiguous_device_state_remains_fail_closed() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        let duplicated = [requested_identity(), requested_identity()];
+        assert_eq!(
+            calibrate_startup_connect(&mut state, &duplicated, Some(raw_state(0.9, 0.9))),
+            Ok(None)
+        );
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn later_appearance_of_requested_controller_connects_and_inputs_calibrated() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        // Startup: requested controller not yet enumerable (async WGI).
+        assert_eq!(calibrate_startup_connect(&mut state, &[], None), Ok(None));
+        assert_eq!(state.input(), PilotInput::neutral());
+        // The device appears shortly afterwards: the same decision path connects it.
+        assert_eq!(
+            calibrate_startup_connect(
+                &mut state,
+                &[requested_identity()],
+                Some(raw_state(0.5, 0.5))
+            ),
+            Ok(Some(()))
+        );
+        assert!(state.is_connected());
+        assert_eq!(state.input().roll(), 0.5);
+        assert_eq!(state.input().throttle(), 0.75);
+    }
+
+    #[test]
+    fn immediately_present_requested_controller_connects_at_startup() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        assert_eq!(
+            calibrate_startup_connect(
+                &mut state,
+                &[requested_identity()],
+                Some(raw_state(-0.5, 0.25))
+            ),
+            Ok(Some(()))
+        );
+        assert!(state.is_connected());
+        assert_eq!(state.input().roll(), -0.5);
+        assert_eq!(state.input().throttle(), 0.625);
+    }
+
+    #[test]
+    fn disconnect_neutralizes_and_same_device_resumes_via_reconnect_path() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        calibrate_startup_connect(
+            &mut state,
+            &[requested_identity()],
+            Some(raw_state(0.5, 0.5)),
+        )
+        .unwrap();
+        assert!(state.is_connected());
+        assert!(state.neutralize().is_some());
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+        // Reconnect of the same requested identity resumes calibrated input.
+        assert_eq!(
+            calibrate_startup_connect(
+                &mut state,
+                &[requested_identity()],
+                Some(raw_state(0.25, 0.75))
+            ),
+            Ok(Some(()))
+        );
+        assert!(state.is_connected());
+        assert_eq!(state.input().roll(), 0.25);
+        assert_eq!(state.input().throttle(), 0.875);
+    }
+
+    #[test]
+    fn calibrated_mode_has_no_keyboard_fallback() {
+        let mut mode = ViewerInputMode::Calibrated(Box::new(CalibratedControllerState::new(
+            calibrated_profile(),
+        )));
+        mode.set_key(KeyboardKey::RollRight, true);
+        mode.set_key(KeyboardKey::ThrottleIncrease, true);
+        let input = mode.sample(PHYSICS_DT.as_secs_f64()).unwrap();
+        assert_eq!(input, PilotInput::neutral());
+    }
+
+    #[test]
+    fn waiting_startup_status_diagnostics_are_explicit() {
+        let state = CalibratedControllerState::new(calibrated_profile());
+        let status =
+            format_calibrated_startup_status(Path::new("controllers/tx16s.json"), &state, None);
+        assert!(
+            status.contains("Controller profile:\ncontrollers\\tx16s.json")
+                || status.contains("Controller profile:\ncontrollers/tx16s.json")
+        );
+        assert!(status.contains("Input mode:\ncalibrated controller profile"));
+        assert!(status.contains("Requested controller:\nname=\"TX16S\""));
+        assert!(status.contains("Controller status:\nwaiting for requested controller"));
+        assert!(status.contains("Pilot input:\nneutral"));
+    }
+
+    #[test]
+    fn connected_startup_status_diagnostics_include_matched_device() {
+        let state = CalibratedControllerState::new(calibrated_profile());
+        let status = format_calibrated_startup_status(
+            Path::new("controllers/tx16s.json"),
+            &state,
+            Some((7, requested_identity())),
+        );
+        assert!(status.contains("Matched controller:\nsession_id=7 name=\"TX16S\""));
+        assert!(status.contains("Controller status:\nconnected"));
+        assert!(status.contains("Pilot input:\ncalibrated"));
     }
 }
