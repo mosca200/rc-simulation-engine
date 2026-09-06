@@ -2197,6 +2197,7 @@ dependencies = [
  "bytemuck",
  "gltf",
  "image",
+ "naga",
  "thiserror 2.0.20",
  "wgpu",
  "winit",
