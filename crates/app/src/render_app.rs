@@ -492,13 +492,13 @@ fn poll_calibrated_hardware(
 /// Pure calibrated-startup connection transition.
 ///
 /// Returns `Ok(Some(()))` only when `candidates` contains the requested
-/// controller and `raw` (already selected and polled by the caller) validates
-/// as calibrated input. Returns `Ok(None)` whenever the controller is not
+/// controller and `raw` (already selected and polled by the caller) contains
+/// every assigned axis. Returns `Ok(None)` whenever the controller is not
 /// (yet) available — transient WGI enumeration, a wrong-only device list,
-/// ambiguity, or no raw sample yet — so startup stays neutral and
-/// [`poll_calibrated_hardware`] keeps retrying the same decision every frame.
-/// Absence at startup is never an error; `Err` is reserved for genuine input
-/// failures.
+/// ambiguity, no raw sample yet, or an early raw sample still missing an
+/// assigned axis — so startup stays neutral and [`poll_calibrated_hardware`]
+/// keeps retrying the same decision every frame. Absence at startup is never
+/// an error; `Err` is reserved for genuine input failures.
 fn calibrate_startup_connect(
     state: &mut CalibratedControllerState,
     candidates: &[DeviceIdentity],
@@ -511,14 +511,14 @@ fn calibrate_startup_connect(
         return Ok(None);
     };
     state.accept_raw_state(&raw_state)?;
-    Ok(Some(()))
+    Ok(state.is_connected().then_some(()))
 }
 
 /// Best-effort connect of the requested controller right after profile load.
 ///
-/// Absent/ambiguous devices simply yield `Ok(None)` (waiting, neutral);
-/// the runtime loop is the single authority for every later connect,
-/// disconnect, and reconnect.
+/// Absent/ambiguous devices and incomplete first samples simply yield
+/// `Ok(None)` (waiting, neutral); the runtime loop is the single authority
+/// for every later connect, disconnect, and reconnect.
 fn try_connect_requested_controller(
     state: &mut CalibratedControllerState,
     backend: &mut GilrsInputBackend,
@@ -536,7 +536,9 @@ fn try_connect_requested_controller(
         Some(raw_state) => raw_state,
         None => return Ok(None),
     };
-    calibrate_startup_connect(state, &identities, Some(raw_state))?;
+    if calibrate_startup_connect(state, &identities, Some(raw_state))?.is_none() {
+        return Ok(None);
+    }
     Ok(Some(selected))
 }
 
@@ -2073,6 +2075,37 @@ mod tests {
         assert!(state.is_connected());
         assert_eq!(state.input().roll(), -0.5);
         assert_eq!(state.input().throttle(), 0.625);
+    }
+
+    #[test]
+    fn incomplete_first_sample_waits_and_later_complete_sample_connects() {
+        let mut state = CalibratedControllerState::new(calibrated_profile());
+        // The requested device is already enumerable, but its first WGI raw
+        // sample is missing LeftStickX (roll): startup stays neutral and
+        // keeps waiting instead of failing.
+        let mut incomplete = RawControllerState::new();
+        incomplete.insert(HardwareAxis::LeftStickY, 0.0).unwrap();
+        incomplete.insert(HardwareAxis::RightStickX, 0.0).unwrap();
+        incomplete.insert(HardwareAxis::RightStickY, 0.5).unwrap();
+        assert_eq!(
+            calibrate_startup_connect(&mut state, &[requested_identity()], Some(incomplete)),
+            Ok(None)
+        );
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+
+        // A later complete sample drives the same decision path to connect.
+        assert_eq!(
+            calibrate_startup_connect(
+                &mut state,
+                &[requested_identity()],
+                Some(raw_state(0.5, 0.5))
+            ),
+            Ok(Some(()))
+        );
+        assert!(state.is_connected());
+        assert_eq!(state.input().roll(), 0.5);
+        assert_eq!(state.input().throttle(), 0.75);
     }
 
     #[test]

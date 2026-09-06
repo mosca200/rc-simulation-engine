@@ -96,6 +96,17 @@ impl CalibratedControllerEvent {
     }
 }
 
+/// Classifies a raw-sample acceptance error as the transient missing-axis
+/// case.
+///
+/// WGI can deliver an early [`RawControllerState`] before the device reports
+/// every assigned axis, and a connected device can briefly drop one; both
+/// mean "sample not ready yet", never "input failure". Every other
+/// [`InputError`] is a genuine failure.
+fn is_transient_sample_error(error: &InputError) -> bool {
+    matches!(error, InputError::UnavailableHardwareAxis { .. })
+}
+
 /// App-side fail-closed state for one explicitly requested controller profile.
 ///
 /// JSON and filesystem work happen before this state is created. Its cached
@@ -142,6 +153,14 @@ impl CalibratedControllerState {
     ) -> Result<Option<CalibratedControllerEvent>, InputError> {
         let input = match self.profile.to_pilot_input(state) {
             Ok(input) => input,
+            Err(error) if is_transient_sample_error(&error) => {
+                // A raw sample that briefly omits an assigned axis is a
+                // transient WGI state, not a failure: fail closed to neutral
+                // and let the next frame retry with a complete sample. This
+                // also covers an axis dropping out of an already-connected
+                // device, which must never keep stale input alive.
+                return Ok(self.neutralize());
+            }
             Err(error) => {
                 self.neutralize();
                 return Err(error);
@@ -393,5 +412,111 @@ mod tests {
             Ok(Some(CalibratedControllerEvent::Reconnected))
         );
         assert_ne!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn incomplete_first_sample_waits_neutral_then_complete_sample_connects() {
+        let requested = identity("Test Transmitter", "profile-uuid");
+        let mut state = CalibratedControllerState::new(profile());
+        assert_eq!(state.match_requested_device(&[requested]), Ok(0));
+
+        // WGI first sample arrives without LeftStickX (roll): not ready, not
+        // fatal, and neutral.
+        let mut incomplete = RawControllerState::new();
+        incomplete.insert(HardwareAxis::LeftStickY, 0.0).unwrap();
+        incomplete.insert(HardwareAxis::RightStickX, 0.0).unwrap();
+        incomplete.insert(HardwareAxis::RightStickY, 0.5).unwrap();
+        assert_eq!(state.accept_raw_state(&incomplete), Ok(None));
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+
+        // The next complete sample connects normally with calibrated input.
+        assert_eq!(
+            state.accept_raw_state(&raw_state(0.8, 0.7)),
+            Ok(Some(CalibratedControllerEvent::Connected))
+        );
+        assert!(state.is_connected());
+        assert_ne!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn axis_dropping_after_connect_neutralizes_and_resumes_on_complete_sample() {
+        let requested = identity("Test Transmitter", "profile-uuid");
+        let mut state = CalibratedControllerState::new(profile());
+        state
+            .match_requested_device(std::slice::from_ref(&requested))
+            .unwrap();
+        assert_eq!(
+            state.accept_raw_state(&raw_state(0.8, 0.7)),
+            Ok(Some(CalibratedControllerEvent::Connected))
+        );
+        assert_ne!(state.input(), PilotInput::neutral());
+
+        // The throttle axis (RightStickY) disappears for a frame: neutralize
+        // immediately, report the disconnect, and keep waiting — never fail.
+        let mut incomplete = RawControllerState::new();
+        incomplete.insert(HardwareAxis::LeftStickX, 0.8).unwrap();
+        incomplete.insert(HardwareAxis::LeftStickY, 0.0).unwrap();
+        incomplete.insert(HardwareAxis::RightStickX, 0.0).unwrap();
+        assert_eq!(
+            state.accept_raw_state(&incomplete),
+            Ok(Some(CalibratedControllerEvent::Disconnected))
+        );
+        assert!(!state.is_connected());
+        assert_eq!(state.input(), PilotInput::neutral());
+
+        // A later complete sample resumes through the reconnect path.
+        assert_eq!(
+            state.accept_raw_state(&raw_state(0.25, 0.75)),
+            Ok(Some(CalibratedControllerEvent::Reconnected))
+        );
+        assert!(state.is_connected());
+        assert_ne!(state.input(), PilotInput::neutral());
+    }
+
+    #[test]
+    fn only_missing_axis_errors_are_classified_as_transient() {
+        let genuine_errors = [
+            InputError::InvalidDeadzone,
+            InputError::NonFiniteRawAxis {
+                axis: "left_stick_x",
+            },
+            InputError::InvalidSamplingTimestep,
+            InputError::InvalidInitialThrottle,
+            InputError::BackendInitialization("boom".to_owned()),
+            InputError::NoDevices,
+            InputError::RequestedDeviceNotFound,
+            InputError::AmbiguousDeviceMatch { candidates: 2 },
+            InputError::InvalidControllerProfile("bad".to_owned()),
+            InputError::UnsupportedProfileVersion {
+                found: 2,
+                supported: 1,
+            },
+            InputError::NonFiniteCalibration {
+                control: Control::Roll,
+            },
+            InputError::InvalidCalibrationOrder {
+                control: Control::Roll,
+            },
+            InputError::DegenerateCalibrationSpan {
+                control: Control::Roll,
+                min_span: 0.001,
+            },
+            InputError::DuplicateAxisAssignment {
+                axis: HardwareAxis::LeftStickX,
+            },
+            InputError::UnknownHardwareAxis("stick_99".to_owned()),
+        ];
+        for error in genuine_errors {
+            assert!(
+                !is_transient_sample_error(&error),
+                "unexpectedly transient: {error:?}"
+            );
+        }
+        assert!(is_transient_sample_error(
+            &InputError::UnavailableHardwareAxis {
+                axis: HardwareAxis::LeftStickX,
+            }
+        ));
     }
 }
