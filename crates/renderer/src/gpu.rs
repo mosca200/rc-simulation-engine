@@ -535,7 +535,14 @@ impl WgpuRenderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("G1C device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                // G3A: the terrain material bind group lives at group 4, one
+                // beyond the WebGPU default `max_bind_groups` of 4. Native
+                // backends advertise up to 8; raising the cap to the adapter's
+                // own advertised value keeps the pipeline valid on every device.
+                required_limits: wgpu::Limits {
+                    max_bind_groups: adapter.limits().max_bind_groups,
+                    ..wgpu::Limits::default()
+                },
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
@@ -550,6 +557,10 @@ impl WgpuRenderer {
                 wgpu::Error::OutOfMemory { .. } => GPU_ERROR_OUT_OF_MEMORY,
                 wgpu::Error::Validation { .. } | wgpu::Error::Internal { .. } => GPU_ERROR_OTHER,
             };
+            // Debug aid: surface the wgpu validation detail that the atomic
+            // only collapses to a code. Correctly diagnosed slices have no
+            // uncaptured errors, so this line stays silent in production.
+            eprintln!("GpuValidation diagnostic: {error}");
             callback_error.store(code, Ordering::Release);
         }));
 
