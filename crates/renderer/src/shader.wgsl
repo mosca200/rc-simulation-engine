@@ -273,7 +273,7 @@ fn smith_geometry(ndot_v: f32, ndot_l: f32, roughness: f32) -> f32 {
 //   L = directional light, H = normalize(V + L).
 //   F0 = mix(0.04, baseColor, metallic)      (glTF metallic workflow)
 //   diffuse albedo = baseColor * (1 - metallic)
-//   specular = D(h) * G(v,l) * F(v,h) / (4 * NdotV * NdotL)
+//   specular = D(h) * G(v,l) * F(v,h) / max(4 * NdotV * NdotL, 1e-4)
 //
 // Legacy-compat irradiance scale: the pre-G1D Lambert path used
 // albedo * intensity (no 1/PI). The physically normalized split
@@ -319,14 +319,17 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     // diffuse term at all.
     let diffuse_albedo = base_rgba.rgb * (1.0 - metallic);
 
-    // Specular BRDF: D * G * F / (4 * NdotV * NdotL), with a floor on the
-    // denominator and a documented clamp on the result.
+    // Specular BRDF: D * G * F / (4 * NdotV * NdotL). NdotL is clamped to
+    // >= 0 but can be exactly zero, which would leave 0/0 through the Smith
+    // geometry term, so the denominator carries an explicit positive floor.
+    // NdotL itself is unchanged for the final direct-light multiplication.
     let alpha = roughness * roughness;
     let distribution = ggx_distribution(ndot_h, alpha);
     let geometry = smith_geometry(ndot_v, ndot_l, roughness);
     let fresnel = schlick_fresnel(f0, vdot_h);
+    let specular_denominator = max(4.0 * ndot_v * ndot_l, 1e-4);
     let specular = min(
-        distribution * geometry * fresnel / (4.0 * ndot_v * ndot_l),
+        distribution * geometry * fresnel / specular_denominator,
         vec3<f32>(SPECULAR_CLAMP),
     );
 

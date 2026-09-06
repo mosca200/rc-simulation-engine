@@ -1697,3 +1697,171 @@ mod material_uniform_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shader_brdf_regression_tests {
+    //! G1D review-fix regression: the WGSL specular division must use an
+    //! explicit positive denominator floor, because `ndot_l` is clamped to
+    //! `>= 0` and can be exactly zero, which would otherwise leave a 0/0
+    //! through the Smith geometry term (`gl = 0 / k`) and poison the final
+    //! direct-light product (`0 * NaN = NaN`).
+    //!
+    //! This module mirrors the WGSL BRDF formulas verbatim and evaluates
+    //! them in pure Rust; no GPU execution infrastructure is involved.
+
+    // WGSL constants, mirrored verbatim from shader.wgsl.
+    // `PI` is the f32-rounded value of the WGSL `const PI: f32 = 3.141592653589793`.
+    const PI: f32 = std::f32::consts::PI;
+    const MIN_ROUGHNESS: f32 = 0.06;
+    const DIELECTRIC_F0: f32 = 0.04;
+    const SPECULAR_CLAMP: f32 = 4.0;
+    const SPECULAR_DENOMINATOR_FLOOR: f32 = 1e-4;
+
+    fn mix3(dielectric: [f32; 3], base_color: [f32; 3], metallic: f32) -> [f32; 3] {
+        [
+            dielectric[0] + (base_color[0] - dielectric[0]) * metallic,
+            dielectric[1] + (base_color[1] - dielectric[1]) * metallic,
+            dielectric[2] + (base_color[2] - dielectric[2]) * metallic,
+        ]
+    }
+
+    // Mirrors WGSL `schlick_fresnel`.
+    fn schlick_fresnel(f0: [f32; 3], vdot_h: f32) -> [f32; 3] {
+        let base = 1.0 - vdot_h;
+        let f = base * base * base * base * base;
+        [
+            f0[0] + (1.0 - f0[0]) * f,
+            f0[1] + (1.0 - f0[1]) * f,
+            f0[2] + (1.0 - f0[2]) * f,
+        ]
+    }
+
+    // Mirrors WGSL `ggx_distribution`.
+    fn ggx_distribution(ndot_h: f32, alpha: f32) -> f32 {
+        let alpha2 = alpha * alpha;
+        let denom = ndot_h * ndot_h * (alpha2 - 1.0) + 1.0;
+        alpha2 / (PI * denom * denom)
+    }
+
+    // Mirrors WGSL `smith_geometry`.
+    fn smith_geometry(ndot_v: f32, ndot_l: f32, roughness: f32) -> f32 {
+        let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        let gv = ndot_v / (ndot_v * (1.0 - k) + k);
+        let gl = ndot_l / (ndot_l * (1.0 - k) + k);
+        gv * gl
+    }
+
+    /// Mirrors the `fs_lit` specular + direct-light block, operand for
+    /// operand, including the floored denominator and the `ndot_l` scale on
+    /// the final product.
+    fn direct_brdf(
+        ndot_v: f32,
+        ndot_l: f32,
+        vdot_h: f32,
+        ndot_h: f32,
+        roughness: f32,
+        metallic: f32,
+        intensity: f32,
+    ) -> [f32; 3] {
+        let base_color = [0.5; 3];
+        let f0 = mix3([DIELECTRIC_F0; 3], base_color, metallic);
+        let diffuse_albedo = [
+            base_color[0] * (1.0 - metallic),
+            base_color[1] * (1.0 - metallic),
+            base_color[2] * (1.0 - metallic),
+        ];
+        let alpha = roughness * roughness;
+        let distribution = ggx_distribution(ndot_h, alpha);
+        let geometry = smith_geometry(ndot_v, ndot_l, roughness);
+        let fresnel = schlick_fresnel(f0, vdot_h);
+        let specular_denominator = f32::max(4.0 * ndot_v * ndot_l, SPECULAR_DENOMINATOR_FLOOR);
+        let specular_value = distribution * geometry / specular_denominator;
+        let specular = [
+            f32::min(specular_value * fresnel[0], SPECULAR_CLAMP),
+            f32::min(specular_value * fresnel[1], SPECULAR_CLAMP),
+            f32::min(specular_value * fresnel[2], SPECULAR_CLAMP),
+        ];
+        let direct_scale = PI * intensity * ndot_l;
+        [
+            (diffuse_albedo[0] / PI + specular[0]) * direct_scale,
+            (diffuse_albedo[1] / PI + specular[1]) * direct_scale,
+            (diffuse_albedo[2] / PI + specular[2]) * direct_scale,
+        ]
+    }
+
+    fn assert_finite(direct: [f32; 3], context: &str) {
+        assert!(
+            direct.iter().all(|value| value.is_finite()),
+            "direct BRDF must stay finite for {context}, got {direct:?}"
+        );
+    }
+
+    #[test]
+    fn direct_brdf_is_finite_and_zero_when_ndot_l_is_exactly_zero() {
+        for roughness in [MIN_ROUGHNESS, 0.5, 1.0] {
+            for &ndot_v in &[1e-4, 0.25, 0.5, 1.0] {
+                let direct = direct_brdf(ndot_v, 0.0, 0.7, 0.8, roughness, 0.35, 0.8);
+                assert_finite(
+                    direct,
+                    &format!("ndot_l=0, ndot_v={ndot_v}, roughness={roughness}"),
+                );
+                assert!(
+                    direct.iter().all(|value| *value == 0.0),
+                    "ndot_l=0 must yield an exactly zero direct response, got {direct:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_brdf_is_finite_when_ndot_l_is_very_close_to_zero() {
+        for &ndot_l in &[1e-7, 1e-6, 1e-5, 1e-4] {
+            for roughness in [MIN_ROUGHNESS, 0.06, 0.5, 1.0] {
+                let direct = direct_brdf(1e-4, ndot_l, 0.7, 0.8, roughness, 0.35, 0.8);
+                assert_finite(direct, &format!("ndot_l={ndot_l}, roughness={roughness}"));
+            }
+        }
+    }
+
+    #[test]
+    fn direct_brdf_is_finite_at_ndot_v_floor_across_ndot_l() {
+        for &ndot_l in &[0.0, 1e-7, 1e-3, 0.5, 1.0] {
+            let direct = direct_brdf(1e-4, ndot_l, 0.0, 1.0, MIN_ROUGHNESS, 0.35, 0.8);
+            assert_finite(direct, &format!("ndot_v=1e-4, ndot_l={ndot_l}"));
+        }
+    }
+
+    #[test]
+    fn direct_brdf_is_finite_at_minimum_roughness_across_directions() {
+        for &ndot_v in &[1e-4, 0.5, 1.0] {
+            for &ndot_l in &[0.0, 1e-7, 0.05, 0.5, 1.0] {
+                for &vdot_h in &[0.0, 0.7, 1.0] {
+                    let direct = direct_brdf(ndot_v, ndot_l, vdot_h, 0.8, MIN_ROUGHNESS, 0.0, 0.8);
+                    assert_finite(
+                        direct,
+                        &format!("ndot_v={ndot_v}, ndot_l={ndot_l}, vdot_h={vdot_h}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Pins the live WGSL (not just this mirror) to the floored denominator,
+    /// so the shader and the reference math cannot drift apart again.
+    #[test]
+    fn shader_source_keeps_denominator_floor_and_ndot_l_scale() {
+        let source = include_str!("shader.wgsl");
+        assert!(
+            source.contains("let specular_denominator = max(4.0 * ndot_v * ndot_l, 1e-4);"),
+            "fs_lit must define the floored specular denominator"
+        );
+        assert!(
+            source.contains("fresnel / specular_denominator,"),
+            "fs_lit must divide the specular BRDF by the floored denominator"
+        );
+        assert!(
+            source.contains("* irradiance * ndot_l;"),
+            "fs_lit must keep ndot_l as the final direct-light multiplier"
+        );
+    }
+}

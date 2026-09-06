@@ -62,14 +62,29 @@ Debug overlays remain unlit and are unaffected.
 - **Geometry**: Smith with Schlick-GGX, direct-lighting `k = (r+1)^2 / 8`
 - **F0**: glTF metallic workflow, `F0 = mix(0.04, baseColor, metallic)`
 - **Diffuse**: `baseColor * (1 - metallic)` — fully suppressed on metals
-- **Specular**: `D * G * F / (4 * NdotV * NdotL)`
+- **Specular**: `D * G * F / max(4 * NdotV * NdotL, 1e-4)`
+
+Energy balance: G1D is **legacy-compatible and physically-inspired, not yet
+strictly energy-conserving**. The diffuse term is `baseColor * (1 - metallic)`
+and deliberately does **not** contain the standard `(1 - Fresnel)` attenuation,
+because G1D preserves the legacy Lambert diffuse response. The BRDF/diffuse
+model itself is intentionally unchanged in this micro-fix.
 
 Documented numeric/readability guards:
 
 - `MIN_ROUGHNESS = 0.06`: floor for numeric stability and stable highlight
   sizes at RC viewing distances (no aliasing micro-dots).
-- `NdotV` floored at `1e-4`; specular denominator floored; specular clamped at
-  `4.0` (it would clip to white in LDR output anyway).
+- `NdotV` floored at `1e-4`.
+- The specular denominator is explicitly floored: `NdotL` is clamped to
+  `>= 0` but may be exactly zero; without the floor, the Smith geometry term
+  (`gl = 0 / k`) makes the `4 * NdotV * NdotL` denominator zero, leaving a
+  0/0 in the specular division and propagating NaN into the final
+  `* NdotL` product. The implemented guard is
+  `specular_denominator = max(4 * NdotV * NdotL, 1e-4)`, applied to the
+  specular division only; the `NdotL` used as the final direct-light
+  multiplier is unchanged, so back-facing surfaces are never artificially
+  illuminated.
+- Specular clamped at `4.0` (it would clip to white in LDR output anyway).
 - `safe_normalize` returns world-up for degenerate vectors (no NaN/Inf when
   the camera coincides with a shaded point, or `V + L` degenerates).
 - **Legacy-compat irradiance scale**: the old Lambert path used
@@ -96,6 +111,12 @@ Renderer crate:
 - `MaterialUniform` layout (16 bytes), finite values, byte round-trip
 - procedural material parameters stay non-metal/rough
 - legacy baseColor-only GLBs keep loading (regression guard)
+- BRDF reference-math regression (pure Rust mirror of the WGSL formulas, no
+  GPU): the direct BRDF evaluation stays finite for `NdotL = 0`, `NdotL`
+  very close to zero, `NdotV` at its `1e-4` floor, and `MIN_ROUGHNESS`, with
+  `NdotL = 0` yielding an exactly zero direct response
+- WGSL source-text guard pinning `fs_lit` to the floored specular
+  denominator and the unchanged `* NdotL` final multiplier
 
 All pre-existing tests remain green.
 
