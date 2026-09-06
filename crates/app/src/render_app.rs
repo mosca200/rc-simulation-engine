@@ -367,6 +367,12 @@ pub enum RenderRuntimeError {
     RenderPose(#[from] RenderDataError),
     #[error("failed to sample normalized pilot input: {0}")]
     Input(#[from] InputError),
+    #[error("failed to initialize render input: {0}")]
+    InputInitialization(InputError),
+    #[error("failed to load controller profile for render input: {0}")]
+    ControllerProfileInitialization(#[source] ControllerProfileFileError),
+    #[error("render input backend was not initialized after window creation")]
+    InputNotInitialized,
     #[error("failed to record live aircraft replay: {0}")]
     Replay(#[from] AircraftReplayError),
     #[error("failed to write live aircraft replay to {path}: {source}")]
@@ -444,6 +450,14 @@ impl ViewerInputMode {
             Self::Calibrated(state) => Ok(state.input()),
         }
     }
+
+    fn diagnostic_label(&self, selected_controller_id: Option<usize>) -> &'static str {
+        match self {
+            Self::Legacy { .. } if selected_controller_id.is_some() => "legacy controller mapping",
+            Self::Legacy { .. } => "keyboard fallback",
+            Self::Calibrated(_) => "calibrated controller profile",
+        }
+    }
 }
 
 fn poll_calibrated_hardware(
@@ -473,7 +487,7 @@ fn initialize_viewer_input(
     profile_path: Option<&Path>,
     initial_throttle: f64,
     backend: &mut GilrsInputBackend,
-) -> Result<(ViewerInputMode, String), RenderAppError> {
+) -> Result<(ViewerInputMode, String), RenderRuntimeError> {
     let Some(profile_path) = profile_path else {
         let selected_controller_id = backend.selected_device_id();
         let controller_devices = backend.devices();
@@ -484,7 +498,8 @@ fn initialize_viewer_input(
             ViewerInputMode::Legacy {
                 state: InputState::new(
                     InputMapping::default(),
-                    KeyboardInputState::new(initial_throttle)?,
+                    KeyboardInputState::new(initial_throttle)
+                        .map_err(RenderRuntimeError::InputInitialization)?,
                 ),
                 status: ControllerStatusTracker::new(selected_controller_id),
             },
@@ -492,16 +507,24 @@ fn initialize_viewer_input(
         ));
     };
 
-    let profile = load_controller_profile(profile_path)?;
+    let profile = load_controller_profile(profile_path)
+        .map_err(RenderRuntimeError::ControllerProfileInitialization)?;
     let mut state = CalibratedControllerState::new(profile);
     let devices = backend.devices();
     let identities: Vec<DeviceIdentity> = devices.iter().map(InputDeviceInfo::identity).collect();
-    state.match_requested_device(&identities)?;
-    let matched = backend.select_device(state.requested_device())?;
+    state
+        .match_requested_device(&identities)
+        .map_err(RenderRuntimeError::InputInitialization)?;
+    let matched = backend
+        .select_device(state.requested_device())
+        .map_err(RenderRuntimeError::InputInitialization)?;
     let raw_state = backend
         .poll_raw_axes()?
-        .ok_or(InputError::RequestedDeviceNotFound)?;
-    state.accept_raw_state(&raw_state)?;
+        .ok_or(InputError::RequestedDeviceNotFound)
+        .map_err(RenderRuntimeError::InputInitialization)?;
+    state
+        .accept_raw_state(&raw_state)
+        .map_err(RenderRuntimeError::InputInitialization)?;
 
     let startup_status = format!(
         "Controller profile:\n{}\n\
@@ -518,13 +541,36 @@ fn initialize_viewer_input(
     Ok((ViewerInputMode::Calibrated(Box::new(state)), startup_status))
 }
 
+fn print_viewer_controller_diagnostics(backend: &GilrsInputBackend, input_mode: &ViewerInputMode) {
+    let devices = backend.devices();
+    println!("Viewer input initialized after window creation");
+    println!("WGI controllers detected: {}", devices.len());
+    if devices.is_empty() {
+        println!("WGI controller identities: none");
+    } else {
+        for device in devices {
+            println!(
+                "WGI controller identity: session_id={} {}",
+                device.id(),
+                format_device_identity(&device.identity())
+            );
+        }
+    }
+    println!(
+        "Input mode: {}",
+        input_mode.diagnostic_label(backend.selected_device_id())
+    );
+}
+
 struct RenderApplication {
     simulation: AircraftSimulation,
     presentation: PresentationModel,
     scenery_preset: SceneryPreset,
     debug_overlays: bool,
-    input_mode: ViewerInputMode,
-    input_backend: GilrsInputBackend,
+    initial_throttle: f64,
+    controller_profile_path: Option<PathBuf>,
+    input_mode: Option<ViewerInputMode>,
+    input_backend: Option<GilrsInputBackend>,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
@@ -576,12 +622,6 @@ impl RenderApplication {
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
         let config = AircraftSimulationConfig::from_physics_hz(DEFAULT_PHYSICS_HZ, environment)?;
         let simulation = AircraftSimulation::new(model, config, initial_state)?;
-        let mut input_backend = GilrsInputBackend::new()?;
-        let (input_mode, controller_startup_status) = initialize_viewer_input(
-            options.controller_profile_path.as_deref(),
-            initial_throttle,
-            &mut input_backend,
-        )?;
         let replay_recorder = options
             .replay_output_path
             .as_ref()
@@ -601,15 +641,15 @@ impl RenderApplication {
             initial_ground.weight_on_wheels(),
             terrain_mode,
         );
-        println!();
-        println!("{controller_startup_status}");
         Ok(Self {
             simulation,
             presentation,
             scenery_preset: options.scenery,
             debug_overlays: options.debug_overlays,
-            input_mode,
-            input_backend,
+            initial_throttle,
+            controller_profile_path: options.controller_profile_path,
+            input_mode: None,
+            input_backend: None,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
@@ -628,6 +668,37 @@ impl RenderApplication {
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: RenderRuntimeError) {
         self.runtime_error = Some(error);
         event_loop.exit();
+    }
+
+    fn initialize_input_after_window(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.input_backend.is_some() && self.input_mode.is_some() {
+            return true;
+        }
+
+        let mut input_backend = match GilrsInputBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.fail(event_loop, error.into());
+                return false;
+            }
+        };
+        let (input_mode, controller_startup_status) = match initialize_viewer_input(
+            self.controller_profile_path.as_deref(),
+            self.initial_throttle,
+            &mut input_backend,
+        ) {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return false;
+            }
+        };
+        print_viewer_controller_diagnostics(&input_backend, &input_mode);
+        println!();
+        println!("{controller_startup_status}");
+        self.input_backend = Some(input_backend);
+        self.input_mode = Some(input_mode);
+        true
     }
 
     fn finish_and_exit(&mut self, event_loop: &ActiveEventLoop) {
@@ -662,7 +733,19 @@ impl RenderApplication {
                 now.saturating_duration_since(previous)
             });
         let step_plan = self.fixed_step.advance(frame_delta);
-        match self.input_mode.poll_hardware(&mut self.input_backend) {
+        if self.input_mode.is_none() || self.input_backend.is_none() {
+            self.fail(event_loop, RenderRuntimeError::InputNotInitialized);
+            return;
+        }
+        let input_mode = self
+            .input_mode
+            .as_mut()
+            .expect("input mode presence checked above");
+        let input_backend = self
+            .input_backend
+            .as_mut()
+            .expect("input backend presence checked above");
+        match input_mode.poll_hardware(input_backend) {
             Ok(Some(message)) => println!("{message}"),
             Ok(None) => {}
             Err(error) => {
@@ -671,7 +754,7 @@ impl RenderApplication {
             }
         }
         for _ in 0..step_plan.physics_steps() {
-            let input = match self.input_mode.sample(PHYSICS_DT.as_secs_f64()) {
+            let input = match input_mode.sample(PHYSICS_DT.as_secs_f64()) {
                 Ok(input) => input,
                 Err(error) => {
                     self.fail(event_loop, error.into());
@@ -756,6 +839,11 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
+        // WGI enumeration needs a process-owned, focus-capable window before gilrs is created.
+        window.focus_window();
+        if !self.initialize_input_after_window(event_loop) {
+            return;
+        }
         let presentation_asset = match &self.presentation {
             PresentationModel::Glb {
                 asset,
@@ -814,9 +902,10 @@ impl ApplicationHandler for RenderApplication {
                 self.finish_and_exit(event_loop);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(key) = keyboard_key(event.physical_key) {
-                    self.input_mode
-                        .set_key(key, event.state == ElementState::Pressed);
+                if let Some(key) = keyboard_key(event.physical_key)
+                    && let Some(input_mode) = self.input_mode.as_mut()
+                {
+                    input_mode.set_key(key, event.state == ElementState::Pressed);
                 }
             }
             WindowEvent::Resized(size) => {

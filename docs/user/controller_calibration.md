@@ -35,6 +35,10 @@ Run all commands from the repository root in PowerShell.
    cargo run -p rcsim-app --release -- controller list
    ```
 
+   These terminal-only diagnostics do not create a winit window. WGI may therefore report zero
+   devices until a viewer window exists; this is not decisive evidence that the TX16S is
+   unsupported. The decisive check is the viewer's post-window initialization diagnostic.
+
 3. Identify the TX16S by its reported name, UUID, vendor ID, product ID, and session ID. Do not
    assume a particular ID or axis layout.
 4. Inspect the axes actually exposed by that device, replacing `ID` with its session ID:

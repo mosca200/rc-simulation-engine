@@ -28,9 +28,11 @@ replay recorder.
 
 ## gilrs backend
 
-The first hardware backend is `gilrs 0.11.2`. On Windows the workspace selects its `xinput`
-feature with default features disabled. This permits the headless `input list` path without the
-focus-window requirement of the default Windows Gaming Input backend.
+The first hardware backend is `gilrs 0.11.2`. On Windows the workspace selects its `wgi` feature
+with default features disabled so generic Windows USB controllers can be exposed through Windows
+Gaming Input. WGI enumeration in render mode is deliberately deferred until after winit creates a
+visible, focus-capable window associated with the process. The backend is then retained by
+`RenderApplication` and polled once per render frame; it is never recreated in the frame loop.
 
 `GilrsInputBackend`:
 
@@ -157,14 +159,17 @@ written to the requested path. The result is accepted directly by `rcsim-app rep
 ## Headless device listing and no-device behavior
 
 ```powershell
-cargo run -p rcsim-app --release -- input list
+cargo run -p rcsim-app --release -- controller list
 ```
 
-This route initializes only gilrs, prints connected device metadata, and exits. It does not create
-a winit event loop, window, surface, GPU adapter, or renderer. Zero connected devices is normal:
+The controller list/monitor/calibrate commands are terminal-only diagnostics. They initialize only
+gilrs and do not create a winit event loop or window. WGI can therefore report zero devices in
+those commands when a device requires a process window or focus; that result is not decisive for
+viewer support. The decisive WGI test is `rcsim-app render`, whose post-window initialization
+prints the detected controller count and identities. Zero connected devices remains a valid result:
 
 ```text
-mode: input-list
+mode: controller-list
 devices: 0
 ```
 

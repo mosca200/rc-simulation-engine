@@ -31,6 +31,13 @@ cargo run -p rcsim-app --release -- controller monitor --duration-seconds 30
 If both bounds are supplied, monitoring stops when the first bound is reached. The commands do not
 write controller state or calibration files.
 
+These commands are terminal-only and intentionally do not create a winit window. With the Windows
+Gaming Input (WGI) backend, Windows may require a process window in focus before it reports a
+controller. Consequently, `controller list`, `monitor`, and `calibrate` can show zero devices even
+when the viewer can detect one. The decisive diagnostic is the post-window initialization message
+printed by `rcsim-app render`; it reports the WGI controller count, identities, and selected input
+mode. No Raw Input or custom HID path is used by this diagnostic slice.
+
 ## Interpretation
 
 The reported `roll`, `pitch`, `yaw`, and `throttle` values are **legacy logical axes /
