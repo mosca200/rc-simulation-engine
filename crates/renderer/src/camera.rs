@@ -12,6 +12,18 @@ const DEFAULT_HEIGHT_ABOVE_M: f32 = 1.25;
 const DEFAULT_LOOK_AHEAD_M: f32 = 1.5;
 const DEFAULT_PILOT_POSITION_RENDER_M: [f32; 3] = [0.0, 1.8, 20.0];
 
+/// Horizontal-heading deadband: below this horizontal forward magnitude the
+/// aircraft is treated as near-vertical and the geometric pose fallback
+/// applies. Above it the historic normalized-forward behavior is kept
+/// bit-for-bit.
+const NEAR_VERTICAL_FORWARD_EPS: f32 = 1.0e-4;
+/// Degenerate-fallback deadband for the pose-derived horizontal projections.
+const DEGENERATE_HORIZONTAL_EPS: f32 = 1.0e-6;
+/// Last-resort heading, reachable only for non-finite or doubly-degenerate
+/// pose input (impossible for valid rotation matrices, whose columns are
+/// orthonormal and therefore never vertical at the same time).
+const GLOBAL_HEADING_FALLBACK: [f32; 3] = [0.0, 0.0, -1.0];
+
 /// Render-space world-up direction: +Y is up.
 ///
 /// The NED-to-render mapping sends physics Down (NED +Z) to render −Y,
@@ -299,7 +311,7 @@ impl ChaseCamera {
     pub fn eye_and_target(&self, aircraft_pose: &RenderPose) -> ([f32; 3], [f32; 3]) {
         let position = aircraft_pose.translation_render_m();
         let forward = aircraft_pose.transform_direction([0.0, 0.0, -1.0]);
-        let horizontal_forward = normalized_horizontal_forward(forward);
+        let horizontal_forward = chase_horizontal_forward(aircraft_pose, forward);
         let eye = add3(
             sub3(
                 position,
@@ -341,17 +353,70 @@ impl ChaseCamera {
     }
 }
 
-fn normalized_horizontal_forward(forward: [f32; 3]) -> [f32; 3] {
-    let horizontal_norm = forward[0].hypot(forward[2]);
-    if horizontal_norm <= 1.0e-4 {
-        [0.0, 0.0, -1.0]
-    } else {
-        [
-            forward[0] / horizontal_norm,
-            0.0,
-            forward[2] / horizontal_norm,
-        ]
+/// Presentation-side chase heading: unit-length horizontal direction used to
+/// place the eye behind the aircraft.
+///
+/// Behavior contract (stateless, deterministic, zero allocation):
+/// - Normal flight (`|forward.xz| > 1e-4`): historic behavior, i.e. the
+///   normalized horizontal projection of `forward`, bit-for-bit.
+/// - Near-vertical flight: geometric fallback derived from the same
+///   `RenderPose`. The horizontal projection of the local vertical axis
+///   (`up`, i.e. body `+Y` in render space) becomes the heading, with a sign
+///   chosen from the climb/dive sense (`forward.y`): belly side (`-up`) when
+///   climbing, canopy side (`+up`) when diving. Either choice matches the
+///   approach heading of a pure pitch entry (loop), so no artificial swing
+///   to a fixed global heading occurs at the pole. If the chosen projection
+///   is itself degenerate (only possible for non-orthonormal/corrupt input,
+///   since the fallback axis is orthogonal to the near-vertical forward),
+///   the horizontal projection of the body right axis (`+X`) is tried next.
+/// - Only non-finite or doubly-degenerate input falls back to the global
+///   `[0, 0, -1]` heading (unreachable for valid rotation matrices).
+///
+/// The sign choice is what gives continuity: pitching up from level flight
+/// toward +90° keeps heading ≈ forward.xz until the deadband, then the belly
+/// projection takes over pointing the same way; symmetrically, pitching down
+/// toward −90° hands over to the canopy projection pointing the entry way.
+fn chase_horizontal_forward(aircraft_pose: &RenderPose, forward: [f32; 3]) -> [f32; 3] {
+    if forward.iter().all(|v| v.is_finite()) {
+        let horizontal_norm = forward[0].hypot(forward[2]);
+        if horizontal_norm > NEAR_VERTICAL_FORWARD_EPS {
+            return [
+                forward[0] / horizontal_norm,
+                0.0,
+                forward[2] / horizontal_norm,
+            ];
+        }
     }
+    // Geometric fallback from the same pose. The sign keeps continuity with
+    // the pitch-entry side: belly (-up) on climb, canopy (+up) on dive.
+    let climb = !forward[1].is_finite() || forward[1] >= 0.0;
+    let vertical_axis = aircraft_pose.transform_direction([0.0, 1.0, 0.0]);
+    let fallback = if climb {
+        scale3(vertical_axis, -1.0)
+    } else {
+        vertical_axis
+    };
+    if let Some(heading) = normalized_horizontal(fallback) {
+        return heading;
+    }
+    let right = aircraft_pose.transform_direction([1.0, 0.0, 0.0]);
+    if let Some(heading) = normalized_horizontal(right) {
+        return heading;
+    }
+    GLOBAL_HEADING_FALLBACK
+}
+
+/// Normalize the horizontal (`x/z`) projection of a render-space direction.
+/// Returns `None` for non-finite or near-zero projections.
+fn normalized_horizontal(direction: [f32; 3]) -> Option<[f32; 3]> {
+    if !direction.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let norm = direction[0].hypot(direction[2]);
+    if norm <= DEGENERATE_HORIZONTAL_EPS {
+        return None;
+    }
+    Some([direction[0] / norm, 0.0, direction[2] / norm])
 }
 
 fn valid_aspect_ratio(width: u32, height: u32) -> Option<f32> {
@@ -420,6 +485,63 @@ mod tests {
         world_ned_pose_to_render(translation_ned, quaternion, [0.0; 3]).unwrap()
     }
 
+    /// Axis-angle quaternion (world-from-body, NED physics frame).
+    fn axis_angle_ned(axis: [f64; 3], angle_rad: f64) -> [f64; 4] {
+        let half = 0.5 * angle_rad;
+        let (sin_half, cos_half) = half.sin_cos();
+        [
+            cos_half,
+            axis[0] * sin_half,
+            axis[1] * sin_half,
+            axis[2] * sin_half,
+        ]
+    }
+
+    /// Hamilton product `left * right` (apply `right` first, then `left`).
+    fn mul_ned(left: [f64; 4], right: [f64; 4]) -> [f64; 4] {
+        let [w1, x1, y1, z1] = left;
+        let [w2, x2, y2, z2] = right;
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ]
+    }
+
+    /// NED pitch about body +Y (positive pitches the nose up in render).
+    fn pitch_ned(angle_rad: f64) -> [f64; 4] {
+        axis_angle_ned([0.0, 1.0, 0.0], angle_rad)
+    }
+
+    /// NED yaw about body +Z.
+    fn yaw_ned(angle_rad: f64) -> [f64; 4] {
+        axis_angle_ned([0.0, 0.0, 1.0], angle_rad)
+    }
+
+    /// NED roll about body +X (forward axis).
+    fn roll_ned(angle_rad: f64) -> [f64; 4] {
+        axis_angle_ned([1.0, 0.0, 0.0], angle_rad)
+    }
+
+    const LEVEL_QUAT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
+
+    fn horizontal_heading(pose: &RenderPose) -> [f32; 3] {
+        let forward = pose.transform_direction([0.0, 0.0, -1.0]);
+        chase_horizontal_forward(pose, forward)
+    }
+
+    fn distance3(left: [f32; 3], right: [f32; 3]) -> f32 {
+        ((left[0] - right[0]).powi(2) + (left[1] - right[1]).powi(2) + (left[2] - right[2]).powi(2))
+            .sqrt()
+    }
+
+    fn assert_unit_horizontal(heading: [f32; 3]) {
+        assert!(heading.iter().all(|v| v.is_finite()));
+        assert_eq!(heading[1], 0.0);
+        let norm = heading[0].hypot(heading[2]);
+        assert!((norm - 1.0).abs() < 1.0e-6, "heading {heading:?} not unit");
+    }
     // -------------------------------------------------------------------
     // Chase camera
     // -------------------------------------------------------------------
@@ -435,6 +557,41 @@ mod tests {
                 .view_projection(&pose([1.0, 0.0, 0.0, 0.0]))
                 .is_finite()
         );
+    }
+
+    #[test]
+    fn level_flight_heading_is_unchanged() {
+        let camera = ChaseCamera::new(1_600, 900);
+        let level = pose(LEVEL_QUAT);
+        assert_eq!(horizontal_heading(&level), [0.0, 0.0, -1.0]);
+        let (eye, target) = camera.eye_and_target(&level);
+        assert_eq!(eye, [0.0, 1.25, 3.5]);
+        assert_eq!(target, [0.0, 0.0, -1.5]);
+    }
+
+    #[test]
+    fn normal_pitch_matches_legacy_projection_within_tolerance() {
+        // +/-30deg, +/-60deg and yawed variants stay on the legacy path.
+        let cases = [
+            pitch_ned(30.0_f64.to_radians()),
+            pitch_ned(-30.0_f64.to_radians()),
+            pitch_ned(60.0_f64.to_radians()),
+            pitch_ned(-60.0_f64.to_radians()),
+            mul_ned(
+                yaw_ned(45.0_f64.to_radians()),
+                pitch_ned(20.0_f64.to_radians()),
+            ),
+        ];
+        for quat in cases {
+            let test_pose = pose(quat);
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            let forward = test_pose.transform_direction([0.0, 0.0, -1.0]);
+            let norm = forward[0].hypot(forward[2]);
+            assert!(norm > 1.0e-4, "case {quat:?} inside fallback deadband");
+            let legacy = [forward[0] / norm, 0.0, forward[2] / norm];
+            assert!(distance3(heading, legacy) < 1.0e-6);
+        }
     }
 
     #[test]
@@ -463,6 +620,42 @@ mod tests {
         assert_ne!(eye, target);
         assert!(eye.into_iter().chain(target).all(f32::is_finite));
         assert!(camera.view_projection(&vertical_pose).is_finite());
+    }
+
+    #[test]
+    fn plus_ninety_pitch_is_finite_and_keeps_entry_heading() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let vertical = pose(pitch_ned(std::f64::consts::FRAC_PI_2));
+        let forward = vertical.transform_direction([0.0, 0.0, -1.0]);
+        assert!(forward[0].hypot(forward[2]) <= 1.0e-4);
+        assert!(forward[1] > 0.999);
+        let heading = horizontal_heading(&vertical);
+        assert_unit_horizontal(heading);
+        // Pitched up from level heading -Z: keep it.
+        assert!(distance3(heading, [0.0, 0.0, -1.0]) < 2.0e-6);
+        let (eye, target) = camera.eye_and_target(&vertical);
+        assert_ne!(eye, target);
+        assert!(eye.into_iter().chain(target).all(f32::is_finite));
+        assert!(camera.view_projection(&vertical).is_finite());
+        assert!(camera.inv_view_projection(&vertical).is_some());
+    }
+
+    #[test]
+    fn minus_ninety_pitch_is_finite_and_keeps_entry_heading() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let vertical = pose(pitch_ned(-std::f64::consts::FRAC_PI_2));
+        let forward = vertical.transform_direction([0.0, 0.0, -1.0]);
+        assert!(forward[0].hypot(forward[2]) <= 1.0e-4);
+        assert!(forward[1] < -0.999);
+        let heading = horizontal_heading(&vertical);
+        assert_unit_horizontal(heading);
+        // Pitched down from level heading -Z: keep it.
+        assert!(distance3(heading, [0.0, 0.0, -1.0]) < 2.0e-6);
+        let (eye, target) = camera.eye_and_target(&vertical);
+        assert_ne!(eye, target);
+        assert!(eye.into_iter().chain(target).all(f32::is_finite));
+        assert!(camera.view_projection(&vertical).is_finite());
+        assert!(camera.inv_view_projection(&vertical).is_some());
     }
 
     #[test]
@@ -498,6 +691,198 @@ mod tests {
         let test_pose = pose([1.0, 0.0, 0.0, 0.0]);
         let (expected_eye, _) = camera.eye_and_target(&test_pose);
         assert_eq!(camera.eye_position(&test_pose), expected_eye);
+    }
+
+    #[test]
+    fn near_plus_ninety_entry_side_stays_continuous() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let entry = [0.0, 0.0, -1.0_f32];
+        let mut previous: Option<[f32; 3]> = None;
+        // Approach the pole from level flight (loop entry side): the heading
+        // must stay on the entry heading with no swing to a global fallback.
+        // The far side (past the pole) genuinely flips the nose the other
+        // way, so it is covered separately below.
+        for degrees in [85.0_f64, 89.0, 89.9, 89.99, 90.0] {
+            let test_pose = pose(pitch_ned(degrees.to_radians()));
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            assert!(
+                distance3(heading, entry) < 1.0e-3,
+                "heading {heading:?} left entry {entry:?} at {degrees}°"
+            );
+            if let Some(prev) = previous {
+                assert!(distance3(heading, prev) < 1.0e-3);
+            }
+            previous = Some(heading);
+            let (eye, target) = camera.eye_and_target(&test_pose);
+            assert_ne!(eye, target);
+            assert!(eye.into_iter().chain(target).all(f32::is_finite));
+            assert!(camera.view_projection(&test_pose).is_finite());
+        }
+    }
+
+    #[test]
+    fn near_plus_ninety_far_side_follows_flipped_nose() {
+        let camera = ChaseCamera::new(1_280, 720);
+        // Past the pole the nose genuinely points the other way; the camera
+        // follows the (pose-derived) flipped heading, continuously.
+        let flipped = [0.0, 0.0, 1.0_f32];
+        let mut previous: Option<[f32; 3]> = None;
+        for degrees in [90.01_f64, 90.1, 91.0, 95.0] {
+            let test_pose = pose(pitch_ned(degrees.to_radians()));
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            assert!(
+                distance3(heading, flipped) < 1.0e-3,
+                "heading {heading:?} != flipped {flipped:?} at {degrees}°"
+            );
+            if let Some(prev) = previous {
+                assert!(distance3(heading, prev) < 1.0e-3);
+            }
+            previous = Some(heading);
+            assert!(camera.view_projection(&test_pose).is_finite());
+        }
+    }
+
+    #[test]
+    fn near_minus_ninety_entry_side_stays_continuous() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let entry = [0.0, 0.0, -1.0_f32];
+        let mut previous: Option<[f32; 3]> = None;
+        // Dive entry side: heading stays on the entry heading.
+        for degrees in [-85.0_f64, -89.0, -89.9, -89.99, -90.0] {
+            let test_pose = pose(pitch_ned(degrees.to_radians()));
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            assert!(
+                distance3(heading, entry) < 1.0e-3,
+                "heading {heading:?} left entry {entry:?} at {degrees}°"
+            );
+            if let Some(prev) = previous {
+                assert!(distance3(heading, prev) < 1.0e-3);
+            }
+            previous = Some(heading);
+            let (eye, target) = camera.eye_and_target(&test_pose);
+            assert_ne!(eye, target);
+            assert!(eye.into_iter().chain(target).all(f32::is_finite));
+            assert!(camera.view_projection(&test_pose).is_finite());
+        }
+    }
+
+    #[test]
+    fn near_minus_ninety_far_side_follows_flipped_nose() {
+        let camera = ChaseCamera::new(1_280, 720);
+        // Past the pole the nose genuinely points the other way; the camera
+        // follows the (pose-derived) flipped heading, continuously.
+        let flipped = [0.0, 0.0, 1.0_f32];
+        let mut previous: Option<[f32; 3]> = None;
+        for degrees in [-90.01_f64, -90.1, -91.0, -95.0] {
+            let test_pose = pose(pitch_ned(degrees.to_radians()));
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            assert!(
+                distance3(heading, flipped) < 1.0e-3,
+                "heading {heading:?} != flipped {flipped:?} at {degrees}°"
+            );
+            if let Some(prev) = previous {
+                assert!(distance3(heading, prev) < 1.0e-3);
+            }
+            previous = Some(heading);
+            assert!(camera.view_projection(&test_pose).is_finite());
+        }
+    }
+
+    #[test]
+    fn yawed_vertical_uses_geometric_fallback_not_global_heading() {
+        // Yaw +90deg (nose-left in NED convention) then pitch up: the loop
+        // plane faces +X, so the geometric fallback must follow +X rather
+        // than jump to the global -Z heading.
+        // (Heading helper is pose-only; no camera instance needed here.)
+        let yawed_climb = pose(mul_ned(
+            yaw_ned(std::f64::consts::FRAC_PI_2),
+            pitch_ned(std::f64::consts::FRAC_PI_2),
+        ));
+        let forward = yawed_climb.transform_direction([0.0, 0.0, -1.0]);
+        assert!(forward[0].hypot(forward[2]) <= 1.0e-4);
+        let heading = horizontal_heading(&yawed_climb);
+        assert_unit_horizontal(heading);
+        assert!(distance3(heading, [1.0, 0.0, 0.0]) < 2.0e-6);
+        assert!(distance3(heading, [0.0, 0.0, -1.0]) > 0.5);
+        // Symmetric dive entry keeps its own approach heading too.
+        let yawed_dive = pose(mul_ned(
+            yaw_ned(std::f64::consts::FRAC_PI_2),
+            pitch_ned(-std::f64::consts::FRAC_PI_2),
+        ));
+        let dive_heading = horizontal_heading(&yawed_dive);
+        assert_unit_horizontal(dive_heading);
+        assert!(distance3(dive_heading, [1.0, 0.0, 0.0]) < 2.0e-6);
+    }
+
+    #[test]
+    fn roll_while_vertical_remains_finite() {
+        let camera = ChaseCamera::new(1_280, 720);
+        let vertical = pitch_ned(std::f64::consts::FRAC_PI_2);
+        for degrees in [0.0_f64, 30.0, 90.0, 135.0, 180.0, 270.0] {
+            let test_pose = pose(mul_ned(roll_ned(degrees.to_radians()), vertical));
+            let heading = horizontal_heading(&test_pose);
+            assert_unit_horizontal(heading);
+            let (eye, target) = camera.eye_and_target(&test_pose);
+            assert_ne!(eye, target);
+            assert!(eye.into_iter().chain(target).all(f32::is_finite));
+            assert!(camera.view_projection(&test_pose).is_finite());
+            assert!(camera.inv_view_projection(&test_pose).is_some());
+        }
+    }
+
+    #[test]
+    fn vertical_camera_eye_differs_from_target_and_matrix_inverts() {
+        let camera = ChaseCamera::new(1_280, 720);
+        for quat in [
+            pitch_ned(std::f64::consts::FRAC_PI_2),
+            pitch_ned(-std::f64::consts::FRAC_PI_2),
+        ] {
+            let test_pose = pose(quat);
+            let (eye, target) = camera.eye_and_target(&test_pose);
+            assert_ne!(eye, target);
+            assert!(distance3(eye, target) > 1.0e-3);
+            let view_projection = camera.view_projection(&test_pose);
+            assert!(view_projection.is_finite());
+            let inverse = camera
+                .inv_view_projection(&test_pose)
+                .expect("vertical VP must invert");
+            assert!(inverse.is_finite());
+            let product = view_projection * inverse;
+            let identity = Mat4::identity();
+            for (product_row, identity_row) in product.rows().iter().zip(identity.rows().iter()) {
+                for (&entry, &expected) in product_row.iter().zip(identity_row.iter()) {
+                    assert!((entry - expected).abs() < 1.0e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn same_pose_gives_same_camera_result() {
+        let camera = ChaseCamera::new(1_600, 900);
+        let quats = [
+            LEVEL_QUAT,
+            pitch_ned(0.6),
+            pitch_ned(std::f64::consts::FRAC_PI_2),
+            pitch_ned(-std::f64::consts::FRAC_PI_2),
+            mul_ned(yaw_ned(1.1), pitch_ned(std::f64::consts::FRAC_PI_2)),
+            mul_ned(roll_ned(0.9), pitch_ned(std::f64::consts::FRAC_PI_2)),
+        ];
+        for quat in quats {
+            let test_pose = pose(quat);
+            assert_eq!(
+                camera.eye_and_target(&test_pose),
+                camera.eye_and_target(&test_pose)
+            );
+            assert_eq!(
+                camera.view_projection(&test_pose),
+                camera.view_projection(&test_pose)
+            );
+        }
     }
 
     #[test]
