@@ -1513,6 +1513,11 @@ mod tests {
     #[test]
     fn altitude_and_airspeed_options_parse_with_manual_flight_defaults_and_overrides() {
         let defaults = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(defaults.model_path, PathBuf::from(DEFAULT_MODEL_PATH));
+        assert_eq!(
+            defaults.model_path,
+            PathBuf::from("models/acro_electric_01/model.json")
+        );
         assert_eq!(defaults.altitude_m, 30.0);
         assert_eq!(defaults.airspeed_mps, 18.0);
         assert!(!defaults.start_on_ground);
@@ -1567,28 +1572,40 @@ mod tests {
     }
 
     #[test]
-    fn ground_start_without_landing_gear_fails_explicitly() {
+    fn acro_electric_01_starts_supported_on_the_physical_flat_plane() {
         let model_path = repository_model_path("models/acro_electric_01/model.json");
         let model = load_aircraft_model(&model_path).unwrap();
-        assert!(matches!(
-            supported_ground_start(&model),
-            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
-                if model_id == "acro-electric-01"
-        ));
-        let options = RenderOptions::parse(
-            [
-                "--model".to_owned(),
-                model_path.display().to_string(),
-                "--start-on-ground".to_owned(),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        assert!(matches!(
-            RenderApplication::new(options),
-            Err(RenderAppError::GroundStartWithoutLandingGear { model_id })
-                if model_id == "acro-electric-01"
-        ));
+        assert_eq!(model.model_id(), "acro-electric-01");
+        assert_eq!(model.landing_gear().len(), 3);
+        let left_main = &model.landing_gear()[1];
+        let right_main = &model.landing_gear()[2];
+        assert_eq!(left_main.id(), "left-main");
+        assert_eq!(right_main.id(), "right-main");
+        assert_eq!(
+            left_main.contact().position_body_m.x,
+            right_main.contact().position_body_m.x
+        );
+        assert_eq!(
+            left_main.contact().position_body_m.y,
+            -right_main.contact().position_body_m.y
+        );
+        assert_eq!(
+            left_main.contact().position_body_m.z,
+            right_main.contact().position_body_m.z
+        );
+
+        let initialized = supported_ground_start(&model).unwrap();
+        assert!(initialized.state.validate().is_ok());
+        assert!(initialized.state.position_world_m.z < 0.0);
+        assert_eq!(initialized.state.linear_velocity_world_mps, Vec3::zeros());
+        assert_eq!(initialized.state.angular_velocity_body_radps, Vec3::zeros());
+        assert!(initialized.ground_evaluation.weight_on_wheels());
+        assert!(initialized.ground_evaluation.active_contacts > 0);
+        let weight_n = model.rigid_body().mass_kg() * DEFAULT_GRAVITY_MPS2;
+        assert!(
+            (initialized.ground_evaluation.total_normal_force_n - weight_n).abs()
+                <= 1.0e-10 * weight_n
+        );
     }
 
     #[test]

@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_telemetry(TelemetryOptions::parse(arguments)?)?;
             Ok(())
         }
-        Some(command) if command == "render" => {
+        Some(command) if command == "render" || command == "play" => {
             run_render(RenderOptions::parse(arguments)?)?;
             Ok(())
         }
@@ -448,6 +448,7 @@ fn print_usage() {
     println!(
         "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--controller-profile PATH] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays]"
     );
+    println!("  rcsim-app play [render options] (alias for render; defaults to Acro Electric 01)");
     println!("  rcsim-app controller list");
     println!(
         "  rcsim-app controller monitor [--raw] [--device-id ID] [--samples N] [--duration-seconds N]"
