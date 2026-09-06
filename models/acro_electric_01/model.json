@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "model_id": "acro-electric-01",
   "display_name": "Acro Electric 01",
   "classification": "synthetic_test",
@@ -317,6 +317,29 @@
       "max_steer_angle_rad": 0.0,
       "steerable": false,
       "braked": true
+    }
+  ],
+  "airframe_contacts": [
+    {
+      "id": "belly",
+      "position_body_m": [-0.12, 0.0, 0.065],
+      "normal_stiffness_n_per_m": 8000.0,
+      "normal_damping_n_s_per_m": 350.0,
+      "friction_coefficient": 0.45
+    },
+    {
+      "id": "left-wing-tip",
+      "position_body_m": [-0.05, -0.9, 0.015],
+      "normal_stiffness_n_per_m": 8000.0,
+      "normal_damping_n_s_per_m": 350.0,
+      "friction_coefficient": 0.45
+    },
+    {
+      "id": "right-wing-tip",
+      "position_body_m": [-0.05, 0.9, 0.015],
+      "normal_stiffness_n_per_m": 8000.0,
+      "normal_damping_n_s_per_m": 350.0,
+      "friction_coefficient": 0.45
     }
   ],
   "presentation": {

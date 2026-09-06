@@ -3,7 +3,7 @@ use crate::{
     AIRCRAFT_MODEL_SCHEMA_VERSION_V2, AIRCRAFT_MODEL_SCHEMA_VERSION_V3,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V4, AIRCRAFT_MODEL_SCHEMA_VERSION_V5,
     AIRCRAFT_MODEL_SCHEMA_VERSION_V6, AIRCRAFT_MODEL_SCHEMA_VERSION_V7,
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V8,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V8, AIRCRAFT_MODEL_SCHEMA_VERSION_V9,
     reference::{
         AircraftClassification, CgReferenceKind, ParameterQuality, ProvenanceConfidence,
         ProvenanceSource, ProvenanceSourceType, ReferenceAircraftIdentity,
@@ -13,9 +13,9 @@ use crate::{
     runtime::{
         AircraftModel, ControlActuator, PresentationArticulatedSurface, PresentationMetadata,
         PresentationSurface, RuntimeAeroDownwashInteraction, RuntimeAeroElement,
-        RuntimeAeroSurface, RuntimeControlSurfaceBinding, RuntimeElectricPropulsion,
-        RuntimeLandingGearContact, RuntimePolar, RuntimePropellerSlipstreamInteraction,
-        RuntimeReynoldsPolarFamily,
+        RuntimeAeroSurface, RuntimeAirframeContact, RuntimeControlSurfaceBinding,
+        RuntimeElectricPropulsion, RuntimeLandingGearContact, RuntimePolar,
+        RuntimePropellerSlipstreamInteraction, RuntimeReynoldsPolarFamily,
     },
     v0::{
         AerodynamicsFileV0, AircraftModelFileV0, AxisResponseFileV0, PresentationSurfaceFileV0,
@@ -35,18 +35,20 @@ use crate::{
     v6::{AeroDownwashInteractionFileV6, AircraftModelFileV6},
     v7::{AircraftModelFileV7, PropellerSlipstreamInteractionFileV7},
     v8::{AircraftModelFileV8, LandingGearContactFileV8, SteeringSourceFileV8},
+    v9::{AircraftModelFileV9, AirframeContactFileV9},
 };
 use serde::Deserialize;
 use sim_core::{
-    AeroElement, AeroElementError, AxisResponseConfig, BatteryConfig, BatteryConfigError,
-    ControlActuatorConfig, ControlConfigError, ControlResponseConfig, ControlSystemConfig,
-    ElectricPropulsionConfig, EscConfig, EscConfigError, GearContact, GroundConfigError,
-    MAX_GEAR_CONTACTS, MotorConfig, MotorConfigError, ParameterError, PolarError, PolarSample,
-    PolarTable, PropellerCoefficientError, PropellerCoefficientMap, PropellerCoefficientMapError,
-    PropellerCoefficientNode, PropellerCoefficientSource, PropellerCoefficientTable,
-    PropellerConfig, PropellerConfigError, PropellerSample, PropellerSpinDirection, ReynoldsPolar,
-    ReynoldsPolarFamily, ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig, SteeringSource,
-    validate_gear_contact,
+    AeroElement, AeroElementError, AirframeContact, AxisResponseConfig, BatteryConfig,
+    BatteryConfigError, ControlActuatorConfig, ControlConfigError, ControlResponseConfig,
+    ControlSystemConfig, ElectricPropulsionConfig, EscConfig, EscConfigError, GearContact,
+    GroundConfigError, MAX_AIRFRAME_CONTACTS, MAX_GEAR_CONTACTS, MotorConfig, MotorConfigError,
+    ParameterError, PolarError, PolarSample, PolarTable, PropellerCoefficientError,
+    PropellerCoefficientMap, PropellerCoefficientMapError, PropellerCoefficientNode,
+    PropellerCoefficientSource, PropellerCoefficientTable, PropellerConfig, PropellerConfigError,
+    PropellerSample, PropellerSpinDirection, ReynoldsPolar, ReynoldsPolarFamily,
+    ReynoldsPolarFamilyError, RigidBodyParams, ServoConfig, SteeringSource,
+    validate_airframe_contact, validate_gear_contact,
 };
 use sim_math::{Mat3, Orientation, Quaternion, Vec3};
 use std::{fs, io, path::Path};
@@ -476,6 +478,15 @@ pub enum ModelLoadError {
         #[source]
         source: GroundConfigError,
     },
+    #[error("too many airframe contacts: {count}")]
+    TooManyAirframeContacts { count: usize },
+    #[error("airframe contact {contact_id:?} at index {contact_index} is invalid: {source}")]
+    InvalidAirframeContact {
+        contact_id: Box<str>,
+        contact_index: usize,
+        #[source]
+        source: GroundConfigError,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -540,6 +551,12 @@ impl AircraftModelLoader {
                     .map_err(|source| ModelLoadError::InvalidStructure { source })?;
                 debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V8);
                 resolve_v8(file)
+            }
+            version if version == u64::from(AIRCRAFT_MODEL_SCHEMA_VERSION_V9) => {
+                let file: AircraftModelFileV9 = serde_json::from_str(json)
+                    .map_err(|source| ModelLoadError::InvalidStructure { source })?;
+                debug_assert_eq!(file.schema_version, AIRCRAFT_MODEL_SCHEMA_VERSION_V9);
+                resolve_v9(file)
             }
             found => Err(ModelLoadError::UnsupportedSchemaVersion { found }),
         }?;
@@ -1056,6 +1073,87 @@ fn resolve_landing_gear(
             }
         })?;
         contacts.push(RuntimeLandingGearContact::new(file.id, contact));
+    }
+    Ok(contacts)
+}
+
+fn resolve_v9(file: AircraftModelFileV9) -> Result<AircraftModel, ModelLoadError> {
+    let AircraftModelFileV9 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propeller_slipstream_interactions,
+        propulsion,
+        landing_gear,
+        airframe_contacts,
+        presentation,
+    } = file;
+    let v6_file = AircraftModelFileV6 {
+        schema_version,
+        model_id,
+        display_name,
+        classification,
+        reference_aircraft,
+        rigid_body,
+        aerodynamics,
+        controls,
+        control_surface_bindings,
+        aero_downwash_interactions,
+        propulsion,
+        presentation,
+    };
+    let model = resolve_v6_fields(v6_file, AIRCRAFT_MODEL_SCHEMA_VERSION_V9)?;
+    let slipstream =
+        resolve_propeller_slipstream_interactions(&model, propeller_slipstream_interactions)?;
+    let gear = resolve_landing_gear(landing_gear)?;
+    let contacts = resolve_airframe_contacts(airframe_contacts)?;
+    Ok(model
+        .with_propeller_slipstream_interactions(slipstream)
+        .with_landing_gear(gear)
+        .with_airframe_contacts(contacts))
+}
+
+fn resolve_airframe_contacts(
+    files: Vec<AirframeContactFileV9>,
+) -> Result<Vec<RuntimeAirframeContact>, ModelLoadError> {
+    if files.len() > MAX_AIRFRAME_CONTACTS {
+        return Err(ModelLoadError::TooManyAirframeContacts { count: files.len() });
+    }
+    let mut contacts = Vec::with_capacity(files.len());
+    for (index, file) in files.into_iter().enumerate() {
+        validate_unique_id(
+            "airframe contact",
+            index,
+            &file.id,
+            contacts
+                .iter()
+                .map(|contact: &RuntimeAirframeContact| contact.id()),
+        )?;
+        let contact = AirframeContact {
+            position_body_m: Vec3::new(
+                file.position_body_m[0],
+                file.position_body_m[1],
+                file.position_body_m[2],
+            ),
+            stiffness_n_per_m: file.normal_stiffness_n_per_m,
+            damping_n_s_per_m: file.normal_damping_n_s_per_m,
+            friction_mu: file.friction_coefficient,
+        };
+        validate_airframe_contact(&contact).map_err(|source| {
+            ModelLoadError::InvalidAirframeContact {
+                contact_id: file.id.clone().into_boxed_str(),
+                contact_index: index,
+                source,
+            }
+        })?;
+        contacts.push(RuntimeAirframeContact::new(file.id, contact));
     }
     Ok(contacts)
 }

@@ -3,13 +3,14 @@ use model::{
     AircraftModel, ControlActuator, RuntimeAeroElement, RuntimeAeroPolarBinding, RuntimeAeroSurface,
 };
 use sim_core::{
-    AeroElement, AeroElementOutput, BodyWrench, ControlSurfacePositions, ControlSystemState,
-    FlatGroundPlane, GearContact, GroundCommand, GroundEvaluation, GroundSurface,
-    MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients, PropellerSpinDirection,
-    PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative, RigidBodyState,
-    Rk4Integrator, SectionKinematics, StateError, advance_controls, assemble_aero_element_wrench,
-    calculate_reynolds_number, compute_section_kinematics, evaluate_aero_element,
-    evaluate_derivative, evaluate_electric_propulsion_with_source, evaluate_ground_wrench,
+    AeroElement, AeroElementOutput, AirframeContact, AirframeGroundEvaluation, BodyWrench,
+    ControlSurfacePositions, ControlSystemState, FlatGroundPlane, GearContact, GroundCommand,
+    GroundEvaluation, GroundSurface, MIN_SECTION_AIRSPEED_MPS, PilotInput, PolarCoefficients,
+    PropellerSpinDirection, PropulsionOutput, ReynoldsAeroElementOutput, RigidBodyDerivative,
+    RigidBodyState, Rk4Integrator, SectionKinematics, StateError, advance_controls,
+    assemble_aero_element_wrench, calculate_reynolds_number, compute_section_kinematics,
+    evaluate_aero_element, evaluate_airframe_ground_wrench, evaluate_derivative,
+    evaluate_electric_propulsion_with_source, evaluate_ground_wrench,
     evaluate_reynolds_aero_element,
 };
 use sim_math::{Orientation, Vec3};
@@ -175,9 +176,11 @@ pub struct AircraftSimulation {
     state: AircraftState,
     effective_aero_elements: Vec<AeroElement>,
     gear_contacts: Vec<GearContact>,
+    airframe_contacts: Vec<AirframeContact>,
     ground_surface: GroundSurface,
     brake_command: f64,
     last_ground: GroundEvaluation,
+    last_airframe_ground: AirframeGroundEvaluation,
     step_index: u64,
 }
 
@@ -214,6 +217,11 @@ impl AircraftSimulation {
             .iter()
             .map(|contact| contact.contact())
             .collect();
+        let airframe_contacts: Vec<AirframeContact> = model
+            .airframe_contacts()
+            .iter()
+            .map(|contact| contact.contact())
+            .collect();
         let controls = ControlSystemState::neutral(model.controls());
         Ok(Self {
             model,
@@ -224,9 +232,11 @@ impl AircraftSimulation {
             },
             effective_aero_elements,
             gear_contacts,
+            airframe_contacts,
             ground_surface: GroundSurface::Flat(FlatGroundPlane::default()),
             brake_command: 0.0,
             last_ground: GroundEvaluation::zero(),
+            last_airframe_ground: AirframeGroundEvaluation::zero(),
             step_index: 0,
         })
     }
@@ -264,8 +274,18 @@ impl AircraftSimulation {
     }
 
     #[must_use]
+    pub fn airframe_contacts(&self) -> &[AirframeContact] {
+        &self.airframe_contacts
+    }
+
+    #[must_use]
     pub const fn last_ground_evaluation(&self) -> &GroundEvaluation {
         &self.last_ground
+    }
+
+    #[must_use]
+    pub const fn last_airframe_ground_evaluation(&self) -> &AirframeGroundEvaluation {
+        &self.last_airframe_ground
     }
 
     /// Refreshes the observational ground diagnostic for the committed state.
@@ -277,6 +297,11 @@ impl AircraftSimulation {
             &self.gear_contacts,
             &self.ground_surface,
             &command,
+        );
+        self.last_airframe_ground = evaluate_airframe_ground_wrench(
+            &self.state.rigid_body,
+            &self.airframe_contacts,
+            &self.ground_surface,
         );
     }
 
@@ -340,18 +365,20 @@ impl AircraftSimulation {
         let model = &self.model;
         let effective_aero_elements = &self.effective_aero_elements;
         let gear_contacts = &self.gear_contacts;
+        let airframe_contacts = &self.airframe_contacts;
         let ground_surface = &self.ground_surface;
         let throttle = control_surface_positions.throttle();
         let ground_command = GroundCommand::new(input.yaw(), self.brake_command);
         self.state.rigid_body =
             Rk4Integrator::step(&initial_state, self.config.dt_s(), |stage_state| {
-                let evaluation = evaluate_aircraft_instantaneous_with_ground(
+                let evaluation = evaluate_aircraft_instantaneous_with_contacts(
                     stage_state,
                     effective_aero_elements,
                     model,
                     throttle,
                     &self.config,
                     gear_contacts,
+                    airframe_contacts,
                     ground_surface,
                     &ground_command,
                 );
@@ -376,9 +403,12 @@ impl AircraftSimulation {
             sim_time_s: self.sim_time_s(),
             rigid_body_state: self.state.rigid_body,
             control_surface_positions,
-            ground_contacts: self.last_ground.active_contacts,
-            total_ground_normal_force_n: self.last_ground.total_normal_force_n,
-            total_ground_tangential_force_n: self.last_ground.total_tangential_force_n,
+            ground_contacts: self.last_ground.active_contacts
+                + self.last_airframe_ground.active_contacts,
+            total_ground_normal_force_n: self.last_ground.total_normal_force_n
+                + self.last_airframe_ground.total_normal_force_n,
+            total_ground_tangential_force_n: self.last_ground.total_tangential_force_n
+                + self.last_airframe_ground.total_tangential_force_n,
             weight_on_wheels: self.last_ground.weight_on_wheels(),
         }
     }
@@ -470,6 +500,7 @@ pub fn evaluate_aircraft_wrench(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundStageContext<'a> {
     pub gear: &'a [GearContact],
+    pub airframe_contacts: &'a [AirframeContact],
     pub surface: &'a GroundSurface,
     pub command: &'a GroundCommand,
 }
@@ -483,6 +514,22 @@ impl<'a> GroundStageContext<'a> {
     ) -> Self {
         Self {
             gear,
+            airframe_contacts: &[],
+            surface,
+            command,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_airframe_contacts(
+        gear: &'a [GearContact],
+        airframe_contacts: &'a [AirframeContact],
+        surface: &'a GroundSurface,
+        command: &'a GroundCommand,
+    ) -> Self {
+        Self {
+            gear,
+            airframe_contacts,
             surface,
             command,
         }
@@ -555,6 +602,39 @@ pub fn evaluate_aircraft_instantaneous_with_ground(
         throttle,
         config.aero_environment(),
         GroundStageContext::new(gear, surface, command),
+    );
+    let derivative = evaluate_derivative(
+        state,
+        model.rigid_body(),
+        &stage.total_wrench,
+        config.gravity_world_mps2(),
+    );
+    AircraftInstantaneousEvaluation {
+        total_wrench: stage.total_wrench,
+        derivative,
+        propulsion: stage.propulsion,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_aircraft_instantaneous_with_contacts(
+    state: &RigidBodyState,
+    effective_aero_elements: &[AeroElement],
+    model: &AircraftModel,
+    throttle: f64,
+    config: &AircraftSimulationConfig,
+    gear: &[GearContact],
+    airframe_contacts: &[AirframeContact],
+    surface: &GroundSurface,
+    command: &GroundCommand,
+) -> AircraftInstantaneousEvaluation {
+    let stage = evaluate_stage(
+        state,
+        effective_aero_elements,
+        model,
+        throttle,
+        config.aero_environment(),
+        GroundStageContext::with_airframe_contacts(gear, airframe_contacts, surface, command),
     );
     let derivative = evaluate_derivative(
         state,
@@ -1440,6 +1520,12 @@ fn evaluate_stage(
         total_wrench.force_body_n += contact.force_body_n;
         total_wrench.moment_body_nm += contact.moment_body_nm;
     }
+    if !ground.airframe_contacts.is_empty() {
+        let contact =
+            evaluate_airframe_ground_wrench(stage_state, ground.airframe_contacts, ground.surface);
+        total_wrench.force_body_n += contact.force_body_n;
+        total_wrench.moment_body_nm += contact.moment_body_nm;
+    }
 
     StageEvaluation {
         total_wrench,
@@ -2251,7 +2337,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             model.schema_version(),
-            model::AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+            model::AIRCRAFT_MODEL_SCHEMA_VERSION_V9
         );
         assert!(model.control_surface_bindings().len() >= 4);
         assert!(model.propulsion().is_some());

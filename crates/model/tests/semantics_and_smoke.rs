@@ -2,7 +2,7 @@ mod common;
 
 use common::{load_value, valid_model_value};
 use model::{
-    AIRCRAFT_MODEL_SCHEMA_VERSION_V8, AircraftClassification, ModelLoadError, load_aircraft_model,
+    AIRCRAFT_MODEL_SCHEMA_VERSION_V9, AircraftClassification, ModelLoadError, load_aircraft_model,
 };
 use sim_core::PropellerSpinDirection;
 use sim_math::Vec3;
@@ -161,7 +161,7 @@ fn acro_electric_01_repository_model_smoke_test() {
     let first = load_aircraft_model(&path).expect("repository Acro Electric 01 must remain valid");
     let second = load_aircraft_model(&path).expect("second deterministic model load");
 
-    assert_eq!(first.schema_version(), AIRCRAFT_MODEL_SCHEMA_VERSION_V8);
+    assert_eq!(first.schema_version(), AIRCRAFT_MODEL_SCHEMA_VERSION_V9);
     assert_eq!(
         first.classification(),
         AircraftClassification::SyntheticTest

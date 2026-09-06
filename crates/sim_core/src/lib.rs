@@ -29,12 +29,14 @@ pub use controls::{
 };
 pub use dynamics::{BodyWrench, RigidBodyDerivative, evaluate_derivative};
 pub use ground::{
+    AirframeContact, AirframeContactSolution, AirframeGroundEvaluation,
     FRICTION_REGULARIZATION_SPEED_MPS, FlatGroundPlane, GearContact, GroundCommand,
-    GroundConfigError, GroundContactSolution, GroundEvaluation, GroundSurface, MAX_GEAR_CONTACTS,
-    MAX_NORMAL_DAMPING_N_S_PER_M, MAX_NORMAL_STIFFNESS_N_PER_M,
-    RECOMMENDED_MAX_NORMAL_DAMPING_N_S_PER_M, RECOMMENDED_MAX_NORMAL_STIFFNESS_N_PER_M,
-    SteeringSource, contact_point_velocity_world, evaluate_ground_wrench, steering_angle_rad,
-    validate_gear_contact,
+    GroundConfigError, GroundContactSolution, GroundEvaluation, GroundSurface,
+    MAX_AIRFRAME_CONTACTS, MAX_GEAR_CONTACTS, MAX_NORMAL_DAMPING_N_S_PER_M,
+    MAX_NORMAL_STIFFNESS_N_PER_M, RECOMMENDED_MAX_NORMAL_DAMPING_N_S_PER_M,
+    RECOMMENDED_MAX_NORMAL_STIFFNESS_N_PER_M, SteeringSource, contact_point_velocity_world,
+    evaluate_airframe_ground_wrench, evaluate_ground_wrench, steering_angle_rad,
+    validate_airframe_contact, validate_gear_contact,
 };
 pub use input::PilotInput;
 pub use integrator::Rk4Integrator;

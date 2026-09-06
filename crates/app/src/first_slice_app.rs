@@ -4,7 +4,7 @@ use crate::{
     validation_app::validate_model_in_memory,
 };
 use aircraft::{AircraftSimulation, AircraftSimulationConfig};
-use model::{AIRCRAFT_MODEL_SCHEMA_VERSION_V8, AircraftModel, ModelLoadError, load_aircraft_model};
+use model::{AIRCRAFT_MODEL_SCHEMA_VERSION_V9, AircraftModel, ModelLoadError, load_aircraft_model};
 use platform::{
     ControllerAxes, InputMapping, InputSource, InputState, KeyboardKey, normalize_centered_axis,
     normalize_throttle_axis,
@@ -632,12 +632,12 @@ fn architecture_criteria(repository_root: &Path, model: &AircraftModel) -> Vec<C
             "versioned_model_format",
             "Versioned model format",
             GateKind::Technical,
-            if model.schema_version() == AIRCRAFT_MODEL_SCHEMA_VERSION_V8 {
+            if model.schema_version() == AIRCRAFT_MODEL_SCHEMA_VERSION_V9 {
                 AcceptanceStatus::Pass
             } else {
                 AcceptanceStatus::Fail
             },
-            "canonical model loaded through strict schema-v8 validation",
+            "canonical model loaded through strict schema-v9 validation",
         )
         .with("schema_version", model.schema_version()),
     ]
@@ -732,7 +732,7 @@ fn model_versioning_criterion(
     simple(
         "model_versioning",
         "Model versioning and identity",
-        model.schema_version() == AIRCRAFT_MODEL_SCHEMA_VERSION_V8
+        model.schema_version() == AIRCRAFT_MODEL_SCHEMA_VERSION_V9
             && !model.model_id().is_empty()
             && matches,
         "schema, model ID, physics fingerprint, and canonical replay identity agree",

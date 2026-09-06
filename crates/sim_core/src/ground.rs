@@ -16,6 +16,8 @@ use thiserror::Error;
 
 /// Max supported gear contacts.
 pub const MAX_GEAR_CONTACTS: usize = 16;
+/// Max supported model-authored airframe contacts.
+pub const MAX_AIRFRAME_CONTACTS: usize = 16;
 /// Coulomb regularization speed (m/s).
 pub const FRICTION_REGULARIZATION_SPEED_MPS: f64 = 0.25;
 /// Rejection bound: stiffness above this fails validation.
@@ -124,6 +126,15 @@ pub struct GearContact {
     pub braked: bool,
 }
 
+/// One validated body-fixed structural contact point. All params are SI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirframeContact {
+    pub position_body_m: Vec3,
+    pub stiffness_n_per_m: f64,
+    pub damping_n_s_per_m: f64,
+    pub friction_mu: f64,
+}
+
 /// Config errors are all load-time; hot loop never validates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum GroundConfigError {
@@ -197,6 +208,83 @@ pub fn validate_gear_contact(contact: &GearContact) -> Result<(), GroundConfigEr
         return Err(GroundConfigError::BrakeAuthorityWithoutFlag);
     }
     Ok(())
+}
+
+/// Validates one structural contact once at model load.
+pub fn validate_airframe_contact(contact: &AirframeContact) -> Result<(), GroundConfigError> {
+    if !contact
+        .position_body_m
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(GroundConfigError::NonFiniteContactPosition);
+    }
+    if !contact.stiffness_n_per_m.is_finite()
+        || contact.stiffness_n_per_m <= 0.0
+        || contact.stiffness_n_per_m > MAX_NORMAL_STIFFNESS_N_PER_M
+    {
+        return Err(GroundConfigError::InvalidNormalStiffness);
+    }
+    if !contact.damping_n_s_per_m.is_finite()
+        || contact.damping_n_s_per_m < 0.0
+        || contact.damping_n_s_per_m > MAX_NORMAL_DAMPING_N_S_PER_M
+    {
+        return Err(GroundConfigError::InvalidNormalDamping);
+    }
+    if !contact.friction_mu.is_finite() || contact.friction_mu < 0.0 {
+        return Err(GroundConfigError::InvalidFriction);
+    }
+    Ok(())
+}
+
+/// Per-structural-contact stage diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirframeContactSolution {
+    pub in_contact: bool,
+    pub penetration_m: f64,
+    pub normal_force_n: f64,
+    pub tangential_force_n: f64,
+    pub contact_velocity_body_mps: Vec3,
+    pub contact_position_world_m: Vec3,
+}
+
+impl AirframeContactSolution {
+    #[must_use]
+    pub fn air() -> Self {
+        Self {
+            in_contact: false,
+            penetration_m: 0.0,
+            normal_force_n: 0.0,
+            tangential_force_n: 0.0,
+            contact_velocity_body_mps: Vec3::zeros(),
+            contact_position_world_m: Vec3::zeros(),
+        }
+    }
+}
+
+/// Aggregate allocation-free structural-contact result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirframeGroundEvaluation {
+    pub force_body_n: Vec3,
+    pub moment_body_nm: Vec3,
+    pub total_normal_force_n: f64,
+    pub total_tangential_force_n: f64,
+    pub active_contacts: usize,
+    pub contacts: [AirframeContactSolution; MAX_AIRFRAME_CONTACTS],
+}
+
+impl AirframeGroundEvaluation {
+    #[must_use]
+    pub fn zero() -> Self {
+        Self {
+            force_body_n: Vec3::zeros(),
+            moment_body_nm: Vec3::zeros(),
+            total_normal_force_n: 0.0,
+            total_tangential_force_n: 0.0,
+            active_contacts: 0,
+            contacts: [AirframeContactSolution::air(); MAX_AIRFRAME_CONTACTS],
+        }
+    }
 }
 
 /// Per-contact stage-local diagnostic (allocation-free, Copy).
@@ -370,6 +458,61 @@ pub fn evaluate_ground_wrench(
     evaluation.force_body_n = force_body;
     evaluation.moment_body_nm = moment_body;
     evaluation.total_tangential_force_n = tangential;
+    evaluation
+}
+
+/// Evaluates model-authored structural points against the same ground surface.
+/// This path is independent of wheel steering, rolling and braking semantics.
+#[must_use]
+pub fn evaluate_airframe_ground_wrench(
+    state: &RigidBodyState,
+    contacts: &[AirframeContact],
+    surface: &GroundSurface,
+) -> AirframeGroundEvaluation {
+    let mut evaluation = AirframeGroundEvaluation::zero();
+    for (index, contact) in contacts.iter().take(MAX_AIRFRAME_CONTACTS).enumerate() {
+        let point_world = state.position_world_m
+            + body_to_world(&state.orientation_world_from_body, &contact.position_body_m);
+        evaluation.contacts[index].contact_position_world_m = point_world;
+        let (ground_height, normal_world) = surface.height_and_normal(&point_world);
+        let penetration = point_world.z - ground_height;
+        if penetration <= 0.0 {
+            continue;
+        }
+
+        evaluation.contacts[index].penetration_m = penetration;
+        let velocity_world = contact_point_velocity_world(state, &contact.position_body_m);
+        evaluation.contacts[index].contact_velocity_body_mps =
+            world_to_body(&state.orientation_world_from_body, &velocity_world);
+        let normal_force = (contact.stiffness_n_per_m * penetration
+            - contact.damping_n_s_per_m * velocity_world.dot(&normal_world))
+        .max(0.0);
+        if normal_force <= 0.0 {
+            continue;
+        }
+
+        let tangent_velocity = velocity_world - normal_world * velocity_world.dot(&normal_world);
+        let tangent_speed = tangent_velocity.norm();
+        let tangential_force_world = if tangent_speed > 0.0 {
+            let magnitude = contact.friction_mu
+                * normal_force
+                * (tangent_speed / FRICTION_REGULARIZATION_SPEED_MPS).min(1.0);
+            -tangent_velocity * (magnitude / tangent_speed)
+        } else {
+            Vec3::zeros()
+        };
+        let force_world = normal_world * normal_force + tangential_force_world;
+        let force_body = world_to_body(&state.orientation_world_from_body, &force_world);
+
+        evaluation.contacts[index].in_contact = true;
+        evaluation.contacts[index].normal_force_n = normal_force;
+        evaluation.contacts[index].tangential_force_n = tangential_force_world.norm();
+        evaluation.active_contacts += 1;
+        evaluation.total_normal_force_n += normal_force;
+        evaluation.total_tangential_force_n += tangential_force_world.norm();
+        evaluation.force_body_n += force_body;
+        evaluation.moment_body_nm += contact.position_body_m.cross(&force_body);
+    }
     evaluation
 }
 
