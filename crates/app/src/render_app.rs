@@ -54,6 +54,8 @@ const DEFAULT_MODEL_PATH: &str = "models/acro_electric_01/model.json";
 const DEFAULT_THROTTLE: f64 = 0.55;
 const DEFAULT_ALTITUDE_M: f64 = 30.0;
 const DEFAULT_AIRSPEED_MPS: f64 = 18.0;
+const PLAY_CHASE_DISTANCE_M: f32 = 3.0;
+const PLAY_CHASE_HEIGHT_M: f32 = 0.95;
 const MAXIMUM_ALTITUDE_M: f64 = 10_000.0;
 const MAXIMUM_AIRSPEED_MPS: f64 = 200.0;
 const PHYSICS_DT: Duration = Duration::from_millis(2);
@@ -126,7 +128,15 @@ impl Default for CameraSelection {
 
 impl RenderOptions {
     pub fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Self, RenderAppError> {
-        let mut options = Self {
+        Self::parse_with_defaults(Self::render_defaults(), &mut arguments)
+    }
+
+    pub fn parse_play(mut arguments: impl Iterator<Item = String>) -> Result<Self, RenderAppError> {
+        Self::parse_with_defaults(Self::play_defaults(), &mut arguments)
+    }
+
+    fn render_defaults() -> Self {
+        Self {
             model_path: PathBuf::from(DEFAULT_MODEL_PATH),
             throttle: DEFAULT_THROTTLE,
             altitude_m: DEFAULT_ALTITUDE_M,
@@ -137,7 +147,27 @@ impl RenderOptions {
             scenery: SceneryPreset::None,
             camera: CameraSelection::default(),
             debug_overlays: false,
-        };
+        }
+    }
+
+    fn play_defaults() -> Self {
+        Self {
+            throttle: 0.0,
+            start_on_ground: true,
+            scenery: SceneryPreset::FlyingField,
+            camera: CameraSelection::Chase {
+                distance_behind_m: PLAY_CHASE_DISTANCE_M,
+                height_above_m: PLAY_CHASE_HEIGHT_M,
+                vertical_fov_deg: 55.0,
+            },
+            ..Self::render_defaults()
+        }
+    }
+
+    fn parse_with_defaults(
+        mut options: Self,
+        arguments: &mut impl Iterator<Item = String>,
+    ) -> Result<Self, RenderAppError> {
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -369,6 +399,12 @@ pub enum RenderRuntimeError {
     Input(#[from] InputError),
     #[error("failed to initialize render input: {0}")]
     InputInitialization(InputError),
+    #[error("failed to reconstruct the aircraft simulation during flight reset: {0}")]
+    FlightResetSimulation(#[source] AircraftSimulationError),
+    #[error("failed to reset flight input state: {0}")]
+    FlightResetInput(#[source] InputError),
+    #[error("failed to reset fixed-step scheduling: {0}")]
+    FlightResetScheduling(#[source] FixedStepAccumulatorError),
     #[error("failed to load controller profile for render input: {0}")]
     ControllerProfileInitialization(#[source] ControllerProfileFileError),
     #[error("render input backend was not initialized after window creation")]
@@ -449,6 +485,16 @@ impl ViewerInputMode {
             Self::Legacy { state, .. } => state.sample(physics_dt_s),
             Self::Calibrated(state) => Ok(state.input()),
         }
+    }
+
+    fn reset_flight_controls(&mut self, initial_throttle: f64) -> Result<(), InputError> {
+        if let Self::Legacy { state, .. } = self {
+            *state = InputState::new(
+                InputMapping::default(),
+                KeyboardInputState::new(initial_throttle)?,
+            );
+        }
+        Ok(())
     }
 
     fn diagnostic_label(&self, selected_controller_id: Option<usize>) -> &'static str {
@@ -644,6 +690,7 @@ fn print_viewer_controller_diagnostics(backend: &GilrsInputBackend, input_mode: 
 
 struct RenderApplication {
     simulation: AircraftSimulation,
+    initial_rigid_state: RigidBodyState,
     presentation: PresentationModel,
     scenery_preset: SceneryPreset,
     debug_overlays: bool,
@@ -723,6 +770,7 @@ impl RenderApplication {
         );
         Ok(Self {
             simulation,
+            initial_rigid_state: initial_state,
             presentation,
             scenery_preset: options.scenery,
             debug_overlays: options.debug_overlays,
@@ -802,6 +850,41 @@ impl RenderApplication {
             path: path.clone(),
             source,
         })
+    }
+
+    fn reset_flight_session(
+        &mut self,
+        timing_baseline: Instant,
+    ) -> Result<FlightResetOutcome, RenderRuntimeError> {
+        if self.replay_recorder.is_some() {
+            return Ok(FlightResetOutcome::RefusedWhileRecording);
+        }
+
+        let reset_simulation = AircraftSimulation::new(
+            self.simulation.model().clone(),
+            *self.simulation.config(),
+            self.initial_rigid_state,
+        )
+        .map_err(RenderRuntimeError::FlightResetSimulation)?;
+        let reset_fixed_step = FixedStepAccumulator::new(
+            PHYSICS_DT,
+            MAXIMUM_FRAME_DELTA,
+            MAXIMUM_PHYSICS_STEPS_PER_FRAME,
+        )
+        .map_err(RenderRuntimeError::FlightResetScheduling)?;
+        if let Some(input_mode) = self.input_mode.as_mut() {
+            input_mode
+                .reset_flight_controls(self.initial_throttle)
+                .map_err(RenderRuntimeError::FlightResetInput)?;
+        }
+
+        self.simulation = reset_simulation;
+        self.render_snapshots = AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(
+            &self.initial_rigid_state,
+        ));
+        self.fixed_step = reset_fixed_step;
+        self.last_frame_time = Some(timing_baseline);
+        Ok(FlightResetOutcome::Reset)
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -981,6 +1064,23 @@ impl ApplicationHandler for RenderApplication {
             {
                 self.finish_and_exit(event_loop);
             }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Backspace)) =>
+            {
+                match self.reset_flight_session(Instant::now()) {
+                    Ok(FlightResetOutcome::Reset) => {
+                        println!("Flight session reset to its initial state");
+                    }
+                    Ok(FlightResetOutcome::RefusedWhileRecording) => {
+                        println!(
+                            "Backspace reset refused: replay recording is active; exit to save the recording"
+                        );
+                    }
+                    Err(error) => self.fail(event_loop, error),
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(key) = keyboard_key(event.physical_key)
                     && let Some(input_mode) = self.input_mode.as_mut()
@@ -1030,6 +1130,12 @@ fn advance_aircraft(
     } else {
         Ok(simulation.step(&input))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlightResetOutcome {
+    Reset,
+    RefusedWhileRecording,
 }
 
 fn resolve_presentation_path(model_path: &Path, glb_path: &str) -> PathBuf {
@@ -1197,6 +1303,7 @@ fn print_manual_flight_startup(
     println!("W/S = pitch");
     println!("Q/E = yaw");
     println!("R/F = throttle");
+    println!("Backspace = reset flight");
     println!("ESC = exit");
     println!();
     println!("model ID: {model_id}");
@@ -1335,6 +1442,12 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/acro_electric_01/model.json")
     }
 
+    fn play_options_for_test() -> RenderOptions {
+        let mut options = RenderOptions::parse_play(std::iter::empty()).unwrap();
+        options.model_path = acro_model_path();
+        options
+    }
+
     fn acro_model_with_presentation_path(glb_path: &str) -> model::AircraftModel {
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(acro_model_path()).unwrap()).unwrap();
@@ -1398,6 +1511,17 @@ mod tests {
             RenderOptions::parse(["--controller-profile".to_owned()].into_iter()),
             Err(RenderAppError::MissingArgumentValue("--controller-profile"))
         ));
+
+        let play = RenderOptions::parse_play(
+            ["--controller-profile", "controllers/test-radio.json"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            play.controller_profile_path,
+            calibrated.controller_profile_path
+        );
     }
 
     #[test]
@@ -1538,6 +1662,53 @@ mod tests {
         assert_eq!(options.altitude_m, 45.5);
         assert_eq!(options.airspeed_mps, 22.25);
         assert_eq!(options.throttle, 0.6);
+    }
+
+    #[test]
+    fn play_preset_is_ground_ready_without_changing_render_defaults() {
+        let render = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(render.model_path, PathBuf::from(DEFAULT_MODEL_PATH));
+        assert_eq!(render.throttle, DEFAULT_THROTTLE);
+        assert!(!render.start_on_ground);
+        assert_eq!(render.scenery, SceneryPreset::None);
+        assert_eq!(render.camera, CameraSelection::default());
+
+        let play = RenderOptions::parse_play(std::iter::empty()).unwrap();
+        assert_eq!(play.model_path, PathBuf::from(DEFAULT_MODEL_PATH));
+        assert_eq!(play.throttle, 0.0);
+        assert!(play.start_on_ground);
+        assert_eq!(play.scenery, SceneryPreset::FlyingField);
+        assert_eq!(
+            play.camera,
+            CameraSelection::Chase {
+                distance_behind_m: PLAY_CHASE_DISTANCE_M,
+                height_above_m: PLAY_CHASE_HEIGHT_M,
+                vertical_fov_deg: 55.0,
+            }
+        );
+        assert_eq!(PHYSICS_DT, Duration::from_millis(2));
+        assert_eq!(DEFAULT_PHYSICS_HZ, 500);
+    }
+
+    #[test]
+    fn play_preset_accepts_shared_render_overrides() {
+        let play = RenderOptions::parse_play(
+            [
+                "--throttle",
+                "0.2",
+                "--scenery",
+                "none",
+                "--camera",
+                "pilot",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(play.throttle, 0.2);
+        assert_eq!(play.scenery, SceneryPreset::None);
+        assert!(matches!(play.camera, CameraSelection::Pilot { .. }));
+        assert!(play.start_on_ground);
     }
 
     #[test]
@@ -1960,6 +2131,104 @@ mod tests {
 
     // ── OA1 calibrated startup (hardware-independent) ──────────────────────
 
+    #[test]
+    fn flight_reset_reconstructs_all_mutable_flight_state() {
+        let mut application = RenderApplication::new(play_options_for_test()).unwrap();
+        let initial_rigid_state = application.initial_rigid_state;
+        let expected_simulation = AircraftSimulation::new(
+            application.simulation.model().clone(),
+            *application.simulation.config(),
+            initial_rigid_state,
+        )
+        .unwrap();
+        let expected_snapshots = AircraftRenderSnapshotBuffer::new(
+            AircraftRenderSnapshot::initial(&initial_rigid_state),
+        );
+        application.input_mode = Some(ViewerInputMode::Legacy {
+            state: InputState::new(
+                InputMapping::default(),
+                KeyboardInputState::new(0.0).unwrap(),
+            ),
+            status: ControllerStatusTracker::new(Some(7)),
+        });
+        if let Some(ViewerInputMode::Legacy { state, .. }) = application.input_mode.as_mut() {
+            state.set_key(KeyboardKey::ThrottleIncrease, true);
+            assert!(state.sample(PHYSICS_DT.as_secs_f64()).unwrap().throttle() > 0.0);
+        }
+        application.simulation.set_brake_command(0.8);
+        let snapshot = application
+            .simulation
+            .step(&PilotInput::new(0.8, -0.6, 0.4, 0.7));
+        application
+            .render_snapshots
+            .push(AircraftRenderSnapshot::post_step(
+                &snapshot,
+                application.simulation.model(),
+            ));
+        application.fixed_step.advance(Duration::from_millis(1));
+        application.last_frame_time = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(application.simulation.step_index(), 1);
+        assert_ne!(
+            application.simulation.state().controls(),
+            expected_simulation.state().controls()
+        );
+        assert_ne!(application.render_snapshots, expected_snapshots);
+        assert_ne!(application.fixed_step.remainder(), Duration::ZERO);
+
+        let reset_at = Instant::now();
+        assert_eq!(
+            application.reset_flight_session(reset_at).unwrap(),
+            FlightResetOutcome::Reset
+        );
+        assert_eq!(application.simulation.step_index(), 0);
+        assert_eq!(application.simulation.sim_time_s(), 0.0);
+        assert_eq!(
+            application.simulation.state().rigid_body(),
+            &initial_rigid_state
+        );
+        assert_eq!(
+            application.simulation.state().controls(),
+            expected_simulation.state().controls()
+        );
+        assert_eq!(application.simulation.brake_command(), 0.0);
+        assert_eq!(
+            application.simulation.last_ground_evaluation(),
+            &GroundEvaluation::zero()
+        );
+        assert_eq!(application.render_snapshots, expected_snapshots);
+        assert_eq!(application.fixed_step.remainder(), Duration::ZERO);
+        assert_eq!(application.fixed_step.physics_dt(), PHYSICS_DT);
+        assert_eq!(application.last_frame_time, Some(reset_at));
+        match application.input_mode.as_mut().unwrap() {
+            ViewerInputMode::Legacy { state, status } => {
+                assert_eq!(
+                    state.sample(PHYSICS_DT.as_secs_f64()).unwrap(),
+                    PilotInput::neutral()
+                );
+                assert!(status.observe(Some(7)).is_none());
+            }
+            ViewerInputMode::Calibrated(_) => panic!("expected legacy input"),
+        }
+    }
+
+    #[test]
+    fn flight_reset_is_refused_without_mutation_while_recording() {
+        let mut options = play_options_for_test();
+        options.replay_output_path = Some(PathBuf::from("unused-reset-policy-test.json"));
+        let mut application = RenderApplication::new(options).unwrap();
+        let _ = application.simulation.step(&PilotInput::neutral());
+        let timing = Instant::now() - Duration::from_secs(1);
+        application.last_frame_time = Some(timing);
+
+        assert_eq!(
+            application.reset_flight_session(Instant::now()).unwrap(),
+            FlightResetOutcome::RefusedWhileRecording
+        );
+        assert_eq!(application.simulation.step_index(), 1);
+        assert_eq!(application.last_frame_time, Some(timing));
+        assert!(application.replay_recorder.is_some());
+    }
+
     fn requested_identity() -> DeviceIdentity {
         DeviceIdentity::new(
             "TX16S",
@@ -2010,6 +2279,40 @@ mod tests {
         state.insert(HardwareAxis::RightStickX, 0.0).unwrap();
         state.insert(HardwareAxis::RightStickY, throttle).unwrap();
         state
+    }
+
+    #[test]
+    fn flight_reset_preserves_calibrated_controller_owner_and_live_input() {
+        let mut controller = CalibratedControllerState::new(calibrated_profile());
+        assert_eq!(
+            calibrate_startup_connect(
+                &mut controller,
+                &[requested_identity()],
+                Some(raw_state(0.5, 0.5)),
+            ),
+            Ok(Some(()))
+        );
+        let expected_input = controller.input();
+        let mut application = RenderApplication::new(play_options_for_test()).unwrap();
+        application.input_mode = Some(ViewerInputMode::Calibrated(Box::new(controller)));
+        let owner_before = match application.input_mode.as_ref().unwrap() {
+            ViewerInputMode::Calibrated(state) => std::ptr::from_ref(state.as_ref()),
+            ViewerInputMode::Legacy { .. } => unreachable!(),
+        };
+
+        assert_eq!(
+            application.reset_flight_session(Instant::now()).unwrap(),
+            FlightResetOutcome::Reset
+        );
+        match application.input_mode.as_ref().unwrap() {
+            ViewerInputMode::Calibrated(state) => {
+                assert_eq!(std::ptr::from_ref(state.as_ref()), owner_before);
+                assert!(state.is_connected());
+                assert_eq!(state.requested_device(), &requested_identity());
+                assert_eq!(state.input(), expected_input);
+            }
+            ViewerInputMode::Legacy { .. } => panic!("calibrated mode must not fall back"),
+        }
     }
 
     #[test]
