@@ -162,11 +162,12 @@ written to the requested path. The result is accepted directly by `rcsim-app rep
 cargo run -p rcsim-app --release -- controller list
 ```
 
-The controller list/monitor/calibrate commands are terminal-only diagnostics. They initialize only
-gilrs and do not create a winit event loop or window. WGI can therefore report zero devices in
-those commands when a device requires a process window or focus; that result is not decisive for
-viewer support. The decisive WGI test is `rcsim-app render`, whose post-window initialization
-prints the detected controller count and identities. Zero connected devices remains a valid result:
+The controller list/raw-monitor/calibrate commands use a bounded two-second initial discovery
+window, refreshing gilrs every 25 ms until a controller arrives or the timeout expires. They do not
+create a winit event loop or window, and a zero-device result after that bounded interval remains
+possible when a device requires a process window or focus. The decisive WGI test is `rcsim-app
+render`, whose post-window initialization prints the detected controller count and identities.
+Zero connected devices remains a valid result:
 
 ```text
 mode: controller-list

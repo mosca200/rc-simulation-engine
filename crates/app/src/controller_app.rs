@@ -18,6 +18,8 @@ use thiserror::Error;
 
 const MONITOR_REFRESH_PERIOD: Duration = Duration::from_millis(100);
 const MONITOR_REFRESH_HZ: u32 = 10;
+const INITIAL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const INITIAL_DISCOVERY_POLL_PERIOD: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControllerCommand {
@@ -213,12 +215,42 @@ pub fn run_controller(command: ControllerCommand) -> Result<(), ControllerAppErr
 }
 
 fn run_controller_list() -> Result<(), ControllerAppError> {
-    let backend = GilrsInputBackend::new()?;
+    let mut backend = GilrsInputBackend::new()?;
+    let devices = await_initial_controller_devices(&mut backend);
     let selected_device_id = backend.selected_device_id();
-    let devices = backend.devices();
     let views = controller_device_views(&devices, selected_device_id);
     print!("{}", format_controller_list(&views, selected_device_id));
     Ok(())
+}
+
+fn await_initial_controller_devices(backend: &mut GilrsInputBackend) -> Vec<InputDeviceInfo> {
+    let started = Instant::now();
+    wait_for_initial_device_discovery(
+        || {
+            // `poll_axes` drains gilrs events and updates the cached automatic selection.
+            let _ = backend.poll_axes();
+            backend.devices()
+        },
+        || started.elapsed(),
+        thread::sleep,
+    )
+}
+
+fn wait_for_initial_device_discovery<Device>(
+    mut refresh_devices: impl FnMut() -> Vec<Device>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<Device> {
+    let mut devices = refresh_devices();
+    while devices.is_empty() {
+        let remaining = INITIAL_DISCOVERY_TIMEOUT.saturating_sub(elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(remaining.min(INITIAL_DISCOVERY_POLL_PERIOD));
+        devices = refresh_devices();
+    }
+    devices
 }
 
 fn run_controller_monitor(options: ControllerMonitorOptions) -> Result<(), ControllerAppError> {
@@ -277,7 +309,7 @@ fn run_controller_monitor(options: ControllerMonitorOptions) -> Result<(), Contr
 
 fn run_controller_raw_monitor(options: ControllerMonitorOptions) -> Result<(), ControllerAppError> {
     let mut backend = GilrsInputBackend::new()?;
-    let devices = backend.devices();
+    let devices = await_initial_controller_devices(&mut backend);
     let device = select_raw_monitor_device(&devices, options.device_id)?;
     backend.select_device(&device.identity())?;
     let view = ControllerDeviceView::from_device(device, Some(device.id()));
@@ -338,7 +370,7 @@ fn select_raw_monitor_device(
 
 fn run_controller_calibrate(options: ControllerCalibrateOptions) -> Result<(), ControllerAppError> {
     let mut backend = GilrsInputBackend::new()?;
-    let devices = backend.devices();
+    let devices = await_initial_controller_devices(&mut backend);
     if devices.is_empty() {
         return Err(InputError::NoDevices.into());
     }
@@ -800,6 +832,7 @@ fn format_axis(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     fn device(id: usize, name: &str, selected: bool) -> ControllerDeviceView {
         ControllerDeviceView {
@@ -843,6 +876,82 @@ mod tests {
         assert!(output.contains(
             "session_id=5 name=\"Second\" uuid=uuid-5 vendor_id=0x1205 product_id=0x3405 auto_selected=yes"
         ));
+    }
+
+    #[test]
+    fn initial_discovery_returns_an_immediately_present_device_without_waiting() {
+        let polls = Cell::new(0_u32);
+        let sleeps = RefCell::new(Vec::new());
+        let devices = wait_for_initial_device_discovery(
+            || {
+                polls.set(polls.get() + 1);
+                vec![7_usize]
+            },
+            || Duration::ZERO,
+            |duration| sleeps.borrow_mut().push(duration),
+        );
+
+        assert_eq!(devices, vec![7]);
+        assert_eq!(polls.get(), 1);
+        assert!(sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn initial_discovery_retries_until_a_device_appears() {
+        let polls = Cell::new(0_u32);
+        let elapsed = Cell::new(Duration::ZERO);
+        let sleeps = RefCell::new(Vec::new());
+        let devices = wait_for_initial_device_discovery(
+            || {
+                let poll = polls.get() + 1;
+                polls.set(poll);
+                (poll >= 3).then_some(9_usize).into_iter().collect()
+            },
+            || elapsed.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+        );
+
+        assert_eq!(devices, vec![9]);
+        assert_eq!(polls.get(), 3);
+        assert_eq!(
+            sleeps.borrow().as_slice(),
+            [INITIAL_DISCOVERY_POLL_PERIOD; 2]
+        );
+    }
+
+    #[test]
+    fn initial_discovery_returns_no_devices_after_the_bounded_timeout() {
+        let polls = Cell::new(0_u32);
+        let elapsed = Cell::new(Duration::ZERO);
+        let sleeps = RefCell::new(Vec::new());
+        let devices: Vec<usize> = wait_for_initial_device_discovery(
+            || {
+                polls.set(polls.get() + 1);
+                Vec::new()
+            },
+            || elapsed.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+        );
+
+        assert!(devices.is_empty());
+        assert_eq!(elapsed.get(), INITIAL_DISCOVERY_TIMEOUT);
+        assert_eq!(
+            polls.get(),
+            1 + (INITIAL_DISCOVERY_TIMEOUT.as_millis() / INITIAL_DISCOVERY_POLL_PERIOD.as_millis())
+                as u32
+        );
+        assert!(
+            sleeps
+                .borrow()
+                .iter()
+                .all(|duration| *duration <= INITIAL_DISCOVERY_POLL_PERIOD)
+        );
     }
 
     #[test]
