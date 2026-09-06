@@ -41,10 +41,18 @@
 //!
 //! # Material Strategy
 //!
-//! The terrain material base_color_factor is baked into vertex colors at chunk
-//! generation time. The shader's texture * vertex_color pipeline with a white
-//! fallback texture produces the correct terrain color. This avoids a separate
-//! terrain shading path while keeping the material pipeline uniform.
+//! G3A: the terrain is a textured PBR surface. `TerrainMaterial` carries the
+//! metallic/roughness/normal-strength factors and per-map UV offsets that are
+//! uploaded once into the dedicated terrain material bind group; the shader
+//! entry `fs_terrain` reuses the G1D PBR response with a sampled albedo,
+//! tangent-space normal map, and roughness map, all tiled in world-space
+//! metres.
+//!
+//! The `base_color_factor` is baked into vertex colors at chunk generation
+//! time. In the textured configuration the default base is white: the shader
+//! multiplies the (G2D-modulated) vertex color by the albedo texture sample,
+//! so the texture is the chromatic authority while G2D stays the macro
+//! brightness/tint variation on top of it.
 
 use crate::mesh::{SAFE_NORMAL, Vertex};
 use std::f32::consts::PI;
@@ -183,23 +191,50 @@ impl TerrainHeightField {
 
 /// Terrain material configuration.
 ///
-/// The `base_color_factor` is baked into terrain vertex colors at chunk
-/// generation time. The shader multiplies vertex color by the (white fallback)
-/// texture, producing the correct terrain color without a separate shading path.
+/// G3A: the default configuration is the textured grass surface. The
+/// `base_color_factor` is baked into terrain vertex colors at chunk generation
+/// time; the `fs_terrain` shader multiplies the vertex color by the sampled
+/// albedo texture, so the texture is the chromatic authority while the G2D
+/// macro variation (baked into the vertex color) modulates it.
 #[derive(Debug, Clone)]
 pub struct TerrainMaterial {
     /// Base color factor (RGBA). Baked into vertex colors during chunk generation.
     pub base_color_factor: [f32; 4],
     /// Texture scale in metres for UV tiling.
     pub texture_scale_m: f32,
+    /// G3A: PBR metallic factor (glTF metallic workflow). Terrain is a
+    /// dielectric; the default is 0.0.
+    pub metallic: f32,
+    /// G3A: base perceptual roughness. The sampled roughness map is multiplied
+    /// by this factor before the shader's MIN_ROUGHNESS floor.
+    pub roughness: f32,
+    /// G3A: tangent-space normal strength in [0, 1] applied to the sampled
+    /// normal map (1.0 = the committed asset amplitude).
+    pub normal_strength: f32,
+    /// G3A: albedo map UV anchor (in tile units) added to the world-space UV.
+    pub albedo_uv_offset: [f32; 2],
+    /// G3A: normal map UV anchor (in tile units) added to the world-space UV.
+    pub normal_uv_offset: [f32; 2],
+    /// G3A: roughness map UV anchor (in tile units) added to the world-space UV.
+    pub roughness_uv_offset: [f32; 2],
 }
 
 impl Default for TerrainMaterial {
     fn default() -> Self {
         Self {
-            // Default grass-like green.
-            base_color_factor: [0.25, 0.45, 0.18, 1.0],
+            // G3A: the white base turns the baked vertex color into the G2D
+            // macro-variation carrier; the albedo texture is the chromatic
+            // authority in the textured pipeline.
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
             texture_scale_m: DEFAULT_TERRAIN_TEXTURE_SCALE_M,
+            metallic: 0.0,
+            roughness: 0.9,
+            normal_strength: 1.0,
+            // Deliberately non-integer anchors (in tile units) so the three
+            // maps' tile borders never align, breaking perceived repetition.
+            albedo_uv_offset: [0.0, 0.0],
+            normal_uv_offset: [0.271, 0.137],
+            roughness_uv_offset: [0.413, 0.303],
         }
     }
 }
@@ -1078,6 +1113,7 @@ mod tests {
         let material = TerrainMaterial {
             base_color_factor: [0.25, 0.5, 0.75, 1.0],
             texture_scale_m: 4.0,
+            ..Default::default()
         };
         let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &material, [0.0; 2]);
 
@@ -1731,5 +1767,283 @@ mod tests {
                 .iter()
                 .all(|c| !c.vertices.is_empty() && !c.indices.is_empty())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // G3A: textured terrain material regression tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn g3a_material_configuration_is_deterministic_and_finite() {
+        // Pinned production defaults: dielectric, matte, full-strength normal,
+        // world-space tiling at 4 m, white baked base carrying G2D variation.
+        let material = TerrainMaterial::default();
+        assert_eq!(material.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(material.texture_scale_m, DEFAULT_TERRAIN_TEXTURE_SCALE_M);
+        assert_eq!(material.metallic, 0.0);
+        assert_eq!(material.roughness, 0.9);
+        assert_eq!(material.normal_strength, 1.0);
+        for offset in [
+            material.albedo_uv_offset,
+            material.normal_uv_offset,
+            material.roughness_uv_offset,
+        ] {
+            assert!(offset.iter().all(|v| v.is_finite()));
+        }
+
+        // Custom configurations stay finite and produce finite chunk output.
+        let custom = TerrainMaterial {
+            base_color_factor: [0.2, 0.4, 0.6, 0.5],
+            texture_scale_m: 8.0,
+            metallic: 0.0,
+            roughness: 0.75,
+            normal_strength: 0.6,
+            albedo_uv_offset: [0.1, 0.2],
+            normal_uv_offset: [0.3, 0.4],
+            roughness_uv_offset: [0.5, 0.6],
+        };
+        let terrain = generate_rolling_terrain(16, 16, 2.0, 0.0, 1.0);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &custom, [0.0; 2]);
+        assert!(chunk
+            .vertices
+            .iter()
+            .all(|v| v.color.iter().chain(v.uv.iter()).all(|c| c.is_finite())));
+    }
+
+    #[test]
+    fn g3a_uv_mapping_is_world_space_anchored() {
+        // uv = render_position / texture_scale_m, unchanged from G2D; the
+        // mapping authority is the world position, not the chunk.
+        let material = TerrainMaterial {
+            texture_scale_m: 4.0,
+            ..Default::default()
+        };
+        let terrain = generate_flat_terrain(8, 8, 2.0, 0.0);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+        for vertex in &chunk.vertices {
+            assert_eq!(
+                vertex.uv,
+                [vertex.position[0] / 4.0, vertex.position[2] / 4.0]
+            );
+        }
+    }
+
+    #[test]
+    fn g3a_uv_and_color_are_chunk_size_independent() {
+        // Same world position under two different chunkings must resolve to
+        // identical UV and identical G2D color (both anchored to render-space).
+        for terrain in [
+            generate_flat_terrain(128, 128, 2.0, 0.0),
+            generate_rolling_terrain(128, 128, 2.0, 0.0, 2.0),
+        ] {
+            let material = TerrainMaterial::default();
+            let coarse = generate_centered_terrain_chunks(&terrain, 64, &material);
+            let fine = generate_centered_terrain_chunks(&terrain, 32, &material);
+
+            // Probe positions must lie exactly on grid vertices (spacing 2 m);
+            // centered generation covers negative render coordinates too.
+            for world in [(10.0, 20.0), (36.0, -12.0), (0.0, 0.0), (-64.0, 48.0)] {
+                let (wx, wz) = world;
+                let vertex_c = find_vertex(&coarse, wx, wz);
+                let vertex_f = find_vertex(&fine, wx, wz);
+                assert_eq!(vertex_c.uv, vertex_f.uv, "uv mismatch at {world:?}");
+                assert_eq!(
+                    vertex_c.color.map(f32::to_bits),
+                    vertex_f.color.map(f32::to_bits),
+                    "color mismatch at {world:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_adjacent_chunk_boundary_uv_and_color_match() {
+        // Shared boundary vertices between adjacent chunks must carry the same
+        // world-space UV and G2D color — no tile or tone seam.
+        for terrain in [
+            generate_flat_terrain(64, 64, 1.0, 0.0),
+            generate_rolling_terrain(64, 64, 1.0, 0.0, 2.0),
+        ] {
+            let material = TerrainMaterial::default();
+            let chunk_00 = TerrainChunk::generate(&terrain, 0, 0, 32, &material, [0.0; 2]);
+            let chunk_10 = TerrainChunk::generate(&terrain, 1, 0, 32, &material, [0.0; 2]);
+            let chunk_01 = TerrainChunk::generate(&terrain, 0, 1, 32, &material, [0.0; 2]);
+
+            // X boundary: right edge of (0,0) vs left edge of (1,0).
+            let mut pairs = Vec::new();
+            for v in &chunk_00.vertices {
+                if (v.position[0] - 32.0).abs() < 1e-4 {
+                    for w in &chunk_10.vertices {
+                        if (w.position[0] - 32.0).abs() < 1e-4
+                            && w.position[2] == v.position[2]
+                        {
+                            pairs.push((v, w));
+                        }
+                    }
+                }
+            }
+            // Z boundary: far edge of (0,0) vs near edge of (0,1).
+            for v in &chunk_00.vertices {
+                if (v.position[2] - 32.0).abs() < 1e-4 {
+                    for w in &chunk_01.vertices {
+                        if (w.position[2] - 32.0).abs() < 1e-4
+                            && w.position[0] == v.position[0]
+                        {
+                            pairs.push((v, w));
+                        }
+                    }
+                }
+            }
+            assert!(
+                pairs.len() >= 32,
+                "expected shared X and Z boundary vertices, got {}",
+                pairs.len()
+            );
+            for (v, w) in pairs {
+                assert_eq!(v.uv, w.uv, "boundary UV mismatch at {:?}", v.position);
+                assert_eq!(
+                    v.color.map(f32::to_bits),
+                    w.color.map(f32::to_bits),
+                    "boundary color mismatch at {:?}",
+                    v.position
+                );
+            }
+        }
+    }
+
+    /// CPU mirror of the `fs_terrain` derivative TBN reconstruction.
+    ///
+    /// The WGSL fragment shader computes the tangent frame from screen-space
+    /// derivatives of `world_position` and `uv`. Its CPU analogue: with
+    /// `dp1/duv1` from the +X grid neighbour and `dp2/duv2` from the +Z grid
+    /// neighbour, the determinant guard and the `(duv2.y * dp1 - duv1.y * dp2)
+    /// / det` reconstruction reduce exactly to `dp1 / duu` and `dp2 / dvv`.
+    fn derivative_tbn(
+        dp1: [f32; 3],
+        dp2: [f32; 3],
+        duv1: [f32; 2],
+        duv2: [f32; 2],
+    ) -> ([f32; 3], [f32; 3], f32) {
+        let det = duv1[0] * duv2[1] - duv1[1] * duv2[0];
+        let has_basis = det.abs() > 1e-8;
+        let inv_det = if has_basis { 1.0 / det } else { 0.0 };
+        let normalize_or_world = |v: [f32; 3], fallback: [f32; 3]| -> [f32; 3] {
+            let length_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+            if !has_basis || length_sq <= 0.0 {
+                fallback
+            } else {
+                let inv = length_sq.sqrt().recip();
+                [v[0] * inv, v[1] * inv, v[2] * inv]
+            }
+        };
+        let tangent_raw = [
+            (duv2[1] * dp1[0] - duv1[1] * dp2[0]) * inv_det,
+            (duv2[1] * dp1[1] - duv1[1] * dp2[1]) * inv_det,
+            (duv2[1] * dp1[2] - duv1[1] * dp2[2]) * inv_det,
+        ];
+        let bitangent_raw = [
+            (-duv2[0] * dp1[0] + duv1[0] * dp2[0]) * inv_det,
+            (-duv2[0] * dp1[1] + duv1[0] * dp2[1]) * inv_det,
+            (-duv2[0] * dp1[2] + duv1[0] * dp2[2]) * inv_det,
+        ];
+        (
+            normalize_or_world(tangent_raw, [1.0, 0.0, 0.0]),
+            normalize_or_world(bitangent_raw, [0.0, 0.0, 1.0]),
+            det,
+        )
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_finite_and_unit_length() {
+        // Every interior vertex of a rolling chunk must yield a finite,
+        // unit-length tangent/bitangent pair under the derivative
+        // reconstruction used by fs_terrain. Note that for a sloped height
+        // field dP/du and dP/dv are not mutually orthogonal (that only holds
+        // on the flat plane), so no orthonormality is asserted here — the
+        // invariant is finiteness, unit length and the +X tracking of the
+        // tangent.
+        let terrain = generate_rolling_terrain(32, 32, 2.0, 0.0, 2.0);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 32, &material, [0.0; 2]);
+
+        let vertex_at = |x: u32, z: u32| &chunk.vertices[(z * 33 + x) as usize];
+        for z in 1..32 {
+            for x in 1..32 {
+                let p = vertex_at(x, z).position;
+                let p_x = vertex_at(x + 1, z).position;
+                let p_z = vertex_at(x, z + 1).position;
+                let uv = vertex_at(x, z).uv;
+                let uv_x = vertex_at(x + 1, z).uv;
+                let uv_z = vertex_at(x, z + 1).uv;
+
+                let dp1 = [p_x[0] - p[0], p_x[1] - p[1], p_x[2] - p[2]];
+                let dp2 = [p_z[0] - p[0], p_z[1] - p[1], p_z[2] - p[2]];
+                let duv1 = [uv_x[0] - uv[0], uv_x[1] - uv[1]];
+                let duv2 = [uv_z[0] - uv[0], uv_z[1] - uv[1]];
+
+                let (tangent, bitangent, det) = derivative_tbn(dp1, dp2, duv1, duv2);
+                assert!(det.is_finite() && det > 0.0, "det must be positive, got {det}");
+                for axis in [tangent, bitangent] {
+                    assert!(
+                        axis.iter().all(|c| c.is_finite()),
+                        "non-finite TBN axis at ({x}, {z})"
+                    );
+                    let length = (axis[0].powi(2) + axis[1].powi(2) + axis[2].powi(2)).sqrt();
+                    assert!(
+                        (length - 1.0).abs() < 1e-4,
+                        "TBN axis not unit length at ({x}, {z}): {length}"
+                    );
+                }
+                // Tangent follows the +X grid edge (uv.x = x / scale); the
+                // rolling amplitude tilts it up to ~0.8 forward, so the
+                // hemisphere check stays sober.
+                assert!(
+                    tangent[0] > 0.75 && tangent[1].abs() < 0.8,
+                    "tangent must track +X at ({x}, {z}): {tangent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_is_exact_on_flat_terrain() {
+        // On the flat plane dP/du = (spacing, 0, 0)/du and dP/dv normalize to
+        // exactly [1, 0, 0] and [0, 0, 1]: unit length, orthogonal.
+        let terrain = generate_flat_terrain(8, 8, 2.0, -1.0);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+
+        let vertex_at = |x: u32, z: u32| &chunk.vertices[(z * 9 + x) as usize];
+        for z in 0..8 {
+            for x in 0..8 {
+                let p = vertex_at(x, z).position;
+                let p_x = vertex_at(x + 1, z).position;
+                let p_z = vertex_at(x, z + 1).position;
+                let uv = vertex_at(x, z).uv;
+                let uv_x = vertex_at(x + 1, z).uv;
+                let uv_z = vertex_at(x, z + 1).uv;
+
+                let (tangent, bitangent, det) = derivative_tbn(
+                    [p_x[0] - p[0], p_x[1] - p[1], p_x[2] - p[2]],
+                    [p_z[0] - p[0], p_z[1] - p[1], p_z[2] - p[2]],
+                    [uv_x[0] - uv[0], uv_x[1] - uv[1]],
+                    [uv_z[0] - uv[0], uv_z[1] - uv[1]],
+                );
+                assert!(det > 0.0);
+                assert_eq!(tangent, [1.0, 0.0, 0.0]);
+                assert_eq!(bitangent, [0.0, 0.0, 1.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn g3a_terrain_tbn_degenerate_fallback_is_finite() {
+        // A degenerate basis (det ~ 0, e.g. a zero-area fragment) must fall
+        // back to the world-aligned frame instead of producing NaN.
+        let (tangent, bitangent, det) =
+            derivative_tbn([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0]);
+        assert_eq!(det, 0.0);
+        assert_eq!(tangent, [1.0, 0.0, 0.0]);
+        assert_eq!(bitangent, [0.0, 0.0, 1.0]);
     }
 }
