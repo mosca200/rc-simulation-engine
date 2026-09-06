@@ -465,6 +465,12 @@ fn poll_calibrated_hardware(
     backend: &mut GilrsInputBackend,
 ) -> Result<Option<&'static str>, InputError> {
     if !state.is_connected() {
+        // Advance the gilrs/WGI event queue before enumerating devices: WGI
+        // reports newly connected controllers through event delivery, so a
+        // stale device list would keep the calibrated binding stuck in
+        // "waiting for requested controller". poll_axes() is used here only
+        // as the event pump; its returned axis values are discarded.
+        let _ = backend.poll_axes();
         let devices = backend.devices();
         let identities: Vec<DeviceIdentity> =
             devices.iter().map(InputDeviceInfo::identity).collect();
