@@ -16,7 +16,7 @@ use renderer::{
     AircraftMesh, CameraConfig, FixedStepAccumulator, FixedStepAccumulatorError,
     GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError, PresentationAsset,
     RenderDataError, RenderTerrainMode, RendererError, SurfaceError, SurfaceHinge, SurfaceId,
-    WgpuRenderer, aircraft_mesh, load_glb_asset, scenery::SceneryPreset,
+    TerrainDebugMode, WgpuRenderer, aircraft_mesh, load_glb_asset, scenery::SceneryPreset,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -63,6 +63,8 @@ pub struct RenderOptions {
     scenery: SceneryPreset,
     camera: CameraSelection,
     debug_overlays: bool,
+    // G3A-R: presentation-only terrain debug channel (FINAL by default).
+    terrain_debug: TerrainDebugMode,
 }
 
 /// Presentation-side camera selection parsed from the CLI.
@@ -127,6 +129,7 @@ impl RenderOptions {
             scenery: SceneryPreset::None,
             camera: CameraSelection::default(),
             debug_overlays: false,
+            terrain_debug: TerrainDebugMode::default(),
         };
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -187,6 +190,13 @@ impl RenderOptions {
                 }
                 "--debug-overlays" => {
                     options.debug_overlays = true;
+                }
+                "--terrain-debug" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--terrain-debug"))?;
+                    options.terrain_debug = TerrainDebugMode::from_label(&value)
+                        .ok_or_else(|| RenderAppError::InvalidTerrainDebug(value.clone()))?;
                 }
                 "--scenery" => {
                     let value = arguments
@@ -288,6 +298,10 @@ pub enum RenderAppError {
     UnknownArgument(String),
     #[error("invalid scenery preset `{0}`; expected `none` or `flying-field`")]
     InvalidScenery(String),
+    #[error(
+        "invalid terrain debug mode `{0}`; expected `final`, `albedo`, `normal`, `roughness`, `macro`, or `detail`"
+    )]
+    InvalidTerrainDebug(String),
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
     UnknownCamera(String),
     #[error("invalid camera FOV `{0}`; expected a finite value inside (10, 120) degrees")]
@@ -390,6 +404,7 @@ struct RenderApplication {
     presentation: PresentationModel,
     scenery_preset: SceneryPreset,
     debug_overlays: bool,
+    terrain_debug: TerrainDebugMode,
     input_state: InputState,
     input_backend: GilrsInputBackend,
     replay_recorder: Option<AircraftReplayRecorder>,
@@ -472,6 +487,7 @@ impl RenderApplication {
             presentation,
             scenery_preset: options.scenery,
             debug_overlays: options.debug_overlays,
+            terrain_debug: options.terrain_debug,
             input_state,
             input_backend,
             replay_recorder,
@@ -642,6 +658,7 @@ impl ApplicationHandler for RenderApplication {
             }
         };
         renderer.set_show_debug_overlays(self.debug_overlays);
+        renderer.set_terrain_debug_mode(self.terrain_debug);
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());
@@ -1055,6 +1072,41 @@ mod tests {
 
         let default = RenderOptions::parse(std::iter::empty()).unwrap();
         assert!(matches!(default.camera, CameraSelection::Pilot { .. }));
+    }
+
+    #[test]
+    fn terrain_debug_option_parses_and_defaults_to_final() {
+        let default = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(default.terrain_debug, TerrainDebugMode::Final);
+
+        for (label, expected) in [
+            ("final", TerrainDebugMode::Final),
+            ("albedo", TerrainDebugMode::Albedo),
+            ("normal", TerrainDebugMode::Normal),
+            ("roughness", TerrainDebugMode::Roughness),
+            ("macro", TerrainDebugMode::Macro),
+            ("detail", TerrainDebugMode::Detail),
+        ] {
+            let options =
+                RenderOptions::parse(["--terrain-debug", label].map(str::to_owned).into_iter())
+                    .unwrap();
+            assert_eq!(options.terrain_debug, expected, "label {label}");
+        }
+    }
+
+    #[test]
+    fn terrain_debug_option_rejects_unknown_modes() {
+        for value in ["FINAL", "metal", "", "normal-map", "5"] {
+            assert!(
+                matches!(
+                    RenderOptions::parse(
+                        ["--terrain-debug".to_owned(), value.to_owned()].into_iter()
+                    ),
+                    Err(RenderAppError::InvalidTerrainDebug(_))
+                ),
+                "value {value:?} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub use glb::{
 };
 pub use gpu::{
     PresentationAsset, RenderTerrainMode, RendererError, SKY_CLEAR_COLOR, SurfaceError,
-    WgpuRenderer,
+    TerrainDebugMode, WgpuRenderer,
 };
 pub use math::{Mat4, ProjectionError, matrix_to_wgsl_columns, webgpu_perspective};
 pub use mesh::{
@@ -49,8 +49,9 @@ pub use surfaces::{
     GlbPrimitivePart, SurfaceBindingTable, SurfaceHinge, SurfaceId, VISUAL_SLOT_COUNT,
 };
 pub use terrain::{
-    TerrainChunk, TerrainHeightField, TerrainMaterial, generate_centered_terrain_chunks,
-    generate_flat_terrain, generate_rolling_terrain, generate_terrain_chunks,
+    TerrainChunk, TerrainHeightField, TerrainMaterial, detail_normal_fade_weight,
+    generate_centered_terrain_chunks, generate_flat_terrain, generate_rolling_terrain,
+    generate_terrain_chunks, rotated_secondary_uv,
 };
 pub use texture::{
     DecodedTexture, SamplerConfig, SamplerFilter, SamplerWrap, TextureLoadError, decode_image,

@@ -153,6 +153,20 @@ and receives the G2B directional shadow exactly as before. Main pass:
 sky → terrain (`terrain_pipeline`) → scenery (shared lit pipeline, restored
 explicitly) → debug overlays → aircraft/surfaces.
 
+### Presentation camera ground block
+
+When the aircraft dives below the terrain plane (low airspeed, no trim, or
+after a stall), the chase camera — which tracks the physics pose — sinks
+below the grid it renders. The terrain is front-face culled from below, so
+the frame degrades to a uniform sky even though the terrain is fine. The
+renderer raises the **camera-driving pose** onto the visual terrain plane
+(`RenderPose::raised_to_min_height(-ground_below_render_origin_m)`),
+presentation-only: the aircraft mesh, shadow matrices, and articulated
+surfaces still use the true pose. The view stays above the field in every
+flight regime while the physics and determinism are untouched. The clamp is
+a pure elevation of the render Y (a no-op for any pose above the plane) and
+is pinned by two source tests.
+
 ## Tests
 
 CPU-only regression coverage in `crates/renderer`:
@@ -177,16 +191,46 @@ CPU-only regression coverage in `crates/renderer`:
   regressions on CPU-only runners; plus entry-point structure guards.
 - All pre-existing G2D determinism tests still pass unchanged.
 
-## Smoke result
+## Runtime validation
 
-`rcsim-app render --scenery flying-field` (release) initializes the renderer,
-builds every pipeline, and renders frames with zero GPU validation errors —
-before the `max_bind_groups` fix the run failed with a validation error, after
-the fix it ran continuously. The terrain pipeline is exercised every frame;
-the result was confirmed visually through a live window capture. Screenshot
-persistence was unavailable in the driving environment (capture output was
-not written to disk), so the evidence is the clean runtime plus the captured
-frame description.
+`rcsim-app render --scenery flying-field --camera chase --altitude-m 1.5/3
+--airspeed-mps 5` (release build, no `--start-on-ground`) was driven and the
+window captured at ~7 s into each run for all five terrain channels
+(`--terrain-debug final|albedo|normal|roughness|macro`): 10 frames total,
+persisted under `tmp/runtime_g3ar/g3a_alt{15,3}_{mode}.png`. A frame-level
+pixel analysis confirms every channel renders textured terrain, never the
+pre-fix uniform sky:
+
+| mode      | mean RGB (mid frame) | frame |
+| --------- | -------------------- | ----- |
+| final     | (36, 56, 27)         | dark sun-occluded green field, 9/10 bands terrain |
+| albedo    | (63, 99, 45)         | green grass + dry patches + macro stains, 9/10 bands |
+| normal    | (185, 185, 252)      | flat-normal blue-purple plane with detail noise, 9/10 bands |
+| roughness | (218, 218, 218)      | mottled light-grey field with detail, 9/10 bands |
+| macro     | (60, 104, 46)        | green variation band, 9/10 bands |
+
+(The top row band is the sky/horizon in every capture; the remaining nine
+bands are terrain.) The albedo capture shows the committed grass texture
+with repeating dry patches and larger tonal stains; normal and roughness
+carry visible field variation (luminance σ ≈ 20–22 in the mid frame vs. a
+flat fallback's ~0), so all three maps demonstrably sample through the
+debug channels. Results are identical at 1.5 m and 3 m, as expected from the
+deterministic simulation.
+
+Two integration bugs were found and fixed on the way, both blocking any
+visual validation rather than part of the texture path:
+
+- `terrain.rs`: chunk indices were wound so every triangle was back-facing
+  against `Cull Back` and the whole grid was culled before a fragment
+  reached `fs_terrain`. The `v1/v2` swap plus the corrected
+  `cross_y = e1.z*e2.x - e1.x*e2.z` orient the triangles up.
+- `gpu.rs`: a duplicated `set_bind_group(4)` in the terrain draw was removed.
+
+After the fixes the headless `fs_terrain_offscreen` probe renders green
+terrain bands against a white control, and the live viewer shows textured
+grass in all five channels at both gate altitudes. The empty-sky symptom of
+the pre-fix binary is captured by `tmp/runtime_g3ar/win13_low15_final.png`
+and `win14_high30_final.png` for comparison.
 
 ## Current limits
 

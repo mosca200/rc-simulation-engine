@@ -58,6 +58,18 @@ impl RenderPose {
                 + rotation[2][2] * direction_render_body[2],
         ]
     }
+
+    /// Presentation-only ground block: raises the render translation to
+    /// `min_y` when it dips below, keeping a tracking camera above the visual
+    /// terrain plane. The orientation is untouched; geometry keeps its true
+    /// pose and only the camera view uses the raised pose.
+    #[must_use]
+    pub fn raised_to_min_height(mut self, min_y: f32) -> Self {
+        if self.translation_render_m[1] < min_y {
+            self.translation_render_m[1] = min_y;
+        }
+        self
+    }
 }
 
 /// Latest committed pose and no simulation-owned state.
@@ -318,5 +330,23 @@ mod tests {
                 .rotation_render_world_from_render_body()
                 .map(|row| row.map(f32::to_bits))
         );
+    }
+
+    #[test]
+    fn raised_to_min_height_raises_dived_translation_onto_floor() {
+        let dived = pose([0.0, 0.0, 5.0], IDENTITY_QUATERNION).raised_to_min_height(-1.5);
+        assert_eq!(dived.translation_render_m(), [0.0, -1.5, 0.0]);
+        assert_eq!(
+            dived.rotation_render_world_from_render_body(),
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+    }
+
+    #[test]
+    fn raised_to_min_height_leaves_poses_above_floor_unchanged() {
+        let above = pose([0.0, 0.0, -5.0], IDENTITY_QUATERNION).raised_to_min_height(-1.5);
+        assert_eq!(above.translation_render_m(), [0.0, 5.0, 0.0]);
+        let on_floor = pose([0.0, 0.0, 1.5], IDENTITY_QUATERNION).raised_to_min_height(-1.5);
+        assert_eq!(on_floor.translation_render_m(), [0.0, -1.5, 0.0]);
     }
 }

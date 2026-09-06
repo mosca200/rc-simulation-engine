@@ -93,7 +93,22 @@ pub fn decode_image(data: &[u8]) -> Result<DecodedTexture, TextureLoadError> {
 /// Returns `None` if the arithmetic would overflow u32.
 #[must_use]
 pub fn padded_bytes_per_row_checked(width: u32) -> Option<u32> {
-    let unpadded = width.checked_mul(4)?;
+    padded_bytes_per_row_checked_for_bytes_per_pixel(width, 4)
+}
+
+/// Compute the padded bytes_per_row for an upload with an arbitrary
+/// `bytes_per_pixel` (e.g. 4 for RGBA8, 1 for R8 mip levels).
+///
+/// WebGPU requires each row to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`
+/// (256 bytes): the row size is padded up to the next multiple of 256.
+///
+/// Returns `None` if the arithmetic would overflow u32.
+#[must_use]
+pub fn padded_bytes_per_row_checked_for_bytes_per_pixel(
+    width: u32,
+    bytes_per_pixel: u32,
+) -> Option<u32> {
+    let unpadded = width.checked_mul(bytes_per_pixel)?;
     let remainder = unpadded % COPY_BYTES_PER_ROW_ALIGNMENT;
     if remainder == 0 {
         Some(unpadded)
@@ -111,6 +126,20 @@ pub fn padded_bytes_per_row_checked(width: u32) -> Option<u32> {
 #[must_use]
 pub fn padded_bytes_per_row(width: u32) -> u32 {
     padded_bytes_per_row_checked(width).expect("padded_bytes_per_row overflow")
+}
+
+/// Compute the padded bytes_per_row for an upload with an arbitrary
+/// `bytes_per_pixel`.
+///
+/// # Panics
+///
+/// Panics if the arithmetic would overflow (use
+/// `padded_bytes_per_row_checked_for_bytes_per_pixel` for a non-panicking
+/// version).
+#[must_use]
+pub fn padded_bytes_per_row_for_bytes_per_pixel(width: u32, bytes_per_pixel: u32) -> u32 {
+    padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
+        .expect("padded bytes_per_row overflow")
 }
 
 /// Create a staging buffer with row padding for GPU upload.
@@ -301,6 +330,51 @@ mod tests {
                 Some(padded_bytes_per_row(width))
             );
         }
+    }
+
+    #[test]
+    fn padded_bytes_per_row_generic_matches_rgba8_specialization() {
+        for width in [0, 1, 63, 64, 65, 128, 256, 1024] {
+            assert_eq!(
+                padded_bytes_per_row_checked_for_bytes_per_pixel(width, 4),
+                padded_bytes_per_row_checked(width),
+                "the generic helper must agree with the RGBA8 specialization"
+            );
+        }
+    }
+
+    #[test]
+    fn padded_bytes_per_row_r8_aligns_to_copy_alignment() {
+        // R8 uploads (e.g. roughness mip levels) must respect the same 256-byte
+        // row alignment; only widths of 256+ are already aligned.
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(512, 1),
+            Some(512)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(256, 1),
+            Some(256)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(128, 1),
+            Some(256)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(64, 1),
+            Some(256)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(8, 1),
+            Some(256)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(1, 1),
+            Some(256)
+        );
+        assert_eq!(
+            padded_bytes_per_row_checked_for_bytes_per_pixel(u32::MAX, 1),
+            None
+        );
     }
 
     #[test]

@@ -37,12 +37,20 @@ use crate::shadow::{
 };
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::terrain_textures::generated as terrain_assets;
-use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer, decode_image};
+use crate::terrain_textures::{
+    TERRAIN_TEXTURE_SIZE, generate_terrain_mip_chain, mip_level_count_for_size,
+    terrain_texture_set_from_decoded,
+};
+use crate::texture::{
+    SamplerConfig, TextureLoadError, create_staging_buffer, decode_image,
+    padded_bytes_per_row_checked_for_bytes_per_pixel,
+};
 use crate::{
     AircraftMesh, CameraConfig, CameraMode, GlbAsset, Mat4, RenderFrame, Vertex,
     matrix_to_wgsl_columns, reference_grid_and_axes_at,
 };
 use bytemuck::{Pod, Zeroable};
+use std::f32::consts::PI;
 use std::{
     mem::size_of,
     sync::{
@@ -293,38 +301,156 @@ impl MaterialUniform {
     }
 }
 
-/// G3A: terrain material uniform matching the WGSL `TerrainMaterialUniform`
-/// struct (four 16-byte vec4 slots, 64 bytes total).
+/// G3A-R: terrain debug presentation mode (uniform-driven, no shader recompiles).
 ///
-/// The per-map UV anchors (in tile units) decorrelate the three samples so
-/// their tile borders never align; offsets are added to the world-space UV.
+/// `Final` is the production default; any other mode bypasses lighting and
+/// fog and outputs the selected material channel for inspection. Debug mode
+/// is presentation-only — it never feeds back into physics or animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerrainDebugMode {
+    /// Full lit PBR terrain (default).
+    #[default]
+    Final = 0,
+    /// Composite albedo stack (base + rotated second sample + macro/detail).
+    Albedo = 1,
+    /// Tangent-space normal after the distance-faded detail blend, linear [0,1] view.
+    Normal = 2,
+    /// Final roughness scalar used by the BRDF.
+    Roughness = 3,
+    /// Macro layer albedo sample.
+    Macro = 4,
+    /// Detail layer albedo sample.
+    Detail = 5,
+}
+
+impl TerrainDebugMode {
+    /// WGSL uniform value (0 = FINAL).
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Map a WGSL uniform value back to a mode.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Final),
+            1 => Some(Self::Albedo),
+            2 => Some(Self::Normal),
+            3 => Some(Self::Roughness),
+            4 => Some(Self::Macro),
+            5 => Some(Self::Detail),
+            _ => None,
+        }
+    }
+
+    /// CLI/config label for the mode.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Final => "final",
+            Self::Albedo => "albedo",
+            Self::Normal => "normal",
+            Self::Roughness => "roughness",
+            Self::Macro => "macro",
+            Self::Detail => "detail",
+        }
+    }
+
+    /// Parse a CLI/config label.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "final" => Some(Self::Final),
+            "albedo" => Some(Self::Albedo),
+            "normal" => Some(Self::Normal),
+            "roughness" => Some(Self::Roughness),
+            "macro" => Some(Self::Macro),
+            "detail" => Some(Self::Detail),
+            _ => None,
+        }
+    }
+}
+
+/// G3A-R: terrain material uniform matching the WGSL `TerrainMaterialUniform`
+/// struct (eight 16-byte vec4 slots, 128 bytes total).
+///
+/// G3A slots carry the PBR factors and per-map world-space UV anchors. G3A-R
+/// adds: the three-frequency stack (base/detail/macro scales and per-layer
+/// anchors), the anti-repetition rotated second-sample transform
+/// (cos/sin angle, scale, offset), the detail-normal distance fade range, and
+/// the debug mode selector. All values are world-anchored, chunk-invariant
+/// configuration written once at load time (except `debug_mode`, which is
+/// updated only when the debug channel changes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct TerrainMaterialUniform {
+    // Slot 0: PBR factors + debug selector.
     metallic: f32,
     roughness: f32,
     normal_strength: f32,
-    _padding: f32,
+    debug_mode: u32,
+    // Slot 1: three-frequency stack scales (world metres).
+    base_scale_m: f32,
+    detail_scale_m: f32,
+    macro_scale_m: f32,
+    _padding1: f32,
+    // Slot 2: base albedo + base normal anchors.
     albedo_uv_offset: [f32; 2],
     normal_uv_offset: [f32; 2],
+    // Slot 3: base roughness anchor + detail layer anchor.
     roughness_uv_offset: [f32; 2],
-    // 6 floats: keeps the struct at 64 bytes (four WGSL vec4 slots),
-    // matching the shader's vec4-aligned `padding2`.
-    _padding2: [f32; 6],
+    detail_uv_offset: [f32; 2],
+    // Slot 4: macro layer anchor + anti-repetition angle (cos, sin).
+    macro_uv_offset: [f32; 2],
+    ar_angle_cos_sin: [f32; 2],
+    // Slot 5: anti-repetition scale + offset (xy) + padding.
+    ar_scale_offset: [f32; 4],
+    // Slot 6: detail-normal fade near/far (xy) + padding.
+    detail_fade_near_far: [f32; 4],
+    // Slot 7: reserved.
+    _padding2: [f32; 4],
 }
 
 impl TerrainMaterialUniform {
-    fn from_terrain_material(material: &TerrainMaterial) -> Self {
+    fn from_terrain_material(material: &TerrainMaterial, debug_mode: TerrainDebugMode) -> Self {
+        let radians = material.ar_angle_degrees * PI / 180.0;
         Self {
             metallic: material.metallic.clamp(0.0, 1.0),
             roughness: material.roughness.clamp(0.0, 1.0),
             normal_strength: material.normal_strength.clamp(0.0, 1.0),
-            _padding: 0.0,
+            debug_mode: debug_mode.as_u32(),
+            base_scale_m: material.texture_scale_m.max(1e-3),
+            detail_scale_m: material.detail_scale_m.max(1e-3),
+            macro_scale_m: material.macro_scale_m.max(1e-3),
+            _padding1: 0.0,
             albedo_uv_offset: material.albedo_uv_offset,
             normal_uv_offset: material.normal_uv_offset,
             roughness_uv_offset: material.roughness_uv_offset,
-            _padding2: [0.0; 6],
+            detail_uv_offset: material.detail_uv_offset,
+            macro_uv_offset: material.macro_uv_offset,
+            ar_angle_cos_sin: [radians.cos(), radians.sin()],
+            ar_scale_offset: [
+                material.ar_scale.max(1e-3),
+                material.ar_offset[0],
+                material.ar_offset[1],
+                0.0,
+            ],
+            detail_fade_near_far: [
+                material.detail_normal_fade_near_m,
+                material.detail_normal_fade_far_m,
+                0.0,
+                0.0,
+            ],
+            _padding2: [0.0; 4],
         }
+    }
+
+    /// Rebuild this uniform with a different debug mode (same material).
+    fn with_debug_mode(&self, debug_mode: TerrainDebugMode) -> Self {
+        let mut updated = *self;
+        updated.debug_mode = debug_mode.as_u32();
+        updated
     }
 }
 
@@ -351,11 +477,14 @@ struct GpuMaterial {
     bind_group: wgpu::BindGroup,
 }
 
-/// G3A: persistent GPU terrain material (dedicated bind group at group 4).
+/// G3A-R: persistent GPU terrain material (dedicated bind group at group 4).
 ///
-/// Owns the albedo (sRGB), normal (linear), and roughness (linear) textures
-/// plus one shared repeat/linear sampler and the static material uniform.
-/// Created once at renderer initialization, never recreated per frame.
+/// Owns the mipmapped albedo (sRGB), normal (linear), and roughness (linear)
+/// textures plus one shared repeat/trilinear sampler with anisotropic
+/// filtering clamped to the device capability, and the material uniform.
+/// Created once at renderer initialization, never recreated per frame. The
+/// uniform buffer is rewritten in place only when the debug mode changes
+/// (presentation-only, never on the frame path).
 struct GpuTerrainMaterial {
     _albedo_texture: wgpu::Texture,
     _albedo_texture_view: wgpu::TextureView,
@@ -364,8 +493,20 @@ struct GpuTerrainMaterial {
     _roughness_texture: wgpu::Texture,
     _roughness_texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
-    _material_uniform: wgpu::Buffer,
+    /// Effective sampler anisotropy on this device (1 or 16).
+    sampler_anisotropy: u32,
+    material_uniform: wgpu::Buffer,
+    uniform: TerrainMaterialUniform,
     bind_group: wgpu::BindGroup,
+}
+
+impl GpuTerrainMaterial {
+    /// Switch the presentation-only debug channel. Rewrites the existing
+    /// uniform buffer in place; no resource is created and nothing allocates.
+    fn update_debug_mode(&mut self, queue: &wgpu::Queue, debug_mode: TerrainDebugMode) {
+        self.uniform = self.uniform.with_debug_mode(debug_mode);
+        queue.write_buffer(&self.material_uniform, 0, bytemuck::bytes_of(&self.uniform));
+    }
 }
 
 /// G1C: A render batch with its own vertex/index buffers and material.
@@ -494,9 +635,14 @@ pub struct WgpuRenderer {
     shadow_target: ShadowTarget,
     _shadow_sampler: wgpu::Sampler,
     camera: CameraMode,
+    // G3A-PR: distance from the render origin down to the visual terrain
+    // plane, kept for the presentation-only camera ground block.
+    ground_below_render_origin_m: f32,
     asynchronous_gpu_error: Arc<AtomicU8>,
 
     show_debug_overlays: bool,
+    // G3A-R: presentation-only terrain debug channel (uniform-driven).
+    terrain_debug_mode: TerrainDebugMode,
 }
 
 impl WgpuRenderer {
@@ -549,6 +695,18 @@ impl WgpuRenderer {
             })
             .await
             .map_err(|error| RendererError::RequestDevice(error.to_string()))?;
+
+        // G3A-R: anisotropic filtering is a downlevel capability in wgpu 30.
+        // When the backend supports it, request the WebGPU maximum of 16x
+        // (the RTX 3090 target supports it natively); otherwise fall back to
+        // 1x so less capable adapters stay valid. The sampler is created with
+        // this value; wgpu additionally clamps to [1, 16] internally.
+        let terrain_sampler_anisotropy = effective_sampler_anisotropy(
+            adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING),
+        );
 
         let asynchronous_gpu_error = Arc::new(AtomicU8::new(GPU_ERROR_NONE));
         let callback_error = Arc::clone(&asynchronous_gpu_error);
@@ -910,6 +1068,7 @@ impl WgpuRenderer {
             &terrain_material_bind_group_layout,
             &queue,
             &terrain_material,
+            terrain_sampler_anisotropy,
         )?;
 
         let mut terrain_chunks = Vec::with_capacity(terrain_chunk_data.len());
@@ -1092,8 +1251,10 @@ impl WgpuRenderer {
             shadow_target,
             _shadow_sampler: shadow_sampler,
             camera: camera_config.build(size.width, size.height),
+            ground_below_render_origin_m,
             asynchronous_gpu_error,
             show_debug_overlays: false,
+            terrain_debug_mode: TerrainDebugMode::default(),
         })
     }
 
@@ -1136,6 +1297,29 @@ impl WgpuRenderer {
         self.show_debug_overlays = show;
     }
 
+    /// G3A-R: switch the presentation-only terrain debug channel.
+    ///
+    /// Writes the debug selector into the existing terrain material uniform;
+    /// no shader recompile, no resource creation, and no per-frame work. The
+    /// default is [`TerrainDebugMode::Final`], which is the production path.
+    pub fn set_terrain_debug_mode(&mut self, mode: TerrainDebugMode) {
+        self.terrain_debug_mode = mode;
+        self.terrain_material.update_debug_mode(&self.queue, mode);
+    }
+
+    /// Current terrain debug channel.
+    #[must_use]
+    pub fn terrain_debug_mode(&self) -> TerrainDebugMode {
+        self.terrain_debug_mode
+    }
+
+    /// Effective terrain sampler anisotropy on this device
+    /// (`1` when the backend lacks `ANISOTROPIC_FILTERING`, `16` otherwise).
+    #[must_use]
+    pub fn terrain_sampler_anisotropy(&self) -> u32 {
+        self.terrain_material.sampler_anisotropy
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             self.surface_is_configured = false;
@@ -1174,14 +1358,19 @@ impl WgpuRenderer {
             wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
         };
 
-        // Compute camera uniforms on the stack.
+        // Compute camera uniforms on the stack. G3A-PR: the camera-driving
+        // pose is raised onto the visual terrain plane, so an aircraft that
+        // dives below the ground does not drag the chase camera underneath
+        // the backface-culled terrain grid; the aircraft mesh keeps its true
+        // pose.
         let aircraft_pose = frame.aircraft_pose();
-        let vp = self.camera.view_projection(aircraft_pose);
-        let eye = self.camera.eye_position(aircraft_pose);
+        let camera_pose = aircraft_pose.raised_to_min_height(-self.ground_below_render_origin_m);
+        let vp = self.camera.view_projection(&camera_pose);
+        let eye = self.camera.eye_position(&camera_pose);
         let identity = Mat4::identity();
         let inv_vp = self
             .camera
-            .inv_view_projection(aircraft_pose)
+            .inv_view_projection(&camera_pose)
             .unwrap_or(identity);
         let camera_uniform = CameraUniform::new(&vp, &inv_vp, eye);
 
@@ -1340,7 +1529,9 @@ impl WgpuRenderer {
             render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
 
             // G3A: terrain chunks use the dedicated terrain pipeline and its own
-            // bind group (identity object transform, world-local).
+            // bind group (identity object transform, world-local). Group 3 is
+            // unused by fs_terrain but present in the layout, so leave the
+            // previous binding untouched.
             render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
             render_pass.set_pipeline(&self.terrain_pipeline);
             render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
@@ -1609,21 +1800,82 @@ fn create_gpu_material(
 }
 
 // ---------------------------------------------------------------------------
-// G3A: terrain material creation
+// G3A-R: terrain material creation
 // ---------------------------------------------------------------------------
 
-/// Create the textured terrain material from the embedded grass maps.
+/// Effective terrain sampler anisotropy: 16x when the backend supports
+/// anisotropic filtering (the WebGPU maximum, and the RTX 3090 native
+/// capability), 1x otherwise so less capable adapters stay valid.
+#[must_use]
+fn effective_sampler_anisotropy(anisotropic_supported: bool) -> u16 {
+    if anisotropic_supported { 16 } else { 1 }
+}
+
+/// Upload one mip level with WebGPU row alignment applied for the given
+/// `bytes_per_pixel` (4 for RGBA8 maps, 1 for the R8 roughness map).
 ///
-/// Decodes the committed PNGs once at initialization and uploads three
-/// persistent textures: albedo (sRGB, hardware converts on sampling), normal
-/// (linear RGBA), roughness (linear R8). One repeat/linear sampler serves all
-/// three maps; the static uniform carries the PBR factors and per-map UV
-/// anchors. No resource is created or recreated per frame.
+/// Pads each row to `COPY_BYTES_PER_ROW_ALIGNMENT` into a temporary staging
+/// buffer. Called once per level at initialization; the frame path never
+/// allocates or uploads.
+fn upload_terrain_mip_level(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    level: u32,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+    bytes_per_pixel: u32,
+) -> Result<(), RendererError> {
+    let row_bytes = padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
+        .ok_or(RendererError::TextureUpload(
+            TextureLoadError::PaddedRowOverflow { width },
+        ))?;
+    let unpadded = width as usize * bytes_per_pixel as usize;
+    let padding = row_bytes as usize - unpadded;
+    let mut staged = Vec::with_capacity(row_bytes as usize * height as usize);
+    for row in 0..height as usize {
+        let start = row * unpadded;
+        staged.extend_from_slice(&bytes[start..start + unpadded]);
+        staged.extend(std::iter::repeat_n(0u8, padding));
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: level,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &staged,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(row_bytes),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Create the textured, mipmapped terrain material from the embedded maps.
+///
+/// Decodes the committed PNGs once at initialization, builds the full
+/// deterministic mip chain (512 -> 1, 10 levels: sRGB-correct albedo,
+/// renormalized normals, linear roughness averages), and uploads all levels
+/// into three persistent textures. One repeat/trilinear sampler with
+/// anisotropic filtering (clamped to the device capability) serves all three
+/// maps; the uniform carries the PBR factors, the three-frequency stack, the
+/// anti-repetition transform, and the debug selector. No resource is created
+/// or recreated per frame.
 fn create_terrain_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     queue: &wgpu::Queue,
     material: &TerrainMaterial,
+    sampler_anisotropy: u16,
 ) -> Result<GpuTerrainMaterial, RendererError> {
     let albedo =
         decode_image(terrain_assets::TERRAIN_ALBEDO_PNG).map_err(RendererError::TextureUpload)?;
@@ -1632,6 +1884,25 @@ fn create_terrain_material(
     let roughness = decode_image(terrain_assets::TERRAIN_ROUGHNESS_PNG)
         .map_err(RendererError::TextureUpload)?;
 
+    // G3A-R: assemble the base set (the gray roughness decode carries the
+    // linear R channel) and generate the deterministic mip chain once, at
+    // initialization. Missing mips would silently downgrade sampling to
+    // mip-0-only bilinear, so the level count is asserted up front.
+    let base_set = terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness.rgba8);
+    let mip_chain = generate_terrain_mip_chain(&base_set, TERRAIN_TEXTURE_SIZE);
+    let mip_levels = mip_chain.albedo.len() as u32;
+    debug_assert_eq!(
+        mip_levels,
+        mip_level_count_for_size(TERRAIN_TEXTURE_SIZE),
+        "terrain textures must carry the full mip chain"
+    );
+    assert!(
+        mip_levels >= 2
+            && mip_chain.normal.len() == mip_levels as usize
+            && mip_chain.roughness.len() == mip_levels as usize,
+        "all three terrain maps must carry the full mip chain"
+    );
+
     let size = wgpu::Extent3d {
         width: albedo.width,
         height: albedo.height,
@@ -1639,132 +1910,111 @@ fn create_terrain_material(
     };
 
     let albedo_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G3A terrain albedo texture"),
+        label: Some("G3A-R terrain albedo texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        // COPY_SRC: enables GPU readback verification of the committed asset
+        // bytes (headless tests); otherwise inert. Never copied in a frame.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let albedo_texture_view = albedo_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let (albedo_data, albedo_row_bytes) =
-        create_staging_buffer(&albedo).map_err(RendererError::TextureUpload)?;
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &albedo_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &albedo_data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(albedo_row_bytes),
-            rows_per_image: Some(albedo.height),
-        },
-        size,
-    );
+    for (level, mip) in mip_chain.albedo.iter().enumerate() {
+        upload_terrain_mip_level(
+            queue,
+            &albedo_texture,
+            level as u32,
+            mip.width,
+            mip.height,
+            &mip.bytes,
+            4,
+        )?;
+    }
 
     let normal_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G3A terrain normal texture"),
+        label: Some("G3A-R terrain normal texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let normal_texture_view = normal_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let (normal_data, normal_row_bytes) =
-        create_staging_buffer(&normal).map_err(RendererError::TextureUpload)?;
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &normal_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &normal_data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(normal_row_bytes),
-            rows_per_image: Some(normal.height),
-        },
-        size,
-    );
+    for (level, mip) in mip_chain.normal.iter().enumerate() {
+        upload_terrain_mip_level(
+            queue,
+            &normal_texture,
+            level as u32,
+            mip.width,
+            mip.height,
+            &mip.bytes,
+            4,
+        )?;
+    }
 
-    // Roughness: single R8 channel extracted from the gray PNG decode.
+    // Roughness: single R8 channel, linear data.
     let roughness_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G3A terrain roughness texture"),
+        label: Some("G3A-R terrain roughness texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::R8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let roughness_texture_view =
         roughness_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let roughness_row_bytes = crate::texture::padded_bytes_per_row_checked(roughness.width).ok_or(
-        RendererError::TextureUpload(TextureLoadError::PaddedRowOverflow {
-            width: roughness.width,
-        }),
-    )?;
-    let mut staged_roughness =
-        Vec::with_capacity((roughness_row_bytes as usize) * (roughness.height as usize));
-    for row in 0..roughness.height as usize {
-        let start = row * roughness.width as usize * 4;
-        staged_roughness.extend(
-            roughness.rgba8[start..start + roughness.width as usize * 4]
-                .iter()
-                .step_by(4)
-                .copied(),
-        );
-        staged_roughness.extend(std::iter::repeat_n(
-            0u8,
-            roughness_row_bytes as usize - roughness.width as usize,
-        ));
+    for (level, mip) in mip_chain.roughness.iter().enumerate() {
+        upload_terrain_mip_level(
+            queue,
+            &roughness_texture,
+            level as u32,
+            mip.width,
+            mip.height,
+            &mip.bytes,
+            1,
+        )?;
     }
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &roughness_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &staged_roughness,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(roughness_row_bytes),
-            rows_per_image: Some(roughness.height),
-        },
-        size,
-    );
 
+    // G3A-R: trilinear filtering with anisotropy clamped to the device
+    // capability (16x on capable backends, 1x otherwise).
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("G3A terrain sampler"),
+        label: Some("G3A-R terrain sampler"),
         address_mode_u: wgpu::AddressMode::Repeat,
         address_mode_v: wgpu::AddressMode::Repeat,
         address_mode_w: wgpu::AddressMode::Repeat,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: sampler_anisotropy,
         ..Default::default()
     });
 
-    // G3A: terrain PBR factors + UV anchors, written once at load time.
+    // G3A-R: PBR factors + the full visual stack configuration. Written once
+    // at load time; only `debug_mode` is rewritten later (in place, via
+    // `update_debug_mode`) when the presentation debug channel changes.
+    let uniform =
+        TerrainMaterialUniform::from_terrain_material(material, TerrainDebugMode::default());
     let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("G3A terrain material uniform"),
-        contents: bytemuck::bytes_of(&TerrainMaterialUniform::from_terrain_material(material)),
-        usage: wgpu::BufferUsages::UNIFORM,
+        label: Some("G3A-R terrain material uniform"),
+        contents: bytemuck::bytes_of(&uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("G3A terrain material bind group"),
+        label: Some("G3A-R terrain material bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1798,7 +2048,9 @@ fn create_terrain_material(
         _roughness_texture: roughness_texture,
         _roughness_texture_view: roughness_texture_view,
         _sampler: sampler,
-        _material_uniform: material_uniform_buffer,
+        sampler_anisotropy: u32::from(sampler_anisotropy),
+        material_uniform: material_uniform_buffer,
+        uniform,
         bind_group,
     })
 }
@@ -2675,31 +2927,99 @@ mod terrain_material_uniform_tests {
     use super::*;
 
     #[test]
-    fn terrain_material_uniform_layout_is_64_bytes() {
-        // WGSL: four vec4 slots (metallic/roughness/normal_strength/pad,
-        // three vec2 anchors, pad2). Must match the shader struct exactly.
+    fn terrain_material_uniform_layout_is_128_bytes() {
+        // WGSL: eight vec4 slots (PBR factors + debug, stack scales, five
+        // vec2 anchors, ar transform, fade range, padding). Must match the
+        // shader struct exactly.
         assert_eq!(
             size_of::<TerrainMaterialUniform>(),
-            64,
-            "TerrainMaterialUniform must occupy exactly four WGSL vec4 slots"
+            128,
+            "TerrainMaterialUniform must occupy exactly eight WGSL vec4 slots"
         );
+        // Rust (repr(C), f32 arrays) and WGSL (vec2/vec4 alignment) must agree
+        // on every member offset; a mismatch would corrupt the uniform.
+        let uniform = TerrainMaterialUniform::from_terrain_material(
+            &TerrainMaterial::default(),
+            TerrainDebugMode::default(),
+        );
+        let base = &uniform as *const TerrainMaterialUniform as usize;
+        assert_eq!(&uniform.metallic as *const f32 as usize - base, 0);
+        assert_eq!(&uniform.debug_mode as *const u32 as usize - base, 12);
+        assert_eq!(&uniform.base_scale_m as *const f32 as usize - base, 16);
+        assert_eq!(
+            &uniform.albedo_uv_offset as *const [f32; 2] as usize - base,
+            32
+        );
+        assert_eq!(
+            &uniform.normal_uv_offset as *const [f32; 2] as usize - base,
+            40
+        );
+        assert_eq!(
+            &uniform.roughness_uv_offset as *const [f32; 2] as usize - base,
+            48
+        );
+        assert_eq!(
+            &uniform.detail_uv_offset as *const [f32; 2] as usize - base,
+            56
+        );
+        assert_eq!(
+            &uniform.macro_uv_offset as *const [f32; 2] as usize - base,
+            64
+        );
+        assert_eq!(
+            &uniform.ar_angle_cos_sin as *const [f32; 2] as usize - base,
+            72
+        );
+        assert_eq!(
+            &uniform.ar_scale_offset as *const [f32; 4] as usize - base,
+            80
+        );
+        assert_eq!(
+            &uniform.detail_fade_near_far as *const [f32; 4] as usize - base,
+            96
+        );
+        assert_eq!(&uniform._padding2 as *const [f32; 4] as usize - base, 112);
     }
 
     #[test]
     fn terrain_material_uniform_roundtrips_through_bytes() {
         let material = TerrainMaterial::default();
-        let uniform = TerrainMaterialUniform::from_terrain_material(&material);
+        let uniform =
+            TerrainMaterialUniform::from_terrain_material(&material, TerrainDebugMode::default());
         assert_eq!(uniform.metallic, 0.0);
         assert_eq!(uniform.roughness, 0.9);
         assert_eq!(uniform.normal_strength, 1.0);
+        assert_eq!(uniform.debug_mode, 0);
+        assert_eq!(uniform.base_scale_m, 4.0);
+        assert_eq!(uniform.detail_scale_m, 0.40);
+        assert_eq!(uniform.macro_scale_m, 48.0);
         assert_eq!(uniform.albedo_uv_offset, [0.0, 0.0]);
         assert_eq!(uniform.normal_uv_offset, [0.271, 0.137]);
         assert_eq!(uniform.roughness_uv_offset, [0.413, 0.303]);
+        assert_eq!(uniform.detail_uv_offset, [0.163, 0.037]);
+        assert_eq!(uniform.macro_uv_offset, [0.170, 0.390]);
+        assert_eq!(uniform.ar_scale_offset[0], 1.370);
+        assert_eq!(uniform.ar_scale_offset[1], 0.315);
+        assert_eq!(uniform.ar_scale_offset[2], 0.571);
+        assert_eq!(
+            uniform.ar_angle_cos_sin[0],
+            (27.0f32 * PI / 180.0).cos(),
+            "ar angle must be stored as cos"
+        );
+        assert_eq!(
+            uniform.ar_angle_cos_sin[1],
+            (27.0f32 * PI / 180.0).sin(),
+            "ar angle must be stored as sin"
+        );
+        assert_eq!(uniform.detail_fade_near_far[0], 20.0);
+        assert_eq!(uniform.detail_fade_near_far[1], 80.0);
 
         let decoded: TerrainMaterialUniform = *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
         assert_eq!(decoded.metallic, 0.0);
         assert_eq!(decoded.roughness, 0.9);
         assert_eq!(decoded.normal_uv_offset, [0.271, 0.137]);
+        assert_eq!(decoded.debug_mode, 0);
+        assert_eq!(decoded.ar_scale_offset, uniform.ar_scale_offset);
         assert!(decoded.roughness.is_finite());
         assert!(decoded.normal_strength.is_finite());
     }
@@ -2714,17 +3034,105 @@ mod terrain_material_uniform_tests {
             normal_strength: 1.4,
             ..Default::default()
         };
-        let uniform = TerrainMaterialUniform::from_terrain_material(&material);
+        let uniform =
+            TerrainMaterialUniform::from_terrain_material(&material, TerrainDebugMode::default());
         assert_eq!(uniform.metallic, 1.0);
         assert_eq!(uniform.roughness, 0.02);
         assert_eq!(uniform.normal_strength, 1.0);
+    }
+
+    #[test]
+    fn terrain_material_uniform_with_debug_mode_only_changes_selector() {
+        let material = TerrainMaterial::default();
+        let base =
+            TerrainMaterialUniform::from_terrain_material(&material, TerrainDebugMode::default());
+        for mode in [
+            TerrainDebugMode::Albedo,
+            TerrainDebugMode::Normal,
+            TerrainDebugMode::Roughness,
+            TerrainDebugMode::Macro,
+            TerrainDebugMode::Detail,
+        ] {
+            let updated = base.with_debug_mode(mode);
+            assert_eq!(updated.debug_mode, mode.as_u32());
+            // Everything else must stay byte-identical apart from the selector.
+            let mut expected = base;
+            expected.debug_mode = mode.as_u32();
+            assert_eq!(
+                updated.debug_mode, expected.debug_mode,
+                "debug mode selector mismatch"
+            );
+            assert_eq!(
+                updated.ar_scale_offset, base.ar_scale_offset,
+                "debug switch must not touch material state"
+            );
+            assert_eq!(
+                updated.detail_fade_near_far, base.detail_fade_near_far,
+                "debug switch must not touch material state"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod terrain_debug_mode_tests {
+    use super::*;
+
+    #[test]
+    fn terrain_debug_mode_defaults_to_final() {
+        assert_eq!(TerrainDebugMode::default(), TerrainDebugMode::Final);
+        assert_eq!(TerrainDebugMode::Final.as_u32(), 0);
+    }
+
+    #[test]
+    fn terrain_debug_mode_u32_mapping_roundtrips() {
+        for mode in [
+            TerrainDebugMode::Final,
+            TerrainDebugMode::Albedo,
+            TerrainDebugMode::Normal,
+            TerrainDebugMode::Roughness,
+            TerrainDebugMode::Macro,
+            TerrainDebugMode::Detail,
+        ] {
+            assert_eq!(TerrainDebugMode::from_u32(mode.as_u32()), Some(mode));
+        }
+        assert_eq!(TerrainDebugMode::from_u32(6), None);
+        assert_eq!(TerrainDebugMode::from_u32(255), None);
+    }
+
+    #[test]
+    fn terrain_debug_mode_labels_roundtrip() {
+        for mode in [
+            TerrainDebugMode::Final,
+            TerrainDebugMode::Albedo,
+            TerrainDebugMode::Normal,
+            TerrainDebugMode::Roughness,
+            TerrainDebugMode::Macro,
+            TerrainDebugMode::Detail,
+        ] {
+            assert_eq!(
+                TerrainDebugMode::from_label(mode.label()),
+                Some(mode),
+                "label {} must roundtrip",
+                mode.label()
+            );
+        }
+        assert_eq!(TerrainDebugMode::from_label("FINAL"), None);
+        assert_eq!(TerrainDebugMode::from_label(""), None);
+        assert_eq!(TerrainDebugMode::from_label("metal"), None);
+    }
+
+    #[test]
+    fn effective_sampler_anisotropy_matches_capability() {
+        assert_eq!(effective_sampler_anisotropy(true), 16);
+        assert_eq!(effective_sampler_anisotropy(false), 1);
     }
 }
 
 #[cfg(test)]
 mod terrain_gpu_integration_guards {
-    //! G3A structural guards: the terrain shader/renderer integration points
-    //! that must not drift in later slices.
+    //! G3A/G3A-R structural guards: the terrain shader/renderer integration
+    //! points that must not drift in later slices.
 
     #[test]
     fn shader_terrain_entry_reuses_pbr_and_stays_textured() {
@@ -2742,12 +3150,12 @@ mod terrain_gpu_integration_guards {
             .nth(1)
             .expect("terrain fragment entry must exist");
         assert!(
-            terrain_block.contains("input.color * albedo_rgba"),
-            "G2D vertex color must modulate the albedo texture"
+            terrain_block.contains("input.color * vec4<f32>(albedo.rgb, 1.0)"),
+            "G2D vertex color must modulate the composite albedo stack"
         );
         assert!(
-            terrain_block.contains("terrain_material.roughness * roughness_sample"),
-            "roughness map must scale the material base roughness"
+            terrain_block.contains("terrain_material.roughness * r_stack"),
+            "roughness stack must scale the material base roughness"
         );
         assert!(
             terrain_block.contains("dpdx(input.world_position)"),
@@ -2758,6 +3166,43 @@ mod terrain_gpu_integration_guards {
                 || terrain_block.contains("lit_pbr_response("),
             "terrain must keep G2B shadow receiving via the shared path"
         );
+    }
+
+    #[test]
+    fn shader_keeps_the_g3a_r_three_frequency_stack() {
+        let source = include_str!("shader.wgsl");
+        let terrain_block = source
+            .split("fn fs_terrain(input: VertexOutput)")
+            .nth(1)
+            .expect("terrain fragment entry must exist");
+        for (needle, label) in [
+            (
+                "terrain_material.macro_scale_m",
+                "macro scale must be uniform-driven",
+            ),
+            (
+                "terrain_material.detail_scale_m",
+                "detail scale must be uniform-driven",
+            ),
+            (
+                "smoothstep(fade_near, fade_far, distance)",
+                "detail fade must be a continuous smoothstep",
+            ),
+            (
+                "TERRAIN_DETAIL_NORMAL_BLEND",
+                "detail normal blend must be a named constant",
+            ),
+            (
+                "terrain_material.debug_mode",
+                "debug channel must be uniform-driven",
+            ),
+            ("mode == 5u", "detail debug channel must exist"),
+        ] {
+            assert!(
+                terrain_block.contains(needle),
+                "terrain fragment must use {label}"
+            );
+        }
     }
 
     #[test]
@@ -2789,15 +3234,1360 @@ mod terrain_gpu_integration_guards {
             ("create_texture(", "texture"),
             ("create_sampler(", "sampler"),
             ("create_bind_group(", "bind group"),
+            ("write_texture(", "texture upload"),
+            ("generate_terrain_mip_chain(", "mip chain generation"),
         ] {
             assert!(
                 !frame_path.contains(needle),
-                "frame path must not recreate the {label} resource"
+                "frame path must not recreate/upload the {label} resource"
             );
         }
         assert!(
             initialization_path.contains("let terrain_material_gpu = create_terrain_material("),
             "terrain material must be created once at startup"
+        );
+    }
+
+    #[test]
+    fn terrain_material_uploads_the_full_mip_chain_at_startup_only() {
+        let source = include_str!("gpu.rs");
+        let (initialization_path, after_init) = source
+            .split_once("fn create_terrain_material(")
+            .expect("terrain material helper must exist");
+        let (creation_path, _) = after_init
+            .split_once("// ---------------------------------------------------------------------------\n// Scenery upload helper")
+            .or_else(|| after_init.split_once("// Scenery upload helper"))
+            .expect("terrain material creation must end before the scenery helper");
+
+        // All mip uploads happen inside the startup helper.
+        assert!(
+            creation_path.contains("generate_terrain_mip_chain("),
+            "mip chain must be generated deterministically at startup"
+        );
+        assert!(
+            creation_path.contains("upload_terrain_mip_level("),
+            "every mip level must be uploaded at startup"
+        );
+        assert!(
+            creation_path.contains("mip_level_count: mip_levels"),
+            "all three terrain textures must carry the full mip chain"
+        );
+        assert!(
+            creation_path.contains("anisotropy_clamp: sampler_anisotropy"),
+            "the terrain sampler must carry the (clamped) anisotropy"
+        );
+        assert!(
+            initialization_path.contains("effective_sampler_anisotropy("),
+            "anisotropy must be derived from the device capability"
+        );
+        // The frame path must not contain any mip upload or mip generation.
+        let (_, after_render) = source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path");
+        let (frame_path, _) = after_render
+            .split_once("fn check_asynchronous_gpu_error")
+            .expect("frame path must end before asynchronous error handling");
+        for needle in ["upload_terrain_mip_level(", "generate_terrain_mip_chain("] {
+            assert!(
+                !frame_path.contains(needle),
+                "frame path must never touch the mip chain: {needle}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod terrain_headless_gpu_tests {
+    //! Opt-in GPU tests (run with `cargo test -p renderer --lib -- --ignored`).
+    //!
+    //! They drive the REAL terrain material upload and the REAL `fs_terrain`
+    //! pipeline on a headless wgpu device (no window, no surface), so the
+    //! texture content and the lit terrain output can be verified on machines
+    //! with a GPU while CPU-only CI stays green. Both tests are `#[ignore]`d;
+    //! the upload readback test is also a permanent regression guard for the
+    //! G3A-R mip chain upload path.
+    use super::*;
+    use crate::math::look_at_rh;
+    use crate::terrain::{generate_centered_terrain_chunks, generate_flat_terrain};
+    use crate::terrain_textures::{generate_terrain_mip_chain, terrain_texture_set_from_decoded};
+    use crate::webgpu_perspective;
+
+    fn headless_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .expect("no wgpu adapter available on this machine");
+        eprintln!(
+            "headless adapter: {:?} backend={:?}",
+            adapter.get_info(),
+            adapter.get_info().backend
+        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("g3a-r headless test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_bind_groups: adapter.limits().max_bind_groups,
+                ..wgpu::Limits::default()
+            },
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("request_device failed");
+        (device, queue)
+    }
+
+    fn committed_base_set() -> crate::terrain_textures::TerrainTextureSet {
+        let albedo = decode_image(terrain_assets::TERRAIN_ALBEDO_PNG).expect("albedo decode");
+        let normal = decode_image(terrain_assets::TERRAIN_NORMAL_PNG).expect("normal decode");
+        let roughness =
+            decode_image(terrain_assets::TERRAIN_ROUGHNESS_PNG).expect("roughness decode");
+        terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness.rgba8)
+    }
+
+    /// Read one mip level back to CPU with WebGPU row alignment.
+    fn read_texture_level(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        level: u32,
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Vec<u8> {
+        let row_bytes = padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
+            .expect("row padding must not overflow");
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("g3a-r readback buffer"),
+            size: u64::from(row_bytes) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("readback channel");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll failed");
+        receiver
+            .recv()
+            .expect("readback response")
+            .expect("map failed");
+        let mapped = slice.get_mapped_range().expect("mapped range");
+
+        // Strip the WebGPU row padding so the caller gets dense pixels.
+        let unpadded = width as usize * bytes_per_pixel as usize;
+        let mut bytes = Vec::with_capacity(unpadded * height as usize);
+        for row in 0..height as usize {
+            let start = row * row_bytes as usize;
+            bytes.extend_from_slice(&mapped[start..start + unpadded]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        bytes
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn terrain_upload_readback_matches_committed_assets() {
+        let (device, queue) = headless_device();
+        let layout = terrain_material_bind_group_layout(&device, "g3a-r readback layout");
+        // Real startup path: decode committed PNGs, build the chain, upload.
+        let material =
+            create_terrain_material(&device, &layout, &queue, &TerrainMaterial::default(), 16)
+                .expect("terrain material creation must succeed");
+
+        // CPU expectation from the same committed assets (bit-exact).
+        let base = committed_base_set();
+        let chain = generate_terrain_mip_chain(&base, TERRAIN_TEXTURE_SIZE);
+
+        // Level 0 and a mid level of the sRGB albedo must round-trip exactly.
+        for (level, width, height) in [(0u32, 512u32, 512u32), (5, 16, 16), (9, 1, 1)] {
+            let gpu = read_texture_level(
+                &device,
+                &queue,
+                &material._albedo_texture,
+                level,
+                width,
+                height,
+                4,
+            );
+            let expected = &chain.albedo[level as usize].bytes;
+            assert!(
+                gpu.len() >= expected.len(),
+                "albedo level {level} readback must at least span the level bytes"
+            );
+            assert_eq!(
+                &gpu[..expected.len()],
+                expected.as_slice(),
+                "albedo level {level} must round-trip the committed pixels"
+            );
+        }
+
+        // Normal levels must also round-trip (linear data).
+        for (level, width) in [(0u32, 512u32), (5, 16), (9, 1)] {
+            let gpu = read_texture_level(
+                &device,
+                &queue,
+                &material._normal_texture,
+                level,
+                width,
+                width,
+                4,
+            );
+            let expected = &chain.normal[level as usize].bytes;
+            assert_eq!(
+                &gpu[..expected.len()],
+                expected.as_slice(),
+                "normal level {level} must round-trip the committed pixels"
+            );
+        }
+
+        // Roughness (R8) base level.
+        let gpu_roughness = read_texture_level(
+            &device,
+            &queue,
+            &material._roughness_texture,
+            0,
+            512,
+            512,
+            1,
+        );
+        assert_eq!(
+            &gpu_roughness[..chain.roughness[0].bytes.len()],
+            chain.roughness[0].bytes.as_slice(),
+            "roughness level 0 must round-trip the committed pixels"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn fs_terrain_offscreen_renders_lit_green_grass() {
+        let (device, queue) = headless_device();
+        const SIZE: u32 = 512;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        // --- Bind group layouts / pipeline (identical to the app) ---
+        let camera_layout = camera_bind_group_layout(&device, "test camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "test object layout");
+        let env_layout = environment_bind_group_layout(&device, "test env layout");
+        let terrain_layout = terrain_material_bind_group_layout(&device, "test terrain layout");
+        let material_layout = material_bind_group_layout(&device, "test material layout");
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("g3a-r headless terrain layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                None,
+                Some(&terrain_layout),
+            ],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3a-r headless shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let pipeline = create_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            format,
+            PipelineSpec {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write_enabled: true,
+                label: "g3a-r headless fs_terrain pipeline",
+                fragment_entry_point: "fs_terrain",
+            },
+        );
+
+        // --- Camera: 60 deg vertical FOV, eye above a flat 1 km field ---
+        let eye = [0.0, 3.0, 10.0];
+        let view = look_at_rh(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let projection = webgpu_perspective(60.0_f32.to_radians(), 1.0, 0.05, 2_000.0)
+            .expect("projection must be valid");
+        let view_projection = projection * view;
+        let inv_view_projection = view_projection
+            .inverse()
+            .expect("view-projection invertible");
+        let camera_uniform = CameraUniform::new(&view_projection, &inv_view_projection, eye);
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test camera buffer"),
+            contents: bytemuck::bytes_of(&camera_uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test camera bind group"),
+            layout: &camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+        let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test identity object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let object_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test object bind group"),
+            layout: &object_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: object_buffer.as_entire_binding(),
+            }],
+        });
+        let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test environment buffer"),
+            contents: bytemuck::bytes_of(&EnvironmentUniform::default_environment()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test shadow matrix buffer"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_target = create_shadow_target(&device);
+        let shadow_sampler = create_shadow_comparison_sampler(&device);
+        let environment_bind_group = create_environment_bind_group(
+            &device,
+            &env_layout,
+            &environment_buffer,
+            &shadow_target.view,
+            &shadow_sampler,
+            &shadow_matrix_buffer,
+            "g3a-r headless env bind group",
+        );
+
+        // --- Real terrain material + real chunk geometry ---
+        let terrain_material = create_terrain_material(
+            &device,
+            &terrain_layout,
+            &queue,
+            &TerrainMaterial::default(),
+            16,
+        )
+        .expect("terrain material creation must succeed");
+        let height_field = generate_flat_terrain(200, 200, 5.0, 0.0);
+        let chunks =
+            generate_centered_terrain_chunks(&height_field, 32, &TerrainMaterial::default());
+        let mut gpu_chunks = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test terrain vertices"),
+                contents: bytemuck::cast_slice(&chunk.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test terrain indices"),
+                contents: bytemuck::cast_slice(&chunk.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            gpu_chunks.push((vertex_buffer, index_buffer, chunk.indices.len() as u32));
+        }
+
+        // --- Offscreen targets ---
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r headless color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_target = create_depth_target(&device, SIZE, SIZE);
+
+        // --- Control pass: SAME geometry through the SHARED lit pipeline with
+        // the white fallback material. If this renders but the terrain pass
+        // does not, the difference is terrain-specific. ---
+        let lit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("g3a-r headless lit control layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                Some(&material_layout),
+            ],
+            immediate_size: 0,
+        });
+        let lit_pipeline = create_pipeline(
+            &device,
+            &shader,
+            &lit_layout,
+            format,
+            PipelineSpec {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write_enabled: true,
+                label: "g3a-r headless lit control pipeline",
+                fragment_entry_point: "fs_lit",
+            },
+        );
+        let white_material = create_white_fallback_material(&device, &material_layout, &queue);
+        let control_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r control color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let control_view = control_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let control_depth = create_depth_target(&device, SIZE, SIZE);
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r headless lit control pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &control_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &control_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&lit_pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(3, &white_material.bind_group, &[]);
+            for (vertex_buffer, index_buffer, index_count) in &gpu_chunks {
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r headless terrain pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_target.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(4, &terrain_material.bind_group, &[]);
+            for (vertex_buffer, index_buffer, index_count) in &gpu_chunks {
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+        }
+        queue.submit([encoder.finish()]);
+
+        // --- Read back and assert the terrain is lit GREEN grass ---
+        let bytes = read_texture_level(&device, &queue, &color_texture, 0, SIZE, SIZE, 4);
+        let control = read_texture_level(&device, &queue, &control_color, 0, SIZE, SIZE, 4);
+        // Diagnostic: band means so a failure is self-explanatory.
+        let mut band_means = Vec::new();
+        for band in 0..10 {
+            let y0 = (band * SIZE / 10) as usize;
+            let y1 = ((band + 1) * SIZE / 10) as usize;
+            let mut sum = [0.0f64; 3];
+            for y in y0..y1 {
+                for x in 0..SIZE as usize {
+                    let pixel = &bytes[(y * SIZE as usize + x) * 4..];
+                    sum[0] += f64::from(pixel[0]);
+                    sum[1] += f64::from(pixel[1]);
+                    sum[2] += f64::from(pixel[2]);
+                }
+            }
+            let n = ((y1 - y0) * SIZE as usize) as f64;
+            band_means.push(format!(
+                "band{band}:[{:.0},{:.0},{:.0}]",
+                sum[0] / n,
+                sum[1] / n,
+                sum[2] / n
+            ));
+        }
+        eprintln!(
+            "offscreen terrain render band means: {}",
+            band_means.join(" ")
+        );
+        let mut control_means = Vec::new();
+        for band in 0..10 {
+            let y0 = (band * SIZE / 10) as usize;
+            let y1 = ((band + 1) * SIZE / 10) as usize;
+            let mut sum = [0.0f64; 3];
+            for y in y0..y1 {
+                for x in 0..SIZE as usize {
+                    let pixel = &control[(y * SIZE as usize + x) * 4..];
+                    sum[0] += f64::from(pixel[0]);
+                    sum[1] += f64::from(pixel[1]);
+                    sum[2] += f64::from(pixel[2]);
+                }
+            }
+            let n = ((y1 - y0) * SIZE as usize) as f64;
+            control_means.push(format!(
+                "band{band}:[{:.0},{:.0},{:.0}]",
+                sum[0] / n,
+                sum[1] / n,
+                sum[2] / n
+            ));
+        }
+        eprintln!(
+            "lit control render band means:   {}",
+            control_means.join(" ")
+        );
+
+        // --- Infrastructure probe: a fullscreen triangle with a minimal
+        // shader and NO bind groups. If this renders magenta, the offscreen
+        // render + readback path works and the failure is in the app-like
+        // geometry/camera setup; if it stays at the clear color, the probe
+        // infrastructure itself is broken. ---
+        let probe_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3a-r probe shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+@vertex
+fn vs_probe(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    return vec4<f32>(positions[vertex_index], 0.0, 1.0);
+}
+@fragment
+fn fs_probe() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+}
+"#,
+            )),
+        });
+        let probe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("g3a-r probe pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &probe_module,
+                entry_point: Some("vs_probe"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &probe_module,
+                entry_point: Some("fs_probe"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let probe_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r probe color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let probe_view = probe_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut probe_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = probe_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &probe_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&probe_pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([probe_encoder.finish()]);
+        let probe_bytes = read_texture_level(&device, &queue, &probe_texture, 0, SIZE, SIZE, 4);
+        let mut probe_sum = [0u64; 3];
+        for pixel in probe_bytes.as_chunks::<4>().0 {
+            probe_sum[0] += u64::from(pixel[0]);
+            probe_sum[1] += u64::from(pixel[1]);
+            probe_sum[2] += u64::from(pixel[2]);
+        }
+        let n = (SIZE * SIZE) as f64;
+        eprintln!(
+            "infrastructure probe mean RGB: [{:.0},{:.0},{:.0}]",
+            probe_sum[0] as f64 / n,
+            probe_sum[1] as f64 / n,
+            probe_sum[2] as f64 / n
+        );
+
+        // --- Pipeline probe: the SAME lit pipeline + bind groups + depth, but
+        // with a hardcoded in-view triangle via a vertex buffer. Isolates the
+        // uniform/binding/depth chain from the terrain vertex content. ---
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct ProbeVertex {
+            position: [f32; 3],
+            normal: [f32; 3],
+            color: [f32; 4],
+            uv: [f32; 2],
+        }
+        let probe_vertex_data = [
+            ProbeVertex {
+                position: [-2.0, -2.0, -8.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0, 0.3, 0.1, 1.0],
+                uv: [0.0, 0.0],
+            },
+            ProbeVertex {
+                position: [2.0, -2.0, -8.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0, 0.3, 0.1, 1.0],
+                uv: [1.0, 0.0],
+            },
+            ProbeVertex {
+                position: [0.0, 2.0, -8.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0, 0.3, 0.1, 1.0],
+                uv: [0.5, 1.0],
+            },
+        ];
+        let probe_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3a-r pipeline probe vertices"),
+            contents: bytemuck::cast_slice(&probe_vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let probe_index_data: [u32; 3] = [0, 1, 2];
+        let probe_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3a-r pipeline probe indices"),
+            contents: bytemuck::cast_slice(&probe_index_data),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let probe_pipeline_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r pipeline probe color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let probe_pipeline_view =
+            probe_pipeline_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let probe_pipeline_depth = create_depth_target(&device, SIZE, SIZE);
+        let mut probe_pipeline_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = probe_pipeline_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r pipeline probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &probe_pipeline_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &probe_pipeline_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&lit_pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(3, &white_material.bind_group, &[]);
+            pass.set_vertex_buffer(0, probe_vertex_buffer.slice(..));
+            pass.set_index_buffer(probe_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..3, 0, 0..1);
+        }
+        queue.submit([probe_pipeline_encoder.finish()]);
+        let pipeline_probe =
+            read_texture_level(&device, &queue, &probe_pipeline_color, 0, SIZE, SIZE, 4);
+        let mut pp_sum = [0u64; 3];
+        for pixel in pipeline_probe.as_chunks::<4>().0 {
+            pp_sum[0] += u64::from(pixel[0]);
+            pp_sum[1] += u64::from(pixel[1]);
+            pp_sum[2] += u64::from(pixel[2]);
+        }
+        eprintln!(
+            "pipeline probe (lit+groups+depth, hardcoded triangle) mean: [{:.0},{:.0},{:.0}]",
+            pp_sum[0] as f64 / n,
+            pp_sum[1] as f64 / n,
+            pp_sum[2] as f64 / n
+        );
+
+        // --- Discriminator: the LIT pipeline LAYOUT + full bind groups +
+        // depth + vertex buffer, but the probe shader entries which never read
+        // any uniform. Magenta => bindings/depth/vb are fine and the failure
+        // lives inside the vs_main/fs_lit uniform reads. ---
+        let discriminator_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("g3a-r discriminator pipeline"),
+                layout: Some(&lit_layout),
+                vertex: wgpu::VertexState {
+                    module: &probe_module,
+                    entry_point: Some("vs_probe"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &probe_module,
+                    entry_point: Some("fs_probe"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let discriminator_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r discriminator color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let discriminator_view =
+            discriminator_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let discriminator_depth = create_depth_target(&device, SIZE, SIZE);
+        let mut discriminator_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = discriminator_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r discriminator pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &discriminator_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &discriminator_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // Bind ALL groups the lit layout declares, even though the probe
+            // entries never read them.
+            pass.set_pipeline(&discriminator_pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(3, &white_material.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([discriminator_encoder.finish()]);
+        let discriminator =
+            read_texture_level(&device, &queue, &discriminator_color, 0, SIZE, SIZE, 4);
+        let mut disc_sum = [0u64; 3];
+        for pixel in discriminator.as_chunks::<4>().0 {
+            disc_sum[0] += u64::from(pixel[0]);
+            disc_sum[1] += u64::from(pixel[1]);
+            disc_sum[2] += u64::from(pixel[2]);
+        }
+        eprintln!(
+            "discriminator (lit LAYOUT+groups+depth, probe entries) mean: [{:.0},{:.0},{:.0}]",
+            disc_sum[0] as f64 / n,
+            disc_sum[1] as f64 / n,
+            disc_sum[2] as f64 / n
+        );
+
+        // --- VS discriminator: REAL vs_main (reads camera + object uniforms)
+        // with the probe fragment (ignores all uniforms), full groups + depth.
+        // Magenta => the vertex/uniform chain is fine and fs_lit is the
+        // failure; clear => the vertex uniform reads are the failure. ---
+        let vs_discriminator = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("g3a-r vs discriminator pipeline"),
+            layout: Some(&lit_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Float32x4,
+                        3 => Float32x2,
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &probe_module,
+                entry_point: Some("fs_probe"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vs_disc_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r vs discriminator color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let vs_disc_view = vs_disc_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let vs_disc_depth = create_depth_target(&device, SIZE, SIZE);
+        let mut vs_disc_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = vs_disc_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r vs discriminator pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &vs_disc_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &vs_disc_depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&vs_discriminator);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(3, &white_material.bind_group, &[]);
+            pass.set_vertex_buffer(0, probe_vertex_buffer.slice(..));
+            pass.set_index_buffer(probe_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..3, 0, 0..1);
+        }
+        queue.submit([vs_disc_encoder.finish()]);
+        let vs_disc = read_texture_level(&device, &queue, &vs_disc_color, 0, SIZE, SIZE, 4);
+        let mut vsd_sum = [0u64; 3];
+        for pixel in vs_disc.as_chunks::<4>().0 {
+            vsd_sum[0] += u64::from(pixel[0]);
+            vsd_sum[1] += u64::from(pixel[1]);
+            vsd_sum[2] += u64::from(pixel[2]);
+        }
+        eprintln!(
+            "vs_main(real) + fs_probe, full groups: mean [{:.0},{:.0},{:.0}]",
+            vsd_sum[0] as f64 / n,
+            vsd_sum[1] as f64 / n,
+            vsd_sum[2] as f64 / n
+        );
+
+        // --- Camera-only probe: reads ONLY group 0 (camera), no object, no
+        // vertex attributes, hardcoded positions. Green => the camera uniform
+        // read is correct and the failure involves object/attributes; clear
+        // => the camera uniform read itself is broken in this setup. ---
+        let cam_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3a-r camera probe shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct CameraUniform {
+    view_projection: mat4x4<f32>,
+    inv_view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: CameraUniform;
+@vertex
+fn vs_cam_only(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec3<f32>, 3>(
+        vec3<f32>(-2.0, -2.0, -8.0),
+        vec3<f32>(2.0, -2.0, -8.0),
+        vec3<f32>(0.0, 2.0, -8.0),
+    );
+    return camera.view_projection * vec4<f32>(positions[vertex_index], 1.0);
+}
+@fragment
+fn fs_cam_only() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#,
+            )),
+        });
+        let cam_only_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("g3a-r camera probe pipeline"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("g3a-r camera probe layout"),
+                    bind_group_layouts: &[Some(&camera_bind_group_layout(
+                        &device,
+                        "g3a-r cam probe layout",
+                    ))],
+                    immediate_size: 0,
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &cam_module,
+                entry_point: Some("vs_cam_only"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &cam_module,
+                entry_point: Some("fs_cam_only"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let cam_only_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r camera probe color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let cam_only_view = cam_only_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cam_only_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = cam_only_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r camera probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &cam_only_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&cam_only_pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([cam_only_encoder.finish()]);
+        let cam_only = read_texture_level(&device, &queue, &cam_only_color, 0, SIZE, SIZE, 4);
+        let mut cam_sum = [0u64; 3];
+        for pixel in cam_only.as_chunks::<4>().0 {
+            cam_sum[0] += u64::from(pixel[0]);
+            cam_sum[1] += u64::from(pixel[1]);
+            cam_sum[2] += u64::from(pixel[2]);
+        }
+        eprintln!(
+            "camera-only probe (reads camera uniform): mean [{:.0},{:.0},{:.0}]",
+            cam_sum[0] as f64 / n,
+            cam_sum[1] as f64 / n,
+            cam_sum[2] as f64 / n
+        );
+
+        // --- Packing probe: the SAME transform hardcoded as a WGSL literal
+        // matrix (no uniform read at all). Green => a literal transform works
+        // and the uniform-read path is what delivers garbage; if this also
+        // yields clear, the pipeline/geometry path is fine and it is the
+        // uniform buffers themselves that carry the wrong bytes. ---
+        let pack_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3a-r packing probe shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+@vertex
+fn vs_pack(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec3<f32>, 3>(
+        vec3<f32>(-2.0, -2.0, -8.0),
+        vec3<f32>(2.0, -2.0, -8.0),
+        vec3<f32>(0.0, 2.0, -8.0),
+    );
+    // Near-identity camera-ish transform (same shape as the real one).
+    let m = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.2, 0.0),
+        vec4<f32>(0.0, 0.0, 9.6, 1.0),
+    );
+    return m * vec4<f32>(positions[vertex_index], 1.0);
+}
+@fragment
+fn fs_pack() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#,
+            )),
+        });
+        let pack_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("g3a-r packing probe pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &pack_module,
+                entry_point: Some("vs_pack"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &pack_module,
+                entry_point: Some("fs_pack"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let pack_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3a-r packing probe color target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let pack_view = pack_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut pack_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = pack_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3a-r packing probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &pack_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pack_pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([pack_encoder.finish()]);
+        let pack = read_texture_level(&device, &queue, &pack_color, 0, SIZE, SIZE, 4);
+        let mut pack_sum = [0u64; 3];
+        for pixel in pack.as_chunks::<4>().0 {
+            pack_sum[0] += u64::from(pixel[0]);
+            pack_sum[1] += u64::from(pixel[1]);
+            pack_sum[2] += u64::from(pixel[2]);
+        }
+        eprintln!(
+            "packing probe (literal matrix, no uniforms): mean [{:.0},{:.0},{:.0}]",
+            pack_sum[0] as f64 / n,
+            pack_sum[1] as f64 / n,
+            pack_sum[2] as f64 / n
+        );
+        for vertex in &probe_vertex_data {
+            let rows = view_projection.rows();
+            let mut he = [0.0f32; 4];
+            for (row, he_value) in he.iter_mut().enumerate() {
+                *he_value = rows[row][0] * vertex.position[0]
+                    + rows[row][1] * vertex.position[1]
+                    + rows[row][2] * vertex.position[2]
+                    + rows[row][3] * 1.0;
+            }
+            eprintln!(
+                "cpu clip for {:?}: ndc [{:.3},{:.3},{:.3}] w={:.3}",
+                vertex.position,
+                he[0] / he[3],
+                he[1] / he[3],
+                he[2] / he[3],
+                he[3]
+            );
+        }
+
+        let mut sum = [0.0f64; 3];
+        let mut count = 0u64;
+        // Lower half of the frame: flat field, no sky.
+        for y in (SIZE / 2)..SIZE {
+            for x in 0..SIZE {
+                let pixel = &bytes[((y * SIZE + x) * 4) as usize..];
+                sum[0] += f64::from(pixel[0]);
+                sum[1] += f64::from(pixel[1]);
+                sum[2] += f64::from(pixel[2]);
+                count += 1;
+            }
+        }
+        let mean = [
+            sum[0] / count as f64,
+            sum[1] / count as f64,
+            sum[2] / count as f64,
+        ];
+        assert!(
+            mean[1] > mean[0] + 15.0,
+            "grass must be green-dominant in G, got mean RGB {mean:?}"
+        );
+        assert!(
+            mean[1] > mean[2] + 20.0,
+            "grass must be blue-starved, got mean RGB {mean:?}"
+        );
+        assert!(
+            mean[0] > 30.0 && mean[0] < 230.0 && mean[1] > 30.0 && mean[1] < 250.0,
+            "lit grass must stay within a sane band, got mean RGB {mean:?}"
         );
     }
 }

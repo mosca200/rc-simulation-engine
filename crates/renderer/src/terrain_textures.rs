@@ -27,6 +27,16 @@
 //!
 //! The roughness map is single-channel (R) linear data in [0, 1]; the shader
 //! multiplies it by the material base roughness.
+//!
+//! # G3A-R deterministic mip chain
+//!
+//! `generate_terrain_mip_chain` produces the complete mip pyramid (512 -> 1,
+//! 10 levels) with a wrap-free 2x2 box filter in the correct color space:
+//! albedo is averaged in linear space and re-encoded to sRGB, normal vectors
+//! are decoded, averaged, and renormalized (never flattening), and roughness
+//! (linear R8) is averaged directly. Generation is pure and deterministic, so
+//! the GPU mips can be produced once at initialization from the committed
+//! assets without any per-frame work.
 
 /// Texture edge length in texels for all three maps.
 pub const TERRAIN_TEXTURE_SIZE: u32 = 512;
@@ -298,6 +308,264 @@ fn encode_u8x4(rgb: [f32; 3]) -> [u8; 4] {
         (rgb[2] * 255.0).round() as u8,
         255,
     ]
+}
+
+// ---------------------------------------------------------------------------
+// G3A-R: deterministic CPU mip chain
+// ---------------------------------------------------------------------------
+
+/// One mip level of a terrain map: base-2 power-of-two dimensions and the raw
+/// texel bytes in the same layout as the corresponding base map (RGBA8 for
+/// albedo/normal, single-channel R8 for roughness).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MipImage {
+    /// Level edge length in texels (X).
+    pub width: u32,
+    /// Level edge length in texels (Y).
+    pub height: u32,
+    /// `width * height * channels` bytes, ready for GPU upload.
+    pub bytes: Vec<u8>,
+}
+
+/// Complete deterministic mip chain for the three terrain maps.
+///
+/// Level 0 is the committed base texture (bitwise identical to the decoded
+/// PNG); each following level halves the dimensions with a 2x2 box filter in
+/// the correct color space:
+///
+/// - albedo: decode sRGB -> linear, average, re-encode to sRGB (hardware
+///   samples the sRGB texture and expects sRGB-encoded mip data);
+/// - normal: decode each vector to [-1, 1], average, renormalize — never a
+///   plain flattening average, which would wash out the relief;
+/// - roughness: linear R8, direct average.
+///
+/// All operations are pure and deterministic; no allocation happens at frame
+/// time. The renderer builds this chain once at initialization from the
+/// committed assets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainMipChain {
+    /// Albedo levels, RGBA8 sRGB intent, level 0 = base texture.
+    pub albedo: Vec<MipImage>,
+    /// Tangent-space normal levels, RGBA8 linear, level 0 = base texture.
+    pub normal: Vec<MipImage>,
+    /// Roughness levels, R8 linear, level 0 = base texture.
+    pub roughness: Vec<MipImage>,
+}
+
+/// Number of mip levels for a power-of-two square texture of the given edge:
+/// `log2(size) + 1` (512 -> 10 levels down to 1x1).
+///
+/// # Panics
+///
+/// Panics if `size` is not a positive power of two.
+#[must_use]
+pub fn mip_level_count_for_size(size: u32) -> u32 {
+    assert!(
+        size >= 1 && size.is_power_of_two(),
+        "mip level count requires a positive power-of-two size, got {size}"
+    );
+    size.trailing_zeros() + 1
+}
+
+/// Assemble the base texture set from decoded committed assets.
+///
+/// `albedo_rgba8` and `normal_rgba8` are the direct RGBA8 decodes of the
+/// committed PNGs; `roughness_rgba8` is the gray PNG decode (R == G == B ==
+/// the linear roughness value). Extracting the R channel here keeps the GPU
+/// upload path and the test path byte-identical.
+#[must_use]
+pub fn terrain_texture_set_from_decoded(
+    albedo_rgba8: &[u8],
+    normal_rgba8: &[u8],
+    roughness_rgba8: &[u8],
+) -> TerrainTextureSet {
+    let roughness_r8 = roughness_rgba8.iter().step_by(4).copied().collect();
+    TerrainTextureSet {
+        albedo_rgba: albedo_rgba8.to_vec(),
+        normal_rgba: normal_rgba8.to_vec(),
+        roughness_r8,
+    }
+}
+
+/// Build the full mip chain for a terrain texture set.
+///
+/// A pure function of the input pixels: the same set always yields the same
+/// chain, bitwise, on every build and platform. Level 0 is the input itself;
+/// each following level halves both dimensions.
+#[must_use]
+pub fn generate_terrain_mip_chain(set: &TerrainTextureSet, size: u32) -> TerrainMipChain {
+    assert_eq!(
+        set.albedo_rgba.len(),
+        (size * size * 4) as usize,
+        "albedo pixel count must match size"
+    );
+    assert_eq!(
+        set.normal_rgba.len(),
+        (size * size * 4) as usize,
+        "normal pixel count must match size"
+    );
+    assert_eq!(
+        set.roughness_r8.len(),
+        (size * size) as usize,
+        "roughness pixel count must match size"
+    );
+
+    let level_count = mip_level_count_for_size(size) as usize;
+    let mut albedo = Vec::with_capacity(level_count);
+    let mut normal = Vec::with_capacity(level_count);
+    let mut roughness = Vec::with_capacity(level_count);
+
+    let (mut w, mut h, mut albedo_px) = (size, size, set.albedo_rgba.clone());
+    let (mut normal_w, mut normal_h, mut normal_px) = (size, size, set.normal_rgba.clone());
+    let (mut rough_w, mut rough_h, mut rough_px) = (size, size, set.roughness_r8.clone());
+
+    albedo.push(MipImage {
+        width: w,
+        height: h,
+        bytes: albedo_px.clone(),
+    });
+    normal.push(MipImage {
+        width: normal_w,
+        height: normal_h,
+        bytes: normal_px.clone(),
+    });
+    roughness.push(MipImage {
+        width: rough_w,
+        height: rough_h,
+        bytes: rough_px.clone(),
+    });
+
+    while w > 1 {
+        (w, h, albedo_px) = downsample_rgba8_srgb(w, h, &albedo_px);
+        albedo.push(MipImage {
+            width: w,
+            height: h,
+            bytes: albedo_px.clone(),
+        });
+        (normal_w, normal_h, normal_px) = downsample_rgba8_normal(normal_w, normal_h, &normal_px);
+        normal.push(MipImage {
+            width: normal_w,
+            height: normal_h,
+            bytes: normal_px.clone(),
+        });
+        (rough_w, rough_h, rough_px) = downsample_r8(rough_w, rough_h, &rough_px);
+        roughness.push(MipImage {
+            width: rough_w,
+            height: rough_h,
+            bytes: rough_px.clone(),
+        });
+    }
+
+    TerrainMipChain {
+        albedo,
+        normal,
+        roughness,
+    }
+}
+
+/// Half-resolution 2x2 box filter of an RGBA8 sRGB image.
+///
+/// Every intermediate level of a power-of-two chain is even-sized, so the
+/// filter never crosses the tile border and each level stays perfectly
+/// periodic. Each texel is decoded to linear light, averaged, and re-encoded
+/// to sRGB, so the color space is preserved down the chain.
+fn downsample_rgba8_srgb(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let out_w = width / 2;
+    let out_h = height / 2;
+    let mut out = vec![0u8; (out_w * out_h * 4) as usize];
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut acc = [0.0f64; 4];
+            for (dy, dx) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
+                let i = (((2 * oy + dy) * width + (2 * ox + dx)) * 4) as usize;
+                for channel in 0..3 {
+                    acc[channel] += srgb_to_linear(src[i + channel]);
+                }
+                acc[3] += f64::from(src[i + 3]);
+            }
+            let oi = ((oy * out_w + ox) * 4) as usize;
+            for channel in 0..3 {
+                out[oi + channel] = linear_to_srgb_u8(acc[channel] * 0.25);
+            }
+            out[oi + 3] = (acc[3] * 0.25).round() as u8;
+        }
+    }
+    (out_w, out_h, out)
+}
+
+/// Half-resolution 2x2 box filter of an RGBA8 tangent-space normal map.
+///
+/// The four vectors are decoded to [-1, 1], summed, and renormalized; a
+/// near-zero sum (only possible on fully opposing corners, which the terrain
+/// normals never reach) falls back to flat-up instead of producing a
+/// degenerate level.
+fn downsample_rgba8_normal(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let out_w = width / 2;
+    let out_h = height / 2;
+    let mut out = vec![0u8; (out_w * out_h * 4) as usize];
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut sum = [0.0f64; 3];
+            for (dy, dx) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
+                let i = (((2 * oy + dy) * width + (2 * ox + dx)) * 4) as usize;
+                for channel in 0..3 {
+                    sum[channel] += (f64::from(src[i + channel]) / 127.5) - 1.0;
+                }
+            }
+            let length_sq = sum.iter().map(|c| c * c).sum::<f64>();
+            let normal = if length_sq > 1e-12 {
+                let inv = length_sq.sqrt().recip();
+                [sum[0] * inv, sum[1] * inv, sum[2] * inv]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            let oi = ((oy * out_w + ox) * 4) as usize;
+            for channel in 0..3 {
+                out[oi + channel] = ((normal[channel] * 0.5 + 0.5) * 255.0).round() as u8;
+            }
+            out[oi + 3] = 255;
+        }
+    }
+    (out_w, out_h, out)
+}
+
+/// Half-resolution 2x2 box filter of an R8 linear map (roughness).
+fn downsample_r8(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let out_w = width / 2;
+    let out_h = height / 2;
+    let mut out = vec![0u8; (out_w * out_h) as usize];
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut acc = 0u32;
+            for (dy, dx) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
+                acc += u32::from(src[((2 * oy + dy) * width + (2 * ox + dx)) as usize]);
+            }
+            // Nearest with half-up rounding, exact integer arithmetic.
+            out[(oy * out_w + ox) as usize] = ((acc + 2) / 4) as u8;
+        }
+    }
+    (out_w, out_h, out)
+}
+
+/// sRGB (IEC 61966-2-1) decode of one channel: [0, 255] -> linear [0, 1].
+fn srgb_to_linear(channel: u8) -> f64 {
+    let c = f64::from(channel) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB (IEC 61966-2-1) encode of one linear channel: [0, 1] -> [0, 255].
+fn linear_to_srgb_u8(linear: f64) -> u8 {
+    let c = linear.clamp(0.0, 1.0);
+    let encoded = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -609,5 +877,249 @@ mod tests {
             assert_eq!(a.to_bits(), b.to_bits(), "period violation at {i}");
             assert!((0.0..=1.0).contains(&a));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // G3A-R: deterministic mip chain regression tests
+    // -----------------------------------------------------------------------
+
+    fn chain_from_committed_assets() -> TerrainMipChain {
+        let albedo = decode_image(TERRAIN_ALBEDO_PNG).expect("albedo asset must decode");
+        let normal = decode_image(TERRAIN_NORMAL_PNG).expect("normal asset must decode");
+        let roughness = decode_image(TERRAIN_ROUGHNESS_PNG).expect("roughness asset must decode");
+        let set = terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness.rgba8);
+        generate_terrain_mip_chain(&set, TERRAIN_TEXTURE_SIZE)
+    }
+
+    #[test]
+    fn mip_level_count_is_log2_plus_one() {
+        assert_eq!(mip_level_count_for_size(1), 1);
+        assert_eq!(mip_level_count_for_size(2), 2);
+        assert_eq!(mip_level_count_for_size(64), 7);
+        assert_eq!(mip_level_count_for_size(512), 10);
+        assert_eq!(mip_level_count_for_size(1024), 11);
+    }
+
+    #[test]
+    fn mip_chain_has_full_level_count_for_all_maps() {
+        let chain = chain_from_committed_assets();
+        let levels = mip_level_count_for_size(TERRAIN_TEXTURE_SIZE) as usize;
+        assert_eq!(chain.albedo.len(), levels, "albedo level count");
+        assert_eq!(chain.normal.len(), levels, "normal level count");
+        assert_eq!(chain.roughness.len(), levels, "roughness level count");
+        assert!(
+            levels > 1,
+            "the mip chain must never collapse to mip-0-only"
+        );
+    }
+
+    #[test]
+    fn mip_chain_levels_have_halved_dimensions_and_pixel_counts() {
+        let chain = chain_from_committed_assets();
+        let mut expected_w = TERRAIN_TEXTURE_SIZE;
+        for (level, mip) in chain.albedo.iter().enumerate() {
+            assert_eq!(
+                (mip.width, mip.height),
+                (expected_w, expected_w),
+                "albedo level {level} dimensions"
+            );
+            assert_eq!(
+                mip.bytes.len(),
+                (mip.width * mip.height * 4) as usize,
+                "albedo level {level} byte count"
+            );
+            expected_w /= 2;
+        }
+        assert_eq!(expected_w, 0, "chain must terminate at the 1x1 level");
+
+        for (level, mip) in chain.normal.iter().enumerate() {
+            assert_eq!(
+                (mip.width, mip.height),
+                (chain.albedo[level].width, chain.albedo[level].height),
+                "normal level {level} must match the albedo dimensions"
+            );
+            assert_eq!(
+                mip.bytes.len(),
+                (mip.width * mip.height * 4) as usize,
+                "normal level {level} byte count"
+            );
+        }
+        for (level, mip) in chain.roughness.iter().enumerate() {
+            assert_eq!(
+                (mip.width, mip.height),
+                (chain.albedo[level].width, chain.albedo[level].height),
+                "roughness level {level} must match the albedo dimensions"
+            );
+            assert_eq!(
+                mip.bytes.len(),
+                (mip.width * mip.height) as usize,
+                "roughness level {level} must be single-channel"
+            );
+        }
+        let last = chain.albedo.last().expect("chain must be non-empty");
+        assert_eq!((last.width, last.height), (1, 1), "last level must be 1x1");
+    }
+
+    #[test]
+    fn mip_chain_mip_zero_is_the_committed_base() {
+        let albedo = decode_image(TERRAIN_ALBEDO_PNG).expect("albedo asset must decode");
+        let normal = decode_image(TERRAIN_NORMAL_PNG).expect("normal asset must decode");
+        let chain = chain_from_committed_assets();
+        assert_eq!(chain.albedo[0].bytes, albedo.rgba8, "albedo base level");
+        assert_eq!(chain.normal[0].bytes, normal.rgba8, "normal base level");
+    }
+
+    #[test]
+    fn mip_chain_generation_is_bitwise_deterministic() {
+        let a = chain_from_committed_assets();
+        let b = chain_from_committed_assets();
+        assert_eq!(a, b, "mip chain generation must be bitwise deterministic");
+    }
+
+    #[test]
+    fn mip_chain_preserves_periodicity_of_the_base_texture() {
+        // The base maps are periodic in their own texture space, and the mip
+        // filter never crosses the tile border (every 2x2 quad is interior),
+        // so each level inherits the wrap smoothness: the seam delta (edge
+        // texel vs the far edge texel that becomes its tiled neighbour) must
+        // stay within the interior delta budget, exactly like the base maps.
+        let chain = chain_from_committed_assets();
+        for (level, mip) in chain.albedo.iter().enumerate().skip(2) {
+            let n = mip.width as usize;
+            let mut max_interior = 0u8;
+            for row in 0..n {
+                for col in 0..n - 1 {
+                    for channel in 0..3 {
+                        let a = mip.bytes[row * n * 4 + col * 4 + channel];
+                        let b = mip.bytes[row * n * 4 + (col + 1) * 4 + channel];
+                        max_interior = max_interior.max(a.abs_diff(b));
+                    }
+                }
+            }
+            let mut max_seam = 0u8;
+            for row in 0..n {
+                for channel in 0..3 {
+                    let a = mip.bytes[row * n * 4 + channel];
+                    let b = mip.bytes[row * n * 4 + (n - 1) * 4 + channel];
+                    max_seam = max_seam.max(a.abs_diff(b));
+                }
+            }
+            assert!(
+                max_seam as u16 <= max_interior as u16 + 2,
+                "albedo level {level}: seam delta {max_seam} exceeds interior {max_interior}"
+            );
+        }
+        for (level, mip) in chain.roughness.iter().enumerate().skip(2) {
+            let n = mip.width as usize;
+            let mut max_interior = 0u8;
+            for row in 0..n {
+                for col in 0..n - 1 {
+                    max_interior = max_interior
+                        .max(mip.bytes[row * n + col].abs_diff(mip.bytes[row * n + col + 1]));
+                }
+            }
+            let mut max_seam = 0u8;
+            for row in 0..n {
+                max_seam = max_seam.max(mip.bytes[row * n].abs_diff(mip.bytes[row * n + n - 1]));
+            }
+            assert!(
+                max_seam as u16 <= max_interior as u16 + 2,
+                "roughness level {level}: seam delta {max_seam} exceeds interior {max_interior}"
+            );
+        }
+    }
+
+    #[test]
+    fn mip_normal_levels_are_finite_and_normalized() {
+        let chain = chain_from_committed_assets();
+        for (level, mip) in chain.normal.iter().enumerate() {
+            for pixel in mip.bytes.as_chunks::<4>().0 {
+                let nx = (f32::from(pixel[0]) / 127.5) - 1.0;
+                let ny = (f32::from(pixel[1]) / 127.5) - 1.0;
+                let nz = (f32::from(pixel[2]) / 127.5) - 1.0;
+                assert!(nx.is_finite() && ny.is_finite() && nz.is_finite());
+                let length = (nx * nx + ny * ny + nz * nz).sqrt();
+                assert!(
+                    (length - 1.0).abs() < 0.04,
+                    "normal level {level} texel not unit length: {length} at {pixel:?}"
+                );
+                assert!(nz > 0.9, "downsampled normals must keep pointing up");
+                assert_eq!(pixel[3], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn mip_albedo_mean_is_stable_down_the_chain() {
+        // The box filter averages in linear light, so the sRGB-space mean can
+        // drift only slightly from level to level; a large jump would mean the
+        // color space is being ignored.
+        let chain = chain_from_committed_assets();
+        let base_mean: Vec<f64> = {
+            let mip = &chain.albedo[0];
+            let mut mean = [0.0f64; 3];
+            for pixel in mip.bytes.as_chunks::<4>().0 {
+                for (channel, slot) in mean.iter_mut().enumerate() {
+                    *slot += f64::from(pixel[channel]);
+                }
+            }
+            for value in &mut mean {
+                *value /= (mip.width * mip.height) as f64;
+            }
+            mean.to_vec()
+        };
+        for (level, mip) in chain.albedo.iter().enumerate().skip(1) {
+            let mut mean = [0.0f64; 3];
+            for pixel in mip.bytes.as_chunks::<4>().0 {
+                for (channel, slot) in mean.iter_mut().enumerate() {
+                    *slot += f64::from(pixel[channel]);
+                }
+            }
+            for (channel, value) in mean.iter_mut().enumerate() {
+                *value /= (mip.width * mip.height) as f64;
+                assert!(
+                    (*value - base_mean[channel]).abs() < 14.0,
+                    "albedo level {level} channel {channel} mean drifted: {value:.1} vs {:.1}",
+                    base_mean[channel]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mip_roughness_mean_is_stable_down_the_chain() {
+        // Integer half-up averaging preserves the mean of linear data.
+        let chain = chain_from_committed_assets();
+        let base_mean = chain.roughness[0]
+            .bytes
+            .iter()
+            .map(|&v| f64::from(v))
+            .sum::<f64>()
+            / chain.roughness[0].bytes.len() as f64;
+        for (level, mip) in chain.roughness.iter().enumerate().skip(1) {
+            let mean =
+                mip.bytes.iter().map(|&v| f64::from(v)).sum::<f64>() / mip.bytes.len() as f64;
+            assert!(
+                (mean - base_mean).abs() < 3.0,
+                "roughness level {level} mean drifted: {mean:.1} vs {base_mean:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn mip_chain_from_generated_set_matches_committed_chain() {
+        // The chain built from `generate_terrain_textures` must be bitwise
+        // identical to the chain built from the committed PNGs, proving the
+        // GPU path (decoded assets) and the development path (generator) can
+        // never drift apart.
+        let generated = generate_terrain_textures(TERRAIN_TEXTURE_SIZE);
+        let chain_a = generate_terrain_mip_chain(&generated, TERRAIN_TEXTURE_SIZE);
+
+        let albedo = decode_image(TERRAIN_ALBEDO_PNG).expect("albedo asset must decode");
+        let normal = decode_image(TERRAIN_NORMAL_PNG).expect("normal asset must decode");
+        let roughness = decode_image(TERRAIN_ROUGHNESS_PNG).expect("roughness asset must decode");
+        let set = terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness.rgba8);
+        let chain_b = generate_terrain_mip_chain(&set, TERRAIN_TEXTURE_SIZE);
+        assert_eq!(chain_a, chain_b);
     }
 }
