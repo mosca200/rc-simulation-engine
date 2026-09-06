@@ -8,8 +8,9 @@
 //   - legacy-compat irradiance scale (see fs_lit) so the diffuse response
 //     matches the established Lambert look exactly
 //
-// Still deliberately out of scope: no shadows, no HDR, no IBL, no normal maps,
-// no clouds. Ambient is flat and mostly applied to the diffuse response.
+// G2B adds one stable directional shadow map. Still deliberately out of scope:
+// no cascades, HDR, IBL, normal maps, or clouds. Ambient is flat and mostly
+// applied to the diffuse response so aircraft remain readable in shadow.
 
 // ---------------------------------------------------------------------------
 // Uniforms
@@ -48,6 +49,14 @@ struct EnvironmentUniform {
     sun_color: vec4<f32>,
 };
 
+// G2B: directional shadow state. The light view-projection transforms a world
+// position into WebGPU clip space for depth comparison. The receiver offset is
+// deliberately separate from the caster rasterization bias configured by wgpu.
+struct ShadowUniform {
+    light_view_projection: mat4x4<f32>,
+    receiver_depth_bias_and_padding: vec4<f32>,
+};
+
 // G1D: per-primitive PBR material parameters.
 // metallic: 0 = dielectric, 1 = metal (glTF metallicFactor).
 // roughness: perceptual roughness (glTF roughnessFactor), floored in the
@@ -66,6 +75,12 @@ var<uniform> object: ObjectUniform;
 
 @group(2) @binding(0)
 var<uniform> environment: EnvironmentUniform;
+@group(2) @binding(1)
+var directional_shadow_depth: texture_depth_2d;
+@group(2) @binding(2)
+var directional_shadow_sampler: sampler_comparison;
+@group(2) @binding(3)
+var<uniform> shadow: ShadowUniform;
 
 // G1C: Material texture and sampler.
 // Group 3 is the material bind group, containing the base color texture,
@@ -198,6 +213,15 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return output;
 }
 
+// G2B depth-only shadow caster vertex path. It shares the object binding with
+// the scene pipeline and reads the light matrix from the existing environment
+// boundary. The pass has no fragment stage or color target.
+@vertex
+fn vs_shadow(input: VertexInput) -> @builtin(position) vec4<f32> {
+    let world_position = object.model * vec4<f32>(input.position, 1.0);
+    return shadow.light_view_projection * world_position;
+}
+
 // ---------------------------------------------------------------------------
 // G1D: PBR material response (metallic/roughness)
 // ---------------------------------------------------------------------------
@@ -257,6 +281,33 @@ fn smith_geometry(ndot_v: f32, ndot_l: f32, roughness: f32) -> f32 {
     let gv = ndot_v / (ndot_v * (1.0 - k) + k);
     let gl = ndot_l / (ndot_l * (1.0 - k) + k);
     return gv * gl;
+}
+
+// G2B: comparison-sample a single directional shadow map. Coordinates outside
+// the fixed light frustum deliberately return fully lit, rather than relying on
+// sampler edge behavior. Linear comparison filtering provides the compact
+// hardware PCF footprint; no large fragment kernel is needed.
+fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
+    let light_clip = shadow.light_view_projection * vec4<f32>(world_position, 1.0);
+    if (light_clip.w <= 1e-6) {
+        return 1.0;
+    }
+    let projected = light_clip.xyz / light_clip.w;
+    let uv = projected.xy * 0.5 + vec2<f32>(0.5);
+    let inside_shadow_frustum =
+        uv.x >= 0.0 && uv.x <= 1.0 &&
+        uv.y >= 0.0 && uv.y <= 1.0 &&
+        projected.z >= 0.0 && projected.z <= 1.0;
+    if (!inside_shadow_frustum) {
+        return 1.0;
+    }
+    let receiver_depth = clamp(projected.z - shadow.receiver_depth_bias_and_padding.x, 0.0, 1.0);
+    return textureSampleCompare(
+        directional_shadow_depth,
+        directional_shadow_sampler,
+        uv,
+        receiver_depth,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +386,9 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Direct lighting (see legacy-compat irradiance scale above).
     let irradiance = PI * environment.light_direction.w;
-    let direct = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
+    let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
+    let shadow_visibility = directional_shadow_visibility(input.world_position);
+    let direct = direct_unshadowed * shadow_visibility;
 
     // Ambient: applied predominantly to the diffuse (non-metal) response,
     // with the documented readability floor for metals. No fake IBL.

@@ -12,11 +12,10 @@
 //!
 //! # Draw Architecture
 //!
-//! The render pass is organized as:
-//! 1. Sky pass (fullscreen triangle)
-//! 2. Terrain batches (chunked, lit + fogged)
-//! 3. Debug overlays (grid/axes, unlit)
-//! 4. Aircraft batches (lit + fogged)
+//! Each frame is organized as:
+//! 1. Directional shadow depth pass (terrain, scenery, aircraft, articulated surfaces)
+//! 2. Main scene pass: sky (fullscreen triangle), terrain/scenery (lit + fogged),
+//!    optional debug overlays (unlit), and aircraft batches (lit + fogged)
 //!
 //! # Object Transforms
 //!
@@ -32,6 +31,10 @@
 //! for presentation.
 
 use crate::scenery::{SceneryMesh, SceneryPreset};
+use crate::shadow::{
+    SHADOW_DEPTH_BIAS_CONSTANT, SHADOW_DEPTH_BIAS_SLOPE_SCALE, SHADOW_MAP_RESOLUTION,
+    SHADOW_RECEIVER_DEPTH_BIAS, stable_directional_shadow_transform,
+};
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::texture::{SamplerConfig, TextureLoadError, create_staging_buffer};
 use crate::{
@@ -181,6 +184,27 @@ struct EnvironmentUniform {
     sun_color: [f32; 4],
 }
 
+/// G2B: per-frame light matrix and receiver bias for directional shadows.
+///
+/// The matrix is kept in the existing environment bind-group boundary, beside
+/// the shared light direction and atmosphere data. It is the only shadow
+/// buffer written in the frame path.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ShadowUniform {
+    light_view_projection: [[f32; 4]; 4],
+    receiver_depth_bias_and_padding: [f32; 4],
+}
+
+impl ShadowUniform {
+    fn from_matrix(light_view_projection: &Mat4) -> Self {
+        Self {
+            light_view_projection: matrix_to_wgsl_columns(light_view_projection),
+            receiver_depth_bias_and_padding: [SHADOW_RECEIVER_DEPTH_BIAS, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
 impl EnvironmentUniform {
     fn default_environment() -> Self {
         let dir = DEFAULT_LIGHT_DIRECTION;
@@ -273,6 +297,14 @@ struct DepthTarget {
     view: wgpu::TextureView,
 }
 
+/// G2B: persistent depth texture sampled by the lit pass and written by the
+/// directional shadow caster pass. It is deliberately independent from the
+/// resize-dependent scene depth target.
+struct ShadowTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 /// G1C: Persistent GPU material resources.
 struct GpuMaterial {
     _texture: wgpu::Texture,
@@ -350,6 +382,7 @@ pub struct WgpuRenderer {
     sky_pipeline: wgpu::RenderPipeline,
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
 
     _camera_bind_group_layout: wgpu::BindGroupLayout,
     _object_bind_group_layout: wgpu::BindGroupLayout,
@@ -369,7 +402,9 @@ pub struct WgpuRenderer {
     identity_object_bind_group: wgpu::BindGroup,
 
     _environment_buffer: wgpu::Buffer,
+    shadow_matrix_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
+    shadow_light_direction: [f32; 3],
 
     // G1C: Material system.
     materials: Vec<GpuMaterial>,
@@ -396,6 +431,8 @@ pub struct WgpuRenderer {
     line_vertex_count: u32,
 
     depth_target: DepthTarget,
+    shadow_target: ShadowTarget,
+    _shadow_sampler: wgpu::Sampler,
     camera: CameraMode,
     asynchronous_gpu_error: Arc<AtomicU8>,
 
@@ -528,6 +565,16 @@ impl WgpuRenderer {
                 ],
                 immediate_size: 0,
             });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("G2B directional shadow pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                    Some(&environment_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
 
         let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, format);
         let triangle_pipeline = create_pipeline(
@@ -556,6 +603,7 @@ impl WgpuRenderer {
                 fragment_entry_point: "fs_unlit",
             },
         );
+        let shadow_pipeline = create_shadow_pipeline(&device, &shader, &shadow_pipeline_layout);
 
         // White fallback material.
         let fallback_material =
@@ -819,11 +867,30 @@ impl WgpuRenderer {
         });
 
         let default_environment = EnvironmentUniform::default_environment();
+        // G2B: derive the shadow camera direction from the exact normalized
+        // direction uploaded into EnvironmentUniform, so the sun disk,
+        // direct PBR lighting, and shadow map can never diverge.
+        let shadow_light_direction = [
+            default_environment.light_direction[0],
+            default_environment.light_direction[1],
+            default_environment.light_direction[2],
+        ];
+        let initial_shadow_transform =
+            stable_directional_shadow_transform(shadow_light_direction, [0.0; 3]);
         let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("environment uniform"),
             contents: bytemuck::bytes_of(&default_environment),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("directional shadow matrix uniform"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(
+                &initial_shadow_transform.light_view_projection,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_target = create_shadow_target(&device);
+        let shadow_sampler = create_shadow_comparison_sampler(&device);
 
         // Bind groups.
         let camera_bind_group = camera_bind_group(
@@ -848,6 +915,9 @@ impl WgpuRenderer {
             &device,
             &environment_bind_group_layout,
             &environment_buffer,
+            &shadow_target.view,
+            &shadow_sampler,
+            &shadow_matrix_buffer,
             "environment bind group",
         );
 
@@ -867,6 +937,7 @@ impl WgpuRenderer {
             sky_pipeline,
             triangle_pipeline,
             line_pipeline,
+            shadow_pipeline,
             _camera_bind_group_layout: camera_bind_group_layout,
             _object_bind_group_layout: object_bind_group_layout,
             _environment_bind_group_layout: environment_bind_group_layout,
@@ -878,7 +949,9 @@ impl WgpuRenderer {
             _identity_object_buffer: identity_object_buffer,
             identity_object_bind_group,
             _environment_buffer: environment_buffer,
+            shadow_matrix_buffer,
             environment_bind_group,
+            shadow_light_direction,
             materials,
             _fallback_material_index: fallback_material_index,
             aircraft_batches,
@@ -892,6 +965,8 @@ impl WgpuRenderer {
             line_vertex_buffer,
             line_vertex_count: references.vertices().len() as u32,
             depth_target,
+            shadow_target,
+            _shadow_sampler: shadow_sampler,
             camera: camera_config.build(size.width, size.height),
             asynchronous_gpu_error,
             show_debug_overlays: false,
@@ -998,6 +1073,20 @@ impl WgpuRenderer {
             bytemuck::bytes_of(&aircraft_object_uniform),
         );
 
+        // G2B: the light camera follows the aircraft only on its light-space
+        // texel grid. The single matrix write targets a persistent buffer; no
+        // shadow GPU resource, bind group, or pipeline is created per frame.
+        let shadow_transform = stable_directional_shadow_transform(
+            self.shadow_light_direction,
+            aircraft_pose.translation_render_m(),
+        );
+        let shadow_uniform = ShadowUniform::from_matrix(&shadow_transform.light_view_projection);
+        self.queue.write_buffer(
+            &self.shadow_matrix_buffer,
+            0,
+            bytemuck::bytes_of(&shadow_uniform),
+        );
+
         // G1E: articulated surface uniforms (`root * local hinge`).
         for batch in &self.surface_batches {
             let composed = aircraft_model_matrix
@@ -1020,6 +1109,67 @@ impl WgpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("G1C frame encoder"),
             });
+        {
+            // G2B: directional caster pass. This is intentionally depth-only:
+            // terrain, scenery, rigid aircraft geometry, and articulated
+            // surfaces are drawn once into the persistent shadow target.
+            let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+                view: &self.shadow_target.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            };
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("G2B directional shadow depth pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(depth_attachment),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            // Group 0 is unused by `vs_shadow`, but binding the existing camera
+            // group keeps the depth pipeline layout contiguous and portable.
+            shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            shadow_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+
+            shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+            for chunk in &self.terrain_chunks {
+                shadow_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
+
+            if let Some(ref scenery) = self.scenery {
+                shadow_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
+            }
+
+            shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+            for batch in &self.aircraft_batches {
+                shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+            }
+
+            for batch in &self.surface_batches {
+                shadow_pass.set_bind_group(
+                    1,
+                    &self.surface_object_bind_groups[batch.object_buffer_index],
+                    &[],
+                );
+                shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+            }
+        }
         {
             let color_attachment = wgpu::RenderPassColorAttachment {
                 view: &surface_view,
@@ -1392,16 +1542,48 @@ fn matrix_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGro
 fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(size_of::<EnvironmentUniform>() as u64),
+        entries: &[
+            // Existing environment/light/atmosphere uniform.
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<EnvironmentUniform>() as u64),
+                },
+                count: None,
             },
-            count: None,
-        }],
+            // G2B: comparison sample resources and light matrix. They extend
+            // the established environment boundary while the lit pipeline
+            // remains at groups 0..3.
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<ShadowUniform>() as u64),
+                },
+                count: None,
+            },
+        ],
     })
 }
 
@@ -1475,16 +1657,33 @@ fn matrix_bind_group(
 fn create_environment_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    buffer: &wgpu::Buffer,
+    environment_buffer: &wgpu::Buffer,
+    shadow_texture_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+    shadow_matrix_buffer: &wgpu::Buffer,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: environment_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(shadow_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadow_matrix_buffer.as_entire_binding(),
+            },
+        ],
     })
 }
 
@@ -1557,6 +1756,62 @@ fn create_pipeline(
     })
 }
 
+/// G2B: depth-only caster pipeline for the fixed directional shadow map.
+///
+/// It intentionally has no color target, material bind group, or fragment
+/// entry point. Back-face culling matches the main scene pipeline; unlike a
+/// front-face-only shadow pass it keeps thin RC wings and articulated control
+/// surfaces from disappearing as casters.
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G2B directional shadow depth pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3,
+                    1 => Float32x3,
+                    2 => Float32x4,
+                    3 => Float32x2,
+                ],
+            })],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: SHADOW_DEPTH_BIAS_CONSTANT,
+                slope_scale: SHADOW_DEPTH_BIAS_SLOPE_SCALE,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn create_sky_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1624,6 +1879,44 @@ fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthT
         _texture: texture,
         view,
     }
+}
+
+fn create_shadow_target(device: &wgpu::Device) -> ShadowTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("G2B directional shadow map"),
+        size: wgpu::Extent3d {
+            width: SHADOW_MAP_RESOLUTION,
+            height: SHADOW_MAP_RESOLUTION,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    ShadowTarget {
+        _texture: texture,
+        view,
+    }
+}
+
+/// Linear comparison filtering provides the small, stable hardware 2x2 PCF
+/// footprint without a costly manually expanded fragment kernel.
+fn create_shadow_comparison_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("G2B directional shadow comparison sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -1862,6 +2155,66 @@ mod shader_brdf_regression_tests {
         assert!(
             source.contains("* irradiance * ndot_l;"),
             "fs_lit must keep ndot_l as the final direct-light multiplier"
+        );
+    }
+}
+
+#[cfg(test)]
+mod directional_shadow_regression_tests {
+    //! G2B structural guards. The light-space math itself lives in `shadow.rs`
+    //! so it can be tested without wgpu; these tests pin the renderer/shader
+    //! integration points that must not drift in later slices.
+
+    #[test]
+    fn shadow_uniform_has_matrix_plus_one_vec4_slot() {
+        assert_eq!(
+            std::mem::size_of::<super::ShadowUniform>(),
+            80,
+            "ShadowUniform must remain a mat4 plus one aligned vec4 slot"
+        );
+    }
+
+    #[test]
+    fn shadow_resources_are_not_created_from_the_frame_path() {
+        let source = include_str!("gpu.rs");
+        let (_, after_render) = source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path");
+        let (frame_path, _) = after_render
+            .split_once("fn check_asynchronous_gpu_error")
+            .expect("frame path must end before asynchronous error handling");
+        for forbidden_creation in [
+            "create_shadow_target(",
+            "create_shadow_pipeline(",
+            "create_environment_bind_group(",
+        ] {
+            assert!(
+                !frame_path.contains(forbidden_creation),
+                "frame path must not recreate {forbidden_creation}"
+            );
+        }
+        assert!(
+            frame_path.contains("&self.shadow_matrix_buffer"),
+            "frame path should only update the persistent shadow matrix buffer"
+        );
+    }
+
+    #[test]
+    fn shader_keeps_shadows_on_direct_light_only_and_fogs_after_lighting() {
+        let source = include_str!("shader.wgsl");
+        let direct = source
+            .find("let direct = direct_unshadowed * shadow_visibility;")
+            .expect("direct PBR lighting must be multiplied by shadow visibility");
+        let ambient = source
+            .find("let lit_rgb = direct + ambient;")
+            .expect("ambient must remain outside the shadow multiplier");
+        let fog = source
+            .find("let final_rgb = mix(lit_rgb, fog_color, fog);")
+            .expect("fog must continue to be applied after lighting");
+        assert!(direct < ambient && ambient < fog);
+        assert!(
+            source.contains("return textureSampleCompare("),
+            "directional shadows must use the comparison sampler path"
         );
     }
 }
