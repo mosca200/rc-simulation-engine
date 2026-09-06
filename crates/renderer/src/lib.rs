@@ -22,6 +22,7 @@ pub mod scenery;
 mod shadow;
 mod surfaces;
 pub mod terrain;
+pub mod terrain_textures;
 pub mod texture;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
