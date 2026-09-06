@@ -1,12 +1,22 @@
 //! G1C: glTF/GLB asset loading with base-color texture support.
+//! G1D: glTF metallic/roughness factor parsing for PBR material response.
 //!
-//! Loads the G1A/G1B/G1C subset of glTF 2.0:
+//! Loads the G1A/G1B/G1C/G1D subset of glTF 2.0:
 //! - POSITION (required)
 //! - NORMAL (optional with fallback)
 //! - COLOR_0 (optional)
 //! - TEXCOORD_0 (optional)
 //! - pbrMetallicRoughness.baseColorFactor
 //! - pbrMetallicRoughness.baseColorTexture (G1C)
+//! - pbrMetallicRoughness.metallicFactor (G1D)
+//! - pbrMetallicRoughness.roughnessFactor (G1D)
+//!
+//! G1D deliberately does NOT yet load:
+//! - metallicRoughnessTexture
+//! - normalTexture
+//! - occlusionTexture
+//! - emissiveTexture
+//!   These will follow in later slices.
 //!
 //! # Texture Color Space
 //!
@@ -32,6 +42,24 @@ use thiserror::Error;
 
 /// glTF default `pbrMetallicRoughness.baseColorFactor` when absent.
 const GLTF_DEFAULT_BASE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// glTF 2.0 spec default `pbrMetallicRoughness.metallicFactor` when absent.
+const GLTF_DEFAULT_METALLIC: f32 = 1.0;
+
+/// glTF 2.0 spec default `pbrMetallicRoughness.roughnessFactor` when absent.
+const GLTF_DEFAULT_ROUGHNESS: f32 = 1.0;
+
+/// Clamp a glTF scalar material factor into the valid [0, 1] range.
+///
+/// Non-finite values (NaN/Inf from malformed assets) fall back to the glTF
+/// default for that factor so downstream GPU uniforms are always finite.
+fn clamp_unit_factor(value: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum GlbLoadError {
@@ -104,6 +132,12 @@ pub enum GlbLoadError {
 pub struct PrimitiveMaterial {
     pub base_color_factor: [f32; 4],
     pub base_color_texture: Option<DecodedTexture>,
+    /// glTF `pbrMetallicRoughness.metallicFactor` (G1D), clamped to [0, 1].
+    /// Defaults to 1.0 per the glTF 2.0 spec when absent.
+    pub metallic_factor: f32,
+    /// glTF `pbrMetallicRoughness.roughnessFactor` (G1D), clamped to [0, 1].
+    /// Defaults to 1.0 per the glTF 2.0 spec when absent.
+    pub roughness_factor: f32,
     pub sampler_config: SamplerConfig,
 }
 
@@ -116,6 +150,13 @@ impl PrimitiveMaterial {
     ) -> Result<Self, GlbLoadError> {
         let pbr = material.pbr_metallic_roughness();
         let base_color_factor = pbr.base_color_factor();
+
+        // G1D: metallic/roughness scalar factors. The gltf crate already
+        // applies the spec defaults (1.0) when the properties are absent;
+        // the clamp guarantees finite, in-range values even for malformed
+        // assets so GPU uniforms never contain NaN/Inf.
+        let metallic_factor = clamp_unit_factor(pbr.metallic_factor(), GLTF_DEFAULT_METALLIC);
+        let roughness_factor = clamp_unit_factor(pbr.roughness_factor(), GLTF_DEFAULT_ROUGHNESS);
 
         let base_color_texture = if let Some(info) = pbr.base_color_texture() {
             if info.tex_coord() != 0 {
@@ -152,6 +193,8 @@ impl PrimitiveMaterial {
         Ok(Self {
             base_color_factor,
             base_color_texture,
+            metallic_factor,
+            roughness_factor,
             sampler_config,
         })
     }
@@ -160,6 +203,8 @@ impl PrimitiveMaterial {
         Self {
             base_color_factor: GLTF_DEFAULT_BASE_COLOR,
             base_color_texture: None,
+            metallic_factor: GLTF_DEFAULT_METALLIC,
+            roughness_factor: GLTF_DEFAULT_ROUGHNESS,
             sampler_config: SamplerConfig::default_sampler(),
         }
     }
@@ -495,6 +540,8 @@ mod test_glb_builder {
         tex_coords: Option<Vec<[f32; 2]>>,
         indices: Vec<u32>,
         base_color_factor: Option<[f32; 4]>,
+        metallic_factor: Option<f32>,
+        roughness_factor: Option<f32>,
         image_data: Option<Vec<u8>>,
         image_mime: Option<&'static str>,
         sampler_wrap_s: Option<u32>,
@@ -511,6 +558,8 @@ mod test_glb_builder {
         pub positions: Vec<[f32; 3]>,
         pub indices: Vec<u32>,
         pub base_color_factor: Option<[f32; 4]>,
+        pub metallic_factor: Option<f32>,
+        pub roughness_factor: Option<f32>,
         pub has_texture: bool,
     }
 
@@ -523,6 +572,8 @@ mod test_glb_builder {
                 tex_coords: None,
                 indices: vec![0, 1, 2],
                 base_color_factor: None,
+                metallic_factor: None,
+                roughness_factor: None,
                 image_data: None,
                 image_mime: None,
                 sampler_wrap_s: None,
@@ -563,6 +614,16 @@ mod test_glb_builder {
 
         pub fn with_base_color_factor(mut self, factor: [f32; 4]) -> Self {
             self.base_color_factor = Some(factor);
+            self
+        }
+
+        pub fn with_metallic_factor(mut self, factor: f32) -> Self {
+            self.metallic_factor = Some(factor);
+            self
+        }
+
+        pub fn with_roughness_factor(mut self, factor: f32) -> Self {
+            self.roughness_factor = Some(factor);
             self
         }
 
@@ -994,7 +1055,11 @@ mod test_glb_builder {
             let mut materials = Vec::new();
             let has_texture = self.image_data.is_some();
 
-            if has_texture || self.base_color_factor.is_some() {
+            if has_texture
+                || self.base_color_factor.is_some()
+                || self.metallic_factor.is_some()
+                || self.roughness_factor.is_some()
+            {
                 let mut mat = String::from(r#"{"pbrMetallicRoughness":{"#);
                 if let Some(factor) = &self.base_color_factor {
                     mat.push_str(&format!(
@@ -1014,6 +1079,22 @@ mod test_glb_builder {
                 } else if has_texture {
                     mat.push_str(r##""baseColorTexture":{"index":0}"##);
                 }
+                // G1D: optional metallic/roughness factors.
+                if let Some(metallic) = self.metallic_factor {
+                    if self.base_color_factor.is_some() || has_texture {
+                        mat.push_str(",");
+                    }
+                    mat.push_str(&format!(r#""metallicFactor":{}"#, metallic));
+                }
+                if let Some(roughness) = self.roughness_factor {
+                    if self.base_color_factor.is_some()
+                        || has_texture
+                        || self.metallic_factor.is_some()
+                    {
+                        mat.push_str(",");
+                    }
+                    mat.push_str(&format!(r#""roughnessFactor":{}"#, roughness));
+                }
                 mat.push_str("}}");
                 materials.push(mat);
             }
@@ -1032,6 +1113,23 @@ mod test_glb_builder {
                         mat.push_str(",");
                     }
                     mat.push_str(r#""baseColorTexture":{"index":1}"#);
+                }
+                if let Some(metallic) = second.metallic_factor {
+                    if second.base_color_factor.is_some()
+                        || (second.has_texture && second_image_bv_index.is_some())
+                    {
+                        mat.push_str(",");
+                    }
+                    mat.push_str(&format!(r#""metallicFactor":{}"#, metallic));
+                }
+                if let Some(roughness) = second.roughness_factor {
+                    if second.base_color_factor.is_some()
+                        || (second.has_texture && second_image_bv_index.is_some())
+                        || second.metallic_factor.is_some()
+                    {
+                        mat.push_str(",");
+                    }
+                    mat.push_str(&format!(r#""roughnessFactor":{}"#, roughness));
                 }
                 mat.push_str("}}");
                 materials.push(mat);
@@ -1391,6 +1489,135 @@ mod tests {
         let material = PrimitiveMaterial::default_material();
         assert_eq!(material.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
         assert!(material.base_color_texture.is_none());
+        // G1D: glTF 2.0 spec defaults for metallic/roughness.
+        assert_eq!(material.metallic_factor, 1.0);
+        assert_eq!(material.roughness_factor, 1.0);
+    }
+
+    #[test]
+    fn material_metallic_factor_is_parsed() {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_base_color_factor([0.8, 0.2, 0.1, 1.0])
+            .with_metallic_factor(0.0)
+            .with_roughness_factor(0.35)
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "test_metallic_parsed.glb");
+        let asset = load_glb_asset(&path).unwrap();
+
+        let mat = &asset.primitives[0].material;
+        assert!(
+            (mat.metallic_factor - 0.0).abs() < 1e-6,
+            "metallicFactor should be parsed: {}",
+            mat.metallic_factor
+        );
+        assert!(
+            (mat.roughness_factor - 0.35).abs() < 1e-6,
+            "roughnessFactor should be parsed: {}",
+            mat.roughness_factor
+        );
+    }
+
+    #[test]
+    fn material_metallic_roughness_default_to_gltf_spec_when_absent() {
+        // GLB with a baseColorFactor but no explicit metallic/roughness.
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_base_color_factor([0.9, 0.9, 0.9, 1.0])
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "test_factor_defaults.glb");
+        let asset = load_glb_asset(&path).unwrap();
+
+        let mat = &asset.primitives[0].material;
+        assert_eq!(
+            mat.metallic_factor, 1.0,
+            "absent metallicFactor must default to the glTF spec value 1.0"
+        );
+        assert_eq!(
+            mat.roughness_factor, 1.0,
+            "absent roughnessFactor must default to the glTF spec value 1.0"
+        );
+    }
+
+    #[test]
+    fn multi_primitive_metallic_roughness_factors_are_distinct() {
+        let second = test_glb_builder::SecondPrimitive {
+            positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            base_color_factor: Some([0.0, 1.0, 0.0, 1.0]),
+            metallic_factor: Some(1.0),
+            roughness_factor: Some(0.1),
+            has_texture: false,
+        };
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_base_color_factor([1.0, 0.0, 0.0, 1.0])
+            .with_metallic_factor(0.0)
+            .with_roughness_factor(0.7)
+            .with_second_primitive(second)
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "test_multi_prim_factors.glb");
+        let asset = load_glb_asset(&path).unwrap();
+        assert_eq!(asset.primitives.len(), 2, "should have 2 primitives");
+
+        let mat0 = &asset.primitives[0].material;
+        let mat1 = &asset.primitives[1].material;
+
+        assert!((mat0.metallic_factor - 0.0).abs() < 1e-6);
+        assert!((mat0.roughness_factor - 0.7).abs() < 1e-6);
+        assert!((mat1.metallic_factor - 1.0).abs() < 1e-6);
+        assert!((mat1.roughness_factor - 0.1).abs() < 1e-6);
+        assert!(
+            (mat0.metallic_factor - mat1.metallic_factor).abs() > 0.5,
+            "per-primitive metallic factors must stay distinct"
+        );
+    }
+
+    #[test]
+    fn material_factors_are_clamped_to_unit_range() {
+        // Out-of-range factors must be clamped so GPU uniforms stay valid.
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_base_color_factor([0.5, 0.5, 0.5, 1.0])
+            .with_metallic_factor(2.0)
+            .with_roughness_factor(-0.5)
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "test_factor_clamp.glb");
+        let asset = load_glb_asset(&path).unwrap();
+
+        let mat = &asset.primitives[0].material;
+        assert_eq!(mat.metallic_factor, 1.0, "metallic 2.0 must clamp to 1.0");
+        assert_eq!(
+            mat.roughness_factor, 0.0,
+            "roughness -0.5 must clamp to 0.0"
+        );
+    }
+
+    #[test]
+    fn clamp_unit_factor_rejects_non_finite_values() {
+        // NaN / Inf must fall back to the glTF defaults, never poison uniforms.
+        assert_eq!(super::clamp_unit_factor(f32::NAN, 1.0), 1.0);
+        assert_eq!(super::clamp_unit_factor(f32::INFINITY, 1.0), 1.0);
+        assert_eq!(super::clamp_unit_factor(f32::NEG_INFINITY, 1.0), 1.0);
+        assert_eq!(super::clamp_unit_factor(0.5, 1.0), 0.5);
+        assert_eq!(super::clamp_unit_factor(-3.0, 1.0), 0.0);
+        assert_eq!(super::clamp_unit_factor(7.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn base_color_only_glb_still_loads_with_g1d_material_fields() {
+        // Regression guard: legacy baseColor-only GLBs keep loading unchanged.
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_base_color_factor([0.25, 0.5, 0.75, 1.0])
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "test_legacy_basecolor.glb");
+        let asset = load_glb_asset(&path).unwrap();
+
+        let mat = &asset.primitives[0].material;
+        assert_eq!(mat.base_color_factor, [0.25, 0.5, 0.75, 1.0]);
+        assert!(mat.base_color_texture.is_none());
+        assert!(mat.metallic_factor.is_finite());
+        assert!(mat.roughness_factor.is_finite());
+        assert!(
+            (0.0..=1.0).contains(&mat.metallic_factor)
+                && (0.0..=1.0).contains(&mat.roughness_factor)
+        );
     }
 
     #[test]
@@ -1661,6 +1888,8 @@ mod tests {
             positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
             indices: vec![0, 1, 2],
             base_color_factor: Some([0.0, 1.0, 0.0, 1.0]),
+            metallic_factor: None,
+            roughness_factor: None,
             has_texture: false,
         };
         let glb = test_glb_builder::GlbBuilder::new()
@@ -1694,6 +1923,8 @@ mod tests {
             positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
             indices: vec![0, 1, 2],
             base_color_factor: Some([0.0, 1.0, 0.0, 1.0]),
+            metallic_factor: None,
+            roughness_factor: None,
             has_texture: true,
         };
         let glb = test_glb_builder::GlbBuilder::new()

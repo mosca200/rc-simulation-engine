@@ -304,10 +304,15 @@ impl TerrainChunk {
                     render_z / material.texture_scale_m,
                 ];
 
+                // G2D: deterministic surface variation anchored to render-space
+                // coordinates; the geometry fields above are untouched.
+                let color =
+                    terrain_surface_color(baked_color, render_x, render_z, elevation, normal[1]);
+
                 vertices.push(Vertex {
                     position: [render_x, elevation, render_z],
                     normal,
-                    color: baked_color,
+                    color,
                     uv,
                 });
             }
@@ -400,6 +405,170 @@ fn compute_terrain_normal(height_field: &TerrainHeightField, x: u32, z: u32) -> 
     } else {
         SAFE_NORMAL
     }
+}
+
+// ---------------------------------------------------------------------------
+// G2D: deterministic world-space terrain surface variation
+// ---------------------------------------------------------------------------
+//
+// All tuning below is deliberately conservative: the terrain must visibly
+// stay a background for the aircraft (aircraft readability > terrain
+// richness). The worst-case per-channel deviation from the material base
+// color is bounded by TERRAIN_MAX_CHANNEL_DEVIATION; typical vertices land
+// well below it because the noise layers rarely align.
+
+/// Wavelength of the macroscopic brightness patches, in metres.
+const TERRAIN_MACRO_SCALE_M: f32 = 90.0;
+/// Wavelength of the medium brightness patches, in metres.
+const TERRAIN_MEDIUM_SCALE_M: f32 = 25.0;
+/// Peak luminance contribution of the macro layer, as a fraction of base.
+const TERRAIN_MACRO_VARIATION: f32 = 0.10;
+/// Peak luminance contribution of the medium layer, as a fraction of base.
+const TERRAIN_MEDIUM_VARIATION: f32 = 0.05;
+/// Peak luminance brightening on a fully vertical wall (normal_y = 0).
+const TERRAIN_SLOPE_VARIATION: f32 = 0.04;
+/// Elevation bias gradient, in luminance per metre of height.
+const TERRAIN_ELEVATION_GRADIENT_1_PER_M: f32 = 0.0015;
+/// Cap on the elevation bias, as a fraction of base.
+const TERRAIN_ELEVATION_MAX_BIAS: f32 = 0.02;
+/// Peak per-channel warm/cool tint, as a fraction of base.
+const TERRAIN_TINT_VARIATION: f32 = 0.04;
+/// Hard upper bound on any single output channel deviation from the base:
+/// the worst exactly-achievable deviation is 0.2584 (luminance swing 0.21
+/// combined with the full tint swing), rounded up with margin.
+const TERRAIN_MAX_CHANNEL_DEVIATION: f32 = 0.26;
+/// Fixed seeds keep the pattern stable across builds and platforms.
+const TERRAIN_MACRO_SEED: u32 = 0x2F6E_B9D1;
+const TERRAIN_MEDIUM_SEED: u32 = 0x8A4C_3D70;
+const TERRAIN_TINT_SEED: u32 = 0x1B5E_9C43;
+
+/// Deterministic terrain surface color for one vertex.
+///
+/// Pure input -> output mapping computed once at chunk generation:
+/// - no allocation, no mutable state, no time, no camera data;
+/// - anchored to render-space (x, z), the same coordinates used for
+///   `Vertex.position`, so shared boundary vertices between adjacent chunks
+///   (and across different chunkings) always resolve to the same color;
+/// - `base` (the material `base_color_factor`) stays the chromatic authority.
+fn terrain_surface_color(
+    base: [f32; 4],
+    render_x: f32,
+    render_z: f32,
+    elevation: f32,
+    normal_y: f32,
+) -> [f32; 4] {
+    // Slope response: a fully flat surface (normal_y = 1) contributes zero;
+    // steeper slopes brighten slightly, as if exposing drier grass.
+    let slope = (1.0 - normal_y).clamp(0.0, 1.0);
+    // Elevation response: gentle lightening with height, hard-capped so the
+    // effect stays sober even on large height fields. No global elevation
+    // range is assumed; the gradient is deliberately tiny.
+    let elevation_bias = (elevation * TERRAIN_ELEVATION_GRADIENT_1_PER_M)
+        .clamp(-TERRAIN_ELEVATION_MAX_BIAS, TERRAIN_ELEVATION_MAX_BIAS);
+
+    let luminance = 1.0
+        + TERRAIN_MACRO_VARIATION
+            * value_noise_2d(
+                render_x,
+                render_z,
+                TERRAIN_MACRO_SCALE_M,
+                TERRAIN_MACRO_SEED,
+            )
+        + TERRAIN_MEDIUM_VARIATION
+            * value_noise_2d(
+                render_x,
+                render_z,
+                TERRAIN_MEDIUM_SCALE_M,
+                TERRAIN_MEDIUM_SEED,
+            )
+        + TERRAIN_SLOPE_VARIATION * slope
+        + elevation_bias;
+
+    // Tiny warm/cool tint: a positive value lifts R and drops B (drier
+    // grass), negative does the opposite (denser green). The amplitude is
+    // small enough that no hue jumps are visible.
+    let tint = TERRAIN_TINT_VARIATION
+        * value_noise_2d(
+            render_x,
+            render_z,
+            TERRAIN_MEDIUM_SCALE_M,
+            TERRAIN_TINT_SEED,
+        );
+
+    let red = (base[0] * luminance * (1.0 + tint)).clamp(0.0, 1.0);
+    let green = (base[1] * luminance * (1.0 - 0.5 * tint)).clamp(0.0, 1.0);
+    let blue = (base[2] * luminance * (1.0 - tint)).clamp(0.0, 1.0);
+
+    // Keep the documented deviation bound honest even in debug builds. Sound
+    // for any material base in [0, 1]: clamping only shrinks the deviation.
+    debug_assert!(
+        red.is_finite() && (red - base[0]).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+        "red channel exceeds the documented deviation bound"
+    );
+    debug_assert!(
+        green.is_finite() && (green - base[1]).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+        "green channel exceeds the documented deviation bound"
+    );
+    debug_assert!(
+        blue.is_finite() && (blue - base[2]).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+        "blue channel exceeds the documented deviation bound"
+    );
+
+    // Alpha is a material property; G2D never invents alpha variation.
+    [red, green, blue, base[3]]
+}
+
+/// 2D lattice value noise returning [-1, 1].
+///
+/// Bilinear interpolation of deterministic per-cell hash values with a
+/// smoothstep kernel. `scale_m` is the metric wavelength of the pattern;
+/// the function is anchored to render-space metres.
+fn value_noise_2d(x: f32, z: f32, scale_m: f32, seed: u32) -> f32 {
+    let sx = x / scale_m;
+    let sz = z / scale_m;
+    let x0 = sx.floor();
+    let z0 = sz.floor();
+    let fx = sx - x0;
+    let fz = sz - z0;
+
+    let ix0 = x0 as i32;
+    let iz0 = z0 as i32;
+
+    let v00 = lattice_hash_unit(ix0, iz0, seed);
+    let v10 = lattice_hash_unit(ix0 + 1, iz0, seed);
+    let v01 = lattice_hash_unit(ix0, iz0 + 1, seed);
+    let v11 = lattice_hash_unit(ix0 + 1, iz0 + 1, seed);
+
+    let tx = smoothstep_t(fx);
+    let tz = smoothstep_t(fz);
+
+    let top = v00 + (v10 - v00) * tx;
+    let bottom = v01 + (v11 - v01) * tx;
+    let value = top + (bottom - top) * tz;
+
+    value * 2.0 - 1.0
+}
+
+/// Smoothstep interpolation kernel: `t*t*(3 - 2*t)`, zero derivative at both
+/// ends for a kink-free blend between lattice cells.
+fn smoothstep_t(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Deterministic lattice corner hash in [0, 1].
+///
+/// Wrapping integer mixing only: no allocation, no platform state. Negative
+/// cell indices wrap deterministically through `as u32` (defined behaviour).
+fn lattice_hash_unit(x: i32, z: i32, seed: u32) -> f32 {
+    let mut h = seed ^ (x as u32).wrapping_mul(0x85EB_CA6B);
+    h = h.wrapping_add((z as u32).wrapping_mul(0xC2B2_AE35));
+    h = h.wrapping_mul(0x9E37_79B9);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 16;
+    ((h >> 8) & 0xFFFF) as f32 * (1.0 / 65_535.0)
 }
 
 /// Generate a flat terrain height field.
@@ -500,6 +669,7 @@ pub fn generate_centered_terrain_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn flat_terrain_has_correct_dimensions() {
@@ -900,34 +1070,27 @@ mod tests {
     }
 
     #[test]
-    fn terrain_material_color_is_baked_into_vertex_colors() {
-        let terrain = generate_flat_terrain(4, 4, 1.0, 0.0);
+    fn terrain_material_color_stays_authority_within_bounds() {
+        // G2D: the material base_color_factor remains the chromatic authority;
+        // vertex colors are now modulated, but only within the explicit G2D
+        // deviation bound, and alpha stays exactly the material alpha.
+        let terrain = generate_flat_terrain(16, 16, 2.0, 0.0);
         let material = TerrainMaterial {
             base_color_factor: [0.25, 0.5, 0.75, 1.0],
             texture_scale_m: 4.0,
         };
-        let chunk = TerrainChunk::generate(&terrain, 0, 0, 4, &material, [0.0; 2]);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &material, [0.0; 2]);
 
         for vertex in &chunk.vertices {
-            assert!(
-                (vertex.color[0] - 0.25).abs() < 1e-6,
-                "red channel mismatch: {}",
-                vertex.color[0]
-            );
-            assert!(
-                (vertex.color[1] - 0.5).abs() < 1e-6,
-                "green channel mismatch: {}",
-                vertex.color[1]
-            );
-            assert!(
-                (vertex.color[2] - 0.75).abs() < 1e-6,
-                "blue channel mismatch: {}",
-                vertex.color[2]
-            );
-            assert!(
-                (vertex.color[3] - 1.0).abs() < 1e-6,
-                "alpha channel mismatch: {}",
-                vertex.color[3]
+            for (channel, base) in vertex.color[..3].iter().zip(material.base_color_factor) {
+                assert!(
+                    (channel - base).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+                    "channel {channel} deviates too far from base {base}"
+                );
+            }
+            assert_eq!(
+                vertex.color[3], 1.0,
+                "alpha must stay exactly the material alpha"
             );
         }
     }
@@ -944,5 +1107,629 @@ mod tests {
         // At render coord (-5, -5), local coords are (0, 0).
         let sampled = terrain.sample_bilinear_render_space(-5.0, -5.0, offset);
         assert!((sampled - 5.0).abs() < 1e-5);
+    }
+
+    // -----------------------------------------------------------------------
+    // G2D: terrain surface variation regression tests
+    // -----------------------------------------------------------------------
+
+    fn find_vertex(chunks: &[TerrainChunk], render_x: f32, render_z: f32) -> &Vertex {
+        chunks
+            .iter()
+            .flat_map(|c| c.vertices.iter())
+            .find(|v| {
+                (v.position[0] - render_x).abs() < 1e-4 && (v.position[2] - render_z).abs() < 1e-4
+            })
+            .expect("probe vertex must exist in the generated terrain")
+    }
+
+    #[test]
+    fn g2d_flat_terrain_full_chunk_counts() {
+        let terrain = generate_flat_terrain(64, 64, 1.0, 0.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_terrain_chunks(&terrain, 32, &material, [0.0; 2]);
+        assert_eq!(chunks.len(), 4);
+        let vertices: usize = chunks.iter().map(|c| c.vertices.len()).sum();
+        let indices: usize = chunks.iter().map(|c| c.indices.len()).sum();
+        assert_eq!(vertices, 4 * 33 * 33);
+        assert_eq!(indices, 4 * 32 * 32 * 6);
+        assert_eq!(indices / 3, 4 * 32 * 32 * 2);
+    }
+
+    #[test]
+    fn g2d_flat_terrain_elevation_exact_everywhere() {
+        let terrain = generate_flat_terrain(16, 16, 1.0, 7.5);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &material, [0.0; 2]);
+        assert!(chunk.vertices.iter().all(|v| v.position[1] == 7.5));
+    }
+
+    #[test]
+    fn g2d_flat_terrain_vertex_positions_correct() {
+        let terrain = generate_flat_terrain(8, 8, 2.0, 3.0);
+        let material = TerrainMaterial::default();
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+        for (i, vertex) in chunk.vertices.iter().enumerate() {
+            let local_x = (i % 9) as f32;
+            let local_z = (i / 9) as f32;
+            assert_eq!(vertex.position, [local_x * 2.0, 3.0, local_z * 2.0]);
+        }
+    }
+
+    #[test]
+    fn g2d_flat_terrain_normals_still_exact_up() {
+        let terrain = generate_flat_terrain(64, 64, 1.0, 0.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_terrain_chunks(&terrain, 32, &material, [0.0; 2]);
+        for chunk in &chunks {
+            for vertex in &chunk.vertices {
+                assert_eq!(vertex.normal, [0.0, 1.0, 0.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_uv_mapping_unchanged() {
+        let material = TerrainMaterial {
+            texture_scale_m: 4.0,
+            ..Default::default()
+        };
+        let terrain = generate_flat_terrain(8, 8, 2.0, 0.0);
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 8, &material, [0.0; 2]);
+        for vertex in &chunk.vertices {
+            let expected = [vertex.position[0] / 4.0, vertex.position[2] / 4.0];
+            assert_eq!(vertex.uv, expected);
+        }
+    }
+
+    #[test]
+    fn g2d_alpha_is_exactly_material_alpha() {
+        // Default terrain.
+        let terrain = generate_flat_terrain(16, 16, 1.0, 0.0);
+        let chunk =
+            TerrainChunk::generate(&terrain, 0, 0, 16, &TerrainMaterial::default(), [0.0; 2]);
+        assert!(chunk.vertices.iter().all(|v| v.color[3] == 1.0));
+        // Custom alpha.
+        let material = TerrainMaterial {
+            base_color_factor: [0.2, 0.4, 0.6, 0.4],
+            ..Default::default()
+        };
+        let chunk = TerrainChunk::generate(&terrain, 0, 0, 16, &material, [0.0; 2]);
+        assert!(chunk.vertices.iter().all(|v| v.color[3] == 0.4));
+    }
+
+    #[test]
+    fn g2d_color_function_alpha_is_exactly_base() {
+        for base in [
+            [0.25, 0.45, 0.18, 1.0],
+            [1.0, 1.0, 1.0, 0.0],
+            [0.1, 0.2, 0.3, 0.5],
+        ] {
+            let out = terrain_surface_color(base, 12.5, -3.25, 2.0, 0.9);
+            assert_eq!(out[3], base[3]);
+        }
+    }
+
+    #[test]
+    fn g2d_large_flat_terrain_has_color_variation() {
+        // 256 m field: the 25 m/90 m layers guarantee many distinct colors.
+        let terrain = generate_flat_terrain(128, 128, 2.0, 0.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_terrain_chunks(&terrain, 32, &material, [0.0; 2]);
+        let mut distinct = HashSet::new();
+        for chunk in &chunks {
+            for vertex in &chunk.vertices {
+                distinct.insert(vertex.color.map(f32::to_bits));
+            }
+        }
+        assert!(
+            distinct.len() > 16,
+            "expected visible color variation, got {}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn g2d_variation_sober_for_flat_and_rolling() {
+        // Covers: colors finite, in [0,1], within the explicit deviation
+        // bound, alpha preserved (spec tests 9, 10, 11, 13, 32).
+        for terrain in [
+            generate_flat_terrain(200, 200, 5.0, -2.0),
+            generate_rolling_terrain(200, 200, 5.0, -2.0, 3.0),
+        ] {
+            let material = TerrainMaterial::default();
+            let chunks = generate_centered_terrain_chunks(&terrain, 32, &material);
+            for chunk in &chunks {
+                for vertex in &chunk.vertices {
+                    for (channel, base) in vertex.color[..3].iter().zip(material.base_color_factor)
+                    {
+                        assert!(channel.is_finite(), "non-finite color channel");
+                        assert!(
+                            (0.0..=1.0).contains(channel),
+                            "color channel out of range: {channel}"
+                        );
+                        assert!(
+                            (channel - base).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+                            "deviation {} exceeds bound for base {base}",
+                            (channel - base).abs()
+                        );
+                    }
+                    assert_eq!(vertex.color[3], 1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_color_function_is_deterministic_bitwise() {
+        let base = TerrainMaterial::default().base_color_factor;
+        let a = terrain_surface_color(base, 123.5, -456.25, 3.75, 0.98);
+        let b = terrain_surface_color(base, 123.5, -456.25, 3.75, 0.98);
+        assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits));
+    }
+
+    #[test]
+    fn g2d_macro_noise_deterministic_and_bounded() {
+        let a = value_noise_2d(123.5, -456.25, TERRAIN_MACRO_SCALE_M, 3);
+        let b = value_noise_2d(123.5, -456.25, TERRAIN_MACRO_SCALE_M, 3);
+        assert_eq!(a.to_bits(), b.to_bits());
+        assert!((-1.0..=1.0).contains(&a));
+    }
+
+    #[test]
+    fn g2d_medium_noise_deterministic_and_bounded() {
+        let a = value_noise_2d(123.5, -456.25, TERRAIN_MEDIUM_SCALE_M, 9);
+        let b = value_noise_2d(123.5, -456.25, TERRAIN_MEDIUM_SCALE_M, 9);
+        assert_eq!(a.to_bits(), b.to_bits());
+        assert!((-1.0..=1.0).contains(&a));
+    }
+
+    #[test]
+    fn g2d_full_generation_repeatable_bitwise() {
+        let terrain = generate_rolling_terrain(48, 48, 2.0, 0.0, 2.0);
+        let material = TerrainMaterial::default();
+        let first = generate_terrain_chunks(&terrain, 32, &material, [-48.0, -48.0]);
+        let second = generate_terrain_chunks(&terrain, 32, &material, [-48.0, -48.0]);
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.chunk_coords, b.chunk_coords);
+            assert_eq!(a.indices, b.indices);
+            for (va, vb) in a.vertices.iter().zip(b.vertices.iter()) {
+                assert_eq!(va.position.map(f32::to_bits), vb.position.map(f32::to_bits));
+                assert_eq!(va.normal.map(f32::to_bits), vb.normal.map(f32::to_bits));
+                assert_eq!(va.uv.map(f32::to_bits), vb.uv.map(f32::to_bits));
+                assert_eq!(va.color.map(f32::to_bits), vb.color.map(f32::to_bits));
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_noise_finite_and_bounded_on_positive_coordinates() {
+        for i in 0..80 {
+            let x = (i as f32) * 13.7 + 0.3;
+            let z = (i as f32) * 7.1 + 2.5;
+            for scale in [TERRAIN_MACRO_SCALE_M, TERRAIN_MEDIUM_SCALE_M] {
+                let v = value_noise_2d(x, z, scale, 5);
+                assert!(v.is_finite(), "non-finite noise at ({x}, {z})");
+                assert!((-1.0..=1.0).contains(&v));
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_noise_finite_and_bounded_on_negative_coordinates() {
+        for i in 0..80 {
+            let x = -(i as f32) * 13.7 - 0.7;
+            let z = -(i as f32) * 7.1 - 1.3;
+            for scale in [TERRAIN_MACRO_SCALE_M, TERRAIN_MEDIUM_SCALE_M] {
+                let v = value_noise_2d(x, z, scale, 9);
+                assert!(v.is_finite(), "non-finite noise at ({x}, {z})");
+                assert!((-1.0..=1.0).contains(&v));
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_noise_works_at_origin() {
+        let h = lattice_hash_unit(0, 0, 42);
+        assert!((0.0..=1.0).contains(&h));
+        for scale in [TERRAIN_MACRO_SCALE_M, TERRAIN_MEDIUM_SCALE_M] {
+            let v = value_noise_2d(0.0, 0.0, scale, 42);
+            assert!(v.is_finite());
+            assert!((-1.0..=1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn g2d_noise_continuous_across_lattice_boundaries() {
+        for k in [-3.0, -1.0, 1.0, 5.0, 17.0] {
+            let boundary = k * TERRAIN_MEDIUM_SCALE_M;
+            let just_before = boundary - 1e-3;
+            let va = value_noise_2d(just_before, 3.0, TERRAIN_MEDIUM_SCALE_M, 7);
+            let vb = value_noise_2d(boundary, 3.0, TERRAIN_MEDIUM_SCALE_M, 7);
+            assert!(va.is_finite() && vb.is_finite(), "non-finite at {boundary}");
+            assert!(
+                (va - vb).abs() < 1e-3,
+                "discontinuity at {boundary}: {va} vs {vb}"
+            );
+        }
+    }
+
+    #[test]
+    fn g2d_lattice_hash_bounded_including_negative_indices() {
+        for ix in -64..=64 {
+            for iz in -64..=64 {
+                let v = lattice_hash_unit(ix, iz, 11);
+                assert!(
+                    v.is_finite() && (0.0..=1.0).contains(&v),
+                    "hash out of range at ({ix}, {iz}): {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_adjacent_chunks_share_colors_on_x_and_z_seams() {
+        for terrain in [
+            generate_flat_terrain(64, 64, 1.0, 0.0),
+            generate_rolling_terrain(64, 64, 1.0, 0.5, 1.0),
+        ] {
+            let material = TerrainMaterial::default();
+
+            // Shared X boundary at render x = 32.
+            let a = TerrainChunk::generate(&terrain, 0, 0, 32, &material, [0.0; 2]);
+            let b = TerrainChunk::generate(&terrain, 1, 0, 32, &material, [0.0; 2]);
+            let a_edge: Vec<_> = a
+                .vertices
+                .iter()
+                .filter(|v| (v.position[0] - 32.0).abs() < 1e-5)
+                .collect();
+            let b_edge: Vec<_> = b
+                .vertices
+                .iter()
+                .filter(|v| (v.position[0] - 32.0).abs() < 1e-5)
+                .collect();
+            assert_eq!(a_edge.len(), b_edge.len(), "X seam vertex count");
+            for (va, vb) in a_edge.iter().zip(b_edge.iter()) {
+                assert_eq!(va.position[2], vb.position[2]);
+                assert_eq!(
+                    va.color, vb.color,
+                    "color seam on X boundary at z={}",
+                    va.position[2]
+                );
+            }
+
+            // Shared Z boundary at render z = 32.
+            let c = TerrainChunk::generate(&terrain, 0, 1, 32, &material, [0.0; 2]);
+            let a_edge: Vec<_> = a
+                .vertices
+                .iter()
+                .filter(|v| (v.position[2] - 32.0).abs() < 1e-5)
+                .collect();
+            let c_edge: Vec<_> = c
+                .vertices
+                .iter()
+                .filter(|v| (v.position[2] - 32.0).abs() < 1e-5)
+                .collect();
+            assert_eq!(a_edge.len(), c_edge.len(), "Z seam vertex count");
+            for (va, vc) in a_edge.iter().zip(c_edge.iter()) {
+                assert_eq!(va.position[0], vc.position[0]);
+                assert_eq!(
+                    va.color, vc.color,
+                    "color seam on Z boundary at x={}",
+                    va.position[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_render_origin_offset_does_not_create_seam() {
+        // Same world position reached through different grid offsets must
+        // produce the same color, because the pattern is render-space based.
+        let terrain = generate_flat_terrain(48, 48, 2.0, 0.0);
+        let material = TerrainMaterial::default();
+        let offset_a = generate_terrain_chunks(&terrain, 24, &material, [0.0, 0.0]);
+        let offset_b = generate_terrain_chunks(&terrain, 24, &material, [-40.0, 0.0]);
+        for z in [0, 8, 16, 24, 40] {
+            let render_z = (z as f32) * 2.0;
+            let va = find_vertex(&offset_a, 16.0, render_z);
+            let vb = find_vertex(&offset_b, 16.0, render_z);
+            assert_eq!(
+                va.color, vb.color,
+                "render-origin offset seam at render z={render_z}"
+            );
+            assert_eq!(va.position, vb.position);
+        }
+    }
+
+    #[test]
+    fn g2d_centered_seams_match_world_space_colors() {
+        // Centered terrain spans negative render coordinates; seams must
+        // still resolve to identical colors on the shared boundaries.
+        let terrain = generate_rolling_terrain(64, 64, 1.0, 0.0, 1.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_centered_terrain_chunks(&terrain, 32, &material);
+        assert_eq!(chunks.len(), 4);
+        let c00 = &chunks[0];
+        let c10 = &chunks[1];
+        let c01 = &chunks[2];
+
+        // Shared X boundary at render x = 0 (grid x = 32 -> 32 - 32 = 0).
+        let c00_x: Vec<_> = c00
+            .vertices
+            .iter()
+            .filter(|v| v.position[0] == 0.0)
+            .collect();
+        let c10_x: Vec<_> = c10
+            .vertices
+            .iter()
+            .filter(|v| v.position[0] == 0.0)
+            .collect();
+        assert_eq!(c00_x.len(), c10_x.len());
+        for (va, vb) in c00_x.iter().zip(c10_x.iter()) {
+            assert_eq!(va.position[2], vb.position[2]);
+            assert_eq!(va.color, vb.color);
+        }
+
+        // Shared Z boundary at render z = 0.
+        let c00_z: Vec<_> = c00
+            .vertices
+            .iter()
+            .filter(|v| v.position[2] == 0.0)
+            .collect();
+        let c01_z: Vec<_> = c01
+            .vertices
+            .iter()
+            .filter(|v| v.position[2] == 0.0)
+            .collect();
+        assert_eq!(c00_z.len(), c01_z.len());
+        for (va, vc) in c00_z.iter().zip(c01_z.iter()) {
+            assert_eq!(va.position[0], vc.position[0]);
+            assert_eq!(va.color, vc.color);
+        }
+    }
+
+    #[test]
+    fn g2d_chunk_size_does_not_change_color_at_same_world_position() {
+        let terrain = generate_rolling_terrain(64, 64, 1.0, 0.0, 1.5);
+        let material = TerrainMaterial::default();
+
+        for (offset, probes) in [
+            (
+                [0.0, 0.0],
+                [
+                    (16.0, 16.0),
+                    (32.0, 32.0),
+                    (50.0, 7.0),
+                    (63.0, 63.0),
+                    (0.0, 0.0),
+                    (33.0, 41.0),
+                ],
+            ),
+            (
+                [-64.0, -32.0],
+                [
+                    (-33.0, -2.0),
+                    (0.0, 2.0),
+                    (-64.0, -32.0),
+                    (-50.0, 10.0),
+                    (-1.0, -31.0),
+                    (-20.0, 0.0),
+                ],
+            ),
+        ] {
+            let coarse = generate_terrain_chunks(&terrain, 32, &material, offset);
+            let fine = generate_terrain_chunks(&terrain, 16, &material, offset);
+            for (px, pz) in probes {
+                let va = find_vertex(&coarse, px, pz);
+                let vb = find_vertex(&fine, px, pz);
+                assert_eq!(
+                    va.color, vb.color,
+                    "chunk-size seam at ({px}, {pz}) for offset {offset:?}"
+                );
+                assert_eq!(va.position, vb.position);
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_texture_scale_does_not_scale_surface_variation() {
+        let terrain = generate_flat_terrain(80, 80, 1.0, 0.0);
+        let small_scale = TerrainMaterial::default(); // 4 m
+        let large_scale = TerrainMaterial {
+            texture_scale_m: 17.0,
+            ..Default::default()
+        };
+        let a = generate_terrain_chunks(&terrain, 32, &small_scale, [0.0; 2]);
+        let b = generate_terrain_chunks(&terrain, 32, &large_scale, [0.0; 2]);
+        for (px, pz) in [
+            (10.0, 20.0),
+            (55.0, 5.0),
+            (79.0, 79.0),
+            (0.0, 34.0),
+            (37.0, 41.0),
+        ] {
+            let va = find_vertex(&a, px, pz);
+            let vb = find_vertex(&b, px, pz);
+            assert_eq!(
+                va.color, vb.color,
+                "texture_scale must not resize the G2D variation at ({px}, {pz})"
+            );
+            assert_ne!(va.uv, vb.uv, "UVs must differ to exercise different scales");
+        }
+    }
+
+    #[test]
+    fn g2d_custom_material_color_is_respected() {
+        let terrain = generate_rolling_terrain(64, 64, 2.0, 0.0, 2.0);
+        let custom = TerrainMaterial {
+            base_color_factor: [0.3, 0.5, 0.2, 0.8],
+            ..Default::default()
+        };
+        let default_material = TerrainMaterial::default();
+        let custom_chunks = generate_terrain_chunks(&terrain, 32, &custom, [0.0; 2]);
+        let default_chunks = generate_terrain_chunks(&terrain, 32, &default_material, [0.0; 2]);
+
+        for (cc, cd) in custom_chunks.iter().zip(default_chunks.iter()) {
+            for (vc, vd) in cc.vertices.iter().zip(cd.vertices.iter()) {
+                assert_eq!(
+                    vc.position, vd.position,
+                    "geometry must not depend on material"
+                );
+                for (channel, base) in vc.color[..3].iter().zip(custom.base_color_factor) {
+                    assert!(
+                        (channel - base).abs() <= TERRAIN_MAX_CHANNEL_DEVIATION + 1e-6,
+                        "color deviates from custom base: {channel} vs {base}"
+                    );
+                }
+                assert_eq!(vc.color[3], 0.8, "custom alpha must be preserved");
+                assert_ne!(
+                    vc.color[..3],
+                    vd.color[..3],
+                    "color must follow the custom base, not the default"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_rolling_elevations_stay_within_expected_band() {
+        // The rolling generator is bounded: |sum| <= 1.75 before division,
+        // so elevations stay within [base - amplitude, base + amplitude].
+        let base = 0.0;
+        let amplitude = 10.0;
+        let terrain = generate_rolling_terrain(64, 64, 2.0, base, amplitude);
+        for &e in &terrain.elevations {
+            assert!(e.is_finite());
+            assert!((base - amplitude..=base + amplitude).contains(&e));
+        }
+    }
+
+    #[test]
+    fn g2d_flat_terrain_slope_contribution_is_zero() {
+        // On flat terrain normal_y == 1.0 exactly, so the slope term is
+        // identically zero: the deviation budget tightens by the full slope
+        // budget compared with the global TERRAIN_MAX_CHANNEL_DEVIATION.
+        let terrain = generate_flat_terrain(200, 200, 5.0, -2.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_centered_terrain_chunks(&terrain, 32, &material);
+        let no_slope_bound = TERRAIN_MAX_CHANNEL_DEVIATION - TERRAIN_SLOPE_VARIATION;
+        for chunk in &chunks {
+            for vertex in &chunk.vertices {
+                for (channel, base) in vertex.color[..3].iter().zip(material.base_color_factor) {
+                    assert!(
+                        (channel - base).abs() <= no_slope_bound + 1e-6,
+                        "flat terrain exceeded the no-slope bound: {channel} vs {base}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_slope_response_bounded_on_inclined_normal() {
+        let base = TerrainMaterial::default().base_color_factor;
+        let flat = terrain_surface_color(base, 123.0, -45.0, 2.0, 1.0);
+        let steep = terrain_surface_color(base, 123.0, -45.0, 2.0, 0.3);
+        for (flat_channel, steep_channel) in flat[..3].iter().copied().zip(steep) {
+            assert!(steep_channel.is_finite() && flat_channel.is_finite());
+            assert!(
+                (steep_channel - flat_channel).abs() <= TERRAIN_SLOPE_VARIATION + 1e-5,
+                "slope response exceeds its budget"
+            );
+            assert!(
+                steep_channel >= flat_channel,
+                "slope must brighten, never darken"
+            );
+        }
+    }
+
+    #[test]
+    fn g2d_elevation_bias_finite_and_bounded() {
+        let base = TerrainMaterial::default().base_color_factor;
+        let low = terrain_surface_color(base, 55.0, 77.0, -10_000.0, 1.0);
+        let high = terrain_surface_color(base, 55.0, 77.0, 10_000.0, 1.0);
+        let max_swing = 2.0 * TERRAIN_ELEVATION_MAX_BIAS * 1.05;
+        for (low_channel, high_channel) in low[..3].iter().copied().zip(high) {
+            assert!(low_channel.is_finite() && high_channel.is_finite());
+            assert!(
+                high_channel >= low_channel,
+                "higher terrain must be lighter, never darker"
+            );
+            assert!(
+                (high_channel - low_channel).abs() <= max_swing + 1e-5,
+                "elevation swing exceeded its budget"
+            );
+        }
+    }
+
+    #[test]
+    fn g2d_geometry_fields_independent_of_color_modulation() {
+        let terrain = generate_rolling_terrain(64, 64, 2.0, 0.0, 4.0);
+        let material_a = TerrainMaterial {
+            base_color_factor: [0.9, 0.1, 0.2, 0.5],
+            ..Default::default()
+        };
+        let material_b = TerrainMaterial::default();
+        let chunks_a = generate_terrain_chunks(&terrain, 32, &material_a, [0.0; 2]);
+        let chunks_b = generate_terrain_chunks(&terrain, 32, &material_b, [0.0; 2]);
+
+        assert_eq!(chunks_a.len(), chunks_b.len());
+        for (a, b) in chunks_a.iter().zip(chunks_b.iter()) {
+            assert_eq!(a.chunk_coords, b.chunk_coords);
+            assert_eq!(a.world_origin, b.world_origin);
+            assert_eq!(a.size_m, b.size_m);
+            assert_eq!(a.bounds, b.bounds);
+            assert_eq!(a.indices, b.indices);
+            for (va, vb) in a.vertices.iter().zip(b.vertices.iter()) {
+                assert_eq!(va.position, vb.position);
+                assert_eq!(va.normal, vb.normal);
+                assert_eq!(va.uv, vb.uv);
+                assert_ne!(va.color, vb.color, "colors must differ across materials");
+                assert_eq!(va.color[3], 0.5);
+                assert_eq!(vb.color[3], 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_bounds_contain_all_vertices() {
+        let terrain = generate_rolling_terrain(200, 200, 5.0, -2.0, 3.0);
+        let material = TerrainMaterial::default();
+        let chunks = generate_centered_terrain_chunks(&terrain, 32, &material);
+        for chunk in &chunks {
+            let (min, max) = chunk.bounds;
+            for vertex in &chunk.vertices {
+                assert!(vertex.position[0] >= min[0] - 1e-4 && vertex.position[0] <= max[0] + 1e-4);
+                assert!(vertex.position[1] >= min[1] - 1e-4 && vertex.position[1] <= max[1] + 1e-4);
+                assert!(vertex.position[2] >= min[2] - 1e-4 && vertex.position[2] <= max[2] + 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn g2d_no_unexpected_empty_chunks() {
+        let material = TerrainMaterial::default();
+
+        // Non-power-of-two sizes exercise partial edge chunks.
+        let terrain = generate_flat_terrain(65, 33, 1.0, 0.0);
+        let chunks = generate_terrain_chunks(&terrain, 32, &material, [0.0; 2]);
+        assert_eq!(chunks.len(), 3 * 2);
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !c.vertices.is_empty() && !c.indices.is_empty())
+        );
+
+        // Production-like layout (200 cells, 32-cell chunks -> 49 chunks).
+        let production = generate_flat_terrain(200, 200, 5.0, -2.0);
+        let chunks = generate_terrain_chunks(&production, 32, &material, [0.0; 2]);
+        assert_eq!(chunks.len(), 49);
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !c.vertices.is_empty() && !c.indices.is_empty())
+        );
     }
 }

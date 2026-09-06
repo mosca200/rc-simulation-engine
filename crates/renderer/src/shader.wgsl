@@ -1,5 +1,16 @@
 // G1C: Base-color texture support + G1B sky/atmosphere + G1A material/lighting.
-// Deliberately simple. No PBR, no clouds, no HDR, no shadows.
+// G1D: metallic/roughness PBR material response.
+//
+// Lighting model (G1D):
+//   - Schlick Fresnel, GGX/Trowbridge-Reitz NDF, Smith geometry term
+//   - glTF metallic workflow: F0 = mix(0.04, baseColor, metallic)
+//   - roughness floor MIN_ROUGHNESS for numeric stability and stable highlights
+//   - legacy-compat irradiance scale (see fs_lit) so the diffuse response
+//     matches the established Lambert look exactly
+//
+// G2B adds one stable directional shadow map. Still deliberately out of scope:
+// no cascades, HDR, IBL, normal maps, or clouds. Ambient is flat and mostly
+// applied to the diffuse response so aircraft remain readable in shadow.
 
 // ---------------------------------------------------------------------------
 // Uniforms
@@ -38,6 +49,24 @@ struct EnvironmentUniform {
     sun_color: vec4<f32>,
 };
 
+// G2B: directional shadow state. The light view-projection transforms a world
+// position into WebGPU clip space for depth comparison. The receiver offset is
+// deliberately separate from the caster rasterization bias configured by wgpu.
+struct ShadowUniform {
+    light_view_projection: mat4x4<f32>,
+    receiver_depth_bias_and_padding: vec4<f32>,
+};
+
+// G1D: per-primitive PBR material parameters.
+// metallic: 0 = dielectric, 1 = metal (glTF metallicFactor).
+// roughness: perceptual roughness (glTF roughnessFactor), floored in the
+// shader by MIN_ROUGHNESS. reserved keeps the struct at one 16-byte slot.
+struct MaterialUniform {
+    metallic: f32,
+    roughness: f32,
+    reserved: vec2<f32>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
@@ -46,13 +75,22 @@ var<uniform> object: ObjectUniform;
 
 @group(2) @binding(0)
 var<uniform> environment: EnvironmentUniform;
+@group(2) @binding(1)
+var directional_shadow_depth: texture_depth_2d;
+@group(2) @binding(2)
+var directional_shadow_sampler: sampler_comparison;
+@group(2) @binding(3)
+var<uniform> shadow: ShadowUniform;
 
 // G1C: Material texture and sampler.
-// Group 3 is the material bind group, containing the base color texture and sampler.
+// Group 3 is the material bind group, containing the base color texture,
+// sampler, and (G1D) the metallic/roughness uniform.
 @group(3) @binding(0)
 var base_color_texture: texture_2d<f32>;
 @group(3) @binding(1)
 var base_color_sampler: sampler;
+@group(3) @binding(2)
+var<uniform> material: MaterialUniform;
 
 // ---------------------------------------------------------------------------
 // Vertex IO
@@ -175,21 +213,124 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return output;
 }
 
+// G2B depth-only shadow caster vertex path. It shares the object binding with
+// the scene pipeline and reads the light matrix from the existing environment
+// boundary. The pass has no fragment stage or color target.
+@vertex
+fn vs_shadow(input: VertexInput) -> @builtin(position) vec4<f32> {
+    let world_position = object.model * vec4<f32>(input.position, 1.0);
+    return shadow.light_view_projection * world_position;
+}
+
+// ---------------------------------------------------------------------------
+// G1D: PBR material response (metallic/roughness)
+// ---------------------------------------------------------------------------
+
+const PI: f32 = 3.141592653589793;
+
+// Numeric + readability floor on roughness. Without it, near-zero roughness
+// produces (a) near-singular GGX denominators and (b) highlight dots so small
+// they alias into instability at RC-aircraft viewing distances. 0.06 keeps
+// specular credible without turning surfaces matte.
+const MIN_ROUGHNESS: f32 = 0.06;
+
+// Dielectric F0 (generic plastic/paint interface reflectance at normal
+// incidence). Metals override this with their albedo via the glTF workflow.
+const DIELECTRIC_F0: f32 = 0.04;
+
+// Readability ambient floor for metals. With no IBL, a pure-metal surface lit
+// only by the directional term goes almost black outside its highlight,
+// hurting aircraft readability at distance. We therefore let metals receive a
+// flat (non-directional, non-fresnel) fraction of the existing ambient term.
+// This is a documented readability approximation, NOT an environment
+// reflection. Non-metals keep the plain diffuse ambient response.
+const AMBIENT_SPECULAR_SCALE: f32 = 0.5;
+
+// Upper clamp on the direct specular response. GGX can spike at grazing
+// angles on low-roughness surfaces; with LDR output the spike would clip to
+// white anyway, so clamping early keeps the math finite and the highlight
+// stable without changing the perceived result.
+const SPECULAR_CLAMP: f32 = 4.0;
+
+// Normalize with a degenerate-direction guard. Returns WORLD_UP for zero-length
+// inputs instead of NaN (e.g. camera exactly on the shaded surface point).
+fn safe_normalize(direction: vec3<f32>) -> vec3<f32> {
+    let len = length(direction);
+    return select(vec3<f32>(WORLD_UP), direction / len, len > 1e-6);
+}
+
+// Schlick Fresnel: F = F0 + (1 - F0) * (1 - VdotH)^5.
+fn schlick_fresnel(f0: vec3<f32>, vdot_h: f32) -> vec3<f32> {
+    let base = 1.0 - vdot_h;
+    let f = base * base * base * base * base;
+    return f0 + (vec3<f32>(1.0) - f0) * f;
+}
+
+// GGX / Trowbridge-Reitz normal distribution.
+fn ggx_distribution(ndot_h: f32, alpha: f32) -> f32 {
+    let alpha2 = alpha * alpha;
+    let denom = ndot_h * ndot_h * (alpha2 - 1.0) + 1.0;
+    // denom >= alpha2 > 0 for our inputs, so this stays finite.
+    return alpha2 / (PI * denom * denom);
+}
+
+// Smith geometry term with the Schlick-GGX approximation (k scaled for direct
+// lighting, not IBL).
+fn smith_geometry(ndot_v: f32, ndot_l: f32, roughness: f32) -> f32 {
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    let gv = ndot_v / (ndot_v * (1.0 - k) + k);
+    let gl = ndot_l / (ndot_l * (1.0 - k) + k);
+    return gv * gl;
+}
+
+// G2B: comparison-sample a single directional shadow map. Coordinates outside
+// the fixed light frustum deliberately return fully lit, rather than relying on
+// sampler edge behavior. Linear comparison filtering provides the compact
+// hardware PCF footprint; no large fragment kernel is needed.
+fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
+    let light_clip = shadow.light_view_projection * vec4<f32>(world_position, 1.0);
+    if (light_clip.w <= 1e-6) {
+        return 1.0;
+    }
+    let projected = light_clip.xyz / light_clip.w;
+    let uv = projected.xy * 0.5 + vec2<f32>(0.5);
+    let inside_shadow_frustum =
+        uv.x >= 0.0 && uv.x <= 1.0 &&
+        uv.y >= 0.0 && uv.y <= 1.0 &&
+        projected.z >= 0.0 && projected.z <= 1.0;
+    if (!inside_shadow_frustum) {
+        return 1.0;
+    }
+    let receiver_depth = clamp(projected.z - shadow.receiver_depth_bias_and_padding.x, 0.0, 1.0);
+    return textureSampleCompare(
+        directional_shadow_depth,
+        directional_shadow_sampler,
+        uv,
+        receiver_depth,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Lit fragment: texture * vertex_color * lighting + distance fog.
 //
-// G1C color pipeline:
+// G1C color pipeline (preserved):
 //   1. Sample base color texture (sRGB, hardware converts to linear).
 //   2. Multiply by vertex color (which already contains baseColorFactor * COLOR_0).
-//   3. Apply Lambert lighting.
-//   4. Apply distance fog.
+//   3. Apply lighting (G1D: metallic/roughness BRDF instead of plain Lambert).
+//   4. Apply distance fog after lighting.
 //
-// Formula:
-//   texture_rgba = textureSample(base_color_texture, base_color_sampler, uv)
-//   base_rgba = input.color * texture_rgba
-//   lit_rgb = base_rgba.rgb * (ambient + directional * max(dot(N, L), 0))
-//   final_rgb = mix(lit_rgb, fog_color, fog_factor)
-//   alpha = base_rgba.a (preserved, not lit or fogged)
+// G1D lighting model:
+//   N = world normal, V = normalize(camera_position - world_position),
+//   L = directional light, H = normalize(V + L).
+//   F0 = mix(0.04, baseColor, metallic)      (glTF metallic workflow)
+//   diffuse albedo = baseColor * (1 - metallic)
+//   specular = D(h) * G(v,l) * F(v,h) / max(4 * NdotV * NdotL, 1e-4)
+//
+// Legacy-compat irradiance scale: the pre-G1D Lambert path used
+// albedo * intensity (no 1/PI). The physically normalized split
+// (albedo/PI + specular) is therefore scaled by PI * intensity, so the
+// diffuse response matches the established look exactly while the specular
+// term stays energy-consistent with the diffuse.
 //
 // Deterministic defaults:
 //   ambient       = vec3(0.30)
@@ -206,13 +347,58 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     // Combine: vertex_color (contains baseColorFactor * COLOR_0) * texture.
     let base_rgba = input.color * texture_rgba;
 
-    // Lighting.
-    let n = normalize(input.world_normal);
-    let l = normalize(environment.light_direction.xyz);
-    let diffuse = max(dot(n, l), 0.0);
-    let lit_rgb = base_rgba.rgb * (environment.ambient.xyz + environment.light_direction.w * diffuse);
+    // G1D: material parameters with documented safety clamps. The roughness
+    // floor prevents degenerate highlights; both uniforms are guaranteed
+    // finite by the CPU-side clamp at load time.
+    let metallic = clamp(material.metallic, 0.0, 1.0);
+    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
 
-    // Distance fog.
+    // BRDF basis vectors (all guarded against zero-length inputs).
+    let n = safe_normalize(input.world_normal);
+    let l = safe_normalize(environment.light_direction.xyz);
+    let v = safe_normalize(camera.camera_position.xyz - input.world_position);
+    let h = safe_normalize(v + l);
+
+    let ndot_l = max(dot(n, l), 0.0);
+    let ndot_v = max(dot(n, v), 1e-4);
+    let ndot_h = max(dot(n, h), 0.0);
+    let vdot_h = max(dot(v, h), 0.0);
+
+    // glTF metallic workflow F0.
+    let f0 = mix(vec3<f32>(DIELECTRIC_F0), base_rgba.rgb, metallic);
+    // Energy-conscious diffuse/specular split: metallic surfaces carry no
+    // diffuse term at all.
+    let diffuse_albedo = base_rgba.rgb * (1.0 - metallic);
+
+    // Specular BRDF: D * G * F / (4 * NdotV * NdotL). NdotL is clamped to
+    // >= 0 but can be exactly zero, which would leave 0/0 through the Smith
+    // geometry term, so the denominator carries an explicit positive floor.
+    // NdotL itself is unchanged for the final direct-light multiplication.
+    let alpha = roughness * roughness;
+    let distribution = ggx_distribution(ndot_h, alpha);
+    let geometry = smith_geometry(ndot_v, ndot_l, roughness);
+    let fresnel = schlick_fresnel(f0, vdot_h);
+    let specular_denominator = max(4.0 * ndot_v * ndot_l, 1e-4);
+    let specular = min(
+        distribution * geometry * fresnel / specular_denominator,
+        vec3<f32>(SPECULAR_CLAMP),
+    );
+
+    // Direct lighting (see legacy-compat irradiance scale above).
+    let irradiance = PI * environment.light_direction.w;
+    let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
+    let shadow_visibility = directional_shadow_visibility(input.world_position);
+    let direct = direct_unshadowed * shadow_visibility;
+
+    // Ambient: applied predominantly to the diffuse (non-metal) response,
+    // with the documented readability floor for metals. No fake IBL.
+    let ambient_diffuse = diffuse_albedo * environment.ambient.xyz;
+    let ambient_specular = f0 * environment.ambient.xyz * AMBIENT_SPECULAR_SCALE;
+    let ambient = mix(ambient_diffuse, ambient_specular, metallic);
+
+    let lit_rgb = direct + ambient;
+
+    // Distance fog (after lighting, unchanged from G1B/G1C).
     let camera_pos = camera.camera_position.xyz;
     let distance = length(input.world_position - camera_pos);
     let density = environment.sky_ground.w;
