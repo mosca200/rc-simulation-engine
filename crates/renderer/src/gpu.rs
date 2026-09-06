@@ -68,6 +68,15 @@ const DEFAULT_FOG_DENSITY: f32 = 0.0015;
 const DEFAULT_SUN_COLOR_RGB: [f32; 3] = [1.0, 0.95, 0.85];
 const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
 
+// G1D: material response parameters for procedural geometry (terrain, scenery,
+// debug-adjacent fallback, procedural aircraft).
+//
+// Procedural surfaces must NOT become accidentally chromed: they are explicit
+// non-metals with a high roughness so the PBR specular response stays subdued
+// and the terrain keeps its matte, readable look.
+const PROCEDURAL_METALLIC: f32 = 0.0;
+const PROCEDURAL_ROUGHNESS: f32 = 0.85;
+
 /// Default terrain extent for the RC flying field.
 const DEFAULT_TERRAIN_EXTENT_M: f32 = 1000.0;
 const DEFAULT_TERRAIN_CELL_SPACING_M: f32 = 5.0;
@@ -237,6 +246,28 @@ impl ObjectUniform {
     }
 }
 
+/// G1D: per-primitive PBR material parameters (metallic/roughness workflow).
+///
+/// 16 bytes (vec4 rounding) to satisfy WGSL uniform buffer alignment rules.
+/// Created once per material at asset upload time and never written per frame.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct MaterialUniform {
+    metallic: f32,
+    roughness: f32,
+    _reserved: [f32; 2],
+}
+
+impl MaterialUniform {
+    fn new(metallic: f32, roughness: f32) -> Self {
+        Self {
+            metallic,
+            roughness,
+            _reserved: [0.0; 2],
+        }
+    }
+}
+
 struct DepthTarget {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -247,6 +278,8 @@ struct GpuMaterial {
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
+    // G1D: metallic/roughness uniform buffer (static, written once at upload).
+    _material_uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -554,6 +587,8 @@ impl WgpuRenderer {
                         &queue,
                         texture,
                         &primitive.material.sampler_config,
+                        primitive.material.metallic_factor,
+                        primitive.material.roughness_factor,
                     )?;
                     let index = materials.len();
                     materials.push(gpu_material);
@@ -1160,6 +1195,18 @@ fn create_white_fallback_material(
         ..Default::default()
     });
 
+    // G1D: procedural/fallback materials are explicit non-metals with high
+    // roughness so terrain, scenery, and the procedural aircraft never turn
+    // accidentally chromatic under the PBR response.
+    let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("fallback material uniform"),
+        contents: bytemuck::bytes_of(&MaterialUniform::new(
+            PROCEDURAL_METALLIC,
+            PROCEDURAL_ROUGHNESS,
+        )),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("fallback material bind group"),
         layout,
@@ -1172,6 +1219,10 @@ fn create_white_fallback_material(
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: material_uniform_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -1179,16 +1230,20 @@ fn create_white_fallback_material(
         _texture: texture,
         _texture_view: texture_view,
         _sampler: sampler,
+        _material_uniform: material_uniform_buffer,
         bind_group,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_gpu_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     queue: &wgpu::Queue,
     texture_data: &crate::texture::DecodedTexture,
     sampler_config: &SamplerConfig,
+    metallic: f32,
+    roughness: f32,
 ) -> Result<GpuMaterial, RendererError> {
     let size = wgpu::Extent3d {
         width: texture_data.width,
@@ -1240,6 +1295,14 @@ fn create_gpu_material(
         ..Default::default()
     });
 
+    // G1D: static per-primitive metallic/roughness uniform. Written once at
+    // asset upload; never touched per frame.
+    let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("material uniform"),
+        contents: bytemuck::bytes_of(&MaterialUniform::new(metallic, roughness)),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("material bind group"),
         layout,
@@ -1252,6 +1315,10 @@ fn create_gpu_material(
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: material_uniform_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -1259,6 +1326,7 @@ fn create_gpu_material(
         _texture: texture,
         _texture_view: texture_view,
         _sampler: sampler,
+        _material_uniform: material_uniform_buffer,
         bind_group,
     })
 }
@@ -1355,6 +1423,17 @@ fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindG
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // G1D: metallic/roughness material uniform.
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<MaterialUniform>() as u64),
+                },
                 count: None,
             },
         ],
@@ -1570,6 +1649,51 @@ mod glb_articulation_tests {
                 material_index: 41,
                 hinge: Some(hinge),
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod material_uniform_tests {
+    use super::*;
+
+    // G1D: the material uniform must satisfy WGSL uniform buffer alignment.
+    // Two f32 parameters plus padding round up to one 16-byte vec4 slot.
+    #[test]
+    fn material_uniform_layout_is_16_bytes() {
+        assert_eq!(
+            size_of::<MaterialUniform>(),
+            16,
+            "MaterialUniform must occupy exactly one WGSL vec4 slot"
+        );
+    }
+
+    #[test]
+    fn material_uniform_stores_finite_values() {
+        let uniform = MaterialUniform::new(0.35, 0.7);
+        assert_eq!(uniform.metallic, 0.35);
+        assert_eq!(uniform.roughness, 0.7);
+        assert!(uniform.metallic.is_finite() && uniform.roughness.is_finite());
+        let bytes = bytemuck::bytes_of(&uniform);
+        assert_eq!(bytes.len(), 16);
+    }
+
+    #[test]
+    fn material_uniform_roundtrips_through_bytes() {
+        let uniform = MaterialUniform::new(0.0, 1.0);
+        let decoded: MaterialUniform = *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
+        assert_eq!(decoded.metallic, 0.0);
+        assert_eq!(decoded.roughness, 1.0);
+        assert!(decoded.metallic.is_finite() && decoded.roughness.is_finite());
+    }
+
+    #[test]
+    fn procedural_material_parameters_are_non_metal_and_rough() {
+        // Terrain/scenery/procedural aircraft must never become chromed.
+        assert_eq!(PROCEDURAL_METALLIC, 0.0);
+        assert!(
+            (0.5..=1.0).contains(&PROCEDURAL_ROUGHNESS),
+            "procedural roughness must stay high for a matte response"
         );
     }
 }
