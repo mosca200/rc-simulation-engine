@@ -18,9 +18,20 @@
 // anti-repetition rotated second sample, a distance-faded detail normal
 // layer, multi-scale roughness, and presentation-only debug channels driven
 // by a uniform selector (no shader recompiles).
-// Still deliberately out of scope: cascades, HDR, IBL, or clouds. Ambient is
-// flat and mostly applied to the diffuse response so aircraft remain readable
-// in shadow.
+// Still deliberately out of scope: cascades, IBL textures, or clouds.
+//
+// G3B adds an HDR outdoor lighting pipeline:
+//   scene HDR pass (Rgba16Float, linear, no LDR clamp)
+//   -> postprocess pass (exposure * Khronos PBR Neutral tone mapping)
+//   -> sRGB display surface (hardware encode).
+// The flat ambient term is replaced by a deterministic analytic sky model:
+// a hemispherical sky-diffuse irradiance (coherent with world up and the
+// procedural sky gradient) and a roughness/metallic-aware analytic
+// environment specular response. The directional shadow map still modulates
+// ONLY the direct sun term; sky light is never shadowed, so shadow sides
+// stay readable without a fake flat fill. All new resources (HDR target,
+// sampler, bind groups, postprocess pipeline) are created at startup or
+// resize — never per frame.
 
 // ---------------------------------------------------------------------------
 // Uniforms
@@ -40,7 +51,8 @@ struct ObjectUniform {
 //
 // light_direction.xyz: normalized world-space direction TOWARD the light.
 // light_direction.w:   directional light intensity.
-// ambient.xyz:         ambient light color (typically grey).
+// ambient.xyz:         reserved for the legacy flat ambient (kept at zero;
+//                      replaced by the G3B sky-diffuse model).
 // ambient.w:           reserved.
 // sky_zenith.xyz:      zenith color (straight up).
 // sky_zenith.w:        reserved.
@@ -50,6 +62,13 @@ struct ObjectUniform {
 // sky_ground.w:        fog density (exponential fog coefficient).
 // sun_color.xyz:       sun disk color.
 // sun_color.w:         cosine of sun angular radius.
+// sky_diffuse.xyz:     G3B sky-diffuse irradiance scale factor (applied to
+//                      the hemispherical zenith/horizon/ground gradient).
+// sky_diffuse.w:       sun-facing lift weight (diffuse irradiance boost on
+//                      surfaces facing the sun, keeps the lit side alive).
+// env_specular.xyz:    G3B environment specular color (analytic sky
+//                      reflection tint, pre-wired for future prefiltered IBL).
+// env_specular.w:      environment specular strength scaler.
 struct EnvironmentUniform {
     light_direction: vec4<f32>,
     ambient: vec4<f32>,
@@ -57,6 +76,17 @@ struct EnvironmentUniform {
     sky_horizon: vec4<f32>,
     sky_ground: vec4<f32>,
     sun_color: vec4<f32>,
+    sky_diffuse: vec4<f32>,
+    env_specular: vec4<f32>,
+};
+
+// G3B: postprocess state for the final display pass.
+// exposure_ev: manual exposure in EV stops; the scene value is multiplied by
+//   exp2(exposure_ev) BEFORE tone mapping (scene-referred HDR -> display).
+//   Finite and bounded by the CPU-side validator.
+struct PostProcessUniform {
+    exposure_ev: f32,
+    padding: vec3<f32>,
 };
 
 // G2B: directional shadow state. The light view-projection transforms a world
@@ -147,6 +177,18 @@ var terrain_normal_texture: texture_2d<f32>;
 var terrain_roughness_texture: texture_2d<f32>;
 @group(4) @binding(4)
 var<uniform> terrain_material: TerrainMaterialUniform;
+
+// G3B: HDR scene target + postprocess state. This group belongs to the
+// dedicated fullscreen postprocess pipeline (its own layout); the scene
+// passes never bind it, so the HDR texture/state stay out of the lighting
+// paths. The sampler is nearest (1:1 texel mapping, deterministic) and the
+// uniform buffer is the only postprocess state written per frame.
+@group(5) @binding(0)
+var hdr_scene_texture: texture_2d<f32>;
+@group(5) @binding(1)
+var hdr_scene_sampler: sampler;
+@group(5) @binding(2)
+var<uniform> postprocess: PostProcessUniform;
 
 // ---------------------------------------------------------------------------
 // Vertex IO
@@ -241,7 +283,9 @@ fn sky_color_for_direction(view_dir: vec3<f32>) -> vec3<f32> {
     let disk = smoothstep(sun_cos_radius - 0.0005, sun_cos_radius + 0.0005, sun_alignment);
     // Subtle halo: fades from disk edge outward.
     let halo = smoothstep(sun_cos_radius - 0.06, sun_cos_radius - 0.005, sun_alignment) * 0.25;
-    sky = clamp(sky + environment.sun_color.xyz * (disk + halo), vec3<f32>(0.0), vec3<f32>(1.0));
+    // G3B: no LDR clamp — the sun disk and haze stay scene-referred so the
+    // postprocess exposure + tone mapper own the final display range.
+    sky = sky + environment.sun_color.xyz * (disk + halo);
 
     return sky;
 }
@@ -293,14 +337,6 @@ const MIN_ROUGHNESS: f32 = 0.06;
 // Dielectric F0 (generic plastic/paint interface reflectance at normal
 // incidence). Metals override this with their albedo via the glTF workflow.
 const DIELECTRIC_F0: f32 = 0.04;
-
-// Readability ambient floor for metals. With no IBL, a pure-metal surface lit
-// only by the directional term goes almost black outside its highlight,
-// hurting aircraft readability at distance. We therefore let metals receive a
-// flat (non-directional, non-fresnel) fraction of the existing ambient term.
-// This is a documented readability approximation, NOT an environment
-// reflection. Non-metals keep the plain diffuse ambient response.
-const AMBIENT_SPECULAR_SCALE: f32 = 0.5;
 
 // Upper clamp on the direct specular response. GGX can spike at grazing
 // angles on low-roughness surfaces; with LDR output the spike would clip to
@@ -367,6 +403,49 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// G3B: analytic sky response
+// ---------------------------------------------------------------------------
+
+// Hemispherical sky-diffuse irradiance.
+//
+// Builds a world-up hemisphere from the same zenith / horizon / ground
+// gradient as the visible procedural sky, scaled by the uniform irradiance
+// factor, with a subtle lift on sun-facing normals. It is directionally
+// coherent with the outdoor sky, never shadowed, and never clamps: shadow
+// sides keep a plausible blue-grey fill while unshadowed surfaces stay
+// sun-driven. Slots for future prefiltered IBL: replace this function's body
+// with a probe sample while keeping the EnvironmentUniform contract.
+fn sky_diffuse_irradiance(n: vec3<f32>) -> vec3<f32> {
+    let ndot_up = clamp(dot(n, WORLD_UP), 0.0, 1.0);
+    // Sky gradient between horizon and zenith above ground (same power curve
+    // as the visible sky), and horizon-to-ground below.
+    var hemisphere: vec3<f32>;
+    if (ndot_up >= 0.0) {
+        hemisphere = mix(environment.sky_horizon.xyz, environment.sky_zenith.xyz, pow(ndot_up, 0.5));
+    } else {
+        hemisphere = mix(environment.sky_horizon.xyz, environment.sky_ground.xyz, pow(-ndot_up, 0.7));
+    }
+    let sun_dir = safe_normalize(environment.light_direction.xyz);
+    let sun_lift = environment.sky_diffuse.w * clamp(dot(n, sun_dir), 0.0, 1.0);
+    return hemisphere * environment.sky_diffuse.xyz * (1.0 + sun_lift);
+}
+
+// Roughness/metallic-aware analytic environment specular response.
+//
+// Uses the Schlick Fresnel through the same PBR path as the direct term, so
+// metals (F0 ~ albedo) reflect the sky color strongly while dielectrics stay
+// subtle; a GGX-like lobe weight (smoothness^2) makes sharp surfaces reflect
+// more and rough surfaces fade toward the diffuse response. Deterministic and
+// documentable — this is the placeholder for a future prefiltered IBL env map.
+fn environment_specular_response(f0: vec3<f32>, roughness: f32, ndot_v: f32) -> vec3<f32> {
+    let smoothness = clamp(1.0 - roughness, 0.0, 1.0);
+    let lobe_weight = smoothness * smoothness;
+    let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
+    let env_color = mix(environment.sky_horizon.xyz, environment.sky_zenith.xyz, 0.5);
+    return fresnel * env_color * environment.env_specular.xyz * lobe_weight * environment.env_specular.w;
+}
+
+// ---------------------------------------------------------------------------
 // Lit fragment: texture * vertex_color * lighting + distance fog.
 //
 // G1C color pipeline (preserved):
@@ -389,7 +468,7 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
 // term stays energy-consistent with the diffuse.
 //
 // Deterministic defaults:
-//   ambient       = vec3(0.30)
+//   sky diffuse / env specular as configured in `EnvironmentUniform`
 //   direction     = normalize(vec3(0.4, 0.8, -0.3))  (above, right, slightly forward)
 //   intensity     = 0.80
 //   fog_density   = 0.0015
@@ -441,10 +520,17 @@ fn lit_pbr_response(
     let shadow_visibility = directional_shadow_visibility(world_position);
     let direct = direct_unshadowed * shadow_visibility;
 
-    // Ambient: applied predominantly to the diffuse (non-metal) response,
-    // with the documented readability floor for metals. No fake IBL.
-    let ambient_diffuse = diffuse_albedo * environment.ambient.xyz;
-    let ambient_specular = f0 * environment.ambient.xyz * AMBIENT_SPECULAR_SCALE;
+    // G3B analytic sky response (replaces the legacy flat ambient).
+    // Sky diffuse: hemispherical irradiance built from the same zenith /
+    // horizon / ground gradient as the visible sky, lifted slightly on
+    // sun-facing normals. It is directional in world-up, never shadowed, and
+    // keeps the shadow side readable without washing the aircraft out.
+    // Sky specular: roughness-aware analytic environment response through the
+    // PBR path — metals (high F0) reflect strongly, dielectric clearcoat stays
+    // subtle, and sharper surfaces (low roughness) are boosted. Pre-wired for
+    // future prefiltered IBL by keeping both terms in the environment uniform.
+    let ambient_diffuse = diffuse_albedo * sky_diffuse_irradiance(n);
+    let ambient_specular = environment_specular_response(f0, roughness, ndot_v);
     let ambient = mix(ambient_diffuse, ambient_specular, metallic);
 
     let lit_rgb = direct + ambient;
@@ -705,4 +791,50 @@ fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     let view_dir = view_direction_from_clip(input.clip_xy);
     let color = sky_color_for_direction(view_dir);
     return vec4<f32>(color, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// G3B: fullscreen postprocess pass (HDR scene -> exposure -> tone map -> sRGB)
+// ---------------------------------------------------------------------------
+
+// Color-space contract (single chain, documented):
+//   1. sRGB textures decode to linear on sampling (hardware conversion).
+//   2. All lighting runs in linear HDR and is stored scene-referred in the
+//      Rgba16Float target — no clamp before the tone mapper anywhere.
+//   3. The postprocess pass applies the manual exposure, then the Khronos
+//      PBR Neutral tone mapper (highlight compression, controlled saturation,
+//      monotone finite response), and writes linear display values.
+//   4. The sRGB surface format performs the final linear->sRGB encode.
+// There is deliberately NO pow() gamma handling in shader code: the surface
+// already encodes, and a second manual gamma would double-apply the transfer.
+fn khronos_pbr_neutral(color: vec3<f32>) -> vec3<f32> {
+    // Khronos PBR Neutral tone mapper (exact reference math, see the Khronos
+    // glTF-Sample-Renderer tonemapping.glsl).
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+
+    let x = min(color.r, min(color.g, color.b));
+    let offset = select(0.04, x - 6.25 * x * x, x < 0.08);
+    var c = color - vec3<f32>(offset);
+
+    let peak = max(c.r, max(c.g, c.b));
+    if (peak < start_compression) {
+        return c;
+    }
+    let d = 1.0 - start_compression;
+    let new_peak = 1.0 - d * d / (peak + d - start_compression);
+    c = c * vec3<f32>(new_peak / peak);
+    let g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return mix(c, vec3<f32>(new_peak), g);
+}
+
+@fragment
+fn fs_postprocess(input: SkyVertexOutput) -> @location(0) vec4<f32> {
+    // 1:1 texel mapping from the fullscreen triangle; +0.5 lands on texel
+    // centers under the nearest sampler (deterministic, no cross-texel blur).
+    let uv = input.clip_xy * 0.5 + vec2<f32>(0.5);
+    let hdr_rgb = textureSample(hdr_scene_texture, hdr_scene_sampler, uv).rgb;
+    let exposed_rgb = hdr_rgb * exp2(postprocess.exposure_ev);
+    let display_rgb = khronos_pbr_neutral(exposed_rgb);
+    return vec4<f32>(display_rgb, 1.0);
 }

@@ -34,8 +34,9 @@ pub use glb::{
     GlbAsset, GlbLoadError, PrimitiveMaterial, RenderPrimitive, load_glb_asset, load_glb_mesh,
 };
 pub use gpu::{
-    PresentationAsset, RenderTerrainMode, RendererError, SKY_CLEAR_COLOR, SurfaceError,
-    TerrainDebugMode, WgpuRenderer,
+    DEFAULT_EXPOSURE_EV, ExposureError, PresentationAsset, RenderTerrainMode, RendererError,
+    SKY_CLEAR_COLOR, SurfaceError, TerrainDebugMode, WgpuRenderer, exposure_multiplier,
+    validate_exposure_ev,
 };
 pub use math::{Mat4, ProjectionError, matrix_to_wgsl_columns, webgpu_perspective};
 pub use mesh::{

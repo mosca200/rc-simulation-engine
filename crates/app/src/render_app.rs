@@ -21,10 +21,11 @@ use platform::{
     InputState, KeyboardInputState, KeyboardKey, RawControllerState,
 };
 use renderer::{
-    AircraftMesh, CameraConfig, FixedStepAccumulator, FixedStepAccumulatorError,
-    GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError, PresentationAsset,
-    RenderDataError, RenderTerrainMode, RendererError, SurfaceError, SurfaceHinge, SurfaceId,
-    TerrainDebugMode, WgpuRenderer, aircraft_mesh, load_glb_asset, scenery::SceneryPreset,
+    AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, ExposureError, FixedStepAccumulator,
+    FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
+    PresentationAsset, RenderDataError, RenderTerrainMode, RendererError, SurfaceError,
+    SurfaceHinge, SurfaceId, TerrainDebugMode, WgpuRenderer, aircraft_mesh, load_glb_asset,
+    scenery::SceneryPreset, validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -76,6 +77,8 @@ pub struct RenderOptions {
     debug_overlays: bool,
     // G3A-R: presentation-only terrain debug channel (FINAL by default).
     terrain_debug: TerrainDebugMode,
+    // G3B: presentation-only manual exposure in EV stops (default outdoor).
+    exposure_ev: f32,
 }
 
 /// Presentation-side camera selection parsed from the CLI.
@@ -150,6 +153,7 @@ impl RenderOptions {
             camera: CameraSelection::default(),
             debug_overlays: false,
             terrain_debug: TerrainDebugMode::default(),
+            exposure_ev: DEFAULT_EXPOSURE_EV,
         }
     }
 
@@ -243,6 +247,18 @@ impl RenderOptions {
                         .ok_or(RenderAppError::MissingArgumentValue("--terrain-debug"))?;
                     options.terrain_debug = TerrainDebugMode::from_label(&value)
                         .ok_or_else(|| RenderAppError::InvalidTerrainDebug(value.clone()))?;
+                }
+                "--exposure-ev" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--exposure-ev"))?;
+                    let ev = value
+                        .parse::<f32>()
+                        .map_err(|_| RenderAppError::InvalidExposureEv(value.clone()))?;
+                    // Validated here (finite + bounded); the renderer validates
+                    // again defensively. Presentation-only: never physics.
+                    options.exposure_ev = validate_exposure_ev(ev)
+                        .map_err(|_| RenderAppError::InvalidExposureEv(value))?;
                 }
                 "--scenery" => {
                     let value = arguments
@@ -348,6 +364,8 @@ pub enum RenderAppError {
         "invalid terrain debug mode `{0}`; expected `final`, `albedo`, `normal`, `roughness`, `macro`, or `detail`"
     )]
     InvalidTerrainDebug(String),
+    #[error("invalid exposure EV `{0}`; expected a finite value inside [-8, 8]")]
+    InvalidExposureEv(String),
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
     UnknownCamera(String),
     #[error("invalid camera FOV `{0}`; expected a finite value inside (10, 120) degrees")]
@@ -407,6 +425,8 @@ pub enum RenderRuntimeError {
     WindowCreation(#[source] winit::error::OsError),
     #[error("failed to initialize wgpu: {0}")]
     RendererInitialization(#[source] RendererError),
+    #[error("invalid exposure EV rejected at renderer startup: {0}")]
+    ExposureValidation(#[source] ExposureError),
     #[error("failed to convert the committed physics pose for rendering: {0}")]
     RenderPose(#[from] RenderDataError),
     #[error("failed to sample normalized pilot input: {0}")]
@@ -713,6 +733,8 @@ struct RenderApplication {
     input_mode: Option<ViewerInputMode>,
     input_backend: Option<GilrsInputBackend>,
     terrain_debug: TerrainDebugMode,
+    // G3B: presentation-only manual exposure (EV stops), CLI-provided.
+    exposure_ev: f32,
     replay_recorder: Option<AircraftReplayRecorder>,
     replay_output_path: Option<PathBuf>,
     render_origin_world_ned_m: [f64; 3],
@@ -800,6 +822,7 @@ impl RenderApplication {
             input_mode: None,
             input_backend: None,
             terrain_debug: options.terrain_debug,
+            exposure_ev: options.exposure_ev,
             replay_recorder,
             replay_output_path: options.replay_output_path,
             render_origin_world_ned_m,
@@ -1062,6 +1085,12 @@ impl ApplicationHandler for RenderApplication {
         };
         renderer.set_show_debug_overlays(self.debug_overlays);
         renderer.set_terrain_debug_mode(self.terrain_debug);
+        // G3B: exposure was already validated at CLI parse time; the setter is
+        // a defensive no-change-on-invalid guard (presentation-only).
+        if let Err(error) = renderer.set_exposure_ev(self.exposure_ev) {
+            self.fail(event_loop, RenderRuntimeError::ExposureValidation(error));
+            return;
+        }
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last_frame_time = Some(Instant::now());

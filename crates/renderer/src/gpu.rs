@@ -63,6 +63,10 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+// G3B: linear HDR scene target. Opaque geometry, terrain, aircraft, sky and
+// lighting write scene-referred linear values here; the postprocess pass
+// resolves exposure + tone mapping to the sRGB surface.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const GPU_ERROR_NONE: u8 = 0;
 const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
 const GPU_ERROR_OTHER: u8 = 2;
@@ -70,7 +74,25 @@ pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
 const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
 const DEFAULT_LIGHT_INTENSITY: f32 = 0.80;
-const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.30, 0.30, 0.30];
+
+// G3B: deterministic analytic sky response parameters.
+// Sky diffuse: hemispherical irradiance scale applied to the procedural
+// zenith/horizon/ground gradient, plus a sun-facing lift weight. Chosen so
+// the unshadowed field keeps its established energy while shadow sides stay
+// readable (no flat fake fill).
+const DEFAULT_SKY_DIFFUSE_RGB: [f32; 3] = [0.80, 0.85, 0.95];
+const DEFAULT_SKY_DIFFUSE_SUN_LIFT: f32 = 0.15;
+// Environment specular: analytic sky reflection tint and strength through the
+// PBR path (roughness/metallic aware); pre-wired for future prefiltered IBL.
+const DEFAULT_ENV_SPECULAR_RGB: [f32; 3] = [1.0, 1.0, 1.0];
+const DEFAULT_ENV_SPECULAR_STRENGTH: f32 = 1.0;
+
+// G3B: manual exposure (EV). Default outdoor value keeps the current scene
+// energy; the multiplier is exp2(ev). Values outside the conservative band
+// are rejected by the validator (presentation-only, never physics).
+pub const DEFAULT_EXPOSURE_EV: f32 = 0.0;
+const EXPOSURE_EV_MIN: f32 = -8.0;
+const EXPOSURE_EV_MAX: f32 = 8.0;
 
 const DEFAULT_ZENITH_RGB: [f32; 3] = [0.16, 0.36, 0.66];
 const DEFAULT_HORIZON_RGB: [f32; 3] = [0.68, 0.78, 0.88];
@@ -191,6 +213,61 @@ struct EnvironmentUniform {
     sky_horizon: [f32; 4],
     sky_ground: [f32; 4],
     sun_color: [f32; 4],
+    // G3B: analytic sky response (see WGSL struct docs).
+    sky_diffuse: [f32; 4],
+    env_specular: [f32; 4],
+}
+
+/// G3B: postprocess state (exposure EV) matching the WGSL `PostProcessUniform`.
+///
+/// The only uniform written in the frame path besides the camera, object and
+/// shadow matrices; the buffer is UNIFORM | COPY_DST created once at startup.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct PostProcessUniform {
+    exposure_ev: f32,
+    padding: [f32; 3],
+}
+
+impl PostProcessUniform {
+    fn new(exposure_ev: f32) -> Self {
+        Self {
+            exposure_ev,
+            padding: [0.0; 3],
+        }
+    }
+}
+
+/// G3B: exposure validation error. Presentation-only — exposure NEVER enters
+/// the physics/model fingerprint.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ExposureError {
+    #[error("exposure EV `{0}` is not finite")]
+    NotFinite(f32),
+    #[error(
+        "exposure EV `{0}` is outside the supported range [{EXPOSURE_EV_MIN}, {EXPOSURE_EV_MAX}]"
+    )]
+    OutOfRange(f32),
+}
+
+/// Validates a manual exposure value in EV stops.
+///
+/// Rejects non-finite inputs and absurd values; the accepted band keeps the
+/// tone mapper response monotone and finite for any scene-referred value.
+pub fn validate_exposure_ev(exposure_ev: f32) -> Result<f32, ExposureError> {
+    if !exposure_ev.is_finite() {
+        return Err(ExposureError::NotFinite(exposure_ev));
+    }
+    if !(EXPOSURE_EV_MIN..=EXPOSURE_EV_MAX).contains(&exposure_ev) {
+        return Err(ExposureError::OutOfRange(exposure_ev));
+    }
+    Ok(exposure_ev)
+}
+
+/// G3B: exposure multiplier for a manual EV stop value: `exp2(ev)`.
+#[must_use]
+pub fn exposure_multiplier(exposure_ev: f32) -> f32 {
+    2.0f32.powf(exposure_ev)
 }
 
 /// G2B: per-frame light matrix and receiver bias for directional shadows.
@@ -231,10 +308,9 @@ impl EnvironmentUniform {
                 DEFAULT_LIGHT_INTENSITY,
             ],
             ambient: [
-                DEFAULT_AMBIENT_RGB[0],
-                DEFAULT_AMBIENT_RGB[1],
-                DEFAULT_AMBIENT_RGB[2],
-                0.0,
+                // G3B: legacy flat ambient retired — zeroed, the sky-diffuse
+                // model owns the non-direct response now.
+                0.0, 0.0, 0.0, 0.0,
             ],
             sky_zenith: [
                 DEFAULT_ZENITH_RGB[0],
@@ -259,6 +335,18 @@ impl EnvironmentUniform {
                 DEFAULT_SUN_COLOR_RGB[1],
                 DEFAULT_SUN_COLOR_RGB[2],
                 DEFAULT_SUN_COS_ANGULAR_RADIUS,
+            ],
+            sky_diffuse: [
+                DEFAULT_SKY_DIFFUSE_RGB[0],
+                DEFAULT_SKY_DIFFUSE_RGB[1],
+                DEFAULT_SKY_DIFFUSE_RGB[2],
+                DEFAULT_SKY_DIFFUSE_SUN_LIFT,
+            ],
+            env_specular: [
+                DEFAULT_ENV_SPECULAR_RGB[0],
+                DEFAULT_ENV_SPECULAR_RGB[1],
+                DEFAULT_ENV_SPECULAR_RGB[2],
+                DEFAULT_ENV_SPECULAR_STRENGTH,
             ],
         }
     }
@@ -466,6 +554,17 @@ struct DepthTarget {
     view: wgpu::TextureView,
 }
 
+/// G3B: persistent linear HDR scene target (Rgba16Float).
+///
+/// Opaque geometry, terrain, aircraft, sky and lighting write scene-referred
+/// linear values here; the postprocess pass samples it and resolves exposure +
+/// tone mapping to the sRGB surface. Created at startup and recreated only on
+/// resize — never per frame. The view is re-bound on resize.
+struct HdrTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 /// G2B: persistent depth texture sampled by the lit pass and written by the
 /// directional shadow caster pass. It is deliberately independent from the
 /// resize-dependent scene depth target.
@@ -586,6 +685,8 @@ pub struct WgpuRenderer {
     shadow_pipeline: wgpu::RenderPipeline,
     // G3A: terrain pipeline (dedicated fs_terrain entry, group-4 material).
     terrain_pipeline: wgpu::RenderPipeline,
+    // G3B: fullscreen postprocess pipeline (HDR -> exposure -> tone map).
+    postprocess_pipeline: wgpu::RenderPipeline,
 
     _camera_bind_group_layout: wgpu::BindGroupLayout,
     _object_bind_group_layout: wgpu::BindGroupLayout,
@@ -594,6 +695,8 @@ pub struct WgpuRenderer {
     _material_bind_group_layout: wgpu::BindGroupLayout,
     // G3A: extended terrain material layout (albedo/normal/roughness + uniform).
     _terrain_material_bind_group_layout: wgpu::BindGroupLayout,
+    // G3B: dedicated postprocess layout (HDR texture + sampler + uniform).
+    _postprocess_bind_group_layout: wgpu::BindGroupLayout,
 
     // Persistent bind groups.
     camera_buffer: wgpu::Buffer,
@@ -640,6 +743,13 @@ pub struct WgpuRenderer {
 
     depth_target: DepthTarget,
     shadow_target: ShadowTarget,
+    // G3B: linear HDR scene target, postprocess sampler/uniform/bind group.
+    hdr_target: HdrTarget,
+    postprocess_sampler: wgpu::Sampler,
+    postprocess_uniform_buffer: wgpu::Buffer,
+    postprocess_bind_group: wgpu::BindGroup,
+    // G3B: presentation-only manual exposure in EV stops (validated).
+    exposure_ev: f32,
     _shadow_sampler: wgpu::Sampler,
     camera: CameraMode,
     asynchronous_gpu_error: Arc<AtomicU8>,
@@ -1210,6 +1320,53 @@ impl WgpuRenderer {
             surface_configuration.height,
         );
 
+        // G3B: linear HDR scene target + postprocess pass, created once here
+        // (and recreated on resize only). No texture/sampler/bind group/
+        // pipeline creation happens on the frame path.
+        let hdr_target = create_hdr_target(
+            &device,
+            surface_configuration.width,
+            surface_configuration.height,
+        );
+        let postprocess_bind_group_layout =
+            postprocess_bind_group_layout(&device, "G3B postprocess layout");
+        let postprocess_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("G3B postprocess sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            // 1:1 texel mapping from the fullscreen triangle; nearest keeps
+            // the resolve deterministic and avoids cross-texel bleed.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let postprocess_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("G3B postprocess uniform"),
+                contents: bytemuck::bytes_of(&PostProcessUniform::new(DEFAULT_EXPOSURE_EV)),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let postprocess_bind_group = create_hdr_scene_bind_group(
+            &device,
+            &postprocess_bind_group_layout,
+            &hdr_target.view,
+            &postprocess_sampler,
+            &postprocess_uniform_buffer,
+            "G3B postprocess bind group",
+        );
+        // The postprocess rasterizes a fullscreen triangle on the sRGB
+        // surface; the HDR target is sampled in its own fragment entry.
+        let postprocess_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("G3B postprocess pipeline layout"),
+                bind_group_layouts: &[Some(&postprocess_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let postprocess_pipeline =
+            create_postprocess_pipeline(&device, &shader, &postprocess_pipeline_layout, format);
+
         Ok(Self {
             _instance: instance,
             surface,
@@ -1222,12 +1379,14 @@ impl WgpuRenderer {
             line_pipeline,
             shadow_pipeline,
             terrain_pipeline,
+            postprocess_pipeline,
             _camera_bind_group_layout: camera_bind_group_layout,
             _object_bind_group_layout: object_bind_group_layout,
             _environment_bind_group_layout: environment_bind_group_layout,
             _shadow_pass_bind_group_layout: shadow_pass_bind_group_layout,
             _material_bind_group_layout: material_bind_group_layout,
             _terrain_material_bind_group_layout: terrain_material_bind_group_layout,
+            _postprocess_bind_group_layout: postprocess_bind_group_layout,
             camera_buffer,
             camera_bind_group,
             aircraft_object_buffer,
@@ -1253,6 +1412,11 @@ impl WgpuRenderer {
             line_vertex_count: references.vertices().len() as u32,
             depth_target,
             shadow_target,
+            hdr_target,
+            postprocess_sampler,
+            postprocess_uniform_buffer,
+            postprocess_bind_group,
+            exposure_ev: DEFAULT_EXPOSURE_EV,
             _shadow_sampler: shadow_sampler,
             camera: camera_config.build(size.width, size.height),
             asynchronous_gpu_error,
@@ -1316,6 +1480,24 @@ impl WgpuRenderer {
         self.terrain_debug_mode
     }
 
+    /// G3B: set the presentation-only manual exposure (EV stops).
+    ///
+    /// The value is validated (finite, bounded) before it replaces the
+    /// current exposure; invalid values are rejected and leave the state
+    /// unchanged. Exposure is applied only in the postprocess pass — it never
+    /// enters physics, interpolation, or the model fingerprint.
+    pub fn set_exposure_ev(&mut self, exposure_ev: f32) -> Result<(), ExposureError> {
+        validate_exposure_ev(exposure_ev)?;
+        self.exposure_ev = exposure_ev;
+        Ok(())
+    }
+
+    /// G3B: current manual exposure in EV stops.
+    #[must_use]
+    pub fn exposure_ev(&self) -> f32 {
+        self.exposure_ev
+    }
+
     /// Effective terrain sampler anisotropy on this device
     /// (`1` when the backend lacks `ANISOTROPIC_FILTERING`, `16` otherwise).
     #[must_use]
@@ -1333,6 +1515,18 @@ impl WgpuRenderer {
         self.camera.resize(width, height);
         self.reconfigure_surface();
         self.depth_target = create_depth_target(&self.device, width, height);
+        // G3B: the linear HDR scene target tracks the surface size; the
+        // postprocess bind group is re-created to reference the new view.
+        // Pipelines, sampler and uniform buffer are NOT recreated here.
+        self.hdr_target = create_hdr_target(&self.device, width, height);
+        self.postprocess_bind_group = create_hdr_scene_bind_group(
+            &self.device,
+            &self._postprocess_bind_group_layout,
+            &self.hdr_target.view,
+            &self.postprocess_sampler,
+            &self.postprocess_uniform_buffer,
+            "G3B postprocess bind group (resized)",
+        );
         self.surface_is_configured = true;
     }
 
@@ -1412,6 +1606,14 @@ impl WgpuRenderer {
             );
         }
 
+        // G3B: postprocess exposure (presentation-only). One 16-byte write to
+        // the persistent uniform buffer; no resource is created per frame.
+        self.queue.write_buffer(
+            &self.postprocess_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&PostProcessUniform::new(self.exposure_ev)),
+        );
+
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1482,16 +1684,20 @@ impl WgpuRenderer {
             }
         }
         {
+            // G3B: the scene pass now renders to the linear HDR target. The
+            // surface receives only the resolved postprocess output below.
             let color_attachment = wgpu::RenderPassColorAttachment {
-                view: &surface_view,
+                view: &self.hdr_target.view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
+                    // Scene-referred HDR clear: the procedural sky pass covers
+                    // the full viewport, so this is only a safety fill.
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: SKY_CLEAR_COLOR[0],
-                        g: SKY_CLEAR_COLOR[1],
-                        b: SKY_CLEAR_COLOR[2],
-                        a: SKY_CLEAR_COLOR[3],
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -1585,6 +1791,32 @@ impl WgpuRenderer {
                     .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
             }
+        }
+        {
+            // G3B: fullscreen postprocess pass — samples the linear HDR scene
+            // target, applies the manual exposure and the Khronos PBR Neutral
+            // tone mapper, and writes display values to the sRGB surface. The
+            // surface sRGB format performs the final linear->sRGB encode.
+            let display_attachment = wgpu::RenderPassColorAttachment {
+                view: &surface_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            };
+            let mut postprocess_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("G3B HDR postprocess pass"),
+                color_attachments: &[Some(display_attachment)],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            postprocess_pass.set_pipeline(&self.postprocess_pipeline);
+            postprocess_pass.set_bind_group(0, &self.postprocess_bind_group, &[]);
+            postprocess_pass.draw(0..3, 0..1);
         }
 
         let _submit_index = self.queue.submit(std::iter::once(encoder.finish()));
@@ -2530,6 +2762,49 @@ fn create_sky_pipeline(
     })
 }
 
+/// G3B: fullscreen postprocess pipeline — `vs_sky_fullscreen` triangle over
+/// `fs_postprocess`, no depth test, output to the sRGB surface format.
+fn create_postprocess_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G3B HDR postprocess pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_sky_fullscreen"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_postprocess"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth target"),
@@ -2550,6 +2825,97 @@ fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthT
         _texture: texture,
         view,
     }
+}
+
+/// G3B: persistent linear HDR scene target (Rgba16Float).
+///
+/// Created at startup and recreated on resize only; sampled by the
+/// postprocess pass, never rendered on the frame path creation-wise.
+fn create_hdr_target(device: &wgpu::Device, width: u32, height: u32) -> HdrTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("G3B HDR scene target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    HdrTarget {
+        _texture: texture,
+        view,
+    }
+}
+
+/// G3B: postprocess bind group layout — HDR scene texture (f32 sampleable),
+/// nearest sampler, and the postprocess uniform (exposure EV).
+fn postprocess_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// G3B: postprocess bind group binding the HDR scene view + sampler + uniform.
+fn create_hdr_scene_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    hdr_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    uniform_buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(hdr_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn create_shadow_target(device: &wgpu::Device) -> ShadowTarget {
