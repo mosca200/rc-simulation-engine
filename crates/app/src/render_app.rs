@@ -24,8 +24,8 @@ use renderer::{
     AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, ExposureError, FixedStepAccumulator,
     FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
     PresentationAsset, RenderDataError, RenderTerrainMode, RendererError, SurfaceError,
-    SurfaceHinge, SurfaceId, TerrainDebugMode, WgpuRenderer, aircraft_mesh, load_glb_asset,
-    scenery::SceneryPreset, validate_exposure_ev,
+    SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode, WgpuRenderer, aircraft_mesh,
+    load_glb_asset, scenery::SceneryPreset, validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -77,6 +77,8 @@ pub struct RenderOptions {
     debug_overlays: bool,
     // G3A-R: presentation-only terrain debug channel (FINAL by default).
     terrain_debug: TerrainDebugMode,
+    // G3D: presentation-only vegetation debug channel (FINAL by default).
+    vegetation_debug: VegetationDebugMode,
     // G3B: presentation-only manual exposure in EV stops (default outdoor).
     exposure_ev: f32,
 }
@@ -153,6 +155,7 @@ impl RenderOptions {
             camera: CameraSelection::default(),
             debug_overlays: false,
             terrain_debug: TerrainDebugMode::default(),
+            vegetation_debug: VegetationDebugMode::default(),
             exposure_ev: DEFAULT_EXPOSURE_EV,
         }
     }
@@ -247,6 +250,13 @@ impl RenderOptions {
                         .ok_or(RenderAppError::MissingArgumentValue("--terrain-debug"))?;
                     options.terrain_debug = TerrainDebugMode::from_label(&value)
                         .ok_or_else(|| RenderAppError::InvalidTerrainDebug(value.clone()))?;
+                }
+                "--vegetation-debug" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--vegetation-debug"))?;
+                    options.vegetation_debug = VegetationDebugMode::from_label(&value)
+                        .ok_or_else(|| RenderAppError::InvalidVegetationDebug(value.clone()))?;
                 }
                 "--exposure-ev" => {
                     let value = arguments
@@ -364,6 +374,8 @@ pub enum RenderAppError {
         "invalid terrain debug mode `{0}`; expected `final`, `albedo`, `normal`, `roughness`, `macro`, or `detail`"
     )]
     InvalidTerrainDebug(String),
+    #[error("invalid vegetation debug mode `{0}`; expected `final`, `lod`, `culling`, or `bounds`")]
+    InvalidVegetationDebug(String),
     #[error("invalid exposure EV `{0}`; expected a finite value inside [-8, 8]")]
     InvalidExposureEv(String),
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
@@ -733,6 +745,8 @@ struct RenderApplication {
     input_mode: Option<ViewerInputMode>,
     input_backend: Option<GilrsInputBackend>,
     terrain_debug: TerrainDebugMode,
+    // G3D: presentation-only vegetation debug channel (CLI-provided).
+    vegetation_debug: VegetationDebugMode,
     // G3B: presentation-only manual exposure (EV stops), CLI-provided.
     exposure_ev: f32,
     replay_recorder: Option<AircraftReplayRecorder>,
@@ -822,6 +836,7 @@ impl RenderApplication {
             input_mode: None,
             input_backend: None,
             terrain_debug: options.terrain_debug,
+            vegetation_debug: options.vegetation_debug,
             exposure_ev: options.exposure_ev,
             replay_recorder,
             replay_output_path: options.replay_output_path,
@@ -1085,6 +1100,8 @@ impl ApplicationHandler for RenderApplication {
         };
         renderer.set_show_debug_overlays(self.debug_overlays);
         renderer.set_terrain_debug_mode(self.terrain_debug);
+        // G3D: presentation-only vegetation debug channel (final = production).
+        renderer.set_vegetation_debug_mode(self.vegetation_debug);
         // G3B: exposure was already validated at CLI parse time; the setter is
         // a defensive no-change-on-invalid guard (presentation-only).
         if let Err(error) = renderer.set_exposure_ev(self.exposure_ev) {
@@ -1645,6 +1662,32 @@ mod tests {
                         ["--terrain-debug".to_owned(), value.to_owned()].into_iter()
                     ),
                     Err(RenderAppError::InvalidTerrainDebug(_))
+                ),
+                "value {value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn vegetation_debug_option_parses_all_modes_and_rejects_unknown() {
+        for (label, expected) in [
+            ("final", VegetationDebugMode::Final),
+            ("lod", VegetationDebugMode::Lod),
+            ("culling", VegetationDebugMode::Culling),
+            ("bounds", VegetationDebugMode::Bounds),
+        ] {
+            let options =
+                RenderOptions::parse(["--vegetation-debug", label].map(str::to_owned).into_iter())
+                    .unwrap();
+            assert_eq!(options.vegetation_debug, expected, "label {label}");
+        }
+        for value in ["FINAL", "lods", "", "2", "na"] {
+            assert!(
+                matches!(
+                    RenderOptions::parse(
+                        ["--vegetation-debug".to_owned(), value.to_owned()].into_iter()
+                    ),
+                    Err(RenderAppError::InvalidVegetationDebug(_))
                 ),
                 "value {value:?} must be rejected"
             );

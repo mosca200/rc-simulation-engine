@@ -845,3 +845,147 @@ fn fs_postprocess(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     let display_rgb = khronos_pbr_neutral(exposed_rgb);
     return vec4<f32>(display_rgb, 1.0);
 }
+
+// ---------------------------------------------------------------------------
+// G3D: production vegetation (instanced trees)
+// ---------------------------------------------------------------------------
+
+// Presentation-only vegetation state (group 4 of the vegetation scene
+// pipeline). debug_mode: 0 = FINAL (production path), 1 = LOD colors.
+// The uniform is written once on mode change, never per frame in production.
+struct VegetationUniform {
+    debug_mode: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+};
+
+@group(4) @binding(0)
+var<uniform> vegetation_state: VegetationUniform;
+
+// Per-instance attributes ride on vertex buffer slot 1, step mode Instance:
+//   offset 0  position_yaw : world position xyz + yaw (radians, around +Y)
+//   offset 16 scale_tint   : uniform scale (x) + rgb color tint
+//   offset 32 lod_class    : LOD class (x) + asset index (y), reserved zw
+// The shader reconstructs T = translate(position) * rotY(yaw) * scale at the
+// vertex — no 4x4 instance matrix is stored or built on the GPU.
+struct VegetationVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) instance_position_yaw: vec4<f32>,
+    @location(5) instance_scale_tint: vec4<f32>,
+    @location(6) instance_lod_class: vec4<f32>,
+};
+
+struct VegetationVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) world_position: vec3<f32>,
+    @location(4) lod_class: f32,
+};
+
+struct VegetationTransformed {
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+};
+
+// T = translate(position) * rotY(yaw) * scale on the local position; the
+// normal rotates with the same Y-rotation block (uniform scale + rotation,
+// so the inverse-transpose equals R). Both results are unit-safe.
+fn transform_vegetation_vertex(
+    local_position: vec3<f32>,
+    local_normal: vec3<f32>,
+    position_yaw: vec4<f32>,
+    scale: f32,
+) -> VegetationTransformed {
+    let yaw = position_yaw.w;
+    let cos_y = cos(yaw);
+    let sin_y = sin(yaw);
+    let p = local_position * scale;
+    let world_position = vec3<f32>(
+        position_yaw.x + cos_y * p.x + sin_y * p.z,
+        position_yaw.y + p.y,
+        position_yaw.z - sin_y * p.x + cos_y * p.z,
+    );
+    let world_normal = normalize(vec3<f32>(
+        cos_y * local_normal.x + sin_y * local_normal.z,
+        local_normal.y,
+        -sin_y * local_normal.x + cos_y * local_normal.z,
+    ));
+    return VegetationTransformed(world_position, world_normal);
+}
+
+// Placement tint multiplies the baked per-vertex base color (±~8%).
+fn tinted_vertex_color(base: vec4<f32>, tint: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(base.rgb * tint, base.a);
+}
+
+@vertex
+fn vs_vegetation(input: VegetationVertexInput) -> VegetationVertexOutput {
+    var output: VegetationVertexOutput;
+    let transformed = transform_vegetation_vertex(
+        input.position,
+        input.normal,
+        input.instance_position_yaw,
+        input.instance_scale_tint.x,
+    );
+    output.clip_position = camera.view_projection * vec4<f32>(transformed.world_position, 1.0);
+    output.world_normal = transformed.world_normal;
+    output.color = tinted_vertex_color(input.color, input.instance_scale_tint.yzw);
+    output.uv = input.uv;
+    output.world_position = transformed.world_position;
+    output.lod_class = input.instance_lod_class.x;
+    return output;
+}
+
+// G2B depth-only instanced caster for the vegetation shadow pass. Shares the
+// exact instance transform; no fragment stage and no color target.
+@vertex
+fn vs_vegetation_shadow(input: VegetationVertexInput) -> @builtin(position) vec4<f32> {
+    let transformed = transform_vegetation_vertex(
+        input.position,
+        input.normal,
+        input.instance_position_yaw,
+        input.instance_scale_tint.x,
+    );
+    return shadow.light_view_projection * vec4<f32>(transformed.world_position, 1.0);
+}
+
+// Lit vegetation fragment: the exact fs_lit chain (texture * vertex color,
+// metallic/roughness PBR, G2B shadow visibility, distance fog) so trees join
+// the same linear HDR Rgba16Float scene — no independent tone mapping, no
+// LDR clamp, no gamma. The presentation-only debug selector (0 FINAL, 1 LOD
+// colors) is resolved first; production output is untouched by it.
+@fragment
+fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
+    let mode = vegetation_state.debug_mode;
+    if (mode == 1u) {
+        // Deterministic LOD debug colors: LOD0 green, LOD1 yellow, LOD2 orange.
+        let lod = u32(input.lod_class + 0.5);
+        var debug_color: vec3<f32>;
+        if (lod == 0u) {
+            debug_color = vec3<f32>(0.05, 0.65, 0.15);
+        } else if (lod == 1u) {
+            debug_color = vec3<f32>(0.85, 0.70, 0.10);
+        } else {
+            debug_color = vec3<f32>(0.90, 0.42, 0.08);
+        }
+        return vec4<f32>(debug_color, 1.0);
+    }
+
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let base_rgba = input.color * texture_rgba;
+
+    let metallic = clamp(material.metallic, 0.0, 1.0);
+    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+
+    let n = safe_normalize(input.world_normal);
+    let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+
+    return vec4<f32>(final_rgb, base_rgba.a);
+}

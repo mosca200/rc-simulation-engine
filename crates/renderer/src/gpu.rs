@@ -45,6 +45,11 @@ use crate::texture::{
     SamplerConfig, TextureLoadError, create_staging_buffer, decode_image,
     padded_bytes_per_row_checked_for_bytes_per_pixel,
 };
+use crate::vegetation::{
+    DEFAULT_VEGETATION_SEED, GROUP_COUNT, LOD_COUNT, PART_COUNT, VegetationDebugMode,
+    VegetationFrameStats, VegetationGpuInstance, VegetationWorld,
+};
+use crate::vegetation_assets::{VegetationPart, part_metallic, part_roughness};
 use crate::{
     AircraftMesh, CameraConfig, CameraMode, GlbAsset, Mat4, RenderFrame, Vertex,
     matrix_to_wgsl_columns, reference_grid_and_axes_at,
@@ -670,6 +675,61 @@ struct GpuScenery {
     index_count: u32,
 }
 
+// ── G3D: production vegetation ─────────────────────────────────────────────
+
+/// Presentation-only vegetation state (mirror of the WGSL group-4 uniform).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
+struct VegetationUniform {
+    debug_mode: u32,
+    _pad: [u32; 3],
+}
+
+impl VegetationUniform {
+    fn new(debug_mode: VegetationDebugMode) -> Self {
+        Self {
+            debug_mode: debug_mode.as_u32(),
+            _pad: [0; 3],
+        }
+    }
+}
+
+/// One static (asset, LOD, part) mesh staged for instanced drawing.
+///
+/// Buffers are created once at startup and never touched again; the
+/// instance buffer (slot 1) carries the per-frame transform data.
+struct VegetationGpuMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    /// Index into `WgpuRenderer::materials` (bark or foliage PBR material).
+    material_index: usize,
+}
+
+/// Persistent GPU vegetation resources (G3D).
+///
+/// Everything here is created once and reused every frame: static per-asset
+/// meshes, the preallocated COPY_DST instance buffer, the presentation-only
+/// debug uniform, and the two instanced pipelines (lit HDR scene + depth-only
+/// shadow). Per frame the renderer only rewrites the instance buffer contents
+/// via `queue.write_buffer` and records index draws per active batch group.
+struct GpuVegetation {
+    /// `(asset, LOD, part)` flattened:
+    /// index = (asset * LOD_COUNT + lod) * PART_COUNT + part.
+    meshes: Vec<VegetationGpuMesh>,
+    /// Persistent preallocated instance buffer, `capacity * 48` bytes.
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: usize,
+    /// Presentation-only debug state uniform (16 bytes, rewritten on change).
+    _uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    uniform: VegetationUniform,
+    /// Lit HDR instanced scene pipeline (`vs_vegetation` / `fs_vegetation`).
+    pipeline: wgpu::RenderPipeline,
+    /// Depth-only instanced shadow caster (`vs_vegetation_shadow`).
+    shadow_pipeline: wgpu::RenderPipeline,
+}
+
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
     _instance: wgpu::Instance,
@@ -757,6 +817,12 @@ pub struct WgpuRenderer {
     show_debug_overlays: bool,
     // G3A-R: presentation-only terrain debug channel (uniform-driven).
     terrain_debug_mode: TerrainDebugMode,
+    // G3D: production vegetation (FlyingField preset only).
+    vegetation_world: Option<VegetationWorld>,
+    vegetation: Option<GpuVegetation>,
+    vegetation_debug_mode: VegetationDebugMode,
+    /// Frame counter for the periodic Culling-mode counter log.
+    vegetation_frame_counter: u64,
 }
 
 impl WgpuRenderer {
@@ -1219,6 +1285,86 @@ impl WgpuRenderer {
             }
         });
 
+        // G3D: production vegetation — owned by the FlyingField preset only.
+        // The world owns the deterministic instance list and the per-frame
+        // visibility/LOD selection; the GPU side builds every buffer, material,
+        // uniform and pipeline ONCE here. The per-frame loop only rewrites the
+        // instance buffer contents and records instanced draws. Nothing in this
+        // block runs per frame.
+        let (vegetation_world, vegetation) = if scenery_preset == Some(SceneryPreset::FlyingField) {
+            let world = VegetationWorld::flying_field(
+                DEFAULT_VEGETATION_SEED,
+                -ground_below_render_origin_m,
+            );
+            // Dedicated bark/foliage PBR materials (dielectric, rough bark,
+            // slightly glossier foliage — distinct response per part).
+            let bark_material = create_white_texture_material(
+                &device,
+                &material_bind_group_layout,
+                &queue,
+                part_metallic(VegetationPart::Bark),
+                part_roughness(VegetationPart::Bark),
+            );
+            let bark_material_index = materials.len();
+            materials.push(bark_material);
+            let foliage_material = create_white_texture_material(
+                &device,
+                &material_bind_group_layout,
+                &queue,
+                part_metallic(VegetationPart::Foliage),
+                part_roughness(VegetationPart::Foliage),
+            );
+            let foliage_material_index = materials.len();
+            materials.push(foliage_material);
+
+            // Group 4 of the vegetation scene pipeline carries the
+            // presentation-only debug uniform (camera/object/environment/
+            // material keep the shared lit slots 0-3).
+            let vegetation_state_bind_group_layout =
+                vegetation_state_bind_group_layout(&device, "G3D vegetation state layout");
+            let vegetation_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("G3D vegetation pipeline layout"),
+                    bind_group_layouts: &[
+                        Some(&camera_bind_group_layout),
+                        Some(&object_bind_group_layout),
+                        Some(&environment_bind_group_layout),
+                        Some(&material_bind_group_layout),
+                        Some(&vegetation_state_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                });
+            // Depth-only instanced caster layout: camera + identity object +
+            // shadow matrix (no material/state groups are touched by the
+            // shadow vertex path).
+            let vegetation_shadow_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("G3D vegetation shadow pipeline layout"),
+                    bind_group_layouts: &[
+                        Some(&camera_bind_group_layout),
+                        Some(&object_bind_group_layout),
+                        Some(&shadow_pass_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                });
+
+            let gpu = build_gpu_vegetation(
+                &device,
+                &queue,
+                &shader,
+                &world,
+                &vegetation_state_bind_group_layout,
+                &vegetation_pipeline_layout,
+                &vegetation_shadow_pipeline_layout,
+                bark_material_index,
+                foliage_material_index,
+                VegetationDebugMode::default(),
+            );
+            (Some(world), Some(gpu))
+        } else {
+            (None, None)
+        };
+
         // Debug overlays.
         let references = reference_grid_and_axes_at(-ground_below_render_origin_m);
         let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1429,6 +1575,10 @@ impl WgpuRenderer {
             asynchronous_gpu_error,
             show_debug_overlays: false,
             terrain_debug_mode: TerrainDebugMode::default(),
+            vegetation_world,
+            vegetation,
+            vegetation_debug_mode: VegetationDebugMode::default(),
+            vegetation_frame_counter: 0,
         })
     }
 
@@ -1497,6 +1647,56 @@ impl WgpuRenderer {
         validate_exposure_ev(exposure_ev)?;
         self.exposure_ev = exposure_ev;
         Ok(())
+    }
+
+    /// G3D: switch the presentation-only vegetation debug channel.
+    ///
+    /// Only rewrites the 16-byte persistent state uniform on change; no
+    /// shader recompile, no resource creation, nothing per frame. The default
+    /// is [`VegetationDebugMode::Final`], the production path. No-op when
+    /// vegetation is not configured (scenery preset != FlyingField).
+    pub fn set_vegetation_debug_mode(&mut self, mode: VegetationDebugMode) {
+        self.vegetation_debug_mode = mode;
+        if let Some(vegetation) = self.vegetation.as_mut()
+            && vegetation.uniform.debug_mode != mode.as_u32()
+        {
+            vegetation.uniform.debug_mode = mode.as_u32();
+            self.queue.write_buffer(
+                &vegetation._uniform_buffer,
+                0,
+                bytemuck::bytes_of(&vegetation.uniform),
+            );
+        }
+    }
+
+    /// Current vegetation debug channel.
+    #[must_use]
+    pub fn vegetation_debug_mode(&self) -> VegetationDebugMode {
+        self.vegetation_debug_mode
+    }
+
+    /// G3D: per-frame vegetation visibility counters (presentation-only).
+    ///
+    /// `None` when the renderer was created without the FlyingField preset.
+    #[must_use]
+    pub fn vegetation_stats(&self) -> Option<&VegetationFrameStats> {
+        self.vegetation_world.as_ref().map(VegetationWorld::stats)
+    }
+
+    /// G3D: the instance-buffer capacity (preallocated worst case).
+    #[must_use]
+    pub fn vegetation_instance_capacity(&self) -> Option<usize> {
+        self.vegetation.as_ref().map(|v| v.instance_capacity)
+    }
+
+    /// G3D: instance bytes uploaded in the last frame (visible × 48).
+    #[must_use]
+    pub fn vegetation_last_instance_bytes(&self) -> Option<u64> {
+        let visible_count = self
+            .vegetation_world
+            .as_ref()
+            .map(|world| world.visible().len() as u64)?;
+        Some(visible_count * size_of::<VegetationGpuInstance>() as u64)
     }
 
     /// G3B: current manual exposure in EV stops.
@@ -1599,6 +1799,54 @@ impl WgpuRenderer {
             bytemuck::bytes_of(&shadow_uniform),
         );
 
+        // G3D: per-frame CPU visibility/LOD selection and the instance-buffer
+        // rewrite. Everything is persistent and preallocated: `update_visibility`
+        // reuses its scratch (clear + swap), and the write targets the same
+        // COPY_DST instance buffer every frame. No buffer, bind group, pipeline
+        // or shader is created here; the visible list is never cloned.
+        if let (Some(world), Some(vegetation)) =
+            (self.vegetation_world.as_mut(), self.vegetation.as_ref())
+        {
+            let visibility_start = std::time::Instant::now();
+            world.update_visibility(eye, &vp);
+            let visibility_elapsed = visibility_start.elapsed();
+            let visible = world.visible();
+            if !visible.is_empty() {
+                self.queue.write_buffer(
+                    &vegetation.instance_buffer,
+                    0,
+                    bytemuck::cast_slice(visible),
+                );
+            }
+            debug_assert!(
+                visible.len() <= vegetation.instance_capacity,
+                "instance buffer capacity exceeded"
+            );
+
+            // G3D: presentation-only counter log in Culling mode (~1.5 s cadence).
+            self.vegetation_frame_counter += 1;
+            if self.vegetation_debug_mode == VegetationDebugMode::Culling
+                && self.vegetation_frame_counter.is_multiple_of(90)
+            {
+                let stats = world.stats();
+                tracing::info!(
+                    vegetation_total = stats.total,
+                    vegetation_visible = stats.visible,
+                    vegetation_culled_frustum = stats.culled_frustum,
+                    vegetation_culled_distance = stats.culled_distance,
+                    vegetation_lod0 = stats.lod_counts[0],
+                    vegetation_lod1 = stats.lod_counts[1],
+                    vegetation_lod2 = stats.lod_counts[2],
+                    vegetation_scene_draw_calls = stats.scene_draw_calls,
+                    vegetation_shadow_draw_calls = stats.shadow_draw_calls,
+                    vegetation_instance_bytes_uploaded =
+                        visible.len() as u64 * size_of::<VegetationGpuInstance>() as u64,
+                    vegetation_cpu_visibility_ms = visibility_elapsed.as_secs_f64() * 1e3,
+                    "G3D vegetation visibility/culling counters"
+                );
+            }
+        }
+
         // G1E: articulated surface uniforms (`root * local hinge`).
         for batch in &self.surface_batches {
             let composed = aircraft_model_matrix
@@ -1668,6 +1916,41 @@ impl WgpuRenderer {
                 shadow_pass
                     .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 shadow_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
+            }
+
+            // G3D: instanced vegetation shadows — LOD0/LOD1 cast, LOD2 skips
+            // the caster (economical; the far tier is beyond the field's
+            // operational shadows anyway). Draw calls depend on active
+            // (asset, LOD) batch groups × parts, never on the tree count.
+            if let (Some(vegetation), Some(world)) =
+                (self.vegetation.as_ref(), self.vegetation_world.as_ref())
+                && !world.visible().is_empty()
+            {
+                shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
+                shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                let ranges = world.batch_ranges();
+                for group in 0..GROUP_COUNT {
+                    if group % LOD_COUNT > 1 {
+                        continue;
+                    }
+                    let start = ranges[group * 2];
+                    let count = ranges[group * 2 + 1];
+                    if count == 0 {
+                        continue;
+                    }
+                    let asset = group / LOD_COUNT;
+                    let lod = (group % LOD_COUNT) as u8;
+                    for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                        let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            mesh.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        shadow_pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                    }
+                }
             }
 
             shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
@@ -1751,7 +2034,7 @@ impl WgpuRenderer {
                 render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
             }
 
-            // G2A: Scenery (flying field, trees, markers). Drawn with the
+            // G2A: Scenery (flying field, markers). Drawn with the
             // shared lit pipeline — the terrain pipeline is terrain-only.
             if let Some(ref scenery) = self.scenery {
                 let scenery_material = &self.materials[self.scenery_material_index];
@@ -1762,6 +2045,47 @@ impl WgpuRenderer {
                 render_pass
                     .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
+            }
+
+            // G3D: instanced production vegetation (scene pass). Each active
+            // (asset, LOD) group draws bark + foliage with their dedicated PBR
+            // materials; the instance range comes from `batch_ranges`, so the
+            // number of draw calls depends on the batches, never on the tree
+            // count. Same linear HDR target, sun, sky, fog and shadow response
+            // as every other lit surface.
+            if let (Some(vegetation), Some(world)) =
+                (self.vegetation.as_ref(), self.vegetation_world.as_ref())
+            {
+                let visible = world.visible();
+                if !visible.is_empty() {
+                    render_pass.set_pipeline(&vegetation.pipeline);
+                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                    render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+                    render_pass.set_bind_group(4, &vegetation.uniform_bind_group, &[]);
+                    let ranges = world.batch_ranges();
+                    for group in 0..GROUP_COUNT {
+                        let start = ranges[group * 2];
+                        let count = ranges[group * 2 + 1];
+                        if count == 0 {
+                            continue;
+                        }
+                        let asset = group / LOD_COUNT;
+                        let lod = (group % LOD_COUNT) as u8;
+                        for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                            let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                            let material = &self.materials[mesh.material_index];
+                            render_pass.set_bind_group(3, &material.bind_group, &[]);
+                            render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            render_pass.set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
+                            render_pass.set_index_buffer(
+                                mesh.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            render_pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                        }
+                    }
+                }
             }
 
             // Debug grid/axes: identity object transform.
@@ -1854,6 +2178,27 @@ fn create_white_fallback_material(
     layout: &wgpu::BindGroupLayout,
     queue: &wgpu::Queue,
 ) -> GpuMaterial {
+    create_white_texture_material(
+        device,
+        layout,
+        queue,
+        PROCEDURAL_METALLIC,
+        PROCEDURAL_ROUGHNESS,
+    )
+}
+
+/// G1D/G3D: white-texture material with explicit PBR factors.
+///
+/// Used by the shared fallback (procedural aircraft / scenery) and by the G3D
+/// bark/foliage vegetation materials, whose meshes carry linear vertex colors
+/// and only need a neutral texel to modulate.
+fn create_white_texture_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    queue: &wgpu::Queue,
+    metallic: f32,
+    roughness: f32,
+) -> GpuMaterial {
     let size = wgpu::Extent3d {
         width: 1,
         height: 1,
@@ -1900,13 +2245,11 @@ fn create_white_fallback_material(
 
     // G1D: procedural/fallback materials are explicit non-metals with high
     // roughness so terrain, scenery, and the procedural aircraft never turn
-    // accidentally chromatic under the PBR response.
+    // accidentally chromatic under the PBR response. G3D passes the same
+    // factors through for the bark/foliage vegetation materials.
     let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("fallback material uniform"),
-        contents: bytemuck::bytes_of(&MaterialUniform::new(
-            PROCEDURAL_METALLIC,
-            PROCEDURAL_ROUGHNESS,
-        )),
+        label: Some("white material uniform"),
+        contents: bytemuck::bytes_of(&MaterialUniform::new(metallic, roughness)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
 
@@ -2313,6 +2656,125 @@ fn upload_scenery_mesh(device: &wgpu::Device, mesh: &SceneryMesh) -> GpuScenery 
 }
 
 // ---------------------------------------------------------------------------
+// G3D: vegetation upload helper
+// ---------------------------------------------------------------------------
+
+/// Flattened mesh index for the (asset, LOD, part) triple.
+///
+/// Group = asset * LOD_COUNT + lod (matches `VegetationWorld::batch_ranges`),
+/// then the two parts sit side by side:
+/// index = group * PART_COUNT + part.
+fn vegetation_mesh_index(asset: usize, lod: u8, part: VegetationPart) -> usize {
+    (asset * LOD_COUNT + lod as usize) * PART_COUNT + part.index()
+}
+
+/// Build all persistent vegetation GPU resources for the FlyingField preset
+/// (G3D). Creates the static per-(asset, LOD, part) mesh buffers, the
+/// preallocated COPY_DST instance buffer, the presentation-only debug uniform
+/// and the two instanced pipelines. Nothing here is recreated per frame.
+///
+/// `bark_material_index` / `foliage_material_index` reference the shared
+/// `WgpuRenderer::materials` vector (both white-texture PBR materials with
+/// the `part_metallic`/`part_roughness` factors from the asset spec).
+#[allow(clippy::too_many_arguments)]
+fn build_gpu_vegetation(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    shader: &wgpu::ShaderModule,
+    world: &VegetationWorld,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    pipeline_layout: &wgpu::PipelineLayout,
+    shadow_pipeline_layout: &wgpu::PipelineLayout,
+    bark_material_index: usize,
+    foliage_material_index: usize,
+    debug_mode: VegetationDebugMode,
+) -> GpuVegetation {
+    // Static meshes: one buffer pair per (asset, LOD, part). The Vec index is
+    // positional: (asset * LOD_COUNT + lod) * PART_COUNT + part, matching
+    // `vegetation_mesh_index`.
+    let mut meshes = Vec::with_capacity(world.assets().len() * LOD_COUNT * PART_COUNT);
+    for asset in world.assets().assets() {
+        for class in 0..LOD_COUNT {
+            let lod = asset
+                .lods
+                .lod(class as u8)
+                .expect("LOD class 0..2 always present in the production set");
+            for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                let mesh = match part {
+                    VegetationPart::Bark => &lod.bark,
+                    VegetationPart::Foliage => &lod.foliage,
+                };
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vegetation part vertices"),
+                    contents: bytemuck::cast_slice(mesh.vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vegetation part indices"),
+                    contents: bytemuck::cast_slice(mesh.indices()),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                meshes.push(VegetationGpuMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: mesh.indices().len() as u32,
+                    material_index: match part {
+                        VegetationPart::Bark => bark_material_index,
+                        VegetationPart::Foliage => foliage_material_index,
+                    },
+                });
+            }
+        }
+    }
+
+    // Persistent preallocated instance buffer (COPY_DST; rewritten per frame).
+    let instance_capacity = world.instance_capacity();
+    let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("G3D vegetation instance buffer"),
+        size: (instance_capacity * size_of::<VegetationGpuInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Presentation-only debug uniform (16 bytes, rewritten only on change).
+    let uniform = VegetationUniform::new(debug_mode);
+    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("G3D vegetation state uniform"),
+        contents: bytemuck::bytes_of(&uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("G3D vegetation state bind group"),
+        layout: uniform_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+
+    let pipeline = create_vegetation_pipeline(device, shader, pipeline_layout);
+    let shadow_pipeline = create_vegetation_shadow_pipeline(device, shader, shadow_pipeline_layout);
+
+    // Startup upload of the initial visible set so the first frame is not
+    // empty even before the first `update_visibility` call runs.
+    let initial = world.visible();
+    if !initial.is_empty() {
+        queue.write_buffer(&instance_buffer, 0, bytemuck::cast_slice(initial));
+    }
+
+    GpuVegetation {
+        meshes,
+        instance_buffer,
+        instance_capacity,
+        _uniform_buffer: uniform_buffer,
+        uniform_bind_group,
+        uniform,
+        pipeline,
+        shadow_pipeline,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bind group layout helpers
 // ---------------------------------------------------------------------------
 
@@ -2342,6 +2804,29 @@ fn matrix_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGro
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: wgpu::BufferSize::new(size_of::<ObjectUniform>() as u64),
+            },
+            count: None,
+        }],
+    })
+}
+
+/// G3D: bind group layout for the 16-byte presentation-only vegetation state
+/// uniform (group 4 of the vegetation scene pipeline).
+///
+/// Deliberately separate from `matrix_bind_group_layout`: that layout declares
+/// a 64-byte minimum and VERTEX-only visibility, while the vegetation selector
+/// is read by `fs_vegetation` (FRAGMENT) and is exactly 16 bytes. Reusing the
+/// matrix layout would fail wgpu validation at bind-group creation.
+fn vegetation_state_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(size_of::<VegetationUniform>() as u64),
             },
             count: None,
         }],
@@ -2694,6 +3179,134 @@ fn create_shadow_pipeline(
                     3 => Float32x2,
                 ],
             })],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: SHADOW_DEPTH_BIAS_CONSTANT,
+                slope_scale: SHADOW_DEPTH_BIAS_SLOPE_SCALE,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The instanced vertex layout shared by the G3D vegetation pipelines: the
+/// static per-vertex mesh on slot 0 and the per-instance transform on slot 1.
+///
+/// The instance stride is `size_of::<VegetationGpuInstance>()` (48 bytes);
+/// the shader reconstructs `translate * rotY(yaw) * scale` from the three
+/// vec4s — no 4x4 matrix per instance.
+static VEGETATION_MESH_ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    0 => Float32x3,
+    1 => Float32x3,
+    2 => Float32x4,
+    3 => Float32x2,
+];
+static VEGETATION_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    4 => Float32x4,
+    5 => Float32x4,
+    6 => Float32x4,
+];
+
+fn vegetation_vertex_buffers() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &VEGETATION_MESH_ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<VegetationGpuInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &VEGETATION_INSTANCE_ATTRIBUTES,
+        }),
+    ]
+}
+
+/// G3D: lit HDR instanced vegetation pipeline (`vs_vegetation`/`fs_vegetation`).
+///
+/// Writes scene-referred linear color to the same Rgba16Float target as every
+/// other lit surface; exposure + tone mapping stay exclusively in the G3B
+/// postprocess pass (no independent tone mapping in this pipeline).
+fn create_vegetation_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G3D vegetation lit pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_vegetation"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vegetation_vertex_buffers(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_vegetation"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// G3D: depth-only instanced vegetation caster for the fixed directional
+/// shadow map (`vs_vegetation_shadow`). Same raster state and instance layout
+/// as `create_shadow_pipeline`, with the per-instance transform on slot 1.
+fn create_vegetation_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G3D vegetation shadow depth pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_vegetation_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vegetation_vertex_buffers(),
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -4203,6 +4816,924 @@ mod terrain_headless_gpu_tests {
         assert!(
             mean[0] > 100.0 && mean[0] < 250.0,
             "roughness level must sit in the committed band, got mean RGB {mean:?}"
+        );
+    }
+}
+
+// ── G3D: vegetation tests ──────────────────────────────────────────────────
+
+/// G3D vegetation tests: CPU/structural checks (always green) plus opt-in
+/// headless GPU integration tests (`#[ignore]`, run with
+/// `cargo test -p renderer --lib vegetation -- --ignored`).
+///
+/// The GPU tests drive the REAL production assembly path
+/// (`build_gpu_vegetation`, the instanced pipelines, the real asset meshes and
+/// `VegetationWorld::update_visibility`) on a headless device, so they
+/// discriminate a correct instanced implementation from a no-op: they render
+/// actual pixels and assert coverage/transform differences, never just
+/// "no panic".
+#[cfg(test)]
+mod vegetation_tests {
+    use super::*;
+    use crate::math::look_at_rh;
+    use crate::vegetation::VegetationInstance;
+    use crate::vegetation::VegetationLodConfig;
+    use crate::vegetation_assets::VegetationAssetSet;
+    use crate::webgpu_perspective;
+
+    const TEST_SIZE: u32 = 512;
+
+    // ── CPU / structural checks (no GPU) ──────────────────────────────────
+
+    #[test]
+    fn vegetation_mesh_index_is_contiguous_and_has_no_gaps() {
+        // 4 assets × 3 LOD × 2 parts = 24 distinct, contiguous mesh slots.
+        let total = 4 * LOD_COUNT * PART_COUNT;
+        assert_eq!(GROUP_COUNT * PART_COUNT, total);
+        let mut seen = vec![false; total];
+        for asset in 0..4 {
+            for lod in 0..LOD_COUNT {
+                for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                    let index = vegetation_mesh_index(asset, lod as u8, part);
+                    assert!(index < total, "mesh index {index} out of range");
+                    assert!(!seen[index], "duplicate mesh index {index}");
+                    seen[index] = true;
+                }
+            }
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "vegetation mesh slots must be fully covered"
+        );
+    }
+
+    #[test]
+    fn vegetation_mesh_index_matches_group_part_flattening() {
+        // The pass loops flatten as group * PART_COUNT + part; the helper must
+        // be equivalent for every (asset, lod) group.
+        for group in 0..GROUP_COUNT {
+            let asset = group / LOD_COUNT;
+            let lod = (group % LOD_COUNT) as u8;
+            for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                let via_helper = vegetation_mesh_index(asset, lod, part);
+                let via_group = group * PART_COUNT + part.index();
+                assert_eq!(via_helper, via_group);
+            }
+        }
+    }
+
+    #[test]
+    fn vegetation_state_uniform_is_16_bytes() {
+        assert_eq!(size_of::<VegetationUniform>(), 16);
+        assert_eq!(size_of::<VegetationGpuInstance>(), 48);
+        // Instance stride must be a multiple of 16 for vec4 alignment.
+        assert_eq!(size_of::<VegetationGpuInstance>() % 16, 0);
+    }
+
+    #[test]
+    fn draw_call_counts_follow_batches_not_instance_count() {
+        // With a fixed visible set, `stats.scene_draw_calls` equals
+        // active-groups × parts, and shadow counts only LOD0/1 groups — the
+        // same arithmetic the pass loops perform. This pins the draw-call
+        // contract: batch-driven, never per-tree.
+        let assets = VegetationAssetSet::single_default();
+        let config = VegetationLodConfig {
+            lod0_max_m: 30.0,
+            lod1_max_m: 60.0,
+            distance_cull_m: 120.0,
+            hysteresis_band: 0.0,
+        };
+        // Ten instances spread over LOD0 and LOD1 from the test eye.
+        let instances = (0..10)
+            .map(|i| {
+                let z = 10.0 + (i as f32) * 4.0;
+                VegetationInstance {
+                    position: [0.0, 0.0, z],
+                    yaw_rad: 0.0,
+                    scale: 1.0,
+                    asset_index: 0,
+                    tint: [1.0, 1.0, 1.0],
+                    zone: 0,
+                }
+            })
+            .collect();
+        let mut world = VegetationWorld::new(assets, instances, config);
+        let vp = test_view_projection([0.0, 3.0, 14.0]);
+        world.update_visibility([0.0, 3.0, 14.0], &vp);
+        let stats = *world.stats();
+        assert_eq!(stats.total, 10);
+
+        // Recompute the draw loops' arithmetic from the ranges alone.
+        let ranges = world.batch_ranges();
+        let mut scene_groups = 0u32;
+        let mut shadow_groups = 0u32;
+        for group in 0..GROUP_COUNT {
+            if ranges[group * 2 + 1] > 0 {
+                scene_groups += 1;
+                if group % LOD_COUNT <= 1 {
+                    shadow_groups += 1;
+                }
+            }
+        }
+        assert_eq!(stats.scene_draw_calls, scene_groups * PART_COUNT as u32);
+        assert_eq!(stats.shadow_draw_calls, shadow_groups * PART_COUNT as u32);
+        assert!(
+            stats.scene_draw_calls <= (GROUP_COUNT * PART_COUNT) as u32,
+            "draw calls must never exceed the batch grid"
+        );
+    }
+
+    #[test]
+    fn vegetation_instance_buffer_bytes_scale_with_visible_count() {
+        let assets = VegetationAssetSet::single_default();
+        let config = VegetationLodConfig {
+            lod0_max_m: 30.0,
+            lod1_max_m: 60.0,
+            distance_cull_m: 120.0,
+            hysteresis_band: 0.0,
+        };
+        let instances = (0..8)
+            .map(|i| VegetationInstance {
+                position: [0.0, 0.0, 10.0 + (i as f32) * 4.0],
+                yaw_rad: 0.0,
+                scale: 1.0,
+                asset_index: 0,
+                tint: [1.0, 1.0, 1.0],
+                zone: 0,
+            })
+            .collect();
+        let mut world = VegetationWorld::new(assets, instances, config);
+        let vp = test_view_projection([0.0, 3.0, 14.0]);
+        world.update_visibility([0.0, 3.0, 14.0], &vp);
+        let bytes = world.visible().len() as u64 * size_of::<VegetationGpuInstance>() as u64;
+        assert_eq!(bytes, world.visible().len() as u64 * 48);
+        assert!(
+            bytes > 0,
+            "visible set must not be empty for near instances"
+        );
+    }
+
+    #[test]
+    fn shader_declares_vegetation_entry_points_and_instance_inputs() {
+        let source = include_str!("shader.wgsl");
+        for entry in ["vs_vegetation", "fs_vegetation", "vs_vegetation_shadow"] {
+            assert!(source.contains(entry), "shader must declare {entry}");
+        }
+        // Instance attributes ride locations 4-6 on slot-1 Instance step mode.
+        assert!(
+            source.contains("@location(4) instance_position_yaw"),
+            "shader must consume the position/yaw instance attribute"
+        );
+        assert!(
+            source.contains("@location(5) instance_scale_tint"),
+            "shader must consume the scale/tint instance attribute"
+        );
+        assert!(
+            source.contains("@location(6) instance_lod_class"),
+            "shader must consume the LOD-class instance attribute"
+        );
+        assert!(
+            source.contains("vegetation_state.debug_mode"),
+            "shader must expose the presentation-only debug selector"
+        );
+    }
+
+    #[test]
+    fn fs_vegetation_has_no_independent_tone_mapping_or_gamma() {
+        // The vegetation fragment must reuse the scene PBR chain and leave
+        // display encoding to the G3B postprocess pass (no khronos tonemap,
+        // no pow() gamma) so trees join the HDR scene, not an LDR side path.
+        let source = include_str!("shader.wgsl");
+        let body = source
+            .split_once("fn fs_vegetation")
+            .expect("fs_vegetation present")
+            .1;
+        let body = body
+            .split_once("\n}")
+            .expect("df: end of fs_vegetation body")
+            .0;
+        for banned in ["khronos_pbr_neutral", "exp2(", "pow("] {
+            assert!(
+                !body.contains(banned),
+                "fs_vegetation must not {banned} — tone mapping stays in fs_postprocess"
+            );
+        }
+        // ...but it must reuse the shared scene lighting chain.
+        for required in ["lit_pbr_response", "apply_distance_fog"] {
+            assert!(
+                body.contains(required),
+                "fs_vegetation must reuse {required}"
+            );
+        }
+    }
+
+    fn test_view_projection(eye: [f32; 3]) -> Mat4 {
+        let view = look_at_rh(eye, [0.0; 3], [0.0, 1.0, 0.0]);
+        let projection = webgpu_perspective(60.0_f32.to_radians(), 1.0, 0.05, 2_000.0)
+            .expect("projection must be valid");
+        projection * view
+    }
+
+    // ── GPU integration tests (opt-in, real production path) ──────────────
+
+    fn headless_device_gpu() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .expect("no wgpu adapter available on this machine");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("g3d vegetation headless test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_bind_groups: adapter.limits().max_bind_groups,
+                ..wgpu::Limits::default()
+            },
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("request_device failed");
+        (device, queue)
+    }
+
+    /// Read an offscreen texture back to CPU with WebGPU row alignment,
+    /// stripping the per-row padding (same contract as the terrain tests).
+    fn read_texture_level(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        level: u32,
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Vec<u8> {
+        let row_bytes = padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
+            .expect("row padding must not overflow");
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("g3d vegetation readback buffer"),
+            size: u64::from(row_bytes) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("readback channel");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll failed");
+        receiver
+            .recv()
+            .expect("readback response")
+            .expect("map failed");
+        let mapped = slice.get_mapped_range().expect("mapped range");
+        let unpadded = width as usize * bytes_per_pixel as usize;
+        let mut bytes = Vec::with_capacity(unpadded * height as usize);
+        for row in 0..height as usize {
+            let start = row * row_bytes as usize;
+            bytes.extend_from_slice(&mapped[start..start + unpadded]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        bytes
+    }
+
+    /// Render `instances` with the REAL production vegetation assembly path
+    /// and return the HDR readback of an offscreen 512² target (clear gray
+    /// background). `lod_class` selects the LOD forced via the LOD config;
+    /// `debug_mode` drives the presentation-only state uniform like the CLI.
+    fn render_vegetation_offscreen(
+        positions: &[[f32; 3]],
+        lod_class: u8,
+        debug_mode: VegetationDebugMode,
+    ) -> Vec<u8> {
+        let (device, queue) = headless_device_gpu();
+
+        let assets = VegetationAssetSet::single_default();
+        let instances: Vec<VegetationInstance> = positions
+            .iter()
+            .map(|&position| VegetationInstance {
+                position,
+                yaw_rad: 0.0,
+                scale: 1.0,
+                asset_index: 0,
+                tint: [1.0, 1.0, 1.0],
+                zone: 0,
+            })
+            .collect();
+        // LOD thresholds tuned so a ~14 m camera distance lands exactly in the
+        // requested class with the hysteresis-start state.
+        let config = match lod_class {
+            0 => VegetationLodConfig {
+                lod0_max_m: 30.0,
+                lod1_max_m: 60.0,
+                distance_cull_m: 120.0,
+                hysteresis_band: 0.0,
+            },
+            1 => VegetationLodConfig {
+                lod0_max_m: 10.0,
+                lod1_max_m: 50.0,
+                distance_cull_m: 120.0,
+                hysteresis_band: 0.0,
+            },
+            _ => VegetationLodConfig {
+                lod0_max_m: 5.0,
+                lod1_max_m: 10.0,
+                distance_cull_m: 120.0,
+                hysteresis_band: 0.0,
+            },
+        };
+        let mut world = VegetationWorld::new(assets, instances, config);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3d vegetation test shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        // Material bind groups (production path: white texture + part factors).
+        let material_layout = material_bind_group_layout(&device, "g3d test material layout");
+        let bark_material = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Bark),
+            part_roughness(VegetationPart::Bark),
+        );
+        let foliage_material = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Foliage),
+            part_roughness(VegetationPart::Foliage),
+        );
+
+        // Pipeline layouts / bind groups (identical to the production wiring).
+        let camera_layout = camera_bind_group_layout(&device, "g3d test camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "g3d test object layout");
+        let env_layout = environment_bind_group_layout(&device, "g3d test env layout");
+        let shadow_pass_layout = shadow_pass_bind_group_layout(&device, "g3d test shadow layout");
+        let state_layout = vegetation_state_bind_group_layout(&device, "g3d test state layout");
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("g3d vegetation test layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                Some(&material_layout),
+                Some(&state_layout),
+            ],
+            immediate_size: 0,
+        });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("g3d vegetation test shadow layout"),
+                bind_group_layouts: &[
+                    Some(&camera_layout),
+                    Some(&object_layout),
+                    Some(&shadow_pass_layout),
+                ],
+                immediate_size: 0,
+            });
+
+        let eye = [0.0, 3.0, 14.0];
+        let view_projection = test_view_projection(eye);
+        let camera_uniform = CameraUniform::new(
+            &view_projection,
+            &view_projection.inverse().expect("vp invertible"),
+            eye,
+        );
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d test camera buffer"),
+            contents: bytemuck::bytes_of(&camera_uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_bind_group =
+            camera_bind_group(&device, &camera_layout, &camera_buffer, "g3d camera group");
+        let identity_object = ObjectUniform::from_matrix(&Mat4::identity());
+        let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d test object buffer"),
+            contents: bytemuck::bytes_of(&identity_object),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let object_bind_group =
+            matrix_bind_group(&device, &object_layout, &object_buffer, "g3d object group");
+        let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d test environment buffer"),
+            contents: bytemuck::bytes_of(&EnvironmentUniform::default_environment()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d test shadow matrix buffer"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_target = create_shadow_target(&device);
+        let shadow_sampler = create_shadow_comparison_sampler(&device);
+        let environment_bind_group = create_environment_bind_group(
+            &device,
+            &env_layout,
+            &environment_buffer,
+            &shadow_target.view,
+            &shadow_sampler,
+            &shadow_matrix_buffer,
+            "g3d test environment bind group",
+        );
+        let _shadow_pass_bind_group = create_shadow_pass_bind_group(
+            &device,
+            &shadow_pass_layout,
+            &shadow_matrix_buffer,
+            "g3d test shadow pass group",
+        );
+
+        // Production assembly: real `build_gpu_vegetation` (persistent buffers,
+        // instance buffer, pipelines).
+        let gpu = build_gpu_vegetation(
+            &device,
+            &queue,
+            &shader,
+            &world,
+            &state_layout,
+            &pipeline_layout,
+            &shadow_pipeline_layout,
+            1,
+            2,
+            debug_mode,
+        );
+        // NOTE: bark/foliage material indexes in the test are 1/2 (they are the
+        // only materials pushed here — the fallback is deliberately absent).
+
+        // Visibility + instance upload (the exact per-frame renderer steps). Two
+        // updates because hysteresis ramps 0 → 1 → 2 across frames; classes 0
+        // and 1 are stable under the second update.
+        world.update_visibility(eye, &view_projection);
+        if lod_class >= 2 {
+            world.update_visibility(eye, &view_projection);
+        }
+        let visible = world.visible();
+        debug_assert!(!visible.is_empty());
+        queue.write_buffer(&gpu.instance_buffer, 0, bytemuck::cast_slice(visible));
+
+        let format = HDR_FORMAT;
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3d test color target"),
+            size: wgpu::Extent3d {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE);
+
+        // Scene pass draw (mirrors `WgpuRenderer::render` vegetation block).
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3d vegetation headless scene pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_target.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &environment_bind_group, &[]);
+            pass.set_bind_group(4, &gpu.uniform_bind_group, &[]);
+            let ranges = world.batch_ranges();
+            for group in 0..GROUP_COUNT {
+                let start = ranges[group * 2];
+                let count = ranges[group * 2 + 1];
+                if count == 0 {
+                    continue;
+                }
+                let asset = group / LOD_COUNT;
+                let lod = (group % LOD_COUNT) as u8;
+                for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                    let mesh = &gpu.meshes[vegetation_mesh_index(asset, lod, part)];
+                    let material = if part == VegetationPart::Bark {
+                        &bark_material
+                    } else {
+                        &foliage_material
+                    };
+                    pass.set_bind_group(3, &material.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, gpu.instance_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                }
+            }
+        }
+        queue.submit([encoder.finish()]);
+
+        read_texture_level(&device, &queue, &color_texture, 0, TEST_SIZE, TEST_SIZE, 8)
+    }
+
+    /// Decode one IEEE binary16 (WebGPU half-float texel) to f32.
+    fn f16_to_f32(bits: u16) -> f32 {
+        let sign = (bits & 0x8000) as u32;
+        let exponent = ((bits >> 10) & 0x1f) as u32;
+        let mantissa = (bits & 0x03ff) as u32;
+        let bits32 = if exponent == 0 {
+            // Subnormal half → normalize into f32 (masking sign out above).
+            let mut e = -14i32;
+            let mut m = mantissa;
+            if m == 0 {
+                sign << 31
+            } else {
+                while m & 0x0400 == 0 {
+                    m <<= 1;
+                    e -= 1;
+                }
+                let exp = (e + 127) as u32;
+                (sign << 31) | (exp << 23) | ((m & 0x03ff) << 13)
+            }
+        } else if exponent == 0x1f {
+            // Inf/NaN passthrough.
+            (sign << 31) | (0xff << 23) | (mantissa << 13)
+        } else {
+            (sign << 31) | ((exponent + 112) << 23) | (mantissa << 13)
+        };
+        f32::from_bits(bits32)
+    }
+
+    /// X centroid (px) of the non-background pixels; `None` when empty.
+    fn coverage_centroid_x(pixels: &[u8]) -> Option<u32> {
+        let mut sum = 0u64;
+        let mut count = 0u64;
+        for (index, texel) in pixels.as_chunks::<8>().0.iter().enumerate() {
+            let r = f16_to_f32(u16::from_le_bytes([texel[0], texel[1]]));
+            let g = f16_to_f32(u16::from_le_bytes([texel[2], texel[3]]));
+            let b = f16_to_f32(u16::from_le_bytes([texel[4], texel[5]]));
+            let delta = (r - 0.2).abs().max((g - 0.2).abs()).max((b - 0.2).abs());
+            if delta > 0.02 {
+                count += 1;
+                sum += (index as u32 % TEST_SIZE) as u64;
+            }
+        }
+        sum.checked_div(count).map(|centroid| centroid as u32)
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn vegetation_renders_instances_at_distinct_transforms() {
+        // Instance A alone (left of centre) vs instance B alone (right) must
+        // project to measurably different screen centroids — the instance
+        // transform is actually applied, not a no-op.
+        let left = render_vegetation_offscreen(&[[-4.0, 0.0, 0.0]], 0, VegetationDebugMode::Final);
+        let right = render_vegetation_offscreen(&[[4.0, 0.0, 0.0]], 0, VegetationDebugMode::Final);
+        let centroid_left = coverage_centroid_x(&left).expect("left instance must render");
+        let centroid_right = coverage_centroid_x(&right).expect("right instance must render");
+        assert!(
+            centroid_right.saturating_sub(centroid_left) > TEST_SIZE / 6,
+            "distinct instance positions must project apart (left {centroid_left} px, right {centroid_right} px)"
+        );
+    }
+
+    /// Classify every non-background texel against the deterministic LOD debug
+    /// palette (LOD0 green, LOD1 yellow, LOD2 orange) and return per-class counts.
+    fn classify_lod_debug_pixels(pixels: &[u8]) -> [u64; 3] {
+        const PALETTE: [[f32; 3]; 3] = [[0.05, 0.65, 0.15], [0.85, 0.70, 0.10], [0.90, 0.42, 0.08]];
+        let mut counts = [0u64; 3];
+        for texel in pixels.as_chunks::<8>().0 {
+            let rgb = [
+                f16_to_f32(u16::from_le_bytes([texel[0], texel[1]])),
+                f16_to_f32(u16::from_le_bytes([texel[2], texel[3]])),
+                f16_to_f32(u16::from_le_bytes([texel[4], texel[5]])),
+            ];
+            let mut nearest = 0usize;
+            let mut nearest_distance = f32::INFINITY;
+            for (class, target) in PALETTE.iter().enumerate() {
+                let distance = (rgb[0] - target[0]).powi(2)
+                    + (rgb[1] - target[1]).powi(2)
+                    + (rgb[2] - target[2]).powi(2);
+                if distance < nearest_distance {
+                    nearest = class;
+                    nearest_distance = distance;
+                }
+            }
+            if nearest_distance < 0.05 {
+                counts[nearest] += 1;
+            }
+        }
+        counts
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn vegetation_all_lod_classes_render_with_decreasing_cost() {
+        // The debug LOD channel must color each class deterministically
+        // (LOD0 green, LOD1 yellow, LOD2 orange): this discriminates the
+        // SELECTED LOD per instance, not just "something rendered", and the
+        // near/far cost ladder is pinned by the asset triangle tests. The
+        // hit counts also prove each class actually renders geometry.
+        for (class, expected_class) in [(0usize, 0usize), (1, 1), (2, 2)] {
+            let pixels = render_vegetation_offscreen(
+                &[[0.0, 0.0, 0.0]],
+                class as u8,
+                VegetationDebugMode::Lod,
+            );
+            let counts = classify_lod_debug_pixels(&pixels);
+            assert!(
+                counts[expected_class] > 0,
+                "LOD{class} render must contain real class-{expected_class} pixels, got {counts:?}"
+            );
+            let dominant = counts
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, count)| **count)
+                .map(|(class, _)| class)
+                .expect("non-empty frame");
+            assert_eq!(
+                dominant, expected_class,
+                "class {class} render must dominate the {expected_class} palette, got {counts:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn vegetation_shadow_pass_produces_silhouettes() {
+        // The instanced shadow caster must write the tree into the fixed
+        // directional depth map: center texels nearer than the far plane.
+        let (device, queue) = headless_device_gpu();
+        let assets = VegetationAssetSet::single_default();
+        let instances = vec![VegetationInstance {
+            position: [0.0, 0.0, 0.0],
+            yaw_rad: 0.0,
+            scale: 1.0,
+            asset_index: 0,
+            tint: [1.0, 1.0, 1.0],
+            zone: 0,
+        }];
+        let config = VegetationLodConfig {
+            lod0_max_m: 30.0,
+            lod1_max_m: 60.0,
+            distance_cull_m: 120.0,
+            hysteresis_band: 0.0,
+        };
+        let mut world = VegetationWorld::new(assets, instances, config);
+        let eye = [0.0, 3.0, 14.0];
+        let vp = test_view_projection(eye);
+        world.update_visibility(eye, &vp);
+        assert_eq!(
+            world.stats().lod_counts[0],
+            1,
+            "the single instance must be LOD0 for the shadow test"
+        );
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("g3d vegetation shadow test shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let camera_layout = camera_bind_group_layout(&device, "g3d shadow test camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "g3d shadow test object layout");
+        let shadow_pass_layout =
+            shadow_pass_bind_group_layout(&device, "g3d shadow test shadow layout");
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("g3d shadow vegetation pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_layout),
+                    Some(&object_layout),
+                    Some(&shadow_pass_layout),
+                ],
+                immediate_size: 0,
+            });
+
+        // Build the exact caster pipeline the renderer uses (depth-only,
+        // no material/state groups, same shadow depth bias).
+        let shadow_pipeline =
+            create_vegetation_shadow_pipeline(&device, &shader, &shadow_pipeline_layout);
+
+        // A simpler one-mesh upload for the depth test: LOD0 bark+foliage of
+        // asset 0, drawn with the same instance buffer path.
+        let asset = world.assets().get(0).expect("asset 0 present");
+        let lod = asset.lods.lod(0).expect("lod0 present");
+        let meshes = [&lod.bark, &lod.foliage];
+        let vertex_buffers: Vec<wgpu::Buffer> = meshes
+            .iter()
+            .map(|mesh| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("g3d shadow test vertices"),
+                    contents: bytemuck::cast_slice(mesh.vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+            })
+            .collect();
+        let index_buffers: Vec<wgpu::Buffer> = meshes
+            .iter()
+            .map(|mesh| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("g3d shadow test indices"),
+                    contents: bytemuck::cast_slice(mesh.indices()),
+                    usage: wgpu::BufferUsages::INDEX,
+                })
+            })
+            .collect();
+        let index_counts: Vec<u32> = meshes
+            .iter()
+            .map(|mesh| mesh.indices().len() as u32)
+            .collect();
+
+        let instance_capacity = world.instance_capacity();
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("g3d shadow test instance buffer"),
+            size: (instance_capacity * size_of::<VegetationGpuInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&instance_buffer, 0, bytemuck::cast_slice(world.visible()));
+
+        // Light eye: above and to the side (matches the shipped direction).
+        let light_direction = EnvironmentUniform::default_environment().light_direction;
+        let light_dir = {
+            let len = (light_direction[0] * light_direction[0]
+                + light_direction[1] * light_direction[1]
+                + light_direction[2] * light_direction[2])
+                .sqrt();
+            [
+                light_direction[0] / len,
+                light_direction[1] / len,
+                light_direction[2] / len,
+            ]
+        };
+        let light_eye = [
+            light_dir[0] * 25.0,
+            light_dir[1] * 25.0,
+            light_dir[2] * 25.0,
+        ];
+        let light_view = look_at_rh(light_eye, [0.0; 3], [0.0, 1.0, 0.0]);
+        let light_projection =
+            webgpu_perspective(35.0_f32.to_radians(), 1.0, 0.1, 80.0).expect("light projection");
+        let light_vp = light_projection * light_view;
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d shadow test camera buffer"),
+            contents: bytemuck::bytes_of(&CameraUniform::new(&light_vp, &light_vp, light_eye)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_bind_group = camera_bind_group(
+            &device,
+            &camera_layout,
+            &camera_buffer,
+            "g3d shadow camera group",
+        );
+        let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d shadow test object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let object_bind_group = matrix_bind_group(
+            &device,
+            &object_layout,
+            &object_buffer,
+            "g3d shadow object group",
+        );
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("g3d shadow test matrix buffer"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(&light_vp)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_pass_bind_group = create_shadow_pass_bind_group(
+            &device,
+            &shadow_pass_layout,
+            &shadow_matrix_buffer,
+            "g3d shadow group",
+        );
+
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("g3d shadow test depth target"),
+            size: wgpu::Extent3d {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("g3d vegetation shadow headless pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&shadow_pipeline);
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(1, &object_bind_group, &[]);
+            pass.set_bind_group(2, &shadow_pass_bind_group, &[]);
+            for ((vertex_buffer, index_buffer), index_count) in vertex_buffers
+                .iter()
+                .zip(index_buffers.iter())
+                .zip(index_counts.iter())
+            {
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, instance_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+        }
+        queue.submit([encoder.finish()]);
+
+        let depth_bytes =
+            read_texture_level(&device, &queue, &depth_texture, 0, TEST_SIZE, TEST_SIZE, 4);
+        // Count texels strictly nearer than the far plane in the centre region
+        // (the tree silhouette projects there).
+        let mut nearer = 0u64;
+        let half = TEST_SIZE / 2;
+        for y in (half - half / 4)..(half + half / 4) {
+            for x in (half - half / 4)..(half + half / 4) {
+                let offset = ((y * TEST_SIZE + x) * 4) as usize;
+                let depth = f32::from_le_bytes([
+                    depth_bytes[offset],
+                    depth_bytes[offset + 1],
+                    depth_bytes[offset + 2],
+                    depth_bytes[offset + 3],
+                ]);
+                if depth < 1.0 {
+                    nearer += 1;
+                }
+            }
+        }
+        assert!(
+            nearer > 0,
+            "vegetation shadow caster must write a silhouette into the depth map"
         );
     }
 }
