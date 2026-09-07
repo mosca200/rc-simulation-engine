@@ -54,10 +54,10 @@ initialization. Per frame the renderer only updates the persistent root and
 articulated object uniforms with `queue.write_buffer`. There is no per-frame
 GLB parsing, mesh construction, pipeline construction, or bind-group creation.
 
-The current acro placeholder GLB contains one combined primitive, so its
-model intentionally has no articulation entries and remains rigid. An authored
-multi-primitive GLB can opt in without changing physics or requiring runtime
-vertex-subset hacks.
+The G1E milestone originally shipped against a one-primitive rigid placeholder.
+G3C-A now exercises this contract in production with explicitly mapped left and
+right aileron, elevator, and rudder primitives. This required no physics changes
+or runtime vertex-subset hacks.
 
 ## Presentation metadata example
 

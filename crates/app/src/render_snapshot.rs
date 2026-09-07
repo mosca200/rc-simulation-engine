@@ -420,9 +420,10 @@ mod tests {
     fn acro_model_with_explicit_presentation() -> (AircraftModel, AircraftModel) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../models/acro_electric_01/model.json");
-        let original = load_aircraft_model(&path).expect("acro model must load");
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        value["presentation"]["articulated_surfaces"] = serde_json::json!([]);
+        let rigid = model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap();
         let bindings = value["control_surface_bindings"].as_array_mut().unwrap();
         let opaque_ids = ["v0", "v1", "v2", "v3"];
         for (binding, id) in bindings.iter_mut().zip(opaque_ids) {
@@ -463,7 +464,7 @@ mod tests {
             }
         ]);
         let explicit = model::AircraftModelLoader::from_json_str(&value.to_string()).unwrap();
-        (original, explicit)
+        (rigid, explicit)
     }
 
     fn stepped_snapshot(

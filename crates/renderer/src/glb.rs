@@ -1382,15 +1382,17 @@ mod tests {
         });
         assert!(minimum.into_iter().chain(maximum).all(f32::is_finite));
         assert!(
-            minimum[0] < -1.0 && maximum[0] > 1.0,
+            minimum[0] <= -0.89 && maximum[0] >= 0.89,
             "+X is right across the wing"
         );
-        assert!(maximum[1] > 0.35, "+Y is up along the vertical stabilizer");
+        assert!(maximum[1] > 0.53, "+Y is up along the vertical stabilizer");
         assert!(
-            minimum[2] < -1.2,
+            minimum[2] < -0.87,
             "-Z is the clearly extended nose direction"
         );
-        assert!(maximum[2] > 0.8, "+Z reaches the tail");
+        assert!(maximum[2] >= 0.89, "+Z reaches the tail");
+        assert!(maximum[0] - minimum[0] < 2.0, "wingspan remains plausible");
+        assert!(maximum[2] - minimum[2] < 2.0, "length remains plausible");
     }
 
     #[test]
