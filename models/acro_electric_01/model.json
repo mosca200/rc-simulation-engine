@@ -349,7 +349,7 @@
         "visual_primitive_index": 6,
         "surface": "left_aileron",
         "control_surface_binding_id": "aileron-left",
-        "hinge_origin_render_body_m": [0.0, 0.01, 0.11],
+        "hinge_origin_render_body_m": [0.0, 0.265, 0.11],
         "hinge_axis_render_body": [1.0, -0.054, 0.0],
         "visual_gain": 1.0
       },
@@ -357,7 +357,7 @@
         "visual_primitive_index": 7,
         "surface": "right_aileron",
         "control_surface_binding_id": "aileron-right",
-        "hinge_origin_render_body_m": [0.0, 0.01, 0.11],
+        "hinge_origin_render_body_m": [0.0, 0.265, 0.11],
         "hinge_axis_render_body": [1.0, 0.054, 0.0],
         "visual_gain": 1.0
       },
@@ -365,7 +365,7 @@
         "visual_primitive_index": 9,
         "surface": "elevator",
         "control_surface_binding_id": "elevator",
-        "hinge_origin_render_body_m": [0.0, 0.112, 0.735],
+        "hinge_origin_render_body_m": [0.0, 0.367, 0.735],
         "hinge_axis_render_body": [1.0, 0.0, 0.0],
         "visual_gain": 1.0
       },
@@ -373,7 +373,7 @@
         "visual_primitive_index": 11,
         "surface": "rudder",
         "control_surface_binding_id": "rudder",
-        "hinge_origin_render_body_m": [0.0, 0.12, 0.735],
+        "hinge_origin_render_body_m": [0.0, 0.375, 0.735],
         "hinge_axis_render_body": [0.0, 1.0, 0.0],
         "visual_gain": 1.0
       }
