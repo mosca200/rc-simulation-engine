@@ -374,7 +374,7 @@ pub enum RenderAppError {
         "invalid terrain debug mode `{0}`; expected `final`, `albedo`, `normal`, `roughness`, `macro`, or `detail`"
     )]
     InvalidTerrainDebug(String),
-    #[error("invalid vegetation debug mode `{0}`; expected `final`, `lod`, `culling`, or `bounds`")]
+    #[error("invalid vegetation debug mode `{0}`; expected `final`, `lod`, or `culling`")]
     InvalidVegetationDebug(String),
     #[error("invalid exposure EV `{0}`; expected a finite value inside [-8, 8]")]
     InvalidExposureEv(String),
@@ -1674,14 +1674,13 @@ mod tests {
             ("final", VegetationDebugMode::Final),
             ("lod", VegetationDebugMode::Lod),
             ("culling", VegetationDebugMode::Culling),
-            ("bounds", VegetationDebugMode::Bounds),
         ] {
             let options =
                 RenderOptions::parse(["--vegetation-debug", label].map(str::to_owned).into_iter())
                     .unwrap();
             assert_eq!(options.vegetation_debug, expected, "label {label}");
         }
-        for value in ["FINAL", "lods", "", "2", "na"] {
+        for value in ["FINAL", "lods", "", "2", "na", "bounds"] {
             assert!(
                 matches!(
                     RenderOptions::parse(

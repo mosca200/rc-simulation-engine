@@ -6,9 +6,9 @@
 //! deterministic set of original tree assets. Everything here is pure,
 //! seed-free procedural geometry: the same build always produces the same
 //! meshes, so no DCC pipeline or external download is required. Provenance:
-//! generated in-repository by `src/bin/generate_tree_assets.rs`, which also
-//! exports the same assets as committed GLB files under
-//! `models/assets/scenery`.
+//! generated procedurally in-code by this module; the `export_glb` helper
+//! can write deterministic GLB bytes for offline inspection but no committed
+//! GLB files are required at runtime.
 //!
 //! # Families
 //!
@@ -1088,9 +1088,8 @@ fn align4(offset: usize) -> usize {
 
 /// Deterministic GLB export of one asset's LOD0 (bark + foliage primitives
 /// with distinct PBR materials). The byte stream is a pure function of the
-/// asset, so the committed files under `models/assets/scenery` are
-/// reproducible. Written with serde_json's ordered `Map`, so identical input
-/// yields identical bytes.
+/// asset, so exported files are reproducible. Written with serde_json's
+/// ordered `Map`, so identical input yields identical bytes.
 #[must_use]
 pub fn export_glb(asset: &VegetationAsset) -> Vec<u8> {
     let parts = [

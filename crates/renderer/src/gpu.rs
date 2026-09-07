@@ -1953,6 +1953,14 @@ impl WgpuRenderer {
                 }
             }
 
+            // G3D FIX: restore the standard shadow pipeline after instanced
+            // vegetation shadow draws. The vegetation shadow pipeline uses a
+            // different vertex layout (slot 1 = per-instance transform) and
+            // the `vs_vegetation_shadow` entry point; aircraft and surface
+            // casters must use the non-instanced `vs_shadow` with their own
+            // object transform.
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+
             shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
             for batch in &self.aircraft_batches {
                 shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
@@ -2087,6 +2095,12 @@ impl WgpuRenderer {
                     }
                 }
             }
+
+            // G3D FIX: restore the standard lit pipeline after instanced
+            // vegetation draws. The vegetation pipeline uses a different vertex
+            // layout (slot 1 = per-instance transform) and different entry
+            // points; aircraft and surface batches must never inherit it.
+            render_pass.set_pipeline(&self.triangle_pipeline);
 
             // Debug grid/axes: identity object transform.
             if self.show_debug_overlays {
@@ -5734,6 +5748,660 @@ mod vegetation_tests {
         assert!(
             nearer > 0,
             "vegetation shadow caster must write a silhouette into the depth map"
+        );
+    }
+
+    // ── G3D FIX: pipeline-state isolation regression tests ─────────────────
+    //
+    // These tests reproduce the exact bug where the vegetation pipeline leaked
+    // into subsequent aircraft draws in the same render pass. Without the
+    // explicit `set_pipeline` restore, the aircraft mesh is drawn through the
+    // instanced vegetation entry points and inherits the vegetation instance
+    // transform instead of its own object uniform.
+
+    /// Build a minimal "aircraft-like" mesh (one triangle, ~2 m across) and
+    /// upload it to the GPU. Returns (vertex_buffer, index_buffer, index_count).
+    fn create_test_aircraft_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+        let vertices = [
+            Vertex {
+                position: [-1.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
+            },
+            Vertex {
+                position: [1.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+                uv: [1.0, 0.0],
+            },
+            Vertex {
+                position: [0.0, 0.0, -1.5],
+                normal: [0.0, 1.0, 0.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+                uv: [0.5, 1.0],
+            },
+        ];
+        let indices: [u32; 3] = [0, 1, 2];
+        let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test aircraft vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test aircraft indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        (vb, ib, 3)
+    }
+
+    /// Scene-pass regression: vegetation draw followed by an aircraft draw in
+    /// the SAME pass. The aircraft object transform places it at x = +10; the
+    /// sole vegetation instance sits at x = −20. If the vegetation pipeline
+    /// leaks, the aircraft triangle is transformed by the instance buffer and
+    /// lands near x = −20 instead. The test asserts the aircraft centroid is
+    /// clearly right-of-centre (its own transform), not left (vegetation).
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn scene_pass_aircraft_not_displaced_by_vegetation_pipeline() {
+        let (device, queue) = headless_device_gpu();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pipeline isolation test shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        // ── Bind group layouts (same as production) ──
+        let camera_layout = camera_bind_group_layout(&device, "iso test camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "iso test object layout");
+        let env_layout = environment_bind_group_layout(&device, "iso test env layout");
+        let material_layout = material_bind_group_layout(&device, "iso test material layout");
+        let state_layout = vegetation_state_bind_group_layout(&device, "iso test state layout");
+
+        // ── Standard lit pipeline (aircraft path) ──
+        let lit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("iso test lit layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                Some(&material_layout),
+            ],
+            immediate_size: 0,
+        });
+        let triangle_pipeline = create_pipeline(
+            &device,
+            &shader,
+            &lit_layout,
+            HDR_FORMAT,
+            PipelineSpec {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write_enabled: true,
+                label: "iso test lit triangle pipeline",
+                fragment_entry_point: "fs_lit",
+            },
+        );
+
+        // ── Vegetation pipeline ──
+        let veg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("iso test vegetation layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                Some(&material_layout),
+                Some(&state_layout),
+            ],
+            immediate_size: 0,
+        });
+        let shadow_pass_layout =
+            shadow_pass_bind_group_layout(&device, "iso test shadow pass layout");
+        let veg_shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("iso test vegetation shadow layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&shadow_pass_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        // ── Vegetation world: one instance far LEFT (x = −20) ──
+        let assets = VegetationAssetSet::single_default();
+        let instances = vec![VegetationInstance {
+            position: [-20.0, 0.0, 0.0],
+            yaw_rad: 0.0,
+            scale: 1.0,
+            asset_index: 0,
+            tint: [1.0, 1.0, 1.0],
+            zone: 0,
+        }];
+        let config = VegetationLodConfig {
+            lod0_max_m: 60.0,
+            lod1_max_m: 120.0,
+            distance_cull_m: 300.0,
+            hysteresis_band: 0.0,
+        };
+        let mut world = VegetationWorld::new(assets, instances, config);
+
+        // ── Camera looking at origin from z = +30 ──
+        let eye = [0.0, 5.0, 30.0];
+        let vp = test_view_projection(eye);
+        world.update_visibility(eye, &vp);
+        assert!(
+            !world.visible().is_empty(),
+            "vegetation instance must be visible"
+        );
+
+        // ── GPU vegetation assembly ──
+        let bark_mat = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Bark),
+            part_roughness(VegetationPart::Bark),
+        );
+        let foliage_mat = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Foliage),
+            part_roughness(VegetationPart::Foliage),
+        );
+        let gpu_veg = build_gpu_vegetation(
+            &device,
+            &queue,
+            &shader,
+            &world,
+            &state_layout,
+            &veg_layout,
+            &veg_shadow_layout,
+            0,
+            1,
+            VegetationDebugMode::Final,
+        );
+        queue.write_buffer(
+            &gpu_veg.instance_buffer,
+            0,
+            bytemuck::cast_slice(world.visible()),
+        );
+
+        // ── Aircraft mesh + object transform at x = +10 ──
+        let (aircraft_vb, aircraft_ib, aircraft_ic) = create_test_aircraft_mesh(&device);
+        let aircraft_matrix = Mat4::from_rows([
+            [1.0, 0.0, 0.0, 10.0],
+            [0.0, 1.0, 0.0, 2.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let aircraft_object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("iso test aircraft object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&aircraft_matrix)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let aircraft_object_bg = matrix_bind_group(
+            &device,
+            &object_layout,
+            &aircraft_object_buffer,
+            "iso test aircraft object group",
+        );
+
+        // ── Shared bind groups ──
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("iso test camera buffer"),
+            contents: bytemuck::bytes_of(&CameraUniform::new(
+                &vp,
+                &vp.inverse().expect("vp invertible"),
+                eye,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_bg =
+            camera_bind_group(&device, &camera_layout, &camera_buffer, "iso camera group");
+        let identity_obj_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("iso test identity object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let identity_obj_bg = matrix_bind_group(
+            &device,
+            &object_layout,
+            &identity_obj_buffer,
+            "iso identity object group",
+        );
+        let env_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("iso test environment buffer"),
+            contents: bytemuck::bytes_of(&EnvironmentUniform::default_environment()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("iso test shadow matrix buffer"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_target = create_shadow_target(&device);
+        let shadow_sampler = create_shadow_comparison_sampler(&device);
+        let env_bg = create_environment_bind_group(
+            &device,
+            &env_layout,
+            &env_buffer,
+            &shadow_target.view,
+            &shadow_sampler,
+            &shadow_matrix_buffer,
+            "iso test env group",
+        );
+        // Aircraft material: white texture, non-metal, moderate roughness.
+        let aircraft_mat = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            PROCEDURAL_METALLIC,
+            PROCEDURAL_ROUGHNESS,
+        );
+
+        // ── Offscreen HDR target ──
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("iso test color target"),
+            size: wgpu::Extent3d {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE);
+
+        // ── Render: vegetation THEN aircraft in the SAME pass ──
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("iso test scene pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_target.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // 1. Vegetation draw (instanced pipeline, instance buffer on slot 1).
+            pass.set_pipeline(&gpu_veg.pipeline);
+            pass.set_bind_group(0, &camera_bg, &[]);
+            pass.set_bind_group(1, &identity_obj_bg, &[]);
+            pass.set_bind_group(2, &env_bg, &[]);
+            pass.set_bind_group(4, &gpu_veg.uniform_bind_group, &[]);
+            let ranges = world.batch_ranges();
+            for group in 0..GROUP_COUNT {
+                let start = ranges[group * 2];
+                let count = ranges[group * 2 + 1];
+                if count == 0 {
+                    continue;
+                }
+                let asset = group / LOD_COUNT;
+                let lod = (group % LOD_COUNT) as u8;
+                for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                    let mesh = &gpu_veg.meshes[vegetation_mesh_index(asset, lod, part)];
+                    let material = if part == VegetationPart::Bark {
+                        &bark_mat
+                    } else {
+                        &foliage_mat
+                    };
+                    pass.set_bind_group(3, &material.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, gpu_veg.instance_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                }
+            }
+
+            // 2. THE FIX: restore standard lit pipeline before aircraft draw.
+            pass.set_pipeline(&triangle_pipeline);
+
+            // 3. Aircraft draw (non-instanced, own object transform at x=+10).
+            pass.set_bind_group(0, &camera_bg, &[]);
+            pass.set_bind_group(1, &aircraft_object_bg, &[]);
+            pass.set_bind_group(2, &env_bg, &[]);
+            pass.set_bind_group(3, &aircraft_mat.bind_group, &[]);
+            pass.set_vertex_buffer(0, aircraft_vb.slice(..));
+            pass.set_index_buffer(aircraft_ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..aircraft_ic, 0, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+
+        // ── Readback and centroid analysis ──
+        let pixels =
+            read_texture_level(&device, &queue, &color_texture, 0, TEST_SIZE, TEST_SIZE, 8);
+
+        // Find the centroid of RED-dominant pixels (the aircraft triangle is
+        // pure red [1,0,0]; vegetation is green/brown from the asset colors).
+        let mut red_sum_x = 0u64;
+        let mut red_count = 0u64;
+        for (index, texel) in pixels.as_chunks::<8>().0.iter().enumerate() {
+            let r = f16_to_f32(u16::from_le_bytes([texel[0], texel[1]]));
+            let g = f16_to_f32(u16::from_le_bytes([texel[2], texel[3]]));
+            let b = f16_to_f32(u16::from_le_bytes([texel[4], texel[5]]));
+            // Red-dominant and above background.
+            if r > 0.15 && r > g * 1.5 && r > b * 1.5 {
+                red_count += 1;
+                red_sum_x += (index as u32 % TEST_SIZE) as u64;
+            }
+        }
+        assert!(red_count > 0, "aircraft triangle must render red pixels");
+        let centroid_x = (red_sum_x / red_count) as u32;
+        let centre = TEST_SIZE / 2;
+
+        // The aircraft object transform places it at x = +10 (right of centre);
+        // the vegetation instance is at x = −20 (left). If the pipeline leaked,
+        // the aircraft would inherit the vegetation instance transform and its
+        // red centroid would land LEFT of centre.
+        assert!(
+            centroid_x > centre,
+            "aircraft centroid must be RIGHT of centre ({centroid_x} px > {centre} px) — \
+             a leftward shift means the vegetation pipeline leaked into the aircraft draw"
+        );
+    }
+
+    /// Shadow-pass regression: vegetation shadow draw followed by an aircraft
+    /// shadow draw in the SAME depth-only pass. Without the pipeline restore
+    /// the aircraft caster uses `vs_vegetation_shadow` and the instance buffer,
+    /// displacing the shadow silhouette to the vegetation position.
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn shadow_pass_aircraft_silhouette_not_displaced_by_vegetation() {
+        let (device, queue) = headless_device_gpu();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow isolation test shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        let camera_layout = camera_bind_group_layout(&device, "shadow iso camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "shadow iso object layout");
+        let shadow_pass_layout = shadow_pass_bind_group_layout(&device, "shadow iso shadow layout");
+
+        // Standard shadow pipeline (aircraft caster path).
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow iso standard layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&shadow_pass_layout),
+            ],
+            immediate_size: 0,
+        });
+        let shadow_pipeline = create_shadow_pipeline(&device, &shader, &shadow_layout);
+
+        // Vegetation shadow pipeline.
+        let veg_shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow iso vegetation layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&shadow_pass_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        // Vegetation world: one instance far LEFT (x = −20).
+        let assets = VegetationAssetSet::single_default();
+        let instances = vec![VegetationInstance {
+            position: [-20.0, 0.0, 0.0],
+            yaw_rad: 0.0,
+            scale: 1.0,
+            asset_index: 0,
+            tint: [1.0, 1.0, 1.0],
+            zone: 0,
+        }];
+        let config = VegetationLodConfig {
+            lod0_max_m: 60.0,
+            lod1_max_m: 120.0,
+            distance_cull_m: 300.0,
+            hysteresis_band: 0.0,
+        };
+        let mut world = VegetationWorld::new(assets, instances, config);
+
+        // Light camera: overhead, looking at origin.
+        let light_eye = [0.0, 40.0, 10.0];
+        let light_view = look_at_rh(light_eye, [0.0; 3], [0.0, 0.0, -1.0]);
+        let light_proj =
+            webgpu_perspective(50.0_f32.to_radians(), 1.0, 0.5, 200.0).expect("light proj");
+        let light_vp = light_proj * light_view;
+        world.update_visibility(light_eye, &light_vp);
+        assert!(
+            !world.visible().is_empty(),
+            "vegetation instance must be visible for shadow test"
+        );
+
+        // Build vegetation GPU resources (shadow pipeline only needed here).
+        let state_layout = vegetation_state_bind_group_layout(&device, "shadow iso state layout");
+        let material_layout = material_bind_group_layout(&device, "shadow iso material layout");
+        let env_layout = environment_bind_group_layout(&device, "shadow iso env layout");
+        let veg_scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow iso veg scene layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&env_layout),
+                Some(&material_layout),
+                Some(&state_layout),
+            ],
+            immediate_size: 0,
+        });
+        let gpu_veg = build_gpu_vegetation(
+            &device,
+            &queue,
+            &shader,
+            &world,
+            &state_layout,
+            &veg_scene_layout,
+            &veg_shadow_layout,
+            0,
+            1,
+            VegetationDebugMode::Final,
+        );
+        queue.write_buffer(
+            &gpu_veg.instance_buffer,
+            0,
+            bytemuck::cast_slice(world.visible()),
+        );
+
+        // Aircraft mesh + object transform at x = +10.
+        let (aircraft_vb, aircraft_ib, aircraft_ic) = create_test_aircraft_mesh(&device);
+        let aircraft_matrix = Mat4::from_rows([
+            [1.0, 0.0, 0.0, 10.0],
+            [0.0, 1.0, 0.0, 2.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let aircraft_obj_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow iso aircraft object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&aircraft_matrix)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let aircraft_obj_bg = matrix_bind_group(
+            &device,
+            &object_layout,
+            &aircraft_obj_buffer,
+            "shadow iso aircraft object group",
+        );
+
+        // Shared bind groups.
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow iso camera buffer"),
+            contents: bytemuck::bytes_of(&CameraUniform::new(
+                &light_vp,
+                &light_vp.inverse().expect("light vp invertible"),
+                light_eye,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_bg = camera_bind_group(
+            &device,
+            &camera_layout,
+            &camera_buffer,
+            "shadow iso camera group",
+        );
+        let identity_obj_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow iso identity object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&Mat4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let identity_obj_bg = matrix_bind_group(
+            &device,
+            &object_layout,
+            &identity_obj_buffer,
+            "shadow iso identity object group",
+        );
+        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow iso matrix buffer"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(&light_vp)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let shadow_pass_bg = create_shadow_pass_bind_group(
+            &device,
+            &shadow_pass_layout,
+            &shadow_matrix_buffer,
+            "shadow iso pass group",
+        );
+
+        // Depth-only target.
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow iso depth target"),
+            size: wgpu::Extent3d {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Render: vegetation shadow THEN aircraft shadow in the SAME pass.
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow iso depth pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // 1. Vegetation shadow (instanced pipeline).
+            pass.set_pipeline(&gpu_veg.shadow_pipeline);
+            pass.set_bind_group(0, &camera_bg, &[]);
+            pass.set_bind_group(1, &identity_obj_bg, &[]);
+            pass.set_bind_group(2, &shadow_pass_bg, &[]);
+            let ranges = world.batch_ranges();
+            for group in 0..GROUP_COUNT {
+                if group % LOD_COUNT > 1 {
+                    continue;
+                }
+                let start = ranges[group * 2];
+                let count = ranges[group * 2 + 1];
+                if count == 0 {
+                    continue;
+                }
+                let asset = group / LOD_COUNT;
+                let lod = (group % LOD_COUNT) as u8;
+                for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                    let mesh = &gpu_veg.meshes[vegetation_mesh_index(asset, lod, part)];
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, gpu_veg.instance_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                }
+            }
+
+            // 2. THE FIX: restore standard shadow pipeline before aircraft.
+            pass.set_pipeline(&shadow_pipeline);
+
+            // 3. Aircraft shadow (non-instanced, own object transform at x=+10).
+            pass.set_bind_group(1, &aircraft_obj_bg, &[]);
+            pass.set_vertex_buffer(0, aircraft_vb.slice(..));
+            pass.set_index_buffer(aircraft_ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..aircraft_ic, 0, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+
+        // Readback depth and find the centroid of non-far-plane texels that
+        // belong to the aircraft (right half of the light-space view).
+        let depth_bytes =
+            read_texture_level(&device, &queue, &depth_texture, 0, TEST_SIZE, TEST_SIZE, 4);
+
+        // The aircraft is at x = +10 in world space; under the overhead light
+        // camera its shadow silhouette projects RIGHT of centre. The vegetation
+        // at x = −20 projects LEFT. Count near-depth texels in each half.
+        let centre = TEST_SIZE / 2;
+        let mut right_near = 0u64;
+        let mut left_near = 0u64;
+        for y in 0..TEST_SIZE {
+            for x in 0..TEST_SIZE {
+                let offset = ((y * TEST_SIZE + x) * 4) as usize;
+                let depth = f32::from_le_bytes([
+                    depth_bytes[offset],
+                    depth_bytes[offset + 1],
+                    depth_bytes[offset + 2],
+                    depth_bytes[offset + 3],
+                ]);
+                if depth < 1.0 {
+                    if x >= centre {
+                        right_near += 1;
+                    } else {
+                        left_near += 1;
+                    }
+                }
+            }
+        }
+        // The aircraft triangle (2 m across at x=+10, light from above) must
+        // produce near-depth texels in the RIGHT half. If the vegetation shadow
+        // pipeline leaked, the aircraft would be transformed to x=−20 and land
+        // in the LEFT half instead.
+        assert!(
+            right_near > 0,
+            "aircraft shadow must write depth in the right half \
+             (right={right_near}, left={left_near}) — zero means the vegetation \
+             shadow pipeline leaked into the aircraft caster draw"
         );
     }
 }

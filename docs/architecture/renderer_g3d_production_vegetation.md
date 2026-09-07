@@ -144,10 +144,6 @@ stesso conteggio vertici/indici e stessi fattori materiali.
 - **LOD3 billboard**: gap residuo documentato (`LOD_COUNT = 3`). L'integrazione
   renderer include solo i tre LOD mesh; il billboard richiede acquisizione
   alpha/impostor non proporzionata a questa slice.
-- **Debug `Bounds`**: il selettore `VegetationDebugMode::Bounds` resta
-  accettato dalla CLI ma renderizza il percorso produttivo (nessuna sfera
-  wireframe): il draw di bounds richiede una seconda pipeline instanced per le
-  linee, fuori scope.
 - **Animazione vento / texturing fogliame**: nessun wind animation né texture
   canopy; i colori per-vertice e i fattori PBR sono il contenuto visivo.
 - L'asset set è fisso in produzione; i varianti tuning sono hard-coded.

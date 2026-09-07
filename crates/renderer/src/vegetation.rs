@@ -125,8 +125,6 @@ pub enum VegetationDebugMode {
     Lod = 1,
     /// No visual change; periodically log visibility counters.
     Culling = 2,
-    /// Draw wireframe bounding spheres around visible instances.
-    Bounds = 3,
 }
 
 impl VegetationDebugMode {
@@ -142,7 +140,6 @@ impl VegetationDebugMode {
             Self::Final => "final",
             Self::Lod => "lod",
             Self::Culling => "culling",
-            Self::Bounds => "bounds",
         }
     }
 
@@ -153,7 +150,6 @@ impl VegetationDebugMode {
             "final" => Some(Self::Final),
             "lod" => Some(Self::Lod),
             "culling" => Some(Self::Culling),
-            "bounds" => Some(Self::Bounds),
             _ => None,
         }
     }
@@ -687,7 +683,9 @@ pub struct VegetationWorld {
     visible: Vec<VegetationGpuInstance>,
     /// Sorted scratch swapped with `visible` each frame (keeps capacity).
     visible_sorted: Vec<VegetationGpuInstance>,
-    /// Per-visible bounds (centre xyz + radius) for the bounds debug mode.
+    /// Per-visible bounds (centre xyz + radius), aligned with `visible()`.
+    /// Retained for future debug visualisation; the frustum culling test uses
+    /// the same bounding-sphere data inline during `update_visibility`.
     visible_bounds: Vec<[f32; 4]>,
     /// Sorted bounds scratch swapped with `visible_bounds` each frame.
     visible_bounds_sorted: Vec<[f32; 4]>,
@@ -1265,7 +1263,6 @@ mod tests {
             VegetationDebugMode::Final,
             VegetationDebugMode::Lod,
             VegetationDebugMode::Culling,
-            VegetationDebugMode::Bounds,
         ] {
             let label = mode.label();
             assert_eq!(VegetationDebugMode::from_label(label), Some(mode));
