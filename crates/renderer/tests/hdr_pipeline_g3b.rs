@@ -390,7 +390,8 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
     // All texels get the same value per channel: (4.0, 2.0, 1.0).
     let mut texels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for _ in 0..SIZE * SIZE {
-        texels.extend_from_slice(&[4.0f32, 2.0, 1.0, 1.0]);
+        // IEEE-754 binary16 bit patterns for (4.0, 2.0, 1.0, 1.0).
+        texels.extend_from_slice(&[0x4400u16, 0x4000, 0x3c00, 0x3c00]);
     }
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -442,7 +443,9 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                        PostProcessTestUniform,
+                    >() as u64),
                 },
                 count: None,
             },
@@ -450,7 +453,7 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("g3b test postprocess layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
+        bind_group_layouts: &[None, None, None, None, None, Some(&bind_group_layout)],
         immediate_size: 0,
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -555,13 +558,15 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(5, &bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
     // Read back the sRGB-encoded display bytes and check channel ordering.
-    let row_bytes = SIZE * 4;
+    let unpadded_row_bytes = SIZE * 4;
+    let row_bytes = unpadded_row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("g3b test readback"),
         size: (row_bytes * SIZE) as u64,
@@ -665,7 +670,10 @@ fn headless_device() -> (wgpu::Device, wgpu::Queue) {
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("g3b headless device"),
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
+        required_limits: wgpu::Limits {
+            max_bind_groups: adapter.limits().max_bind_groups,
+            ..wgpu::Limits::default()
+        },
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::Performance,
         trace: wgpu::Trace::Off,

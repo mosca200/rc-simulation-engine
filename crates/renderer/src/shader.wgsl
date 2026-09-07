@@ -86,7 +86,9 @@ struct EnvironmentUniform {
 //   Finite and bounded by the CPU-side validator.
 struct PostProcessUniform {
     exposure_ev: f32,
-    padding: vec3<f32>,
+    padding_0: f32,
+    padding_1: f32,
+    padding_2: f32,
 };
 
 // G2B: directional shadow state. The light view-projection transforms a world

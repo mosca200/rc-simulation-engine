@@ -938,12 +938,12 @@ impl WgpuRenderer {
                 immediate_size: 0,
             });
 
-        let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, format);
+        let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, HDR_FORMAT);
         let triangle_pipeline = create_pipeline(
             &device,
             &shader,
             &lit_pipeline_layout,
-            format,
+            HDR_FORMAT,
             PipelineSpec {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: Some(wgpu::Face::Back),
@@ -956,7 +956,7 @@ impl WgpuRenderer {
             &device,
             &shader,
             &unlit_pipeline_layout,
-            format,
+            HDR_FORMAT,
             PipelineSpec {
                 topology: wgpu::PrimitiveTopology::LineList,
                 cull_mode: None,
@@ -973,7 +973,7 @@ impl WgpuRenderer {
             &device,
             &shader,
             &terrain_pipeline_layout,
-            format,
+            HDR_FORMAT,
             PipelineSpec {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: Some(wgpu::Face::Back),
@@ -1361,7 +1361,14 @@ impl WgpuRenderer {
         let postprocess_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("G3B postprocess pipeline layout"),
-                bind_group_layouts: &[Some(&postprocess_bind_group_layout)],
+                bind_group_layouts: &[
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&postprocess_bind_group_layout),
+                ],
                 immediate_size: 0,
             });
         let postprocess_pipeline =
@@ -1815,7 +1822,7 @@ impl WgpuRenderer {
                 multiview_mask: None,
             });
             postprocess_pass.set_pipeline(&self.postprocess_pipeline);
-            postprocess_pass.set_bind_group(0, &self.postprocess_bind_group, &[]);
+            postprocess_pass.set_bind_group(5, &self.postprocess_bind_group, &[]);
             postprocess_pass.draw(0..3, 0..1);
         }
 
@@ -2881,7 +2888,7 @@ fn postprocess_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+                    min_binding_size: wgpu::BufferSize::new(size_of::<PostProcessUniform>() as u64),
                 },
                 count: None,
             },
