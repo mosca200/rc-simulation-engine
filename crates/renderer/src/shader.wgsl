@@ -834,7 +834,12 @@ fn khronos_pbr_neutral(color: vec3<f32>) -> vec3<f32> {
 fn fs_postprocess(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     // 1:1 texel mapping from the fullscreen triangle; +0.5 lands on texel
     // centers under the nearest sampler (deterministic, no cross-texel blur).
-    let uv = input.clip_xy * 0.5 + vec2<f32>(0.5);
+    // WebGPU framebuffer Y grows downward while clip-space Y grows upward.
+    // Flip V so the offscreen HDR target keeps its orientation on the surface.
+    let uv = vec2<f32>(
+        input.clip_xy.x * 0.5 + 0.5,
+        0.5 - input.clip_xy.y * 0.5,
+    );
     let hdr_rgb = textureSample(hdr_scene_texture, hdr_scene_sampler, uv).rgb;
     let exposed_rgb = hdr_rgb * exp2(postprocess.exposure_ev);
     let display_rgb = khronos_pbr_neutral(exposed_rgb);

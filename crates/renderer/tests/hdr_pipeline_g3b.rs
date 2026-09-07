@@ -202,6 +202,10 @@ fn shader_has_hdr_postprocess_contract_without_ldr_clamp() {
         source.contains("var hdr_scene_texture: texture_2d<f32>;"),
         "the HDR scene texture binding must exist"
     );
+    assert!(
+        source.contains("0.5 - input.clip_xy.y * 0.5"),
+        "the postprocess must flip clip-space Y when mapping to top-left texture V"
+    );
 }
 
 #[test]
@@ -387,11 +391,16 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
         view_formats: &[],
     });
     let hdr_view = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    // All texels get the same value per channel: (4.0, 2.0, 1.0).
+    // The first texture row is the reference highlight; the other rows use a
+    // discriminating blue value so a vertical flip cannot pass this test.
     let mut texels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for _ in 0..SIZE * SIZE {
+    for _ in 0..SIZE {
         // IEEE-754 binary16 bit patterns for (4.0, 2.0, 1.0, 1.0).
         texels.extend_from_slice(&[0x4400u16, 0x4000, 0x3c00, 0x3c00]);
+    }
+    for _ in SIZE..SIZE * SIZE {
+        // IEEE-754 binary16 bit patterns for (0.25, 1.0, 4.0, 1.0).
+        texels.extend_from_slice(&[0x3400u16, 0x3c00, 0x4400, 0x3c00]);
     }
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -609,7 +618,7 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
     drop(mapped);
     buffer.unmap();
 
-    // One texel of the 4x4 fill.
+    // The top-left surface texel must come from the top HDR texture row.
     let rgba = [bytes[0], bytes[1], bytes[2], bytes[3]];
     // (4.0, 2.0, 1.0) @ EV0 -> Khronos Neutral -> sRGB encode.
     // Reference from the Rust mirror:
