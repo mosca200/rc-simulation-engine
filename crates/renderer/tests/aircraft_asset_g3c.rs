@@ -3,7 +3,7 @@
 use renderer::{ControlSurfacePresentation, GlbArticulationPlan, Mat4, SurfaceHinge, SurfaceId};
 use std::path::{Path, PathBuf};
 
-const EXPECTED_PARTS: [&str; 16] = [
+const EXPECTED_PARTS: [&str; 21] = [
     "Fuselage",
     "Cowl",
     "Spinner",
@@ -20,6 +20,11 @@ const EXPECTED_PARTS: [&str; 16] = [
     "NoseLandingGear",
     "Wheels",
     "WingAndFuselageLivery",
+    "TopRedLivery",
+    "UndersideNavyLivery",
+    "CanopyFrame",
+    "WheelHubs",
+    "PropellerTips",
 ];
 
 fn asset_path() -> PathBuf {
@@ -44,14 +49,16 @@ fn bounds(primitive: &renderer::RenderPrimitive) -> ([f32; 3], [f32; 3]) {
 fn production_loader_accepts_detailed_indexed_asset() {
     let path = asset_path();
     assert!(path.is_file(), "production GLB must be checked in");
-    let asset = renderer::load_glb_asset(&path).expect("production loader must accept G3C-A GLB");
+    let asset = renderer::load_glb_asset(&path).expect("production loader must accept G3C-B GLB");
 
     assert_eq!(asset.primitives.len(), EXPECTED_PARTS.len());
-    assert!(asset.total_vertex_count() >= 2_000);
-    assert!(asset.total_index_count() / 3 >= 3_000);
+    assert!((5_500..=8_000).contains(&asset.total_vertex_count()));
+    assert!((8_000..=12_000).contains(&(asset.total_index_count() / 3)));
 
     let mut global_minimum = [f32::INFINITY; 3];
     let mut global_maximum = [f32::NEG_INFINITY; 3];
+    let mut triangle_count = 0usize;
+    let mut degenerate_count = 0usize;
     for primitive in &asset.primitives {
         assert!(!primitive.vertices.is_empty());
         assert!(!primitive.indices.is_empty());
@@ -72,10 +79,29 @@ fn production_loader_accepts_detailed_indexed_asset() {
                 global_maximum[axis] = global_maximum[axis].max(vertex.position[axis]);
             }
         }
+        let (triangles, remainder) = primitive.indices.as_chunks::<3>();
+        assert!(remainder.is_empty());
+        for triangle in triangles {
+            let a = primitive.vertices[triangle[0] as usize].position;
+            let b = primitive.vertices[triangle[1] as usize].position;
+            let c = primitive.vertices[triangle[2] as usize].position;
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let cross = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            triangle_count += 1;
+            if cross.iter().map(|value| value * value).sum::<f32>() <= 1.0e-12 {
+                degenerate_count += 1;
+            }
+        }
     }
+    assert!(degenerate_count * 1_000 <= triangle_count);
 
     assert!(global_minimum[0] <= -0.89 && global_maximum[0] >= 0.89);
-    assert!(global_minimum[1] < -0.35 && global_maximum[1] > 0.53);
+    assert!(global_minimum[1] < -0.09 && global_maximum[1] > 0.78);
     assert!(global_minimum[2] < -0.87 && global_maximum[2] >= 0.89);
     assert!(global_maximum[0] - global_minimum[0] < 2.0);
     assert!(global_maximum[2] - global_minimum[2] < 2.0);
@@ -98,6 +124,17 @@ fn authored_parts_materials_and_surface_primitives_are_distinct() {
     assert!(document.blob.is_some(), "all asset data must be embedded");
     assert_eq!(document.materials().count(), 8);
     assert_eq!(document.meshes().count(), EXPECTED_PARTS.len());
+    assert_eq!(document.textures().count(), 0);
+    assert_eq!(document.images().count(), 0);
+
+    let materials = document.materials().collect::<Vec<_>>();
+    let airframe = materials[0].pbr_metallic_roughness();
+    let canopy = materials[3].pbr_metallic_roughness();
+    let tire = materials[7].pbr_metallic_roughness();
+    assert!(airframe.metallic_factor() <= 0.01);
+    assert!(tire.metallic_factor() <= 0.01);
+    assert!(canopy.roughness_factor() < airframe.roughness_factor());
+    assert!(canopy.roughness_factor() < tire.roughness_factor());
 
     assert_eq!(
         document.meshes().flat_map(|mesh| mesh.primitives()).count(),
@@ -109,7 +146,7 @@ fn authored_parts_materials_and_surface_primitives_are_distinct() {
     assert!(fuselage_maximum[2] - fuselage_minimum[2] > 1.25);
     assert!(fuselage_maximum[0] - fuselage_minimum[0] > 0.30);
     let (canopy_minimum, canopy_maximum) = bounds(&asset.primitives[4]);
-    assert!(canopy_maximum[1] > 0.30);
+    assert!(canopy_maximum[1] > 0.55);
     assert!(canopy_maximum[2] - canopy_minimum[2] > 0.60);
     let (wing_minimum, wing_maximum) = bounds(&asset.primitives[5]);
     assert!(wing_maximum[0] - wing_minimum[0] >= 1.79);
@@ -125,15 +162,21 @@ fn authored_parts_materials_and_surface_primitives_are_distinct() {
     let (elevator_minimum, elevator_maximum) = bounds(&asset.primitives[9]);
     assert!(elevator_minimum[0] < -0.49 && elevator_maximum[0] > 0.49);
     let (rudder_minimum, rudder_maximum) = bounds(&asset.primitives[11]);
-    assert!(rudder_maximum[1] > 0.50);
+    assert!(rudder_maximum[1] > 0.75);
     assert!(rudder_maximum[2] - rudder_minimum[2] > 0.04);
 
     let (main_gear_minimum, main_gear_maximum) = bounds(&asset.primitives[12]);
-    assert!(main_gear_minimum[1] < -0.29 && main_gear_maximum[0] > 0.30);
+    assert!(main_gear_minimum[1] < -0.04 && main_gear_maximum[0] > 0.30);
     let (nose_gear_minimum, nose_gear_maximum) = bounds(&asset.primitives[13]);
     assert!(nose_gear_minimum[2] < -0.50 && nose_gear_maximum[2] < -0.43);
     let (wheels_minimum, wheels_maximum) = bounds(&asset.primitives[14]);
-    assert!(wheels_minimum[1] < -0.35 && wheels_maximum[0] > 0.29);
+    assert!(wheels_minimum[1] < -0.09 && wheels_maximum[0] > 0.29);
+
+    let (top_livery_minimum, top_livery_maximum) = bounds(&asset.primitives[16]);
+    let (underside_minimum, underside_maximum) = bounds(&asset.primitives[17]);
+    assert!(top_livery_minimum[0] < -0.8 && top_livery_maximum[0] > 0.8);
+    assert!(underside_minimum[0] < -0.85 && underside_maximum[0] > 0.85);
+    assert!(underside_maximum[1] < top_livery_minimum[1]);
 }
 
 #[test]
@@ -142,17 +185,17 @@ fn production_surface_mapping_has_identity_neutral_and_finite_deflections() {
         (
             6,
             SurfaceId::LeftAileron,
-            [0.0, 0.01, 0.11],
+            [0.0, 0.265, 0.11],
             [1.0, -0.054, 0.0],
         ),
         (
             7,
             SurfaceId::RightAileron,
-            [0.0, 0.01, 0.11],
+            [0.0, 0.265, 0.11],
             [1.0, 0.054, 0.0],
         ),
-        (9, SurfaceId::Elevator, [0.0, 0.112, 0.735], [1.0, 0.0, 0.0]),
-        (11, SurfaceId::Rudder, [0.0, 0.12, 0.735], [0.0, 1.0, 0.0]),
+        (9, SurfaceId::Elevator, [0.0, 0.367, 0.735], [1.0, 0.0, 0.0]),
+        (11, SurfaceId::Rudder, [0.0, 0.375, 0.735], [0.0, 1.0, 0.0]),
     ]
     .map(|(primitive, surface, origin, axis)| {
         (

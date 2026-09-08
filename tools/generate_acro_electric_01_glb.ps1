@@ -4,8 +4,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$VisualYOffset = 0.255
 
-# Deterministic, dependency-free authoring source for the G3C-A visual asset.
+# Deterministic, dependency-free authoring source for the G3C-B visual asset.
 # Render-local coordinates are +X right, +Y up, -Z forward/nose. The production
 # loader intentionally ignores glTF node transforms, so every position is baked.
 
@@ -40,7 +41,9 @@ function Add-Vertex {
     param($Mesh, [double[]]$Position, [double[]]$Normal)
     $normalized = Normalize-Vector $Normal
     $index = [uint32]($Mesh.Positions.Count / 3)
-    foreach ($value in $Position) { $Mesh.Positions.Add([float]$value) }
+    $Mesh.Positions.Add([float]$Position[0])
+    $Mesh.Positions.Add([float]($Position[1] + $VisualYOffset))
+    $Mesh.Positions.Add([float]$Position[2])
     foreach ($value in $normalized) { $Mesh.Normals.Add([float]$value) }
     return $index
 }
@@ -145,8 +148,11 @@ function Add-AirfoilPanel {
     param($Mesh, [object[]]$Stations, [ValidateSet("horizontal", "vertical")][string]$Plane = "horizontal")
     # Clockwise section from leading edge over the upper surface to trailing edge.
     $profile = @(
-        @(0.00, 0.00), @(0.08, 0.34), @(0.28, 0.50), @(0.58, 0.38),
-        @(0.84, 0.18), @(1.00, 0.00), @(0.82, -0.12), @(0.48, -0.20), @(0.16, -0.14)
+        @(0.000, 0.000), @(0.020, 0.180), @(0.055, 0.315), @(0.110, 0.410),
+        @(0.200, 0.480), @(0.340, 0.500), @(0.500, 0.455), @(0.660, 0.360),
+        @(0.800, 0.235), @(0.910, 0.115), @(1.000, 0.000), @(0.900, -0.070),
+        @(0.730, -0.135), @(0.520, -0.185), @(0.310, -0.205), @(0.140, -0.155),
+        @(0.045, -0.075)
     )
     $rings = @()
     foreach ($station in $Stations) {
@@ -271,6 +277,38 @@ function Add-ExtrudedPolygonXY {
     }
 }
 
+function Add-TwistedPropellerBlade {
+    param($Mesh, [double]$Direction)
+    # radius, half chord and visible pitch depth. The opposite blade is the
+    # exact 180-degree rotation of the first around the propeller shaft.
+    $stations = @(
+        @(0.060, 0.030, 0.004), @(0.105, 0.046, 0.010),
+        @(0.190, 0.052, 0.016), @(0.285, 0.043, 0.019),
+        @(0.350, 0.024, 0.014), @(0.370, 0.009, 0.006)
+    )
+    $frontLeft = @(); $frontRight = @(); $backLeft = @(); $backRight = @()
+    foreach ($station in $stations) {
+        $radius = [double]$station[0]; $halfChord = [double]$station[1]; $pitch = [double]$station[2]
+        $centerY = $Direction * $radius
+        $leftX = -$Direction * $halfChord; $rightX = $Direction * $halfChord
+        $leftZ = -0.694 - $pitch; $rightZ = -0.694 + $pitch
+        $frontLeft += Add-Vertex $Mesh ([double[]]@($leftX, $centerY, ($leftZ - 0.004))) ([double[]]@(0.0, 0.0, -1.0))
+        $frontRight += Add-Vertex $Mesh ([double[]]@($rightX, $centerY, ($rightZ - 0.004))) ([double[]]@(0.0, 0.0, -1.0))
+        $backLeft += Add-Vertex $Mesh ([double[]]@($leftX, $centerY, ($leftZ + 0.004))) ([double[]]@(0.0, 0.0, 1.0))
+        $backRight += Add-Vertex $Mesh ([double[]]@($rightX, $centerY, ($rightZ + 0.004))) ([double[]]@(0.0, 0.0, 1.0))
+    }
+    for ($station = 0; $station -lt $stations.Count - 1; $station++) {
+        $next = $station + 1
+        Add-QuadFacing $Mesh $frontLeft[$station] $frontLeft[$next] $frontRight[$next] $frontRight[$station]
+        Add-QuadFacing $Mesh $backLeft[$station] $backRight[$station] $backRight[$next] $backLeft[$next]
+        Add-QuadFacing $Mesh $frontLeft[$station] $backLeft[$station] $backLeft[$next] $frontLeft[$next]
+        Add-QuadFacing $Mesh $frontRight[$station] $frontRight[$next] $backRight[$next] $backRight[$station]
+    }
+    Add-QuadFacing $Mesh $frontLeft[0] $frontRight[0] $backRight[0] $backLeft[0]
+    $tip = $stations.Count - 1
+    Add-QuadFacing $Mesh $frontLeft[$tip] $backLeft[$tip] $backRight[$tip] $frontRight[$tip]
+}
+
 function Add-TorusX {
     param($Mesh, [double[]]$Center, [double]$MajorRadius, [double]$MinorRadius, [int]$MajorSegments = 18, [int]$MinorSegments = 8)
     $rings = @()
@@ -300,12 +338,12 @@ function Add-TorusX {
 }
 
 $materials = @(
-    [ordered]@{ name = "Airframe Pearl"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.91, 0.94, 0.98, 1.0); metallicFactor = 0.05; roughnessFactor = 0.30 } },
-    [ordered]@{ name = "Competition Red"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.82, 0.025, 0.035, 1.0); metallicFactor = 0.08; roughnessFactor = 0.28 } },
-    [ordered]@{ name = "Deep Navy Accent"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.018, 0.055, 0.13, 1.0); metallicFactor = 0.06; roughnessFactor = 0.32 } },
-    [ordered]@{ name = "Tinted Canopy"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.025, 0.13, 0.22, 1.0); metallicFactor = 0.18; roughnessFactor = 0.16 } },
-    [ordered]@{ name = "Anodized Spinner"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.88, 0.035, 0.025, 1.0); metallicFactor = 0.62; roughnessFactor = 0.20 } },
-    [ordered]@{ name = "Carbon Propeller"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.018, 0.021, 0.026, 1.0); metallicFactor = 0.24; roughnessFactor = 0.25 } },
+    [ordered]@{ name = "Airframe Pearl"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.94, 0.965, 1.0, 1.0); metallicFactor = 0.0; roughnessFactor = 0.26 } },
+    [ordered]@{ name = "Competition Red"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.88, 0.018, 0.028, 1.0); metallicFactor = 0.0; roughnessFactor = 0.24 } },
+    [ordered]@{ name = "Deep Navy Accent"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.012, 0.035, 0.11, 1.0); metallicFactor = 0.0; roughnessFactor = 0.30 } },
+    [ordered]@{ name = "Tinted Canopy"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.018, 0.095, 0.17, 1.0); metallicFactor = 0.0; roughnessFactor = 0.11 } },
+    [ordered]@{ name = "Painted Spinner"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.92, 0.022, 0.018, 1.0); metallicFactor = 0.0; roughnessFactor = 0.19 } },
+    [ordered]@{ name = "Carbon Propeller"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.014, 0.017, 0.024, 1.0); metallicFactor = 0.12; roughnessFactor = 0.30 } },
     [ordered]@{ name = "Gear Metal"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.42, 0.46, 0.52, 1.0); metallicFactor = 0.78; roughnessFactor = 0.27 } },
     [ordered]@{ name = "Tire Rubber"; pbrMetallicRoughness = [ordered]@{ baseColorFactor = @(0.012, 0.014, 0.018, 1.0); metallicFactor = 0.0; roughnessFactor = 0.88 } }
 )
@@ -314,44 +352,45 @@ $meshes = [System.Collections.Generic.List[object]]::new()
 
 $fuselage = New-Mesh "Fuselage" 0
 Add-LoftZ $fuselage @(
-    @(-0.46, 0.015, 0.168, 0.165), @(-0.20, 0.018, 0.174, 0.178),
-    @(0.12, 0.030, 0.155, 0.160), @(0.40, 0.052, 0.112, 0.125),
-    @(0.66, 0.078, 0.066, 0.083), @(0.82, 0.098, 0.025, 0.036)
-) 28
+    @(-0.46, 0.012, 0.166, 0.162), @(-0.34, 0.016, 0.179, 0.178),
+    @(-0.16, 0.022, 0.183, 0.190), @(0.04, 0.032, 0.171, 0.183),
+    @(0.22, 0.043, 0.150, 0.164), @(0.40, 0.056, 0.122, 0.139),
+    @(0.56, 0.071, 0.092, 0.112), @(0.70, 0.086, 0.064, 0.086),
+    @(0.81, 0.099, 0.039, 0.057), @(0.88, 0.108, 0.019, 0.030),
+    @(0.91, 0.112, 0.008, 0.012)
+) 48
 $meshes.Add($fuselage)
 
 $cowl = New-Mesh "Cowl" 1
-Add-LoftZ $cowl @(@(-0.68, 0.008, 0.128, 0.130), @(-0.60, 0.010, 0.165, 0.160), @(-0.43, 0.015, 0.174, 0.168)) 28
+Add-LoftZ $cowl @(@(-0.70, 0.006, 0.116, 0.118), @(-0.655, 0.007, 0.145, 0.145), @(-0.585, 0.009, 0.170, 0.164), @(-0.50, 0.011, 0.176, 0.168), @(-0.43, 0.013, 0.172, 0.165)) 48
 $meshes.Add($cowl)
 
 $spinner = New-Mesh "Spinner" 4
-Add-LoftZ $spinner @(@(-0.875, 0.006, 0.010, 0.010), @(-0.825, 0.006, 0.052, 0.052), @(-0.735, 0.006, 0.105, 0.105), @(-0.685, 0.006, 0.118, 0.118)) 28
+Add-LoftZ $spinner @(@(-0.89, 0.006, 0.006, 0.006), @(-0.855, 0.006, 0.032, 0.032), @(-0.81, 0.006, 0.066, 0.066), @(-0.755, 0.006, 0.096, 0.096), @(-0.705, 0.006, 0.114, 0.114), @(-0.678, 0.006, 0.118, 0.118)) 48
 $meshes.Add($spinner)
 
 $propeller = New-Mesh "Propeller" 5
-$blade = @(@(-0.030, 0.075), @(-0.048, 0.155), @(-0.035, 0.350), @(0.006, 0.365), @(0.030, 0.155), @(0.026, 0.075))
-Add-ExtrudedPolygonXY $propeller $blade -0.704 -0.680
-$oppositeBlade = foreach ($point in $blade) { ,([object[]]@(-[double]$point[0], -[double]$point[1])) }
-Add-ExtrudedPolygonXY $propeller $oppositeBlade -0.704 -0.680
+Add-TwistedPropellerBlade $propeller 1.0
+Add-TwistedPropellerBlade $propeller -1.0
 $meshes.Add($propeller)
 
 $canopy = New-Mesh "Canopy" 3
-Add-LoftZ $canopy @(@(-0.34, 0.145, 0.030, 0.030), @(-0.26, 0.165, 0.105, 0.085), @(-0.04, 0.185, 0.132, 0.125), @(0.18, 0.175, 0.100, 0.100), @(0.29, 0.135, 0.025, 0.025)) 24
+Add-LoftZ $canopy @(@(-0.35, 0.145, 0.018, 0.016), @(-0.31, 0.165, 0.070, 0.055), @(-0.23, 0.190, 0.115, 0.095), @(-0.10, 0.207, 0.137, 0.124), @(0.04, 0.210, 0.133, 0.128), @(0.17, 0.195, 0.108, 0.105), @(0.27, 0.165, 0.061, 0.058), @(0.32, 0.140, 0.016, 0.014)) 40
 $meshes.Add($canopy)
 
 $wing = New-Mesh "MainWingFixed" 0
-Add-AirfoilPanel $wing @(@(-0.015, 0.020, -0.285, 0.255, 0.080), @(-0.30, 0.026, -0.275, 0.245, 0.070))
-Add-AirfoilPanel $wing @(@(-0.30, 0.026, -0.275, 0.105, 0.070), @(-0.68, 0.043, -0.245, 0.105, 0.050), @(-0.90, 0.058, -0.195, 0.105, 0.018))
-Add-AirfoilPanel $wing @(@(0.015, 0.020, -0.285, 0.255, 0.080), @(0.30, 0.026, -0.275, 0.245, 0.070))
-Add-AirfoilPanel $wing @(@(0.30, 0.026, -0.275, 0.105, 0.070), @(0.68, 0.043, -0.245, 0.105, 0.050), @(0.90, 0.058, -0.195, 0.105, 0.018))
+Add-AirfoilPanel $wing @(@(-0.015, 0.020, -0.300, 0.260, 0.086), @(-0.16, 0.022, -0.296, 0.254, 0.083), @(-0.30, 0.027, -0.286, 0.242, 0.076))
+Add-AirfoilPanel $wing @(@(-0.30, 0.027, -0.286, 0.105, 0.076), @(-0.50, 0.036, -0.270, 0.104, 0.066), @(-0.70, 0.048, -0.238, 0.102, 0.050), @(-0.84, 0.059, -0.202, 0.100, 0.030), @(-0.92, 0.066, -0.168, 0.096, 0.012))
+Add-AirfoilPanel $wing @(@(0.015, 0.020, -0.300, 0.260, 0.086), @(0.16, 0.022, -0.296, 0.254, 0.083), @(0.30, 0.027, -0.286, 0.242, 0.076))
+Add-AirfoilPanel $wing @(@(0.30, 0.027, -0.286, 0.105, 0.076), @(0.50, 0.036, -0.270, 0.104, 0.066), @(0.70, 0.048, -0.238, 0.102, 0.050), @(0.84, 0.059, -0.202, 0.100, 0.030), @(0.92, 0.066, -0.168, 0.096, 0.012))
 $meshes.Add($wing)
 
 $leftAileron = New-Mesh "LeftAileron" 1
-Add-AirfoilPanel $leftAileron @(@(-0.30, 0.026, 0.110, 0.245, 0.036), @(-0.68, 0.043, 0.110, 0.235, 0.028), @(-0.875, 0.057, 0.110, 0.195, 0.014))
+Add-AirfoilPanel $leftAileron @(@(-0.30, 0.027, 0.112, 0.242, 0.036), @(-0.50, 0.036, 0.111, 0.238, 0.032), @(-0.70, 0.048, 0.109, 0.224, 0.025), @(-0.84, 0.059, 0.106, 0.190, 0.017), @(-0.90, 0.065, 0.103, 0.160, 0.009))
 $meshes.Add($leftAileron)
 
 $rightAileron = New-Mesh "RightAileron" 1
-Add-AirfoilPanel $rightAileron @(@(0.30, 0.026, 0.110, 0.245, 0.036), @(0.68, 0.043, 0.110, 0.235, 0.028), @(0.875, 0.057, 0.110, 0.195, 0.014))
+Add-AirfoilPanel $rightAileron @(@(0.30, 0.027, 0.112, 0.242, 0.036), @(0.50, 0.036, 0.111, 0.238, 0.032), @(0.70, 0.048, 0.109, 0.224, 0.025), @(0.84, 0.059, 0.106, 0.190, 0.017), @(0.90, 0.065, 0.103, 0.160, 0.009))
 $meshes.Add($rightAileron)
 
 $horizontalTail = New-Mesh "HorizontalStabilizer" 0
@@ -387,9 +426,9 @@ Add-Cylinder $noseGear ([double[]]@(-0.035, -0.265, -0.500)) ([double[]]@(0.035,
 $meshes.Add($noseGear)
 
 $wheels = New-Mesh "Wheels" 7
-Add-TorusX $wheels ([double[]]@(-0.275, -0.285, 0.045)) 0.060 0.021 20 9
-Add-TorusX $wheels ([double[]]@(0.275, -0.285, 0.045)) 0.060 0.021 20 9
-Add-TorusX $wheels ([double[]]@(0.0, -0.265, -0.500)) 0.044 0.016 18 8
+Add-TorusX $wheels ([double[]]@(-0.275, -0.285, 0.045)) 0.052 0.017 32 12
+Add-TorusX $wheels ([double[]]@(0.275, -0.285, 0.045)) 0.052 0.017 32 12
+Add-TorusX $wheels ([double[]]@(0.0, -0.265, -0.500)) 0.038 0.014 28 10
 $meshes.Add($wheels)
 
 $livery = New-Mesh "WingAndFuselageLivery" 2
@@ -397,6 +436,34 @@ Add-AirfoilPanel $livery @(@(-0.895, 0.067, -0.188, 0.095, 0.009), @(-0.70, 0.05
 Add-AirfoilPanel $livery @(@(0.70, 0.055, -0.225, 0.095, 0.009), @(0.895, 0.067, -0.188, 0.095, 0.009))
 Add-LoftZ $livery @(@(-0.415, 0.020, 0.176, 0.170), @(-0.385, 0.020, 0.178, 0.171)) 28
 $meshes.Add($livery)
+
+# Additional G3C-B graphics are appended after the original 16 primitives so
+# the authored G1E articulation indices 6/7/9/11 remain stable.
+$topRedLivery = New-Mesh "TopRedLivery" 1
+Add-AirfoilPanel $topRedLivery @(@(-0.32, 0.068, -0.275, -0.135, 0.006), @(-0.58, 0.071, -0.252, -0.125, 0.006), @(-0.84, 0.078, -0.198, -0.105, 0.005))
+Add-AirfoilPanel $topRedLivery @(@(0.32, 0.068, -0.275, -0.135, 0.006), @(0.58, 0.071, -0.252, -0.125, 0.006), @(0.84, 0.078, -0.198, -0.105, 0.005))
+$meshes.Add($topRedLivery)
+
+$underside = New-Mesh "UndersideNavyLivery" 2
+Add-AirfoilPanel $underside @(@(-0.30, 0.007, -0.260, 0.085, 0.006), @(-0.52, 0.018, -0.245, 0.083, 0.006), @(-0.72, 0.035, -0.215, 0.080, 0.005), @(-0.88, 0.052, -0.170, 0.075, 0.004))
+Add-AirfoilPanel $underside @(@(0.30, 0.007, -0.260, 0.085, 0.006), @(0.52, 0.018, -0.245, 0.083, 0.006), @(0.72, 0.035, -0.215, 0.080, 0.005), @(0.88, 0.052, -0.170, 0.075, 0.004))
+$meshes.Add($underside)
+
+$canopyFrame = New-Mesh "CanopyFrame" 2
+Add-LoftZ $canopyFrame @(@(-0.315, 0.164, 0.072, 0.058), @(-0.292, 0.174, 0.089, 0.072)) 40
+Add-LoftZ $canopyFrame @(@(0.205, 0.182, 0.090, 0.087), @(0.228, 0.176, 0.079, 0.075)) 40
+$meshes.Add($canopyFrame)
+
+$wheelHubs = New-Mesh "WheelHubs" 6
+Add-Cylinder $wheelHubs ([double[]]@(-0.299, -0.285, 0.045)) ([double[]]@(-0.251, -0.285, 0.045)) 0.025 24
+Add-Cylinder $wheelHubs ([double[]]@(0.251, -0.285, 0.045)) ([double[]]@(0.299, -0.285, 0.045)) 0.025 24
+Add-Cylinder $wheelHubs ([double[]]@(-0.018, -0.265, -0.500)) ([double[]]@(0.018, -0.265, -0.500)) 0.018 20
+$meshes.Add($wheelHubs)
+
+$propellerTips = New-Mesh "PropellerTips" 1
+Add-ExtrudedPolygonXY $propellerTips @(@(-0.018, 0.330), @(-0.010, 0.372), @(0.010, 0.372), @(0.022, 0.330)) -0.706 -0.680
+Add-ExtrudedPolygonXY $propellerTips @(@(0.018, -0.330), @(0.010, -0.372), @(-0.010, -0.372), @(-0.022, -0.330)) -0.706 -0.680
+$meshes.Add($propellerTips)
 
 foreach ($mesh in $meshes) {
     if ($mesh.Positions.Count -eq 0 -or $mesh.Positions.Count -ne $mesh.Normals.Count -or ($mesh.Indices.Count % 3) -ne 0) {
@@ -469,9 +536,9 @@ $binary = $binaryStream.ToArray()
 $jsonObject = [ordered]@{
     asset = [ordered]@{
         version = "2.0"
-        generator = "RC Simulation Engine G3C-A deterministic aircraft generator v1"
+        generator = "RC Simulation Engine G3C-B deterministic aircraft generator v2"
         extras = [ordered]@{
-            foundation = "G3C-A"
+            foundation = "G3C-B production visual closure"
             coordinates = "+X right, +Y up, -Z forward/nose"
             provenance = "Original procedural geometry; repository MIT license"
         }
