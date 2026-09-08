@@ -30,8 +30,8 @@
 //!
 //! # G3A-R deterministic mip chain
 //!
-//! `generate_terrain_mip_chain` produces the complete mip pyramid (512 -> 1,
-//! 10 levels) with a wrap-free 2x2 box filter in the correct color space:
+//! `generate_terrain_mip_chain` produces the complete mip pyramid (1024 -> 1,
+//! 11 levels) with a wrap-free 2x2 box filter in the correct color space:
 //! albedo is averaged in linear space and re-encoded to sRGB, normal vectors
 //! are decoded, averaged, and renormalized (never flattening), and roughness
 //! (linear R8) is averaged directly. Generation is pure and deterministic, so
@@ -39,60 +39,66 @@
 //! assets without any per-frame work.
 
 /// Texture edge length in texels for all three maps.
-pub const TERRAIN_TEXTURE_SIZE: u32 = 512;
+pub const TERRAIN_TEXTURE_SIZE: u32 = 1024;
 
 /// Fixed, platform-independent generator seeds. Changing any of these changes
 /// the committed assets; the regression test that regenerates and compares
 /// against the committed PNGs will fail, which is the intended tripwire.
 const SEED_ALBEDO_COARSE: u32 = 0x51A3_9C2D;
 const SEED_ALBEDO_DRY: u32 = 0x7C4B_E9F5;
-const SEED_ALBEDO_MOTTLE: u32 = 0x2A8D_6B34;
+const SEED_ALBEDO_FIBRE_A: u32 = 0x2A8D_6B34;
+const SEED_ALBEDO_FIBRE_B: u32 = 0x4E9C_72D1;
 const SEED_NORMAL_COARSE: u32 = 0x6F1E_47A8;
 const SEED_NORMAL_MID: u32 = 0xB32C_5D91;
 const SEED_NORMAL_FINE: u32 = 0x9E4A_18C6;
 const SEED_ROUGHNESS_COARSE: u32 = 0x3D7F_A22E;
 const SEED_ROUGHNESS_FINE: u32 = 0xE56B_0C91;
 
-/// Albedo base color of a well-kept grass field (linear intent, stored sRGB).
-const GRASS_BASE_RGB: [f32; 3] = [0.30, 0.52, 0.23];
-/// Dry/dead grass color for sparse warm patches.
-const GRASS_DRY_RGB: [f32; 3] = [0.62, 0.55, 0.30];
+/// Albedo base color of a maintained, cool-green grass field (sRGB intent).
+const GRASS_BASE_RGB: [f32; 3] = [0.29, 0.48, 0.19];
+/// Worn/dry grass color for broad, deliberately restrained warm variation.
+const GRASS_DRY_RGB: [f32; 3] = [0.37, 0.46, 0.19];
 /// Luminance around which the albedo field oscillates.
-const GRASS_BASE_LUMINANCE: f32 = 0.80;
+const GRASS_BASE_LUMINANCE: f32 = 0.90;
 /// Peak luminance swing of the low-frequency patch field.
-const GRASS_LUMINANCE_SWING: f32 = 0.22;
+const GRASS_LUMINANCE_SWING: f32 = 0.16;
 /// Dry-patch noise threshold ([0,1] field, above this the patch is dry).
-const DRY_PATCH_START: f32 = 0.60;
-const DRY_PATCH_PEAK: f32 = 0.86;
-/// Peak per-channel micro-mottle (blade-level tint jitter).
-const MOTTLE_SWING: f32 = 0.08;
+const DRY_PATCH_START: f32 = 0.74;
+const DRY_PATCH_PEAK: f32 = 0.94;
+/// Caps colour wear in the base 4 m sample; larger-scale variation comes
+/// from the independent macro carrier rather than repeated yellow patches.
+const DRY_PATCH_MAX_MIX: f32 = 0.16;
+/// Low-contrast directional fibre modulation. Unlike the previous two-pixel
+/// mottle it survives minification as continuous grass grain, not dots.
+const FIBRE_SWING: f32 = 0.014;
 
 /// Octave cell sizes (in texels) for the albedo/patch field.
-const ALBEDO_CELL_COARSE: u32 = 128;
-const ALBEDO_CELL_MID: u32 = 32;
-const ALBEDO_CELL_FINE: u32 = 8;
-/// Octave cell size for the blade-level grain.
-const ALBEDO_CELL_MICRO: u32 = 2;
+const ALBEDO_CELL_COARSE: u32 = 256;
+const ALBEDO_CELL_MID: u32 = 64;
+const ALBEDO_CELL_FINE: u32 = 16;
+/// Long and narrow cells yield continuous, directional grass grain.
+const ALBEDO_FIBRE_ALONG_CELL: u32 = 128;
+const ALBEDO_FIBRE_ACROSS_CELL: u32 = 16;
 
 /// Slope applied to the height-field gradients when building the normal map.
 /// Tuned so the encoded XY channels stay within roughly ±30/255 of 128:
 /// clearly visible micro-relief under the sun, but no cliff-like response.
-const NORMAL_SLOPE: f32 = 6.0;
+const NORMAL_SLOPE: f32 = 18.0;
 
 /// Octave cell sizes for the normal height field.
-const NORMAL_CELL_COARSE: u32 = 128;
-const NORMAL_CELL_MID: u32 = 32;
-const NORMAL_CELL_FINE: u32 = 8;
+const NORMAL_CELL_COARSE: u32 = 256;
+const NORMAL_CELL_MID: u32 = 64;
+const NORMAL_CELL_FINE: u32 = 16;
 
 /// Octave cell sizes for the roughness field.
-const ROUGHNESS_CELL_COARSE: u32 = 64;
-const ROUGHNESS_CELL_FINE: u32 = 16;
+const ROUGHNESS_CELL_COARSE: u32 = 128;
+const ROUGHNESS_CELL_FINE: u32 = 32;
 
 /// Mean roughness and swing of the roughness field (linear data).
-const ROUGHNESS_MEAN: f32 = 0.80;
+const ROUGHNESS_MEAN: f32 = 0.78;
 /// Peak per-octave roughness swing; the combined field sweeps roughly
 /// [0.54, 1.0] so wet and dry patches are clearly separated.
-const ROUGHNESS_SWING: f32 = 0.45;
+const ROUGHNESS_SWING: f32 = 0.34;
 
 /// One set of generated terrain maps, raw pixels ready for GPU upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,29 +177,54 @@ fn grass_pixel(size: u32, x: u32, y: u32) -> ([u8; 4], f32) {
 
     // Sparse dry patches on an independent coarse lattice.
     let dry_field = octave_noise(size, ALBEDO_CELL_COARSE, x, y, SEED_ALBEDO_DRY);
-    let dry = smoothstep(DRY_PATCH_START, DRY_PATCH_PEAK, dry_field);
+    let dry = DRY_PATCH_MAX_MIX * smoothstep(DRY_PATCH_START, DRY_PATCH_PEAK, dry_field);
 
-    // Blade-level mottle: tiny per-channel tint jitter.
-    let mottle = octave_noise(size, ALBEDO_CELL_MICRO, x, y, SEED_ALBEDO_MOTTLE) - 0.5;
-    let mottle_green =
-        (octave_noise(size, ALBEDO_CELL_MICRO, x, y, SEED_ALBEDO_MOTTLE ^ 0x0F) - 0.5) * 0.7;
+    // Two independent, skewed fibre fields create continuous grass grain.
+    // Their long axis is deliberately not world-aligned; the low amplitude
+    // gives near-field material structure without a dotted/speckled carrier.
+    let fibre_a = skewed_octave_noise(
+        size,
+        ALBEDO_FIBRE_ALONG_CELL,
+        ALBEDO_FIBRE_ACROSS_CELL,
+        x,
+        y,
+        SEED_ALBEDO_FIBRE_A,
+    ) - 0.5;
+    let fibre_b = skewed_octave_noise(
+        size,
+        ALBEDO_FIBRE_ALONG_CELL / 2,
+        ALBEDO_FIBRE_ACROSS_CELL * 2,
+        x,
+        y,
+        SEED_ALBEDO_FIBRE_B,
+    ) - 0.5;
+    let fibre = 0.65 * fibre_a + 0.35 * fibre_b;
 
     let mut rgb = [0.0f32; 3];
     for channel in 0..3 {
         let green = mix_channel(GRASS_BASE_RGB[channel], GRASS_DRY_RGB[channel], dry);
-        let mottle_swing = if channel == 1 {
-            mottle_green
+        let fibre_swing = if channel == 1 {
+            fibre * 0.75
         } else if channel == 0 {
-            mottle * 0.8
+            fibre * 0.55
         } else {
-            mottle * 0.6
+            fibre * 0.40
         };
-        rgb[channel] = (green * luminance + MOTTLE_SWING * mottle_swing).clamp(0.0, 1.0);
+        rgb[channel] = (green * luminance + FIBRE_SWING * fibre_swing).clamp(0.0, 1.0);
     }
 
     let height = 0.50 * octave_noise(size, NORMAL_CELL_COARSE, x, y, SEED_NORMAL_COARSE)
         + 0.32 * octave_noise(size, NORMAL_CELL_MID, x, y, SEED_NORMAL_MID)
-        + 0.18 * octave_noise(size, NORMAL_CELL_FINE, x, y, SEED_NORMAL_FINE);
+        + 0.15 * octave_noise(size, NORMAL_CELL_FINE, x, y, SEED_NORMAL_FINE)
+        + 0.03
+            * skewed_octave_noise(
+                size,
+                ALBEDO_FIBRE_ALONG_CELL,
+                ALBEDO_FIBRE_ACROSS_CELL,
+                x,
+                y,
+                SEED_NORMAL_FINE ^ 0xA1,
+            );
 
     (encode_u8x4(rgb), height)
 }
@@ -235,7 +266,7 @@ fn grass_roughness_pixel(size: u32, x: u32, y: u32) -> f32 {
         .clamp(0.0, 1.0)
 }
 
-/// Value noise at texel `(x, y)` for the octave with `cell_px`-wide cells.
+/// Value noise at texel `(x, y)` for the octave with square `cell_px` cells.
 ///
 /// The field is periodic with period `size` texels: the lattice corner hash
 /// wraps with `rem_euclid` over the per-axis cell count, and the texel is
@@ -249,18 +280,46 @@ fn octave_noise(size: u32, cell_px: u32, x: u32, y: u32, seed: u32) -> f32 {
     periodic_value_noise(sx, sy, cells, seed)
 }
 
+/// Periodic value noise on a skewed, rectangular lattice.
+///
+/// Integer skew coefficients keep both axes exactly periodic at `size` while
+/// the unequal cells make a directional, non-cellular grain. This is used
+/// only by the offline generator; the renderer samples the committed map.
+fn skewed_octave_noise(
+    size: u32,
+    along_cell_px: u32,
+    across_cell_px: u32,
+    x: u32,
+    y: u32,
+    seed: u32,
+) -> f32 {
+    debug_assert_eq!(size % along_cell_px, 0);
+    debug_assert_eq!(size % across_cell_px, 0);
+    let along_cells = (size / along_cell_px) as i64;
+    let across_cells = (size / across_cell_px) as i64;
+    let sx = (x as f32 + 2.0 * y as f32 + 0.5) / along_cell_px as f32;
+    let sy = (2.0 * x as f32 - y as f32 + 0.5) / across_cell_px as f32;
+    periodic_value_noise_rect(sx, sy, along_cells, across_cells, seed)
+}
+
 /// Smoothstep-clamped 2D lattice value noise in [0, 1], periodic in both axes.
 fn periodic_value_noise(x: f32, y: f32, cells: i64, seed: u32) -> f32 {
+    periodic_value_noise_rect(x, y, cells, cells, seed)
+}
+
+/// Smoothstep-clamped rectangular 2D lattice value noise in [0, 1], periodic
+/// independently on each lattice axis.
+fn periodic_value_noise_rect(x: f32, y: f32, cells_x: i64, cells_y: i64, seed: u32) -> f32 {
     let x0 = x.floor();
     let y0 = y.floor();
     let fx = x - x0;
     let fy = y - y0;
 
-    let ix0 = (x0 as i64).rem_euclid(cells);
-    let iy0 = (y0 as i64).rem_euclid(cells);
+    let ix0 = (x0 as i64).rem_euclid(cells_x);
+    let iy0 = (y0 as i64).rem_euclid(cells_y);
     // Neighbor cell wraps at the period (cells ≡ 0).
-    let ix1 = (ix0 + 1).rem_euclid(cells);
-    let iy1 = (iy0 + 1).rem_euclid(cells);
+    let ix1 = (ix0 + 1).rem_euclid(cells_x);
+    let iy1 = (iy0 + 1).rem_euclid(cells_y);
 
     let v00 = lattice_hash_unit(ix0, iy0, seed);
     let v10 = lattice_hash_unit(ix1, iy0, seed);
@@ -576,11 +635,12 @@ mod tests {
 
     #[test]
     fn generated_size_is_reasonable() {
-        assert_eq!(TERRAIN_TEXTURE_SIZE, 512);
+        assert_eq!(TERRAIN_TEXTURE_SIZE, 1024);
         let set = generate_terrain_textures(TERRAIN_TEXTURE_SIZE);
-        assert_eq!(set.albedo_rgba.len(), 512 * 512 * 4);
-        assert_eq!(set.normal_rgba.len(), 512 * 512 * 4);
-        assert_eq!(set.roughness_r8.len(), 512 * 512);
+        let pixel_count = TERRAIN_TEXTURE_SIZE as usize * TERRAIN_TEXTURE_SIZE as usize;
+        assert_eq!(set.albedo_rgba.len(), pixel_count * 4);
+        assert_eq!(set.normal_rgba.len(), pixel_count * 4);
+        assert_eq!(set.roughness_r8.len(), pixel_count);
     }
 
     #[test]
@@ -659,8 +719,8 @@ mod tests {
         }
 
         // Green-dominant albedo with a sober dynamic range (no black/white).
-        // Expected means from the constants: base (0.30, 0.52, 0.23) at the
-        // mean luminance 0.80 → roughly (61, 106, 47) in u8.
+        // PV2's restrained maintained-grass palette is green dominant and
+        // leaves room for the macro carrier to make the large-scale variation.
         assert!(
             (90.0..=120.0).contains(&mean[1]),
             "green mean out of range: {}",
@@ -682,8 +742,11 @@ mod tests {
         );
         for byte in 0..3 {
             let spread = max_channel[byte] - min_channel[byte];
+            // PV2 deliberately holds blue variation lower than red/green so
+            // warm wear reads as grass, not as repeated yellow spot decals.
+            let minimum_spread = if byte == 2 { 6 } else { 8 };
             assert!(
-                spread >= 20,
+                spread >= minimum_spread,
                 "albedo must show real variation, channel {byte}: {}..{} (spread {spread})",
                 min_channel[byte],
                 max_channel[byte]
@@ -791,12 +854,46 @@ mod tests {
             "roughness mean {mean} out of range"
         );
         assert!(
-            min < 150,
+            min <= 165,
             "roughness must show wet/dry variation, min {min}"
         );
         assert!(
             max > 190,
             "roughness must show wet/dry variation, max {max}"
+        );
+    }
+
+    #[test]
+    fn roughness_is_not_a_luminance_copy_of_the_albedo() {
+        // A copied albedo channel would create obvious colour/specular locks.
+        // PV2 uses independent seeds and frequencies, so its linear
+        // roughness remains only weakly correlated with visible grass tone.
+        let set = generate_terrain_textures(TERRAIN_TEXTURE_SIZE);
+        let pixel_count = set.roughness_r8.len() as f64;
+        let mut sum_luma = 0.0f64;
+        let mut sum_roughness = 0.0f64;
+        let mut sum_luma_sq = 0.0f64;
+        let mut sum_roughness_sq = 0.0f64;
+        let mut sum_product = 0.0f64;
+        for (index, &roughness) in set.roughness_r8.iter().enumerate() {
+            let pixel = &set.albedo_rgba[index * 4..index * 4 + 3];
+            let luma = 0.299 * f64::from(pixel[0])
+                + 0.587 * f64::from(pixel[1])
+                + 0.114 * f64::from(pixel[2]);
+            let roughness = f64::from(roughness);
+            sum_luma += luma;
+            sum_roughness += roughness;
+            sum_luma_sq += luma * luma;
+            sum_roughness_sq += roughness * roughness;
+            sum_product += luma * roughness;
+        }
+        let covariance = sum_product - sum_luma * sum_roughness / pixel_count;
+        let luma_variance = sum_luma_sq - sum_luma * sum_luma / pixel_count;
+        let roughness_variance = sum_roughness_sq - sum_roughness * sum_roughness / pixel_count;
+        let correlation = covariance / (luma_variance * roughness_variance).sqrt();
+        assert!(
+            correlation.is_finite() && correlation.abs() < 0.45,
+            "roughness must not track albedo luminance, correlation {correlation}"
         );
     }
 

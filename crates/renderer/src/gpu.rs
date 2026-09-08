@@ -2552,7 +2552,7 @@ fn upload_terrain_mip_level(
 /// Create the textured, mipmapped terrain material from the embedded maps.
 ///
 /// Decodes the committed PNGs once at initialization, builds the full
-/// deterministic mip chain (512 -> 1, 10 levels: sRGB-correct albedo,
+/// deterministic mip chain (1024 -> 1, 11 levels: sRGB-correct albedo,
 /// renormalized normals, linear roughness averages), and uploads all levels
 /// into three persistent textures. One repeat/trilinear sampler with
 /// anisotropic filtering (clamped to the device capability) serves all three
@@ -4329,6 +4329,10 @@ mod terrain_gpu_integration_guards {
                 "detail normal blend must be a named constant",
             ),
             (
+                "TERRAIN_MACRO_AR_BLEND",
+                "macro anti-repetition blend must be a named constant",
+            ),
+            (
                 "terrain_material.debug_mode",
                 "debug channel must be uniform-driven",
             ),
@@ -4338,6 +4342,31 @@ mod terrain_gpu_integration_guards {
                 terrain_block.contains(needle),
                 "terrain fragment must use {label}"
             );
+        }
+    }
+
+    #[test]
+    fn terrain_material_keeps_the_production_color_space_contract() {
+        let source = include_str!("gpu.rs");
+        let material_creation = source
+            .split("fn create_terrain_material(")
+            .nth(1)
+            .expect("terrain material creation helper must exist");
+        for (needle, label) in [
+            (
+                "format: wgpu::TextureFormat::Rgba8UnormSrgb",
+                "albedo must remain hardware sRGB",
+            ),
+            (
+                "format: wgpu::TextureFormat::Rgba8Unorm",
+                "normal must remain linear RGBA8",
+            ),
+            (
+                "format: wgpu::TextureFormat::R8Unorm",
+                "roughness must remain linear R8",
+            ),
+        ] {
+            assert!(material_creation.contains(needle), "{label}");
         }
     }
 
@@ -4590,7 +4619,7 @@ mod terrain_headless_gpu_tests {
         let chain = generate_terrain_mip_chain(&base, TERRAIN_TEXTURE_SIZE);
 
         // Level 0 and mid/1x1 levels of the sRGB albedo must round-trip.
-        for (level, width, height) in [(0u32, 512u32, 512u32), (5, 16, 16), (9, 1, 1)] {
+        for (level, width, height) in [(0u32, 1024u32, 1024u32), (5, 32, 32), (10, 1, 1)] {
             let gpu = read_texture_level(
                 &device,
                 &queue,
@@ -4613,7 +4642,7 @@ mod terrain_headless_gpu_tests {
         }
 
         // Normal levels must also round-trip (linear data).
-        for (level, width) in [(0u32, 512u32), (5, 16), (9, 1)] {
+        for (level, width) in [(0u32, 1024u32), (5, 32), (10, 1)] {
             let gpu = read_texture_level(
                 &device,
                 &queue,
@@ -4637,8 +4666,8 @@ mod terrain_headless_gpu_tests {
             &queue,
             &material._roughness_texture,
             0,
-            512,
-            512,
+            1024,
+            1024,
             1,
         );
         assert_eq!(

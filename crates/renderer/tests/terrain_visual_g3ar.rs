@@ -32,7 +32,7 @@ fn committed_chain() -> TerrainMipChain {
 }
 
 #[test]
-fn committed_assets_build_the_full_512_to_1_mip_chain() {
+fn committed_assets_build_the_full_production_mip_chain() {
     let chain = committed_chain();
     let expected_levels = mip_level_count_for_size(TERRAIN_TEXTURE_SIZE) as usize;
     assert_eq!(chain.albedo.len(), expected_levels, "albedo levels");
@@ -42,7 +42,10 @@ fn committed_assets_build_the_full_512_to_1_mip_chain() {
         expected_levels > 1,
         "refusing a mip-0-only terrain (no trilinear minification possible)"
     );
-    assert_eq!((chain.albedo[0].width, chain.albedo[0].height), (512, 512));
+    assert_eq!(
+        (chain.albedo[0].width, chain.albedo[0].height),
+        (TERRAIN_TEXTURE_SIZE, TERRAIN_TEXTURE_SIZE)
+    );
     assert_eq!(
         (
             chain.albedo[expected_levels - 1].width,
