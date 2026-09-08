@@ -174,9 +174,47 @@ pub struct VegetationAssetSet {
 }
 
 impl VegetationAssetSet {
-    /// Build the production asset set (deterministic, no I/O).
+    /// Build the production asset set from the committed GLB files embedded
+    /// into the binary (PV1).
+    ///
+    /// The runtime never reconstructs tree meshes procedurally: meshes are
+    /// baked offline by `generate_vegetation_glbs` (see
+    /// `docs/architecture/renderer_pv1_vegetation_assets.md`), committed,
+    /// and decoded here from `include_bytes!` slices through the shared GLB
+    /// loader. Same six-asset contract as the bake source set.
     #[must_use]
     pub fn production() -> Self {
+        Self::from_committed()
+    }
+
+    /// Runtime constructor over the embedded committed GLB slices.
+    fn from_committed() -> Self {
+        let mut assets = Vec::with_capacity(COMMITTED_GLB.len());
+        for entry in &COMMITTED_GLB {
+            let lods = VegetationLodSet {
+                lod0: decode_committed_lod(entry.lod0),
+                lod1: decode_committed_lod(entry.lod1),
+                lod2: decode_committed_lod(entry.lod2),
+            };
+            let (bounds_center, bounds_radius, height_m) = bounds_from_lod0(&lods.lod0);
+            assets.push(VegetationAsset {
+                species: entry.species,
+                variant: entry.variant,
+                name: entry.name,
+                lods,
+                bounds_center,
+                bounds_radius,
+                height_m,
+            });
+        }
+        Self { assets }
+    }
+
+    /// Bake-time source set used exclusively by `generate_vegetation_glbs`
+    /// and the committed-asset regression tests: the exact procedural meshes
+    /// the offline generator turns into the committed GLB files.
+    #[must_use]
+    pub fn bake_source_set() -> Self {
         let assets = vec![
             build_deciduous_variant(0, "field_oak_a"),
             build_deciduous_variant(1, "field_birch_b"),
@@ -217,6 +255,96 @@ impl VegetationAssetSet {
     }
 }
 
+/// One row of the committed GLB table: the six production assets, each with
+/// its three embedded LOD byte streams (bark + foliage primitives).
+struct CommittedGlbEntry {
+    name: &'static str,
+    species: VegetationSpecies,
+    variant: u8,
+    lod0: &'static [u8],
+    lod1: &'static [u8],
+    lod2: &'static [u8],
+}
+
+/// PV1: embedded production vegetation GLBs, one per `(asset, LOD)`, baked
+/// offline by `generate_vegetation_glbs` and committed. The runtime decodes
+/// these slices through the shared GLB loader; no procedural mesh generation
+/// runs at runtime.
+static COMMITTED_GLB: [CommittedGlbEntry; 6] = [
+    CommittedGlbEntry {
+        name: "field_oak_a",
+        species: VegetationSpecies::Deciduous,
+        variant: 0,
+        lod0: include_bytes!("../assets/vegetation/field_oak_a_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_oak_a_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_oak_a_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_birch_b",
+        species: VegetationSpecies::Deciduous,
+        variant: 1,
+        lod0: include_bytes!("../assets/vegetation/field_birch_b_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_birch_b_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_birch_b_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_willow_c",
+        species: VegetationSpecies::Deciduous,
+        variant: 2,
+        lod0: include_bytes!("../assets/vegetation/field_willow_c_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_willow_c_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_willow_c_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_pine_a",
+        species: VegetationSpecies::Conifer,
+        variant: 0,
+        lod0: include_bytes!("../assets/vegetation/field_pine_a_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_pine_a_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_pine_a_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_spruce_b",
+        species: VegetationSpecies::Conifer,
+        variant: 1,
+        lod0: include_bytes!("../assets/vegetation/field_spruce_b_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_spruce_b_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_spruce_b_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_fir_c",
+        species: VegetationSpecies::Conifer,
+        variant: 2,
+        lod0: include_bytes!("../assets/vegetation/field_fir_c_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_fir_c_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_fir_c_lod2.glb"),
+    },
+];
+
+/// Decode one committed GLB (bark + foliage primitives, in that order) into
+/// the exact `VegetationLod` the renderer consumes.
+fn decode_committed_lod(data: &[u8]) -> VegetationLod {
+    let label = "committed vegetation GLB";
+    let loaded = crate::glb::load_glb_bytes(data, label)
+        .expect("committed vegetation GLB decodes; regenerate with generate_vegetation_glbs");
+    assert_eq!(
+        loaded.primitives.len(),
+        2,
+        "committed vegetation GLB must carry bark + foliage primitives"
+    );
+    let bark = AircraftMesh::new(
+        loaded.primitives[0].vertices.clone(),
+        loaded.primitives[0].indices.clone(),
+    )
+    .expect("committed vegetation bark mesh is valid");
+    let foliage = AircraftMesh::new(
+        loaded.primitives[1].vertices.clone(),
+        loaded.primitives[1].indices.clone(),
+    )
+    .expect("committed vegetation foliage mesh is valid");
+    VegetationLod { bark, foliage }
+}
+
 /// Species count target enforced by tests (species A/B requirement).
 pub const SPECIES_TARGET: usize = 2;
 /// Minimum visual variants per species (mesh variants, not scale-only).
@@ -224,6 +352,9 @@ pub const VARIANTS_PER_SPECIES_TARGET: usize = 3;
 
 /// Maximum layout slots drawn deterministically per asset; builders consume
 /// the same prefix at every LOD so detail levels share one layout.
+// PV1 bake: kept at the established maxima so the per-species silhouette
+// contracts (ground contact, ragged conifer rim) stay bit-identical; the
+// bake-quality gain lives in the LOD fidelity tables (finer tessellation).
 const MAX_PUFFS: usize = 16;
 const MAX_BRANCHES: usize = 8;
 const MAX_WHORLS: usize = 8;
@@ -1027,18 +1158,15 @@ fn conifer_params(variant: u8) -> ConiferParams {
 // ── LOD fidelity tables ────────────────────────────────────────────────────
 
 /// (puffs, branch count, trunk rows, trunk sides, puff segs, puff stacks).
-// G3-VR1: finer trunk and puff tessellation keeps near canopies readable and
-// breaks the low-poly faceting that read as prototype geometry.
-const DECIDUOUS_LOD0: (usize, usize, usize, u32, u32, u32) = (14, 6, 6, 10, 10, 6);
-/// LOD1: fewer puffs/branches, coarser but the same layout prefix. G3-VR1:
-/// more puffs than the previous LOD1 so the mid-distance canopy shell stays
-/// closed instead of reading as bare branch skeletons.
-const DECIDUOUS_LOD1: (usize, usize, usize, u32, u32, u32) = (10, 4, 4, 8, 8, 4);
+// PV1 bake: denser LOD0 so the committed GLBs carry a richer silhouette than
+// the previous VR1 tessellation; ratios stay inside the pinned 35-60%/8-28%.
+const DECIDUOUS_LOD0: (usize, usize, usize, u32, u32, u32) = (16, 7, 6, 12, 12, 8);
+/// LOD1: fewer puffs/branches, coarser but the same layout prefix.
+const DECIDUOUS_LOD1: (usize, usize, usize, u32, u32, u32) = (12, 5, 4, 8, 10, 6);
 /// Conifer LOD0: (whorls, trunk rows, trunk sides, frond tube sides).
-// G3-VR1: fronds at 6 sides remove the flat tube facets up close.
-const CONIFER_LOD0: (usize, usize, u32, u32) = (8, 6, 10, 6);
-/// Conifer LOD1. G3-VR1: one extra whorl keeps the mid-distance mass intact.
-const CONIFER_LOD1: (usize, usize, u32, u32) = (5, 4, 8, 5);
+const CONIFER_LOD0: (usize, usize, u32, u32) = (8, 6, 12, 8);
+/// Conifer LOD1.
+const CONIFER_LOD1: (usize, usize, u32, u32) = (5, 4, 10, 6);
 
 // ── Builders ───────────────────────────────────────────────────────────────
 
@@ -1318,9 +1446,24 @@ fn align4(offset: usize) -> usize {
 /// ordered `Map`, so identical input yields identical bytes.
 #[must_use]
 pub fn export_glb(asset: &VegetationAsset) -> Vec<u8> {
+    export_glb_lod(asset, 0)
+}
+
+/// Deterministic GLB export of one specific LOD class (0..3) of an asset.
+///
+/// PV1: the production runtime consumes committed GLB files generated
+/// offline by this function, one file per `(asset, LOD)` pair, instead of
+/// reconstructing meshes procedurally. Same byte-deterministic contract as
+/// `export_glb`.
+#[must_use]
+pub fn export_glb_lod(asset: &VegetationAsset, class: u8) -> Vec<u8> {
+    let lod = asset
+        .lods
+        .lod(class)
+        .expect("export_glb_lod: LOD class in range");
     let parts = [
-        (VegetationPart::Bark, &asset.lods.lod0.bark),
-        (VegetationPart::Foliage, &asset.lods.lod0.foliage),
+        (VegetationPart::Bark, &lod.bark),
+        (VegetationPart::Foliage, &lod.foliage),
     ];
     let mut bin = Vec::new();
     let mut buffer_views = Vec::new();
@@ -1451,7 +1594,9 @@ pub fn export_glb(asset: &VegetationAsset) -> Vec<u8> {
 
     let root = json!({
         "asset": {
-            "generator": "rc-simulation-engine G3D-R tree asset generator",
+            "generator": format!(
+                "rc-simulation-engine PV1 vegetation asset generator (LOD {class})"
+            ),
             "version": "2.0",
         },
         "scene": 0,
@@ -2016,5 +2161,76 @@ mod tests {
             lod0_tris < 20_000,
             "production LOD0 total {lod0_tris} tris too high"
         );
+    }
+
+    #[test]
+    fn committed_glbs_match_the_offline_bake_bitwise() {
+        // PV1 provenance gate: every embedded GLB is byte-identical to a fresh
+        // offline bake, so the committed assets and the generator cannot
+        // drift apart (same contract as the terrain committed-assets gate).
+        let bake = VegetationAssetSet::bake_source_set();
+        assert_eq!(bake.len(), COMMITTED_GLB.len());
+        for entry in &COMMITTED_GLB {
+            let asset = bake
+                .assets()
+                .iter()
+                .find(|a| a.name == entry.name)
+                .expect("bake set has the committed asset name");
+            for (class, embedded) in [(0_u8, entry.lod0), (1, entry.lod1), (2, entry.lod2)] {
+                assert_eq!(
+                    export_glb_lod(asset, class),
+                    embedded,
+                    "{} LOD{class} committed GLB must equal a fresh offline bake",
+                    asset.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_runtime_consumes_embedded_glbs_not_procedural_builders() {
+        // PV1 runtime gate (structural): `production()` must route through the
+        // committed GLB decode path, never the procedural builders; and every
+        // LOD mesh decoded from the embedded slices keeps the baked geometry
+        // count and exact positions (normals are re-normalized by the loader).
+        // The source is normalized to LF so the assertions are CRLF-proof.
+        let source = include_str!("vegetation_assets.rs").replace("\r\n", "\n");
+        assert!(
+            source.contains("pub fn production() -> Self {\n        Self::from_committed()"),
+            "production() must consume the committed GLB set"
+        );
+        assert!(source.contains("fn decode_committed_lod("));
+        assert!(source.contains("load_glb_bytes(data, label)"));
+        assert!(
+            !source.contains("pub fn production() -> Self {\n        Self::bake_source_set()"),
+            "production() must not fall back to procedural builders"
+        );
+
+        let production = VegetationAssetSet::production();
+        let bake = VegetationAssetSet::bake_source_set();
+        assert_eq!(production.len(), bake.len());
+        for (prod, baked) in production.assets().iter().zip(bake.assets()) {
+            assert_eq!(prod.name, baked.name);
+            for class in 0_u8..3 {
+                let prod_lod = prod.lods.lod(class).expect("LOD present");
+                let baked_lod = baked.lods.lod(class).expect("LOD present");
+                for (prod_mesh, baked_mesh) in [
+                    (&prod_lod.bark, &baked_lod.bark),
+                    (&prod_lod.foliage, &baked_lod.foliage),
+                ] {
+                    assert_eq!(prod_mesh.vertices().len(), baked_mesh.vertices().len());
+                    assert_eq!(prod_mesh.indices(), baked_mesh.indices());
+                    for (p, b) in prod_mesh.vertices().iter().zip(baked_mesh.vertices()) {
+                        assert_eq!(
+                            p.position, b.position,
+                            "{}: exact baked positions",
+                            prod.name
+                        );
+                        assert_eq!(p.color, b.color, "{}: exact baked vertex colors", prod.name);
+                        assert_eq!(p.uv, b.uv, "{}: exact baked UVs", prod.name);
+                    }
+                }
+            }
+        }
     }
 }
