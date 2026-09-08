@@ -91,12 +91,21 @@ struct PostProcessUniform {
     padding_2: f32,
 };
 
-// G2B: directional shadow state. The light view-projection transforms a world
-// position into WebGPU clip space for depth comparison. The receiver offset is
-// deliberately separate from the caster rasterization bias configured by wgpu.
+// G3E: three-cascade directional shadow receiver state. Split distances are
+// camera-to-receiver distances in render metres; each matrix addresses one
+// persistent layer of the depth texture array. Receiver offsets remain
+// separate from the caster rasterization bias configured by wgpu.
 struct ShadowUniform {
+    light_view_projection: array<mat4x4<f32>, 3>,
+    split_distances_m: vec4<f32>,
+    receiver_depth_bias: vec4<f32>,
+    texel_size_uv: vec4<f32>,
+};
+
+// One matrix bound by each depth-only cascade pass. Keeping the caster state
+// separate prevents sampling the array while one of its layers is attached.
+struct ShadowCascadeUniform {
     light_view_projection: mat4x4<f32>,
-    receiver_depth_bias_and_padding: vec4<f32>,
 };
 
 // G1D: per-primitive PBR material parameters.
@@ -150,11 +159,13 @@ var<uniform> object: ObjectUniform;
 @group(2) @binding(0)
 var<uniform> environment: EnvironmentUniform;
 @group(2) @binding(1)
-var directional_shadow_depth: texture_depth_2d;
+var directional_shadow_depth: texture_depth_2d_array;
 @group(2) @binding(2)
 var directional_shadow_sampler: sampler_comparison;
 @group(2) @binding(3)
 var<uniform> shadow: ShadowUniform;
+@group(2) @binding(4)
+var<uniform> shadow_cascade: ShadowCascadeUniform;
 
 // G1C: Material texture and sampler.
 // Group 3 is the material bind group, containing the base color texture,
@@ -315,13 +326,12 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return output;
 }
 
-// G2B depth-only shadow caster vertex path. It shares the object binding with
-// the scene pipeline and reads the light matrix from the existing environment
-// boundary. The pass has no fragment stage or color target.
+// G3E depth-only shadow caster vertex path. Each pass binds one persistent
+// cascade matrix while preserving the caster's normal object transform.
 @vertex
 fn vs_shadow(input: VertexInput) -> @builtin(position) vec4<f32> {
     let world_position = object.model * vec4<f32>(input.position, 1.0);
-    return shadow.light_view_projection * world_position;
+    return shadow_cascade.light_view_projection * world_position;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +387,28 @@ fn smith_geometry(ndot_v: f32, ndot_l: f32, roughness: f32) -> f32 {
     return gv * gl;
 }
 
-// G2B: comparison-sample a single directional shadow map. Coordinates outside
-// the fixed light frustum deliberately return fully lit, rather than relying on
-// sampler edge behavior. Linear comparison filtering provides the compact
-// hardware PCF footprint; no large fragment kernel is needed.
-fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
-    let light_clip = shadow.light_view_projection * vec4<f32>(world_position, 1.0);
+// G3E: deterministic cascade selection by camera-to-receiver distance.
+// Beyond the documented far split the scene stays lit rather than smearing the
+// last depth texel over unrepresented terrain.
+fn shadow_cascade_index(view_distance_m: f32) -> i32 {
+    if (view_distance_m <= shadow.split_distances_m.x) {
+        return 0;
+    }
+    if (view_distance_m <= shadow.split_distances_m.y) {
+        return 1;
+    }
+    if (view_distance_m <= shadow.split_distances_m.z) {
+        return 2;
+    }
+    return -1;
+}
+
+// Fixed 3x3 percentage-closer filter: nine comparison taps for every shadowed
+// receiver, independent of cascade and scene content. This bounds cost and
+// softens hard depth-map aliasing without PCSS-style variability.
+fn pcf_shadow_visibility(world_position: vec3<f32>, cascade_index: u32) -> f32 {
+    let light_clip = shadow.light_view_projection[cascade_index]
+        * vec4<f32>(world_position, 1.0);
     if (light_clip.w <= 1e-6) {
         return 1.0;
     }
@@ -395,13 +421,34 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
     if (!inside_shadow_frustum) {
         return 1.0;
     }
-    let receiver_depth = clamp(projected.z - shadow.receiver_depth_bias_and_padding.x, 0.0, 1.0);
-    return textureSampleCompare(
-        directional_shadow_depth,
-        directional_shadow_sampler,
-        uv,
-        receiver_depth,
+    let receiver_depth = clamp(
+        projected.z - shadow.receiver_depth_bias[cascade_index],
+        0.0,
+        1.0,
     );
+    let texel = shadow.texel_size_uv.xy;
+    var visibility = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            visibility = visibility + textureSampleCompare(
+                directional_shadow_depth,
+                directional_shadow_sampler,
+                uv + vec2<f32>(f32(x), f32(y)) * texel,
+                i32(cascade_index),
+                receiver_depth,
+            );
+        }
+    }
+    return visibility / 9.0;
+}
+
+fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
+    let view_distance_m = distance(world_position, camera.camera_position.xyz);
+    let cascade_index = shadow_cascade_index(view_distance_m);
+    if (cascade_index < 0) {
+        return 1.0;
+    }
+    return pcf_shadow_visibility(world_position, u32(cascade_index));
 }
 
 // ---------------------------------------------------------------------------
@@ -942,7 +989,7 @@ fn vs_vegetation(input: VegetationVertexInput) -> VegetationVertexOutput {
     return output;
 }
 
-// G2B depth-only instanced caster for the vegetation shadow pass. Shares the
+// G3E depth-only instanced caster for the vegetation shadow passes. Shares the
 // exact instance transform; no fragment stage and no color target.
 @vertex
 fn vs_vegetation_shadow(input: VegetationVertexInput) -> @builtin(position) vec4<f32> {
@@ -952,7 +999,8 @@ fn vs_vegetation_shadow(input: VegetationVertexInput) -> @builtin(position) vec4
         input.instance_position_yaw,
         input.instance_scale_tint.x,
     );
-    return shadow.light_view_projection * vec4<f32>(transformed.world_position, 1.0);
+    return shadow_cascade.light_view_projection
+        * vec4<f32>(transformed.world_position, 1.0);
 }
 
 // Lit vegetation fragment: the exact fs_lit chain (texture * vertex color,

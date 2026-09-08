@@ -13,7 +13,8 @@
 //! # Draw Architecture
 //!
 //! Each frame is organized as:
-//! 1. Directional shadow depth pass (terrain, scenery, aircraft, articulated surfaces)
+//! 1. Three stable cascaded shadow depth passes (scenery, instanced vegetation,
+//!    aircraft, articulated surfaces; terrain is the persistent receiver)
 //! 2. Main scene pass: sky (fullscreen triangle), terrain/scenery (lit + fogged),
 //!    optional debug overlays (unlit), and aircraft batches (lit + fogged)
 //!
@@ -32,8 +33,8 @@
 
 use crate::scenery::{SceneryMesh, SceneryPreset};
 use crate::shadow::{
-    SHADOW_DEPTH_BIAS_CONSTANT, SHADOW_DEPTH_BIAS_SLOPE_SCALE, SHADOW_MAP_RESOLUTION,
-    SHADOW_RECEIVER_DEPTH_BIAS, stable_directional_shadow_transform,
+    SHADOW_CASCADE_COUNT, SHADOW_CASCADE_SPLITS_M, SHADOW_DEPTH_BIAS_CONSTANT,
+    SHADOW_DEPTH_BIAS_SLOPE_SCALE, SHADOW_MAP_RESOLUTION, ShadowCascade, build_shadow_cascades,
 };
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
 use crate::terrain_textures::generated as terrain_assets;
@@ -275,23 +276,79 @@ pub fn exposure_multiplier(exposure_ev: f32) -> f32 {
     2.0f32.powf(exposure_ev)
 }
 
-/// G2B: per-frame light matrix and receiver bias for directional shadows.
-///
-/// The matrix is kept in the existing environment bind-group boundary, beside
-/// the shared light direction and atmosphere data. It is the only shadow
-/// buffer written in the frame path.
+/// G3E receiver state for all three production shadow cascades.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct ShadowUniform {
-    light_view_projection: [[f32; 4]; 4],
-    receiver_depth_bias_and_padding: [f32; 4],
+    light_view_projection: [[[f32; 4]; 4]; SHADOW_CASCADE_COUNT],
+    split_distances_m: [f32; 4],
+    receiver_depth_bias: [f32; 4],
+    texel_size_uv: [f32; 4],
 }
 
 impl ShadowUniform {
+    fn from_cascades(cascades: &[ShadowCascade; SHADOW_CASCADE_COUNT]) -> Self {
+        Self {
+            light_view_projection: std::array::from_fn(|index| {
+                matrix_to_wgsl_columns(&cascades[index].light_view_projection)
+            }),
+            split_distances_m: [
+                SHADOW_CASCADE_SPLITS_M[0],
+                SHADOW_CASCADE_SPLITS_M[1],
+                SHADOW_CASCADE_SPLITS_M[2],
+                0.0,
+            ],
+            receiver_depth_bias: [
+                cascades[0].receiver_depth_bias,
+                cascades[1].receiver_depth_bias,
+                cascades[2].receiver_depth_bias,
+                0.0,
+            ],
+            texel_size_uv: [
+                1.0 / SHADOW_MAP_RESOLUTION as f32,
+                1.0 / SHADOW_MAP_RESOLUTION as f32,
+                0.0,
+                0.0,
+            ],
+        }
+    }
+
+    #[cfg(test)]
     fn from_matrix(light_view_projection: &Mat4) -> Self {
         Self {
-            light_view_projection: matrix_to_wgsl_columns(light_view_projection),
-            receiver_depth_bias_and_padding: [SHADOW_RECEIVER_DEPTH_BIAS, 0.0, 0.0, 0.0],
+            light_view_projection: [
+                matrix_to_wgsl_columns(light_view_projection),
+                matrix_to_wgsl_columns(light_view_projection),
+                matrix_to_wgsl_columns(light_view_projection),
+            ],
+            split_distances_m: [
+                SHADOW_CASCADE_SPLITS_M[0],
+                SHADOW_CASCADE_SPLITS_M[1],
+                SHADOW_CASCADE_SPLITS_M[2],
+                0.0,
+            ],
+            receiver_depth_bias: [0.000_1, 0.000_1, 0.000_1, 0.0],
+            texel_size_uv: [
+                1.0 / SHADOW_MAP_RESOLUTION as f32,
+                1.0 / SHADOW_MAP_RESOLUTION as f32,
+                0.0,
+                0.0,
+            ],
+        }
+    }
+}
+
+/// G3E caster state bound independently for each shadow-array layer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ShadowCascadeUniform {
+    light_view_projection: [[f32; 4]; 4],
+}
+
+impl ShadowCascadeUniform {
+    fn from_cascade(cascade: &ShadowCascade) -> Self {
+        Self {
+            light_view_projection: matrix_to_wgsl_columns(&cascade.light_view_projection),
         }
     }
 }
@@ -570,12 +627,13 @@ struct HdrTarget {
     view: wgpu::TextureView,
 }
 
-/// G2B: persistent depth texture sampled by the lit pass and written by the
-/// directional shadow caster pass. It is deliberately independent from the
-/// resize-dependent scene depth target.
+/// G3E: persistent three-layer depth texture sampled by the lit pass and
+/// written one layer at a time by the cascade caster passes. It is independent
+/// from the resize-dependent scene depth target.
 struct ShadowTarget {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
+    cascade_views: [wgpu::TextureView; SHADOW_CASCADE_COUNT],
 }
 
 /// G1C: Persistent GPU material resources.
@@ -771,9 +829,10 @@ pub struct WgpuRenderer {
     identity_object_bind_group: wgpu::BindGroup,
 
     _environment_buffer: wgpu::Buffer,
-    shadow_matrix_buffer: wgpu::Buffer,
+    shadow_uniform_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
-    shadow_pass_bind_group: wgpu::BindGroup,
+    shadow_cascade_uniform_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
+    shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
     shadow_light_direction: [f32; 3],
 
     // G1C: Material system.
@@ -1400,28 +1459,42 @@ impl WgpuRenderer {
         });
 
         let default_environment = EnvironmentUniform::default_environment();
-        // G2B: derive the shadow camera direction from the exact normalized
+        // G3E: derive the shadow camera direction from the exact normalized
         // direction uploaded into EnvironmentUniform, so the sun disk,
-        // direct PBR lighting, and shadow map can never diverge.
+        // direct PBR lighting, and all cascade layers can never diverge.
         let shadow_light_direction = [
             default_environment.light_direction[0],
             default_environment.light_direction[1],
             default_environment.light_direction[2],
         ];
-        let initial_shadow_transform =
-            stable_directional_shadow_transform(shadow_light_direction, [0.0; 3]);
+        let initial_shadow_cascades =
+            build_shadow_cascades(shadow_light_direction, [0.0, 2.0, 8.0], [0.0, 0.0, 0.0]);
         let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("environment uniform"),
             contents: bytemuck::bytes_of(&default_environment),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let shadow_matrix_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("directional shadow matrix uniform"),
-            contents: bytemuck::bytes_of(&ShadowUniform::from_matrix(
-                &initial_shadow_transform.light_view_projection,
-            )),
+        let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("G3E shadow receiver uniform"),
+            contents: bytemuck::bytes_of(&ShadowUniform::from_cascades(&initial_shadow_cascades)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let shadow_cascade_uniform_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT] =
+            std::array::from_fn(|index| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(
+                        [
+                            "G3E near cascade caster uniform",
+                            "G3E mid cascade caster uniform",
+                            "G3E far cascade caster uniform",
+                        ][index],
+                    ),
+                    contents: bytemuck::bytes_of(&ShadowCascadeUniform::from_cascade(
+                        &initial_shadow_cascades[index],
+                    )),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                })
+            });
         let shadow_target = create_shadow_target(&device);
         let shadow_sampler = create_shadow_comparison_sampler(&device);
 
@@ -1450,15 +1523,22 @@ impl WgpuRenderer {
             &environment_buffer,
             &shadow_target.view,
             &shadow_sampler,
-            &shadow_matrix_buffer,
+            &shadow_uniform_buffer,
             "environment bind group",
         );
-        let shadow_pass_bind_group = create_shadow_pass_bind_group(
-            &device,
-            &shadow_pass_bind_group_layout,
-            &shadow_matrix_buffer,
-            "directional shadow pass bind group",
-        );
+        let shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT] =
+            std::array::from_fn(|index| {
+                create_shadow_pass_bind_group(
+                    &device,
+                    &shadow_pass_bind_group_layout,
+                    &shadow_cascade_uniform_buffers[index],
+                    [
+                        "G3E near cascade pass bind group",
+                        "G3E mid cascade pass bind group",
+                        "G3E far cascade pass bind group",
+                    ][index],
+                )
+            });
 
         let depth_target = create_depth_target(
             &device,
@@ -1547,9 +1627,10 @@ impl WgpuRenderer {
             _identity_object_buffer: identity_object_buffer,
             identity_object_bind_group,
             _environment_buffer: environment_buffer,
-            shadow_matrix_buffer,
+            shadow_uniform_buffer,
             environment_bind_group,
-            shadow_pass_bind_group,
+            shadow_cascade_uniform_buffers,
+            shadow_pass_bind_groups,
             shadow_light_direction,
             materials,
             _fallback_material_index: fallback_material_index,
@@ -1765,7 +1846,7 @@ impl WgpuRenderer {
         // Compute camera uniforms on the stack.
         let aircraft_pose = frame.aircraft_pose();
         let vp = self.camera.view_projection(aircraft_pose);
-        let eye = self.camera.eye_position(aircraft_pose);
+        let (eye, camera_target) = self.camera.eye_and_target(aircraft_pose);
         let identity = Mat4::identity();
         let inv_vp = self
             .camera
@@ -1785,19 +1866,26 @@ impl WgpuRenderer {
             bytemuck::bytes_of(&aircraft_object_uniform),
         );
 
-        // G2B: the light camera follows the aircraft only on its light-space
-        // texel grid. The single matrix write targets a persistent buffer; no
-        // shadow GPU resource, bind group, or pipeline is created per frame.
-        let shadow_transform = stable_directional_shadow_transform(
-            self.shadow_light_direction,
-            aircraft_pose.translation_render_m(),
-        );
-        let shadow_uniform = ShadowUniform::from_matrix(&shadow_transform.light_view_projection);
+        // G3E: fixed-extent light cameras follow the active camera view only on
+        // their independent light-space texel grids. All buffers, bind groups,
+        // texture layers and pipelines are persistent; the frame path performs
+        // four bounded uniform writes and command encoding only.
+        let shadow_cascades =
+            build_shadow_cascades(self.shadow_light_direction, eye, camera_target);
+        let shadow_uniform = ShadowUniform::from_cascades(&shadow_cascades);
         self.queue.write_buffer(
-            &self.shadow_matrix_buffer,
+            &self.shadow_uniform_buffer,
             0,
             bytemuck::bytes_of(&shadow_uniform),
         );
+        for (index, cascade) in shadow_cascades.iter().enumerate() {
+            let cascade_uniform = ShadowCascadeUniform::from_cascade(cascade);
+            self.queue.write_buffer(
+                &self.shadow_cascade_uniform_buffers[index],
+                0,
+                bytemuck::bytes_of(&cascade_uniform),
+            );
+        }
 
         // G3D: per-frame CPU visibility/LOD selection and the instance-buffer
         // rewrite. Everything is persistent and preallocated: `update_visibility`
@@ -1838,7 +1926,8 @@ impl WgpuRenderer {
                     vegetation_lod1 = stats.lod_counts[1],
                     vegetation_lod2 = stats.lod_counts[2],
                     vegetation_scene_draw_calls = stats.scene_draw_calls,
-                    vegetation_shadow_draw_calls = stats.shadow_draw_calls,
+                    vegetation_shadow_draw_calls =
+                        stats.shadow_draw_calls * SHADOW_CASCADE_COUNT as u32,
                     vegetation_instance_bytes_uploaded =
                         visible.len() as u64 * size_of::<VegetationGpuInstance>() as u64,
                     vegetation_cpu_visibility_ms = visibility_elapsed.as_secs_f64() * 1e3,
@@ -1877,12 +1966,16 @@ impl WgpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("G1C frame encoder"),
             });
-        {
-            // G2B: directional caster pass. This is intentionally depth-only:
-            // terrain, scenery, rigid aircraft geometry, and articulated
-            // surfaces are drawn once into the persistent shadow target.
+        for cascade_index in 0..SHADOW_CASCADE_COUNT {
+            // G3E: one depth-only caster pass per persistent array layer.
+            // The terrain receives every object shadow but deliberately does
+            // not cast into itself. The RC field height mesh spans the entire
+            // cascade and its coarse long-range relief otherwise produces a
+            // map-sized false occluder over the runway. Scenery, batched
+            // vegetation, rigid aircraft geometry, and articulated surfaces
+            // retain their established caster paths.
             let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-                view: &self.shadow_target.view,
+                view: &self.shadow_target.cascade_views[cascade_index],
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
@@ -1890,7 +1983,13 @@ impl WgpuRenderer {
                 stencil_ops: None,
             };
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("G2B directional shadow depth pass"),
+                label: Some(
+                    [
+                        "G3E near cascade shadow depth pass",
+                        "G3E mid cascade shadow depth pass",
+                        "G3E far cascade shadow depth pass",
+                    ][cascade_index],
+                ),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(depth_attachment),
                 timestamp_writes: None,
@@ -1901,16 +2000,9 @@ impl WgpuRenderer {
             // Group 0 is unused by `vs_shadow`, but binding the existing camera
             // group keeps the depth pipeline layout contiguous and portable.
             shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            shadow_pass.set_bind_group(2, &self.shadow_pass_bind_group, &[]);
+            shadow_pass.set_bind_group(2, &self.shadow_pass_bind_groups[cascade_index], &[]);
 
             shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-            for chunk in &self.terrain_chunks {
-                shadow_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
-                shadow_pass
-                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                shadow_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
-            }
-
             if let Some(ref scenery) = self.scenery {
                 shadow_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
                 shadow_pass
@@ -1953,7 +2045,7 @@ impl WgpuRenderer {
                 }
             }
 
-            // G3D FIX: restore the standard shadow pipeline after instanced
+            // G3D FIX (23ae238): restore the standard shadow pipeline after instanced
             // vegetation shadow draws. The vegetation shadow pipeline uses a
             // different vertex layout (slot 1 = per-instance transform) and
             // the `vs_vegetation_shadow` entry point; aircraft and surface
@@ -2862,7 +2954,7 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
                 },
                 count: None,
             },
-            // G2B: comparison sample resources and light matrix. They extend
+            // G3E: comparison-sampled depth array and receiver state. They extend
             // the established environment boundary while the lit pipeline
             // remains at groups 0..3.
             wgpu::BindGroupLayoutEntry {
@@ -2870,7 +2962,7 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,
@@ -2895,19 +2987,19 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
     })
 }
 
-/// G2B caster-pass group 2. It intentionally exposes only binding 3 from the
-/// existing shadow uniform contract, so the depth target is never also bound
-/// as a sampled texture while the directional pass writes it.
+/// G3E caster-pass group 2. It exposes one cascade matrix at binding 4, so the
+/// sampled receiver array and its full three-matrix uniform are never bound
+/// while a layer is attached for depth writes.
 fn shadow_pass_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 3,
+            binding: 4,
             visibility: wgpu::ShaderStages::VERTEX,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(size_of::<ShadowUniform>() as u64),
+                min_binding_size: wgpu::BufferSize::new(size_of::<ShadowCascadeUniform>() as u64),
             },
             count: None,
         }],
@@ -3053,7 +3145,7 @@ fn create_environment_bind_group(
     environment_buffer: &wgpu::Buffer,
     shadow_texture_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
-    shadow_matrix_buffer: &wgpu::Buffer,
+    shadow_uniform_buffer: &wgpu::Buffer,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3074,7 +3166,7 @@ fn create_environment_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: shadow_matrix_buffer.as_entire_binding(),
+                resource: shadow_uniform_buffer.as_entire_binding(),
             },
         ],
     })
@@ -3083,15 +3175,15 @@ fn create_environment_bind_group(
 fn create_shadow_pass_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    shadow_matrix_buffer: &wgpu::Buffer,
+    shadow_cascade_uniform_buffer: &wgpu::Buffer,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
         entries: &[wgpu::BindGroupEntry {
-            binding: 3,
-            resource: shadow_matrix_buffer.as_entire_binding(),
+            binding: 4,
+            resource: shadow_cascade_uniform_buffer.as_entire_binding(),
         }],
     })
 }
@@ -3165,7 +3257,7 @@ fn create_pipeline(
     })
 }
 
-/// G2B: depth-only caster pipeline for the fixed directional shadow map.
+/// G3E: depth-only caster pipeline shared by all three directional cascades.
 ///
 /// It intentionally has no color target, material bind group, or fragment
 /// entry point. Back-face culling matches the main scene pipeline; unlike a
@@ -3177,7 +3269,7 @@ fn create_shadow_pipeline(
     layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("G2B directional shadow depth pipeline"),
+        label: Some("G3E cascaded directional shadow depth pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -3554,11 +3646,11 @@ fn create_hdr_scene_bind_group(
 
 fn create_shadow_target(device: &wgpu::Device) -> ShadowTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G2B directional shadow map"),
+        label: Some("G3E three-cascade shadow depth array"),
         size: wgpu::Extent3d {
             width: SHADOW_MAP_RESOLUTION,
             height: SHADOW_MAP_RESOLUTION,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: SHADOW_CASCADE_COUNT as u32,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -3567,18 +3659,40 @@ fn create_shadow_target(device: &wgpu::Device) -> ShadowTarget {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("G3E shadow receiver array view"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        base_array_layer: 0,
+        array_layer_count: Some(SHADOW_CASCADE_COUNT as u32),
+        ..Default::default()
+    });
+    let cascade_views = std::array::from_fn(|index| {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(
+                [
+                    "G3E near cascade attachment",
+                    "G3E mid cascade attachment",
+                    "G3E far cascade attachment",
+                ][index],
+            ),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: index as u32,
+            array_layer_count: Some(1),
+            ..Default::default()
+        })
+    });
     ShadowTarget {
         _texture: texture,
         view,
+        cascade_views,
     }
 }
 
-/// Linear comparison filtering provides the small, stable hardware 2x2 PCF
-/// footprint without a costly manually expanded fragment kernel.
+/// Linear comparison filtering combines with the shader's fixed 3x3 tap grid
+/// for a compact, bounded PCF footprint.
 fn create_shadow_comparison_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("G2B directional shadow comparison sampler"),
+        label: Some("G3E cascaded shadow comparison sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -3832,16 +3946,21 @@ mod shader_brdf_regression_tests {
 
 #[cfg(test)]
 mod directional_shadow_regression_tests {
-    //! G2B structural guards. The light-space math itself lives in `shadow.rs`
+    //! G3E structural guards. The light-space math itself lives in `shadow.rs`
     //! so it can be tested without wgpu; these tests pin the renderer/shader
     //! integration points that must not drift in later slices.
 
     #[test]
-    fn shadow_uniform_has_matrix_plus_one_vec4_slot() {
+    fn shadow_uniforms_match_three_cascade_wgsl_layout() {
         assert_eq!(
             std::mem::size_of::<super::ShadowUniform>(),
-            80,
-            "ShadowUniform must remain a mat4 plus one aligned vec4 slot"
+            240,
+            "ShadowUniform must be three mat4 values plus three aligned vec4 slots"
+        );
+        assert_eq!(
+            std::mem::size_of::<super::ShadowCascadeUniform>(),
+            64,
+            "each caster uniform must contain exactly one mat4"
         );
     }
 
@@ -3855,24 +3974,24 @@ mod directional_shadow_regression_tests {
             .split_once("fn check_asynchronous_gpu_error")
             .expect("frame path must end before asynchronous error handling");
         let (_, after_shadow_pass_label) = frame_path
-            .split_once("label: Some(\"G2B directional shadow depth pass\"),")
-            .expect("frame path must contain the directional shadow pass");
+            .split_once("\"G3E near cascade shadow depth pass\",")
+            .expect("frame path must contain the three-cascade shadow pass loop");
         let (shadow_pass_path, _) = after_shadow_pass_label
             .split_once("// --- Sky pass")
             .expect("shadow pass must end before the main scene sky pass");
 
         assert!(
             initialization_path
-                .contains("let shadow_pass_bind_group = create_shadow_pass_bind_group("),
-            "the matrix-only shadow-pass bind group must be persistent"
+                .contains("let shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT]"),
+            "all three matrix-only shadow-pass bind groups must be persistent"
         );
         assert!(
             initialization_path.contains("let shadow_target = create_shadow_target(&device);"),
             "the shadow depth target must remain persistent"
         );
         assert!(
-            shadow_pass_path.contains("set_bind_group(2, &self.shadow_pass_bind_group, &[]);"),
-            "caster pass must bind the matrix-only group at group 2"
+            shadow_pass_path.contains("&self.shadow_pass_bind_groups[cascade_index]"),
+            "each caster pass must bind its matrix-only group at group 2"
         );
         assert!(
             !shadow_pass_path.contains("&self.environment_bind_group"),
@@ -3893,8 +4012,17 @@ mod directional_shadow_regression_tests {
             );
         }
         assert!(
-            frame_path.contains("&self.shadow_matrix_buffer"),
-            "frame path should only update the persistent shadow matrix buffer"
+            frame_path.contains("&self.shadow_uniform_buffer")
+                && frame_path.contains("&self.shadow_cascade_uniform_buffers[index]"),
+            "frame path should only update the persistent receiver and caster buffers"
+        );
+        assert!(
+            frame_path.contains("for cascade_index in 0..SHADOW_CASCADE_COUNT"),
+            "the caster path must encode exactly the centralized cascade count"
+        );
+        assert!(
+            !shadow_pass_path.contains("for chunk in &self.terrain_chunks"),
+            "the field terrain must receive object shadows without self-casting its coarse far relief"
         );
     }
 
@@ -3912,9 +4040,11 @@ mod directional_shadow_regression_tests {
             .expect("fog must continue to be applied after lighting");
         assert!(direct < ambient && ambient < fog);
         assert!(
-            source.contains("return textureSampleCompare("),
+            source.contains("textureSampleCompare("),
             "directional shadows must use the comparison sampler path"
         );
+        assert!(source.contains("texture_depth_2d_array"));
+        assert!(source.contains("return visibility / 9.0;"));
     }
 }
 
@@ -4351,6 +4481,29 @@ mod terrain_headless_gpu_tests {
         height: u32,
         bytes_per_pixel: u32,
     ) -> Vec<u8> {
+        read_texture_layer(
+            device,
+            queue,
+            texture,
+            level,
+            0,
+            width,
+            height,
+            bytes_per_pixel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_texture_layer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        level: u32,
+        array_layer: u32,
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Vec<u8> {
         let row_bytes = padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
             .expect("row padding must not overflow");
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -4365,7 +4518,11 @@ mod terrain_headless_gpu_tests {
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: array_layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -5087,6 +5244,29 @@ mod vegetation_tests {
         height: u32,
         bytes_per_pixel: u32,
     ) -> Vec<u8> {
+        read_vegetation_texture_layer(
+            device,
+            queue,
+            texture,
+            level,
+            0,
+            width,
+            height,
+            bytes_per_pixel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_vegetation_texture_layer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        level: u32,
+        array_layer: u32,
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Vec<u8> {
         let row_bytes = padded_bytes_per_row_checked_for_bytes_per_pixel(width, bytes_per_pixel)
             .expect("row padding must not overflow");
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -5101,7 +5281,11 @@ mod vegetation_tests {
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: array_layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -6128,6 +6312,156 @@ mod vegetation_tests {
             "aircraft centroid must be RIGHT of centre ({centroid_x} px > {centre} px) — \
              a leftward shift means the vegetation pipeline leaked into the aircraft draw"
         );
+    }
+
+    /// G3E GPU smoke: the production caster pipeline writes all three layers
+    /// through their persistent per-cascade uniforms and attachment views.
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn three_cascade_gpu_smoke_writes_every_depth_layer() {
+        let (device, queue) = headless_device_gpu();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("G3E three-cascade smoke shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let camera_layout = camera_bind_group_layout(&device, "G3E smoke camera layout");
+        let object_layout = matrix_bind_group_layout(&device, "G3E smoke object layout");
+        let shadow_pass_layout = shadow_pass_bind_group_layout(&device, "G3E smoke pass layout");
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("G3E smoke pipeline layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&shadow_pass_layout),
+            ],
+            immediate_size: 0,
+        });
+        let pipeline = create_shadow_pipeline(&device, &shader, &pipeline_layout);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("G3E smoke camera buffer"),
+            contents: bytemuck::bytes_of(&CameraUniform::new(
+                &Mat4::identity(),
+                &Mat4::identity(),
+                [0.0, 2.0, 8.0],
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let camera_group = camera_bind_group(
+            &device,
+            &camera_layout,
+            &camera_buffer,
+            "G3E smoke camera group",
+        );
+        let object_matrix = Mat4::from_rows([
+            [8.0, 0.0, 0.0, 0.0],
+            [0.0, 8.0, 0.0, 0.0],
+            [0.0, 0.0, 8.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let object_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("G3E smoke object buffer"),
+            contents: bytemuck::bytes_of(&ObjectUniform::from_matrix(&object_matrix)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let object_group = matrix_bind_group(
+            &device,
+            &object_layout,
+            &object_buffer,
+            "G3E smoke object group",
+        );
+        let cascades = build_shadow_cascades([0.4, 0.8, -0.3], [0.0, 2.0, 8.0], [0.0, 0.0, 0.0]);
+        let cascade_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT] = std::array::from_fn(|index| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("G3E smoke cascade buffer"),
+                contents: bytemuck::bytes_of(&ShadowCascadeUniform::from_cascade(&cascades[index])),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        });
+        let cascade_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT] =
+            std::array::from_fn(|index| {
+                create_shadow_pass_bind_group(
+                    &device,
+                    &shadow_pass_layout,
+                    &cascade_buffers[index],
+                    "G3E smoke cascade group",
+                )
+            });
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("G3E smoke depth array"),
+            size: wgpu::Extent3d {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+                depth_or_array_layers: SHADOW_CASCADE_COUNT as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let layer_views: [wgpu::TextureView; SHADOW_CASCADE_COUNT] = std::array::from_fn(|index| {
+            depth_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("G3E smoke cascade attachment"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: index as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let (vertex_buffer, index_buffer, index_count) = create_test_aircraft_mesh(&device);
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        for index in 0..SHADOW_CASCADE_COUNT {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("G3E smoke cascade pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &layer_views[index],
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &camera_group, &[]);
+            pass.set_bind_group(1, &object_group, &[]);
+            pass.set_bind_group(2, &cascade_groups[index], &[]);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+
+        for layer in 0..SHADOW_CASCADE_COUNT as u32 {
+            let depth = read_vegetation_texture_layer(
+                &device,
+                &queue,
+                &depth_texture,
+                0,
+                layer,
+                TEST_SIZE,
+                TEST_SIZE,
+                4,
+            );
+            let written = depth
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|texel| f32::from_le_bytes(**texel) < 1.0)
+                .count();
+            assert!(
+                written > 0,
+                "cascade layer {layer} must contain caster depth"
+            );
+        }
     }
 
     /// Shadow-pass regression: vegetation shadow draw followed by an aircraft
