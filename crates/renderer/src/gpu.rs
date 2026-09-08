@@ -103,11 +103,13 @@ const EXPOSURE_EV_MAX: f32 = 8.0;
 const DEFAULT_ZENITH_RGB: [f32; 3] = [0.16, 0.36, 0.66];
 const DEFAULT_HORIZON_RGB: [f32; 3] = [0.68, 0.78, 0.88];
 const DEFAULT_GROUND_ATM_RGB: [f32; 3] = [0.38, 0.44, 0.40];
-// G3-VR1: stronger horizon haze widens the terrain/sky blend band, and the
-// higher fog density makes the 500 m field edge fade into the horizon instead
-// of cutting against it, while the aircraft (3-20 m) stays essentially clear.
+// G3-VR1.1: density tuned down from the VR1 0.0028 trial — at 0.0028 a
+// distant aircraft at 300 m sat at ~57 % fog and read washed out. 0.0012
+// keeps the aircraft legible (100 m ≈ 11 %, 200 m ≈ 21 %, 300 m ≈ 30 %)
+// while still grading the 500 m field edge (~45 %); horizon blending is
+// carried primarily by the stronger G3-VR1 haze.
 const DEFAULT_HAZE_STRENGTH: f32 = 0.68;
-const DEFAULT_FOG_DENSITY: f32 = 0.0028;
+const DEFAULT_FOG_DENSITY: f32 = 0.0012;
 const DEFAULT_SUN_COLOR_RGB: [f32; 3] = [1.0, 0.95, 0.85];
 const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
 

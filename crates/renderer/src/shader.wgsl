@@ -410,10 +410,6 @@ fn shadow_cascade_index(view_distance_m: f32) -> i32 {
 // cost stays bounded on the reference GPU.
 const SHADOW_PCF_TAPS: i32 = 2;
 const SHADOW_PCF_TAP_COUNT: f32 = 25.0;
-/// G3-VR1: penumbra floor — fully shadowed receivers keep a small ambient
-/// direct-light share instead of cutting to black, integrating shadows with
-/// the terrain while keeping deep contact shadows readable.
-const SHADOW_MIN_VISIBILITY: f32 = 0.30;
 fn pcf_shadow_visibility(world_position: vec3<f32>, cascade_index: u32) -> f32 {
     let light_clip = shadow.light_view_projection[cascade_index]
         * vec4<f32>(world_position, 1.0);
@@ -456,8 +452,11 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
     if (cascade_index < 0) {
         return 1.0;
     }
-    let raw_visibility = pcf_shadow_visibility(world_position, u32(cascade_index));
-    return mix(SHADOW_MIN_VISIBILITY, 1.0, raw_visibility);
+    // G3-VR1.1: no penumbra floor. G3B's sky-diffuse / env-specular ambient
+    // already lifts shadowed surfaces; multiplying direct light by a 0.30
+    // floor washed contact shadows and tree shadows out. PCF 5x5 stays as the
+    // softness mechanism.
+    return pcf_shadow_visibility(world_position, u32(cascade_index));
 }
 
 // ---------------------------------------------------------------------------

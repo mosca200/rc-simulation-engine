@@ -53,11 +53,15 @@ determinism, silhouette and GLB round-trip tests remain green.
   `TERRAIN_DETAIL_ALBEDO_BLEND` 0.25 → 0.35: more large-scale tonal
   variation and near grain break the perceived 4 m tile repetition without
   touching the versioned textures or UV anchoring.
-- `DEFAULT_FOG_DENSITY` 0.0015 → 0.0028: the 500 m field edge fades to
-  ~0.75 fog instead of cutting against the sky; the aircraft (3–20 m) stays
-  at <0.06 fog.
+- `DEFAULT_FOG_DENSITY` 0.0015 → 0.0028 (VR1 trial) → **0.0012 final
+  (VR1.1)**: the 0.0028 trial washed a 100 m aircraft to near-invisibility
+  (~24 % fog) and hid it entirely by 200 m (~43 %). The final 0.0012 keeps
+  the aircraft legible (100 m ≈ 11 %, 200 m ≈ 21 %, 300 m ≈ 30 %) while the
+  500 m field edge still grades to ~45 %.
 - `DEFAULT_HAZE_STRENGTH` 0.55 → 0.68 and sky haze falloff 6/rad → 4/rad: a
-  wider horizon band blends terrain and sky through a gradation.
+  wider horizon band blends terrain and sky through a gradation. VR1.1
+  keeps these values so the horizon blend is carried by haze, not by a
+  heavy global fog.
 
 ### Shadows (`shader.wgsl`, `gpu.rs`)
 
@@ -66,11 +70,13 @@ determinism, silhouette and GLB round-trip tests remain green.
   comparison divisor now references the constant so the tap count lives in
   one place. The structural regression test was updated to pin the new
   contract.
-- Penumbra floor `SHADOW_MIN_VISIBILITY = 0.30` applied inside
-  `directional_shadow_visibility`: fully shadowed receivers keep 30 % direct
-  light, integrating shadows with the terrain while deep contact shadows stay
-  readable. The `direct_unshadowed * shadow_visibility` line and the ambient
-  isolation contract are unchanged.
+- VR1 introduced a penumbra floor `SHADOW_MIN_VISIBILITY = 0.30`; **VR1.1
+  removes it**. A/B capture showed the floor lifted fully shadowed
+  receivers to 30 % direct sun, flattening the aircraft contact shadow and
+  tree shadows into grey smears. G3B's unshadowed sky-diffuse / env-specular
+  ambient already keeps shadowed surfaces readable, so the final contract is
+  `direct = direct_unshadowed * raw_shadow_visibility` with ambient kept
+  separate and PCF 5×5 as the only softness mechanism.
 
 ### Scenery placeholder reduction (`scenery.rs`)
 
@@ -79,6 +85,30 @@ determinism, silhouette and GLB round-trip tests remain green.
   `[0.72, 0.30, 0.14]`. The poles stay visible position markers without
   reading as debug placeholders. `PILOT_ORANGE` is untouched (pilot stations
   and windsock keep their established identity).
+
+## G3-VR1.1 — readability and shadow correction
+
+Follow-up pass on top of VR1 (`34bbdba`), driven by two verified findings:
+the VR1 fog density degraded distant-aircraft readability, and the VR1
+penumbra floor washed shadows out.
+
+A/B capture on the RTX 3090 (identical camera/FOV/lighting per pair; chase
+camera at fixed 100/200/300 m, plus a static ground-start scene for contact
+and tree shadows):
+
+| Comparison | VR1 (A) | VR1.1 (B) | Verdict |
+|---|---|---|---|
+| Aircraft @100 m | near-invisible dot, terrain washed | legible silhouette with readable colours | B |
+| Aircraft @200 m | invisible | faint but present; terrain keeps contrast | B |
+| Aircraft @300 m | invisible | sub-pixel (angular size dominates), terrain less washed | B (marginal) |
+| Contact / tree shadows | grey, detached smears (30 % direct in full shadow) | deep, grounded, still soft via PCF 5×5 | B |
+| Horizon blend | graded | graded (haze 0.68 carries it) | preserved |
+| Terrain contrast mid/far | washed | contrast retained | B |
+
+Final values: `DEFAULT_FOG_DENSITY = 0.0012`, `DEFAULT_HAZE_STRENGTH = 0.68`,
+no penumbra floor (`direct = direct_unshadowed * raw_shadow_visibility`),
+PCF 5×5 retained. No vegetation, scenery, physics, camera or aircraft
+changes.
 
 ## Verification
 
