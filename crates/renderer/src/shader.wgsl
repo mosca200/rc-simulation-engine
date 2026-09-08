@@ -283,9 +283,10 @@ fn sky_color_for_direction(view_dir: vec3<f32>) -> vec3<f32> {
 
     // Horizon haze: widen the horizon band by blending toward horizon color.
     // haze_falloff is strongest at the horizon (elevation ≈ 0) and decays
-    // exponentially away from it.
+    // exponentially away from it. G3-VR1: gentler falloff widens the haze
+    // band so terrain and sky meet through a gradation instead of a seam.
     let haze_strength = environment.sky_horizon.w;
-    let haze_falloff = exp(-abs(elevation) * 6.0);
+    let haze_falloff = exp(-abs(elevation) * 4.0);
     sky = mix(sky, horizon, haze_falloff * haze_strength);
 
     // Sun disk: procedural, coherent with the directional light.
@@ -403,9 +404,16 @@ fn shadow_cascade_index(view_distance_m: f32) -> i32 {
     return -1;
 }
 
-// Fixed 3x3 percentage-closer filter: nine comparison taps for every shadowed
-// receiver, independent of cascade and scene content. This bounds cost and
-// softens hard depth-map aliasing without PCSS-style variability.
+// G3-VR1: 5x5 percentage-closer filter — twenty-five comparison taps for
+// every shadowed receiver, independent of cascade and scene content. The
+// wider kernel softens the penumbra without PCSS-style variability, and the
+// cost stays bounded on the reference GPU.
+const SHADOW_PCF_TAPS: i32 = 2;
+const SHADOW_PCF_TAP_COUNT: f32 = 25.0;
+/// G3-VR1: penumbra floor — fully shadowed receivers keep a small ambient
+/// direct-light share instead of cutting to black, integrating shadows with
+/// the terrain while keeping deep contact shadows readable.
+const SHADOW_MIN_VISIBILITY: f32 = 0.30;
 fn pcf_shadow_visibility(world_position: vec3<f32>, cascade_index: u32) -> f32 {
     let light_clip = shadow.light_view_projection[cascade_index]
         * vec4<f32>(world_position, 1.0);
@@ -428,8 +436,8 @@ fn pcf_shadow_visibility(world_position: vec3<f32>, cascade_index: u32) -> f32 {
     );
     let texel = shadow.texel_size_uv.xy;
     var visibility = 0.0;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
+    for (var y = -SHADOW_PCF_TAPS; y <= SHADOW_PCF_TAPS; y = y + 1) {
+        for (var x = -SHADOW_PCF_TAPS; x <= SHADOW_PCF_TAPS; x = x + 1) {
             visibility = visibility + textureSampleCompare(
                 directional_shadow_depth,
                 directional_shadow_sampler,
@@ -439,7 +447,7 @@ fn pcf_shadow_visibility(world_position: vec3<f32>, cascade_index: u32) -> f32 {
             );
         }
     }
-    return visibility / 9.0;
+    return visibility / SHADOW_PCF_TAP_COUNT;
 }
 
 fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
@@ -448,7 +456,8 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
     if (cascade_index < 0) {
         return 1.0;
     }
-    return pcf_shadow_visibility(world_position, u32(cascade_index));
+    let raw_visibility = pcf_shadow_visibility(world_position, u32(cascade_index));
+    return mix(SHADOW_MIN_VISIBILITY, 1.0, raw_visibility);
 }
 
 // ---------------------------------------------------------------------------
@@ -791,10 +800,11 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 // G3A-R: terrain stack tuning constants (WGSL side of the central values in
 // `terrain.rs`). Low-contrast by design: the field must read as a maintained
-// flying field, not a wild biome.
-const TERRAIN_MACRO_ALBEDO_GAIN: f32 = 0.20;
+// flying field, not a wild biome. G3-VR1: slightly stronger macro gain and
+// detail blend break the perceived 4 m tile repetition without changing UVs.
+const TERRAIN_MACRO_ALBEDO_GAIN: f32 = 0.32;
 const TERRAIN_ALBEDO_AR_BLEND: f32 = 0.5;
-const TERRAIN_DETAIL_ALBEDO_BLEND: f32 = 0.25;
+const TERRAIN_DETAIL_ALBEDO_BLEND: f32 = 0.35;
 const TERRAIN_DETAIL_NORMAL_BLEND: f32 = 0.55;
 const TERRAIN_ROUGHNESS_BASE_WEIGHT: f32 = 0.70;
 const TERRAIN_ROUGHNESS_MACRO_WEIGHT: f32 = 0.10;

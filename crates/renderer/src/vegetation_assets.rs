@@ -1027,13 +1027,18 @@ fn conifer_params(variant: u8) -> ConiferParams {
 // ── LOD fidelity tables ────────────────────────────────────────────────────
 
 /// (puffs, branch count, trunk rows, trunk sides, puff segs, puff stacks).
-const DECIDUOUS_LOD0: (usize, usize, usize, u32, u32, u32) = (14, 6, 5, 8, 8, 5);
-/// LOD1: fewer puffs/branches, coarser but the same layout prefix.
-const DECIDUOUS_LOD1: (usize, usize, usize, u32, u32, u32) = (8, 3, 3, 6, 8, 4);
+// G3-VR1: finer trunk and puff tessellation keeps near canopies readable and
+// breaks the low-poly faceting that read as prototype geometry.
+const DECIDUOUS_LOD0: (usize, usize, usize, u32, u32, u32) = (14, 6, 6, 10, 10, 6);
+/// LOD1: fewer puffs/branches, coarser but the same layout prefix. G3-VR1:
+/// more puffs than the previous LOD1 so the mid-distance canopy shell stays
+/// closed instead of reading as bare branch skeletons.
+const DECIDUOUS_LOD1: (usize, usize, usize, u32, u32, u32) = (10, 4, 4, 8, 8, 4);
 /// Conifer LOD0: (whorls, trunk rows, trunk sides, frond tube sides).
-const CONIFER_LOD0: (usize, usize, u32, u32) = (8, 5, 8, 4);
-/// Conifer LOD1.
-const CONIFER_LOD1: (usize, usize, u32, u32) = (4, 3, 8, 4);
+// G3-VR1: fronds at 6 sides remove the flat tube facets up close.
+const CONIFER_LOD0: (usize, usize, u32, u32) = (8, 6, 10, 6);
+/// Conifer LOD1. G3-VR1: one extra whorl keeps the mid-distance mass intact.
+const CONIFER_LOD1: (usize, usize, u32, u32) = (5, 4, 8, 5);
 
 // ── Builders ───────────────────────────────────────────────────────────────
 
@@ -1075,7 +1080,9 @@ fn deciduous_lod(
             spec.base_radius * 0.55,
             spec.base_radius * 0.20,
         ];
-        bark_parts.push(tube_sweep(&points, &radii, 4, BARK_BASE, false, spec.seed));
+        // G3-VR1: six-sided branch tubes instead of four suppress the flat
+        // low-poly facets that stood out against the canopy up close.
+        bark_parts.push(tube_sweep(&points, &radii, 6, BARK_BASE, false, spec.seed));
     }
 
     let mut foliage_parts = Vec::new();
@@ -1122,13 +1129,14 @@ fn deciduous_lod2(
         params.crown_radius_m,
         *bend_azimuth + PI * 0.5,
         params.seed,
-        8,
-        5,
+        10,
+        6,
         color,
     );
     let mut foliage_parts = vec![mass];
     // Three small lobes spread across the layout (start / middle / end) so
-    // the far canopy keeps a multi-directional ragged silhouette.
+    // the far canopy keeps a multi-directional ragged silhouette. G3-VR1:
+    // a denser lobe tessellation keeps far trees reading as canopy mass.
     let lobe_indices = [0, puffs.len() / 2, puffs.len() - 1];
     for lobe in lobe_indices {
         let spec = &puffs[lobe];
@@ -1137,8 +1145,8 @@ fn deciduous_lod2(
             spec.radius * 0.85,
             spec.squash,
             spec.seed ^ 0x13,
-            6,
-            3,
+            8,
+            4,
             color,
         ));
     }
@@ -1240,9 +1248,11 @@ fn conifer_lod2(params: &ConiferParams, whorls: &[Vec<FrondSpec>]) -> Vegetation
     );
     let color = foliage_color(conifer_lean(params.variant));
     let mut foliage_parts = Vec::new();
-    for whorl in whorls.iter().take(2) {
-        for spec in whorl.iter().take(3) {
-            foliage_parts.push(frond_mesh(spec, 4, color));
+    // G3-VR1: three whorls with four fronds each keep far conifers reading as
+    // foliage mass instead of a literal bare-branch skeleton.
+    for whorl in whorls.iter().take(3) {
+        for spec in whorl.iter().take(4) {
+            foliage_parts.push(frond_mesh(spec, 5, color));
         }
     }
     let bark = assemble(&[trunk]).expect("conifer LOD2 bark mesh is valid");

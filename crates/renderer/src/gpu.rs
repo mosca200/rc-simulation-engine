@@ -103,8 +103,11 @@ const EXPOSURE_EV_MAX: f32 = 8.0;
 const DEFAULT_ZENITH_RGB: [f32; 3] = [0.16, 0.36, 0.66];
 const DEFAULT_HORIZON_RGB: [f32; 3] = [0.68, 0.78, 0.88];
 const DEFAULT_GROUND_ATM_RGB: [f32; 3] = [0.38, 0.44, 0.40];
-const DEFAULT_HAZE_STRENGTH: f32 = 0.55;
-const DEFAULT_FOG_DENSITY: f32 = 0.0015;
+// G3-VR1: stronger horizon haze widens the terrain/sky blend band, and the
+// higher fog density makes the 500 m field edge fade into the horizon instead
+// of cutting against it, while the aircraft (3-20 m) stays essentially clear.
+const DEFAULT_HAZE_STRENGTH: f32 = 0.68;
+const DEFAULT_FOG_DENSITY: f32 = 0.0028;
 const DEFAULT_SUN_COLOR_RGB: [f32; 3] = [1.0, 0.95, 0.85];
 const DEFAULT_SUN_COS_ANGULAR_RADIUS: f32 = 0.999_96;
 
@@ -4044,7 +4047,12 @@ mod directional_shadow_regression_tests {
             "directional shadows must use the comparison sampler path"
         );
         assert!(source.contains("texture_depth_2d_array"));
-        assert!(source.contains("return visibility / 9.0;"));
+        // G3-VR1: the 5x5 percentage-closer kernel is centralized through
+        // named WGSL constants; the comparison divisor must use the constant
+        // so the tap count stays in one place.
+        assert!(source.contains("return visibility / SHADOW_PCF_TAP_COUNT;"));
+        assert!(source.contains("const SHADOW_PCF_TAPS: i32 = 2;"));
+        assert!(source.contains("const SHADOW_PCF_TAP_COUNT: f32 = 25.0;"));
     }
 }
 

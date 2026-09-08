@@ -49,7 +49,10 @@ pub const DEFAULT_VEGETATION_SEED: u64 = 42;
 /// scattered constants in shaders or draw loops.
 pub const DEFAULT_LOD0_MAX_M: f32 = 55.0;
 /// Nominal distance (m) at which instances switch between LOD1 and LOD2.
-pub const DEFAULT_LOD1_MAX_M: f32 = 130.0;
+///
+/// G3-VR1: raised to keep the richer LOD1 canopy in view through the
+/// mid-distance range that previously degraded to the sparse LOD2 shell.
+pub const DEFAULT_LOD1_MAX_M: f32 = 160.0;
 /// Distance (m) beyond which an instance is culled entirely.
 ///
 /// The far corner of the FlyingField boundary belt (230 m radius from the

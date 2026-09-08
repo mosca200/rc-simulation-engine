@@ -144,6 +144,13 @@ const PILOT_ORANGE: [f32; 4] = [0.85, 0.25, 0.10, 1.0];
 const WINDSOCK_ORANGE: [f32; 4] = [0.92, 0.44, 0.08, 1.0];
 const WINDSOCK_WHITE: [f32; 4] = [0.94, 0.94, 0.92, 1.0];
 
+/// G3-VR1: runway marker poles use a lower, thinner, less saturated profile
+/// than the previous placeholder-orange cylinders so the field reads as real
+/// RC infrastructure instead of debug markers, while staying visible.
+const RUNWAY_POLE_HEIGHT_M: f32 = 1.5;
+const RUNWAY_POLE_RADIUS_M: f32 = 0.035;
+const RUNWAY_POLE_ORANGE: [f32; 4] = [0.72, 0.30, 0.14, 1.0];
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /// Visual classification for a scenery object.
@@ -351,7 +358,7 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         let z = -RUNWAY_HALF_LENGTH_M + (i as f32 + 0.5) * (RUNWAY_HALF_LENGTH_M * 2.0 / 6.0);
         for &x_sign in &[-1.0_f32, 1.0] {
             let x = x_sign * (RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M);
-            let pole = generate_marker_pole(x, params.ground_y, z, 2.0);
+            let pole = generate_marker_pole(x, params.ground_y, z, RUNWAY_POLE_HEIGHT_M);
             merge_mesh(
                 &mut all_vertices,
                 &mut all_indices,
@@ -1006,7 +1013,13 @@ fn append_dome_vegetation(
 
 #[must_use]
 fn generate_marker_pole(x: f32, ground_y: f32, z: f32, height: f32) -> SceneryMesh {
-    generate_cylinder([x, ground_y, z], 0.05, height, [0.85, 0.25, 0.10, 1.0], 5)
+    generate_cylinder(
+        [x, ground_y, z],
+        RUNWAY_POLE_RADIUS_M,
+        height,
+        RUNWAY_POLE_ORANGE,
+        5,
+    )
 }
 
 // ── Windsock ───────────────────────────────────────────────────────────────
