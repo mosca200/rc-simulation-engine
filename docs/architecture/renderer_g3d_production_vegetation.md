@@ -169,7 +169,7 @@ path (v. §16).
 
 | Componente | Quando | Dettaglio |
 |---|---|---|
-| `VegetationGpuMesh` ×24 (4 asset × 3 LOD × 2 parti) | costruttore | vertex/index buffer statici per (asset, LOD, bark/foliage), `material_index` |
+| `VegetationGpuMesh` ×36 (6 asset × 3 LOD × 2 parti) | costruttore | vertex/index buffer statici per (asset, LOD, bark/foliage), `material_index` |
 | `instance_buffer` | costruttore | preallocato COPY_DST, `instance_capacity()` × 48 byte |
 | materiali bark/foliage (white texture + `part_metallic`/`part_roughness`) | costruttore | gruppo 3; roughness 0.85 bark / 0.65 foliage, metallic 0 |
 | `VegetationUniform` (gruppo 4) | costruttore | selettore debug 16 byte, riscritto solo al cambio modalità |
@@ -194,7 +194,7 @@ uniforme).
 2. `queue.write_buffer(instance_buffer, visible)` — solo se visibili > 0.
 3. Scene pass: per ogni gruppo (asset × LOD) attivo, bark + foliage con i
    rispettivi materiali e l'intervallo istanze dal `batch_ranges` — il numero
-   di draw dipende dai batch, mai dal numero di alberi (max 24 draw).
+   di draw dipende dai batch, mai dal numero di alberi (max 36 draw).
 4. Shadow pass: stessi draw ma solo gruppi LOD0/LOD1 (LOD2 non casta).
 5. Modalità `Culling`: log periodico (ogni 90 frame) di total/visible/culled/
    LOD counts/draw calls/byte upload/CPU ms via `tracing::info!`.
@@ -209,8 +209,8 @@ Getter pubblici: `vegetation_stats()`, `vegetation_instance_capacity()`,
 
 ## 12. Costo draw (max teorici FlyingField)
 
-- Scene: gruppi attivi (≤ 12) × 2 parti = ≤ 24 draw.
-- Shadow: gruppi LOD0/1 attivi (≤ 8) × 2 parti = ≤ 16 draw.
+- Scene: gruppi attivi (≤ 18) × 2 parti = ≤ 36 draw.
+- Shadow: gruppi LOD0/1 attivi (≤ 12) × 2 parti = ≤ 24 draw.
 - Con frustum+culling reali i gruppi attivi scendono molto sotto il massimo;
   i contatori effettivi sono esposti via `vegetation_stats()` e nel log
   `Culling` (v. §17 report runtime).
@@ -270,3 +270,68 @@ cargo test --workspace --all-targets
 cargo build --workspace --release
 cargo test -p renderer --lib vegetation -- --ignored   # GPU su RTX3090
 ```
+
+## 19. G3D-R — chiusura qualità visiva (base `23ae238`)
+
+La slice G3D era un Technical PASS ma un Visual FAIL: la vegetation leggeva
+come primitivi evidenti (blob sferici, tier piramidali). G3D-R sostituisce lo
+strato ASSET mantenendo intatta l'intera infrastruttura G3D (world, placement,
+culling, LOD, isteresi, grouping, instancing, batch, shadow batching, HDR/PBR,
+pipeline-state isolation).
+
+### 19.1 Strategia asset
+
+Asset generati proceduralmente in-repo su seme fisso per variante
+(provenance: in-code, nessun asset esterno, nessuna licenza da documentare).
+Nessun nuovo texture subsystem: colori per-vertice + fattori PBR (metallic 0,
+roughness 0.85 bark / 0.65 foliage) come prima.
+
+- **Deciduous (3 varianti)**: tronco curvo rastremato (lathe su centro a
+  curvatura quadratica), sistema di rami principali leggibili (tubi rastremati
+  su spline con droop per variante), chioma fatta di *puff* irregolari —
+  blob lat-lon con raggio modulato da una galleria di sinusoidi per-seed,
+  schiacciati (squash) e stirati lungo un asse: mai ellissoidi perfetti, mai
+  sfere impilate. Nomi: `field_oak_a`, `field_birch_b`, `field_willow_c`.
+- **Conifere (3 varianti)**: tronco visibile e "whorl" di frondi drooping
+  (tubi rastremati pendenti) con slot azimutali saltati (gap) e lean cumulativa
+  della chioma; apice irregolare, mai cono singolo. Nomi: `field_pine_a`,
+  `field_spruce_b`, `field_fir_c`.
+- **Layout condivisi tra LOD**: ogni asset disegna una sequenza deterministica
+  unica (puff/rami/whorl con conteggi massimi); ogni LOD consuma lo stesso
+  prefisso → stabilità temporale: il cambio LOD altera tessellation e numero
+  di elementi, non la personalità dell'albero.
+- **Ground contact**: basi a Y=0 con tronco affondato di −0.10 m (mai
+  sospeso), foliage mai sotto 0.8 m, bounds unit scale, height 6.3–8.7 m.
+
+### 19.2 LOD e budget (misurati, unit scale)
+
+| Asset | Species | height | LOD0 tris | LOD1 | LOD2 | r1 | r2 |
+|---|---|---|---|---|---|---|---|
+| field_oak_a | Deciduous | 7.28 m | 1312 | 602 | 195 | 0.46 | 0.15 |
+| field_birch_b | Deciduous | 6.78 m | 1312 | 602 | 195 | 0.46 | 0.15 |
+| field_willow_c | Deciduous | 6.34 m | 1312 | 602 | 195 | 0.46 | 0.15 |
+| field_pine_a | Conifer | 8.16 m | 992 | 500 | 135 | 0.50 | 0.14 |
+| field_spruce_b | Conifer | 8.72 m | 1192 | 600 | 135 | 0.50 | 0.11 |
+| field_fir_c | Conifer | 7.40 m | 972 | 480 | 135 | 0.49 | 0.14 |
+
+LOD2 non è né cono né cupola: massa asimmetrica (ring modulati in azimut con
+centro driftato, 3 lobi sparsi per le decidue; due whorl grossolani per le
+conifere). Budget: LOD0 per asset < 4000 tris, totale produzione < 20k.
+
+### 19.3 Placement (stesso determinismo, clustering più naturale)
+
+- `GROUP_COUNT` 12 → 18 (6 asset × 3 LOD); selezione variante a 3 vie con
+  pesi diseguali per specie (mai file di cloni equidistanti).
+- Near: membri di cluster 8–17, scatter variabile, **satelliti secondari**
+  1–3 per cluster a ~24 m dal centro (clump naturali, non blob unico).
+- Boundary: count membri 5–21 con varianza, aperture 14%, densità maggiore
+  lato opposto flightline; mix specie diseguale per zona (near 66% decidue,
+  boundary 52% conifere).
+- Runway/safety sempre liberi, pairwise spacing garantito, budget 150–320.
+
+### 19.4 Rendering / limiti invariati
+
+Nessuna modifica a pipeline, shader, uniform, buffer, materiali, shadow
+batching, HDR target, fog, atmosfera; i 5 GPU test vegetation (incluse le due
+regression pipeline-state) restano verdi. LOD3 billboard e wind/texture
+foliage restano gap documentati (§9).
