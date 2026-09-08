@@ -3,3 +3,6 @@ docs/reference_aircraft/data/sources/*.dat binary
 
 # Preserve reference airfoil geometry byte-for-byte (SHA-256 provenance lock).
 reference/**/*.dat binary
+
+# Preserve OA1 validated controller evidence byte-for-byte.
+docs/validation/controller/tx16s_oa1_validated_profile.json binary

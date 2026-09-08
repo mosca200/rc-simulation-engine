@@ -1,0 +1,41 @@
+{
+    "schema_version":  1,
+    "device":  {
+                   "name":  "Controller gioco compatibile HID",
+                   "uuid":  "0300000009120000544f000000000000",
+                   "vendor_id":  4617,
+                   "product_id":  20308
+               },
+    "axes":  {
+                 "roll":  {
+                              "source":  "left_stick_x",
+                              "raw_min":  -0.999969482421875,
+                              "raw_center":  0.000030517578125,
+                              "raw_max":  1.0,
+                              "inverted":  false,
+                              "deadzone":  0.05
+                          },
+                 "pitch":  {
+                               "source":  "left_stick_y",
+                               "raw_min":  -1.0,
+                               "raw_center":  -0.000030517578125,
+                               "raw_max":  0.999969482421875,
+                               "inverted":  false,
+                               "deadzone":  0.05
+                           },
+                 "yaw":  {
+                             "source":  "left_trigger2",
+                             "raw_min":  0.0004882887005805969,
+                             "raw_center":  0.5000076293945312,
+                             "raw_max":  1.0,
+                             "inverted":  false,
+                             "deadzone":  0.05
+                         },
+                 "throttle":  {
+                                  "source":  "right_stick_x",
+                                  "raw_min":  -0.997039794921875,
+                                  "raw_max":  1.0,
+                                  "inverted":  false
+                              }
+             }
+}
