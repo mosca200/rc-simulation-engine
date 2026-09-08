@@ -4861,11 +4861,13 @@ mod vegetation_tests {
 
     #[test]
     fn vegetation_mesh_index_is_contiguous_and_has_no_gaps() {
-        // 4 assets × 3 LOD × 2 parts = 24 distinct, contiguous mesh slots.
-        let total = 4 * LOD_COUNT * PART_COUNT;
+        // production assets × 3 LOD × 2 parts = 2×3×3×2 = 36 distinct,
+        // contiguous mesh slots.
+        let asset_count = VegetationAssetSet::production().len();
+        let total = asset_count * LOD_COUNT * PART_COUNT;
         assert_eq!(GROUP_COUNT * PART_COUNT, total);
         let mut seen = vec![false; total];
-        for asset in 0..4 {
+        for asset in 0..asset_count {
             for lod in 0..LOD_COUNT {
                 for part in [VegetationPart::Bark, VegetationPart::Foliage] {
                     let index = vegetation_mesh_index(asset, lod as u8, part);

@@ -26,14 +26,17 @@ use crate::Mat4;
 use crate::scenery::{
     DEFAULT_GROUND_Y, FIELD_HALF_EXTENT_M, TREE_MIN_DISTANCE_FROM_RUNWAY_M, runway_safety_rect,
 };
-use crate::vegetation_assets::{VegetationAssetSet, VegetationSpecies};
+use crate::vegetation_assets::{
+    SPECIES_TARGET, VARIANTS_PER_SPECIES_TARGET, VegetationAssetSet, VegetationSpecies,
+};
 
 /// Number of LOD classes (LOD3 billboard is a documented residual gap).
 pub const LOD_COUNT: usize = 3;
 /// Render parts per LOD (bark + foliage).
 pub const PART_COUNT: usize = 2;
-/// Batch-group count: one group per (asset, LOD).
-pub const GROUP_COUNT: usize = 12;
+/// Batch-group count: one group per (asset, LOD). With the production set of
+/// `SPECIES_TARGET × VARIANTS_PER_SPECIES_TARGET` assets.
+pub const GROUP_COUNT: usize = SPECIES_TARGET * VARIANTS_PER_SPECIES_TARGET * LOD_COUNT;
 
 /// Default vegetation seed (matches the former `scenery::DEFAULT_TREE_SEED`).
 pub const DEFAULT_VEGETATION_SEED: u64 = 42;
@@ -263,7 +266,7 @@ impl DeterministicRng {
         Self { state: seed }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -271,11 +274,11 @@ impl DeterministicRng {
         z ^ (z >> 31)
     }
 
-    fn unit(&mut self) -> f32 {
+    pub fn unit(&mut self) -> f32 {
         (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32
     }
 
-    fn range(&mut self, low: f32, high: f32) -> f32 {
+    pub fn range(&mut self, low: f32, high: f32) -> f32 {
         low + (high - low) * self.unit()
     }
 }
@@ -320,10 +323,16 @@ const NEAR_CLUSTER_CENTRES: [[f32; 2]; 10] = [
 ];
 
 /// Members per near cluster (spread).
-const NEAR_CLUSTER_MEMBER_MIN: usize = 10;
-const NEAR_CLUSTER_MEMBER_MAX: usize = 16;
+const NEAR_CLUSTER_MEMBER_MIN: usize = 8;
+const NEAR_CLUSTER_MEMBER_MAX: usize = 17;
 /// Near-cluster member scatter radius (m).
-const NEAR_CLUSTER_SPREAD_M: f32 = 14.0;
+const NEAR_CLUSTER_SPREAD_M: f32 = 15.0;
+/// Secondary "satellite" trees per near cluster (smaller, offset groups so
+/// the near field reads as loose clumps instead of one blob per centre).
+const NEAR_SATELLITE_MIN: usize = 1;
+const NEAR_SATELLITE_MAX: usize = 3;
+/// Satellite offset from the cluster centre (m).
+const NEAR_SATELLITE_DISTANCE_M: f32 = 24.0;
 /// Minimum centre spacing in the near zone (m).
 const NEAR_MIN_SPACING_M: f32 = 7.5;
 /// Boundary belt ring (m).
@@ -332,7 +341,7 @@ const BOUNDARY_OUTER_RADIUS_M: f32 = 230.0;
 /// Boundary angular slots.
 const BOUNDARY_SLOT_COUNT: usize = 16;
 /// Probability a boundary slot is left empty (aperture).
-const BOUNDARY_APERTURE_PROBABILITY: f32 = 0.15;
+const BOUNDARY_APERTURE_PROBABILITY: f32 = 0.14;
 /// Minimum centre spacing in the boundary belt (m).
 const BOUNDARY_MIN_SPACING_M: f32 = 6.0;
 /// Near-zone scale range and boundary scale range.
@@ -348,17 +357,18 @@ const TARGET_MAX_INSTANCES: usize = 320;
 #[must_use]
 fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
     match zone {
-        // Near field: mostly broadleaf field trees with some conifers.
+        // Near field: broadleaf field trees dominate, conifers interspersed.
         0 => {
-            if rng.unit() < 0.72 {
+            if rng.unit() < 0.66 {
                 VegetationSpecies::Deciduous
             } else {
                 VegetationSpecies::Conifer
             }
         }
-        // Boundary: conifers dominate the belt, deciduous fill in.
+        // Boundary: conifers lead, deciduous fill in — an unequal, natural
+        // mix rather than a strict species ring.
         _ => {
-            if rng.unit() < 0.58 {
+            if rng.unit() < 0.52 {
                 VegetationSpecies::Conifer
             } else {
                 VegetationSpecies::Deciduous
@@ -367,23 +377,30 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
     }
 }
 
+/// Asset variant weights per species (uneven so the mix does not read as a
+/// uniform row of look-alikes). Deciduous A/B/C occupy asset slots 0/1/2,
+/// conifers 3/4/5.
 #[must_use]
 fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
     match species {
-        // Assets 0 and 1 (deciduous a / b).
+        // Assets 0..2 (deciduous oak / birch / willow).
         VegetationSpecies::Deciduous => {
-            if variant_roll < 0.55 {
+            if variant_roll < 0.38 {
                 0
-            } else {
+            } else if variant_roll < 0.72 {
                 1
+            } else {
+                2
             }
         }
-        // Assets 2 and 3 (conifer a / b).
+        // Assets 3..5 (conifer pine / spruce / fir).
         VegetationSpecies::Conifer => {
-            if variant_roll < 0.55 {
-                2
-            } else {
+            if variant_roll < 0.42 {
                 3
+            } else if variant_roll < 0.78 {
+                4
+            } else {
+                5
             }
         }
     }
@@ -409,14 +426,16 @@ pub fn flying_field_layout(
     let mut boundary_accepted: Vec<[f32; 2]> = Vec::new();
     let safe_rect = expanded_safety_rect(runway_clearance);
 
-    // Zone 0: near clusters.
+    // Zone 0: near clusters, each followed by loose satellite trees so the
+    // field edge reads as natural clumps rather than one dense blob per
+    // centre.
     for &[cx, cz] in &NEAR_CLUSTER_CENTRES {
         let members = NEAR_CLUSTER_MEMBER_MIN
             + (rng.unit() * (NEAR_CLUSTER_MEMBER_MAX - NEAR_CLUSTER_MEMBER_MIN) as f32) as usize;
-        let spread = NEAR_CLUSTER_SPREAD_M * (0.7 + 0.6 * rng.unit());
+        let spread = NEAR_CLUSTER_SPREAD_M * (0.6 + 0.8 * rng.unit());
         let mut accepted_in_cluster = 0;
         let mut attempts = 0;
-        while accepted_in_cluster < members && attempts < members * 8 {
+        while accepted_in_cluster < members && attempts < members * 10 {
             attempts += 1;
             let x = cx + rng.range(-1.0, 1.0) * spread;
             let z = cz + rng.range(-1.0, 1.0) * spread;
@@ -449,9 +468,53 @@ pub fn flying_field_layout(
                 zone: 0,
             });
         }
+        // Satellites: a small secondary clump away from the main blob.
+        let satellites = NEAR_SATELLITE_MIN
+            + (rng.unit() * (NEAR_SATELLITE_MAX - NEAR_SATELLITE_MIN + 1) as f32) as usize;
+        let satellite_azimuth = rng.range(0.0, std::f32::consts::TAU);
+        let satellite_distance = NEAR_SATELLITE_DISTANCE_M * rng.range(0.75, 1.25);
+        let satellite_cx = cx + satellite_distance * satellite_azimuth.cos();
+        let satellite_cz = cz + satellite_distance * satellite_azimuth.sin();
+        let satellite_spread = NEAR_CLUSTER_SPREAD_M * 0.45;
+        let mut accepted_satellite = 0;
+        attempts = 0;
+        while accepted_satellite < satellites && attempts < satellites * 12 {
+            attempts += 1;
+            let x = satellite_cx + rng.range(-1.0, 1.0) * satellite_spread;
+            let z = satellite_cz + rng.range(-1.0, 1.0) * satellite_spread;
+            if !candidate_ok(
+                x,
+                z,
+                field_half_extent,
+                &safe_rect,
+                &near_accepted,
+                &boundary_accepted,
+                NEAR_MIN_SPACING_M,
+            ) {
+                continue;
+            }
+            near_accepted.push([x, z]);
+            accepted_satellite += 1;
+            let species = species_for_zone(0, &mut rng);
+            let asset_index =
+                asset_index_for(species, rng.unit()).min(assets.len().saturating_sub(1));
+            instances.push(VegetationInstance {
+                position: [x, ground_y, z],
+                yaw_rad: rng.range(0.0, std::f32::consts::TAU),
+                scale: rng.range(NEAR_SCALE_MIN * 0.82, NEAR_SCALE_MAX * 0.92),
+                asset_index,
+                tint: [
+                    rng.range(0.94, 1.04),
+                    rng.range(0.94, 1.04),
+                    rng.range(0.88, 1.00),
+                ],
+                zone: 0,
+            });
+        }
     }
 
-    // Zone 1: boundary belt.
+    // Zone 1: boundary belt — clumps of unequal width/density with natural
+    // apertures and occasional isolated trees.
     let step = std::f32::consts::TAU / BOUNDARY_SLOT_COUNT as f32;
     for slot in 0..BOUNDARY_SLOT_COUNT {
         let anchor = (slot as f32 + 0.5) * step;
@@ -460,15 +523,15 @@ pub fn flying_field_layout(
         }
         let cos_anchor = anchor.cos();
         let member_count = if cos_anchor < -0.25 {
-            13 + (rng.unit() * 8.0) as usize // dense opposite the flightline
+            12 + (rng.unit() * 9.0) as usize // dense opposite the flightline
         } else if cos_anchor > 0.10 {
-            6 + (rng.unit() * 4.0) as usize // sparse toward flightline
+            5 + (rng.unit() * 5.0) as usize // sparse toward flightline
         } else {
-            10 + (rng.unit() * 6.0) as usize
+            8 + (rng.unit() * 7.0) as usize
         };
         let cluster_radius =
             rng.range(BOUNDARY_INNER_RADIUS_M + 6.0, BOUNDARY_OUTER_RADIUS_M - 6.0);
-        let spread_rad = 0.075 * (0.8 + 0.4 * rng.unit());
+        let spread_rad = 0.085 * (0.7 + 0.6 * rng.unit());
         for _ in 0..member_count {
             let angle = anchor + rng.range(-1.0, 1.0) * spread_rad;
             let radius = (cluster_radius + rng.range(-1.0, 1.0) * 7.0)
