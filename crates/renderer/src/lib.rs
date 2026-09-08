@@ -24,6 +24,8 @@ mod surfaces;
 pub mod terrain;
 pub mod terrain_textures;
 pub mod texture;
+pub mod vegetation;
+pub mod vegetation_assets;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
 pub use camera::{
@@ -56,4 +58,15 @@ pub use terrain::{
 };
 pub use texture::{
     DecodedTexture, SamplerConfig, SamplerFilter, SamplerWrap, TextureLoadError, decode_image,
+};
+pub use vegetation::{
+    DEFAULT_DISTANCE_CULL_M, DEFAULT_HYSTERESIS_BAND, DEFAULT_LOD0_MAX_M, DEFAULT_LOD1_MAX_M,
+    DEFAULT_VEGETATION_SEED, DeterministicRng, FrustumPlanes, GROUP_COUNT, LOD_COUNT, PART_COUNT,
+    VegetationDebugMode, VegetationFrameStats, VegetationGpuInstance, VegetationInstance,
+    VegetationLodConfig, VegetationWorld, flying_field_layout, placement_is_valid,
+};
+pub use vegetation_assets::{
+    BARK_BASE, FOLIAGE_BASE, SPECIES_TARGET, VARIANTS_PER_SPECIES_TARGET, VegetationAsset,
+    VegetationAssetSet, VegetationLod, VegetationLodSet, VegetationPart, VegetationSpecies,
+    export_glb, part_metallic, part_roughness,
 };

@@ -185,8 +185,21 @@ pub enum SceneryPreset {
 #[derive(Debug, Clone)]
 pub struct FlyingFieldParams {
     pub ground_y: f32,
+    /// Seed for the legacy G2A/G2E placeholder tree layout.
+    ///
+    /// Only consulted when `legacy_tree_placeholders` is enabled; the
+    /// production preset never sets that flag (G3D owns vegetation placement).
     pub tree_seed: u64,
+    /// Legacy placeholder tree count (G2A near-field cone trees).
     pub tree_count: usize,
+    /// Opt-in for the removed G2A/G2E cone/dome placeholder trees.
+    ///
+    /// `false` by default: the production FlyingField scenery contains only
+    /// runway, markings, fence, pilot markers, poles and the windsock — no
+    /// vegetation geometry. The old generators stay reachable exclusively
+    /// through this flag (unit tests / dev fallback), never from the
+    /// production preset.
+    pub legacy_tree_placeholders: bool,
 }
 
 impl Default for FlyingFieldParams {
@@ -195,6 +208,7 @@ impl Default for FlyingFieldParams {
             ground_y: DEFAULT_GROUND_Y,
             tree_seed: DEFAULT_TREE_SEED,
             tree_count: DEFAULT_TREE_COUNT,
+            legacy_tree_placeholders: false,
         }
     }
 }
@@ -277,52 +291,59 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
         &runway.indices,
     );
 
-    // Trees (deterministic placement + deterministic per-tree variation).
-    let tree_positions = deterministic_tree_positions(
-        params.tree_seed,
-        params.tree_count,
-        FIELD_HALF_EXTENT_M,
-        runway_safety_rect(),
-        TREE_MIN_DISTANCE_FROM_RUNWAY_M,
-    );
-    for (index, &[x, z]) in tree_positions.iter().enumerate() {
-        let variant = deterministic_tree_variant(params.tree_seed, index);
-        let tree = generate_tree(x, params.ground_y, z, &variant);
-        merge_mesh(
-            &mut all_vertices,
-            &mut all_indices,
-            &tree.vertices,
-            &tree.indices,
+    // Legacy G2A/G2E placeholder trees — REACHABLE ONLY VIA
+    // `legacy_tree_placeholders`. The production preset keeps this off:
+    // G3D's VegetationWorld owns all vegetation placement now. These
+    // generators are retained as a dev/test fallback under an explicit flag
+    // so the old tests keep exercising them without leaking into production.
+    if params.legacy_tree_placeholders {
+        // Trees (deterministic placement + deterministic per-tree variation).
+        let tree_positions = deterministic_tree_positions(
+            params.tree_seed,
+            params.tree_count,
+            FIELD_HALF_EXTENT_M,
+            runway_safety_rect(),
+            TREE_MIN_DISTANCE_FROM_RUNWAY_M,
         );
-        objects.push(SceneryObject {
-            kind: SceneryVisualKind::TreeTrunk,
-            position: [x, params.ground_y, z],
-            rotation_yaw_rad: variant.yaw_rad,
-            scale: variant.height_scale,
-            variant_id: 0,
-        });
-    }
+        for (index, &[x, z]) in tree_positions.iter().enumerate() {
+            let variant = deterministic_tree_variant(params.tree_seed, index);
+            let tree = generate_tree(x, params.ground_y, z, &variant);
+            merge_mesh(
+                &mut all_vertices,
+                &mut all_indices,
+                &tree.vertices,
+                &tree.indices,
+            );
+            objects.push(SceneryObject {
+                kind: SceneryVisualKind::TreeTrunk,
+                position: [x, params.ground_y, z],
+                rotation_yaw_rad: variant.yaw_rad,
+                scale: variant.height_scale,
+                variant_id: 0,
+            });
+        }
 
-    // G2E: boundary vegetation belt — clustered, deterministic, distant.
-    // Denser opposite the flightline, sparse toward the flightline/windsock
-    // quadrant, with deterministic apertures. All instances merge into the
-    // same single SceneryMesh below (one draw call).
-    let boundary_variants = deterministic_boundary_vegetation_layout(params.tree_seed);
-    for variant in &boundary_variants {
-        append_boundary_vegetation(
-            &mut all_vertices,
-            &mut all_indices,
-            variant.position,
-            params.ground_y,
-            variant,
-        );
-        objects.push(SceneryObject {
-            kind: SceneryVisualKind::BoundaryVegetation,
-            position: [variant.position[0], params.ground_y, variant.position[1]],
-            rotation_yaw_rad: variant.yaw_rad,
-            scale: variant.height_scale,
-            variant_id: variant.silhouette as u8,
-        });
+        // G2E: boundary vegetation belt — clustered, deterministic, distant.
+        // Denser opposite the flightline, sparse toward the flightline/windsock
+        // quadrant, with deterministic apertures. All instances merge into the
+        // same single SceneryMesh below (one draw call).
+        let boundary_variants = deterministic_boundary_vegetation_layout(params.tree_seed);
+        for variant in &boundary_variants {
+            append_boundary_vegetation(
+                &mut all_vertices,
+                &mut all_indices,
+                variant.position,
+                params.ground_y,
+                variant,
+            );
+            objects.push(SceneryObject {
+                kind: SceneryVisualKind::BoundaryVegetation,
+                position: [variant.position[0], params.ground_y, variant.position[1]],
+                rotation_yaw_rad: variant.yaw_rad,
+                scale: variant.height_scale,
+                variant_id: variant.silhouette as u8,
+            });
+        }
     }
 
     // Marker poles along runway edges (iterating along Z, placed at ±X).
@@ -1439,6 +1460,17 @@ mod tests {
         generate_flying_field(&FlyingFieldParams::default())
     }
 
+    /// Legacy dev/test fallback: the production preset never enables
+    /// `legacy_tree_placeholders`; these tests opt in explicitly to keep
+    /// exercising the removed G2A/G2E cone/dome generators.
+    fn legacy_tree_scene() -> SceneryScene {
+        let params = FlyingFieldParams {
+            legacy_tree_placeholders: true,
+            ..FlyingFieldParams::default()
+        };
+        generate_flying_field(&params)
+    }
+
     #[test]
     fn runway_is_centered_at_origin() {
         let scene = default_scene();
@@ -1739,7 +1771,20 @@ mod tests {
         let scene = default_scene();
         assert!(scene.mesh.vertices.len() > 100);
         assert!(scene.mesh.indices.len() > 100);
-        assert!(scene.objects.len() >= DEFAULT_TREE_COUNT);
+        // Production static props: 12 marker poles + 1 fence run + 4 pilot
+        // markers + 1 windsock. No legacy tree objects by default.
+        assert!(
+            scene.objects.len() >= 18,
+            "static props missing: {} objects",
+            scene.objects.len()
+        );
+        assert!(
+            scene.objects.iter().all(|o| !matches!(
+                o.kind,
+                SceneryVisualKind::TreeTrunk | SceneryVisualKind::BoundaryVegetation
+            )),
+            "production scenery must not contain legacy placeholder vegetation"
+        );
     }
 
     #[test]
@@ -2036,9 +2081,9 @@ mod tests {
             assert!((-0.40..=0.40).contains(&a.yaw_rad));
         }
         // The same seed + index must also yield identical per-object
-        // transforms across independent generations.
-        let scene_a = default_scene();
-        let scene_b = default_scene();
+        // transforms across independent generations (legacy opt-in scenes).
+        let scene_a = legacy_tree_scene();
+        let scene_b = legacy_tree_scene();
         for (a, b) in scene_a.objects.iter().zip(scene_b.objects.iter()) {
             if a.kind == SceneryVisualKind::TreeTrunk {
                 assert_eq!(a.rotation_yaw_rad.to_bits(), b.rotation_yaw_rad.to_bits());
@@ -2088,16 +2133,89 @@ mod tests {
 
     #[test]
     fn scenery_geometry_stays_within_an_explicit_budget() {
+        // Production (no placeholder vegetation): runway + markings + fence +
+        // poles + windsock + markers must stay rich but lean (760 triangles
+        // today). The 2500+ count only ever existed because of the legacy
+        // cone/dome trees, which G3D replaces with instanced renderering.
         let scene = default_scene();
         let triangles = scene.mesh.triangle_count();
         assert!(
-            triangles >= 2_500,
+            triangles >= 500,
             "G2C scene lost presentation richness: {triangles} triangles"
         );
         assert!(
             triangles <= MAX_FLYING_FIELD_TRIANGLES as usize,
             "scene exceeded budget: {triangles} > {MAX_FLYING_FIELD_TRIANGLES}"
         );
+        // Legacy opt-in scenes still keep the merged budget honest.
+        let legacy = legacy_tree_scene();
+        let legacy_triangles = legacy.mesh.triangle_count();
+        assert!(
+            legacy_triangles <= MAX_FLYING_FIELD_TRIANGLES as usize,
+            "legacy scene exceeded budget: {legacy_triangles}"
+        );
+    }
+
+    // ── G3D: vegetation separation from the production scenery ────────────
+
+    #[test]
+    fn production_scenery_contains_no_tree_objects_or_geometry() {
+        let scene = default_scene();
+        assert!(
+            scene.objects.iter().all(|o| !matches!(
+                o.kind,
+                SceneryVisualKind::TreeTrunk
+                    | SceneryVisualKind::TreeCanopy
+                    | SceneryVisualKind::BoundaryVegetation
+            )),
+            "production FlyingField must not carry G2A/G2E placeholder vegetation objects"
+        );
+        // No vertex may use the legacy canopy palette (cone/dome greens) nor
+        // the legacy trunk brown; production scenery keeps only the static
+        // prop palette. This makes the test discriminate geometry, not just
+        // the object list.
+        const LEGACY_TRUNK: [f32; 4] = [0.35, 0.22, 0.10, 1.0];
+        let legacy_colored = scene
+            .mesh
+            .vertices
+            .iter()
+            .filter(|v| {
+                v.color == LEGACY_TRUNK
+                    || (v.color[0] < 0.20
+                        && v.color[1] > 0.35
+                        && v.color[2] < 0.25
+                        && v.color[3] == 1.0)
+            })
+            .count();
+        assert_eq!(
+            legacy_colored, 0,
+            "production scenery must not bake legacy tree colors ({legacy_colored} vertices)"
+        );
+    }
+
+    #[test]
+    fn legacy_placeholder_trees_are_an_explicit_opt_in() {
+        // Production default: no TreeTrunk / BoundaryVegetation objects.
+        let production = default_scene();
+        assert!(
+            production
+                .objects
+                .iter()
+                .all(|o| o.kind != SceneryVisualKind::TreeTrunk
+                    && o.kind != SceneryVisualKind::BoundaryVegetation)
+        );
+        // Opt-in scenes still produce the legacy layout (dev/test fallback).
+        let legacy = legacy_tree_scene();
+        let tree_objects = legacy
+            .objects
+            .iter()
+            .filter(|o| o.kind == SceneryVisualKind::TreeTrunk)
+            .count();
+        assert_eq!(
+            tree_objects, DEFAULT_TREE_COUNT,
+            "legacy opt-in scene must contain the legacy tree count"
+        );
+        assert!(legacy.mesh.triangle_count() > production.mesh.triangle_count());
     }
 
     // ── G2E: boundary vegetation ──────────────────────────────────────────
@@ -2238,8 +2356,9 @@ mod tests {
             "expected at least 3 silhouettes, got {}",
             silhouettes.len()
         );
-        // Registered object metadata exposes the same variety.
-        let scene = default_scene();
+        // Registered object metadata exposes the same variety (legacy
+        // opt-in scenes only — production no longer places boundary belts).
+        let scene = legacy_tree_scene();
         let ids: HashSet<u8> = scene
             .objects
             .iter()
@@ -2343,7 +2462,8 @@ mod tests {
 
     #[test]
     fn boundary_instances_are_registered_in_objects() {
-        let scene = default_scene();
+        // The belt only exists in legacy opt-in scenes.
+        let scene = legacy_tree_scene();
         let layout = boundary_layout();
         let registered: Vec<&SceneryObject> = scene
             .objects
