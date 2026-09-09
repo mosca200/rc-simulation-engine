@@ -1,0 +1,9 @@
+backend=Vulkan
+name=NVIDIA GeForce RTX 3090
+vendor=0x10de
+device=0x2204
+device_type=DiscreteGpu
+driver=NVIDIA
+driver_info=595.97
+max_texture_dimension_2d=32768
+has_timestamp_query=true

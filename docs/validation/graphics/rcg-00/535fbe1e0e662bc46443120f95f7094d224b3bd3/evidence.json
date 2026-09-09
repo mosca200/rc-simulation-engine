@@ -1,0 +1,87 @@
+{
+  "package": "RCG-00",
+  "commit": "535fbe1e0e662bc46443120f95f7094d224b3bd3",
+  "branch": "rcg-00-baseline (from integration/current)",
+  "capture_date": "2026-09-09",
+  "environment": {
+    "os": "Microsoft Windows 11 Pro 10.0.26200",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram_gib": 31.9,
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "vram_gib": 24,
+    "gpu_driver": "595.97 (Win32_VideoController DriverVersion 32.0.15.9597)",
+    "wgpu_backend": "Vulkan",
+    "wgpu_adapter": "NVIDIA GeForce RTX 3090 (vendor 0x10de, device 0x2204, DiscreteGpu)",
+    "wgpu_version": "30.0.1",
+    "winit_version": "0.30.13",
+    "gltf_version": "1.4.1",
+    "rust_toolchain": "1.98.0 (rust-toolchain.toml channel = 1.98.0)",
+    "display_resolution": "1920x1080",
+    "refresh_hz": 100,
+    "blender": "4.2.16 LTS portable (tmp/blender_portable, usato solo dalla pipeline PV1)",
+    "timestamp_query_feature": true
+  },
+  "physics": {
+    "model_id": "acro-electric-01",
+    "physics_fingerprint": "07c48378ad0f8de786f0927c1bba206681c4153deb50174bf0c518d6eae5ba73",
+    "physics_hz": 500,
+    "model_json_sha256": "F0CC5CE4711F07D85DC60C0F6C61B0FBA48D04107205FFA0CB42329F00AA0EEE",
+    "aircraft_glb_sha256": "55932887DA7E5114846BCF20F5BF1219FED303810AC761043C22275BECC470D9"
+  },
+  "captures": [
+    {
+      "file": "s1_play_chase_ground.png",
+      "command": "rcsim-app play --scenery flying-field --exposure-ev 0.0",
+      "camera": "chase (distance 3.5 m, height 1.25 m, vfov 55)",
+      "scenario": "FlyingField, ground start, throttle 0",
+      "window_px": "1296x759",
+      "shows": ["acro vicino", "terreno G3A-R", "vegetazione G3D-R", "ombre di contatto", "pali pista"]
+    },
+    {
+      "file": "s2_pilot_ground.png",
+      "command": "rcsim-app render --start-on-ground --scenery flying-field --camera pilot --throttle 0",
+      "camera": "pilot (posizione fissa 0,1.8,20 m, vfov 55)",
+      "scenario": "FlyingField, ground start, throttle 0",
+      "window_px": "1296x759",
+      "shows": ["acro a ~20 m", "ombre alberi sul terreno", "horizon haze"]
+    },
+    {
+      "file": "s3_chase_air_100m.png",
+      "command": "rcsim-app render --altitude-m 100 --airspeed-mps 15 --throttle 0.6 --scenery flying-field --camera chase --chase-distance-m 100",
+      "camera": "chase 100 m",
+      "scenario": "FlyingField, volo 100 m / 15 m/s",
+      "window_px": "1296x759",
+      "shows": ["acro a distanza significativa (punto piccolo ma presente)", "fading terreno-haze", "cielo analitico piatto"]
+    },
+    {
+      "file": "s4_pilot_air.png",
+      "command": "rcsim-app render --altitude-m 100 --airspeed-mps 15 --throttle 0.6 --scenery flying-field --camera pilot",
+      "camera": "pilot",
+      "scenario": "FlyingField, volo 100 m / 15 m/s",
+      "window_px": "1296x759",
+      "shows": ["vista pilota in volo"]
+    },
+    {
+      "file": "s5_chase_ground_25m.png",
+      "command": "rcsim-app render --start-on-ground --scenery flying-field --camera chase --chase-distance-m 25 --throttle 0",
+      "camera": "chase 25 m",
+      "scenario": "FlyingField, ground start, throttle 0",
+      "window_px": "1296x759",
+      "shows": ["campo con vegetazione e ombre", "materiali terreno"]
+    },
+    {
+      "file": "s6_play_ev15.png",
+      "command": "rcsim-app play --scenery flying-field --exposure-ev 1.5",
+      "camera": "chase",
+      "scenario": "FlyingField, ground start, throttle 0, EV +1.5",
+      "window_px": "1296x759",
+      "shows": ["risposta esposizione HDR/tone mapping senza clipping"]
+    }
+  ],
+  "notes": [
+    "Catture finestra reale via tmp/capture-win.ps1 (CopyFromScreen), renderer di produzione release.",
+    "Nessuna sequenza video: lo strumento non esiste nel repo; sequenze immagine possibili ripetendo capture-win.ps1.",
+    "Nessuna instrumentation frame-time nel renderer (limitazione documentata da G3E): prestazioni NOT_MEASURED.",
+    "Le immagini Gate 0 storiche (docs/validation/gate0) NON sono evidenza di questa build."
+  ]
+}

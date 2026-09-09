@@ -1,0 +1,2252 @@
+   Compiling windows-sys v0.61.2
+   Compiling serde_json v1.0.151
+   Compiling regex-automata v0.4.18
+   Compiling serde v1.0.229
+   Compiling allocation-counter v0.8.1
+   Compiling ciborium-ll v0.2.2
+   Compiling num-complex v0.4.6
+   Compiling ciborium v0.2.2
+   Compiling simba v0.9.1
+   Compiling tinytemplate v1.2.1
+   Compiling gltf-json v1.4.1
+   Compiling winapi-util v0.1.11
+   Compiling nu-ansi-term v0.50.3
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling regex v1.13.1
+   Compiling matchers v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling criterion v0.7.0
+   Compiling gltf v1.4.1
+   Compiling renderer v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\renderer)
+   Compiling nalgebra v0.34.2
+   Compiling sim_math v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\sim_math)
+   Compiling sim_core v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\sim_core)
+   Compiling model v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\model)
+   Compiling platform v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\platform)
+   Compiling aircraft v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\aircraft)
+   Compiling replay v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\replay)
+   Compiling telemetry v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\telemetry)
+   Compiling rcsim-app v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.62s
+     Running unittests src\lib.rs (target\debug\deps\aircraft-db468bf7a5f17480.exe)
+
+running 65 tests
+test simulation::tests::as13_glider_adds_no_propulsion_wrench ... ok
+test simulation::tests::as12_propulsion_aggregation_is_aero_plus_propulsion ... ok
+test simulation::tests::as11_two_element_aero_aggregate_matches_manual_sum ... ok
+test simulation::tests::as17_aero_is_recomputed_from_each_stage_state ... ok
+test simulation::tests::as18_propulsion_is_recomputed_from_each_stage_axial_speed ... ok
+test simulation::tests::as23_positive_yaw_input_produces_positive_yawing_moment ... ok
+test simulation::tests::as15_controls_advance_exactly_once_per_step ... ok
+test simulation::tests::as14_gravity_is_not_double_counted ... ok
+test simulation::tests::as16_all_rk4_stages_share_the_same_effective_orientation ... ok
+test simulation::tests::as22_positive_roll_input_produces_positive_rolling_moment ... ok
+test simulation::tests::as21_positive_pitch_input_produces_positive_pitching_moment ... ok
+test simulation::tests::as8_nonidentity_base_composes_before_local_y_deflection ... ok
+test simulation::tests::as7_servo_neutral_preserves_base_orientation_bit_exactly ... ok
+test simulation::tests::as19_snapshot_and_simulation_use_post_step_accounting ... ok
+test simulation::tests::m2_8c_downwash_rotation_obeys_sign_and_preserves_speed ... ok
+test simulation::tests::as9_opposite_aileron_gains_produce_opposite_geometry ... ok
+test simulation::tests::huge_finite_gain_that_can_overflow_is_rejected_at_initialization ... ok
+test simulation::tests::rudder_fixture_local_y_is_body_vertical ... ok
+test simulation::tests::positive_local_y_deflection_produces_positive_element_alpha ... ok
+test simulation::tests::m2_4b_v4_map_is_stage_local_instead_of_freezing_the_k1_operating_point ... ok
+test simulation::tests::symmetric_aircraft_cancels_lateral_force_roll_and_yaw ... ok
+test simulation::tests::complete_step_updates_all_subsystems_and_allocates_nothing ... ok
+test simulation::tests::as10_unbound_fixed_element_does_not_move ... ok
+test trim_characterization::tests::alpha_step_must_be_finite_and_positive ... ok
+test simulation::tests::m2_8c_runtime_diagnostic_uses_source_solution_without_feedback ... ok
+test trim::tests::bitwise_equal_detects_signed_zero_difference_in_quaternion ... ok
+test trim::tests::bitwise_equal_detects_signed_zero_difference_in_state_position ... ok
+test trim_characterization::tests::elevator_step_must_be_finite_and_positive ... ok
+test trim::tests::bitwise_equal_detects_signed_zero_difference_in_residual ... ok
+test trim::tests::bitwise_equal_rejects_nonzero_difference ... ok
+test trim::tests::bitwise_equal_identical_evaluations ... ok
+test trim::tests::partial_eq_and_bitwise_diverge_on_signed_zero ... ok
+test trim_characterization::tests::synthetic_fixture_remains_synthetic_test ... ok
+test trim_characterization::tests::all_characterized_derivatives_are_finite ... ok
+test trim_characterization::tests::dmy_dalpha_equals_central_difference_formula ... ok
+test trim_characterization::tests::valid_steps_construct_successfully ... ok
+test trim_characterization::tests::alpha_perturbation_freezes_elevator_and_throttle ... ok
+test trim_characterization::tests::dmy_delevator_equals_central_difference_formula ... ok
+test trim_characterization::tests::elevator_perturbation_freezes_alpha_and_throttle ... ok
+test trim_characterization::tests::trim_failure_point_is_not_characterized ... ok
+test trim_characterization::tests::too_large_alpha_step_produces_unavailable ... ok
+test trim_characterization::tests::successful_sweep_produces_characterization_in_order ... ok
+test trim_characterization::tests::target_airspeed_unchanged_during_perturbations ... ok
+test trim_characterization::tests::identical_inputs_produce_identical_outputs ... ok
+test trim_qualification::tests::range_status_boundary_identity_distinguishes_signed_zero_bits ... ok
+test trim_characterization::tests::too_large_elevator_step_produces_unavailable ... ok
+test trim_qualification::tests::range_status_degenerate_interval_only_admits_exact_endpoint ... ok
+test trim_qualification::tests::range_status_distinguishes_exact_bounds_from_interior ... ok
+test trim_qualification::tests::range_status_infinity_is_non_finite ... ok
+test trim_qualification::tests::range_status_finite_values_classify_correctly ... ok
+test trim_characterization::tests::sweep_length_mismatch_fails_closed ... ok
+test trim_qualification::tests::qualification_determinism_is_bitwise ... ok
+test trim_qualification::tests::range_status_inverted_interval_is_invalid ... ok
+test trim_qualification::tests::range_status_nan_is_non_finite ... ok
+test trim_characterization::tests::sweep_target_airspeed_mismatch_fails_closed ... ok
+test trim_qualification::tests::qualification_preserves_diagnostics_on_signed_zero_reevaluation_failure ... ok
+test trim_qualification::tests::qualification_rejects_signed_zero_reevaluation_mismatch ... ok
+test trim_sweep::tests::unverifiable_outcome_does_not_carry_an_independent_evaluation ... ok
+test trim_sweep::tests::sweep_real_path_rejects_signed_zero_via_production_comparator ... ok
+test trim_sweep::tests::mismatch_detail_accessors_round_trip_inputs ... ok
+test trim_sweep::tests::outcome_predicates_are_disjoint ... ok
+test simulation::tests::acro_electric_01_complete_step_allocates_nothing_after_initialization ... ok
+test simulation::tests::as20_repeat_runs_are_bit_identical ... ok
+test simulation::tests::acro_electric_01_headless_smoke_run ... ok
+test simulation::tests::ten_thousand_step_run_remains_finite_and_servos_stay_in_travel ... ok
+
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+     Running tests\airframe_ground_contacts_oa2c.rs (target\debug\deps\airframe_ground_contacts_oa2c-3c5206da50aeccef.exe)
+
+running 3 tests
+test normal_gear_stance_has_weight_on_wheels_without_airframe_support ... ok
+test belly_reaction_is_included_in_rk4_without_fabricated_gear ... ok
+test abnormal_tip_impact_is_bounded_finite_and_repeatable_at_500_hz ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running tests\common_ground.rs (target\debug\deps\common_ground-109aebc4b1bfe9ab.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\finite_wing_induced_m2_8b.rs (target\debug\deps\finite_wing_induced_m2_8b-385e8b5e3ac858da.exe)
+
+running 18 tests
+test reynolds_family_member_support ... ok
+test deterministic_repeated_evaluation ... ok
+test legacy_v1_model_unchanged ... ok
+test no_nan_inf_for_valid_configs ... ok
+test asymmetric_q_s_weighting ... ok
+test assigned_element_not_double_counted ... ok
+test unassigned_element_remains_quasi2d ... ok
+test force_direction_unchanged_by_finite_wing ... ok
+test reynolds_uses_physical_speed_not_effective_alpha ... ok
+test analytic_linear_polar_finite_wing_solution ... ok
+test v5_empty_surfaces_remains_legacy ... ok
+test finite_wing_reduces_lift_vs_quasi2d ... ok
+test post_stall_polar_deterministic ... ok
+test higher_e_reduces_correction ... ok
+test zero_alpha_zero_induced ... ok
+test higher_ar_reduces_correction ... ok
+test induced_drag_is_nonnegative ... ok
+test simulation_step_deterministic_with_surfaces ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests\ground_acceptance_phase2.rs (target\debug\deps\ground_acceptance_phase2-86e3b9c878558efc.exe)
+
+running 1 test
+test full_takeoff_airborne_descent_touchdown_chain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+
+     Running tests\ground_contact_phase2.rs (target\debug\deps\ground_contact_phase2-10e590caf8feb37f.exe)
+
+running 14 tests
+test contact_velocity_includes_omega_cross_r ... ok
+test free_rolling_uses_only_rolling_resistance ... ok
+test damping_opposes_penetration_velocity ... ok
+test commanded_braking_adds_bounded_longitudinal_resistance ... ok
+test free_body_above_ground_produces_zero_wrench ... ok
+test ground_pushes_but_never_pulls ... ok
+test friction_force_is_tangent_to_ground_at_arbitrary_attitude ... ok
+test longitudinal_resistance_opposes_reverse_motion_and_is_zero_at_rest ... ok
+test steering_rotates_wheel_basis ... ok
+test wheel_radius_moves_ground_force_moment_to_the_contact_point ... ok
+test longitudinal_rolling_accelerates_and_lateral_friction_opposes_sideslip ... ok
+test friction_and_rolling_resistance_create_no_energy ... ok
+test thrust_accelerates_wheeled_aircraft_along_runway ... ok
+test static_rest_settles_and_supports_weight ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running tests\ground_takeoff_landing_phase2.rs (target\debug\deps\ground_takeoff_landing_phase2-618f2953faaa1f97.exe)
+
+running 6 tests
+test elevator_binding_changes_tail_geometry_and_pitching_wrench ... ok
+test ground_step_holds_zero_allocation_guarantee ... ok
+test landing_touchdown_is_finite_and_damped ... ok
+test takeoff_emerges_from_physics_without_trigger ... ok
+test identical_ground_scenarios_reproduce_bitwise ... ok
+test hard_landing_bounces_but_stays_finite ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests\longitudinal_trim_m2_5.rs (target\debug\deps\longitudinal_trim_m2_5-6dc217a90c4a0fa3.exe)
+
+running 6 tests
+test request_validation_fails_closed_and_initial_guess_is_clamped ... ok
+test fixture_is_synthetic_and_does_not_promote_reference_aircraft ... ok
+test elevator_and_throttle_perturbations_are_physically_connected ... ok
+test bounded_infeasible_case_returns_a_finite_diagnostic_failure ... ok
+test synthetic_trim_converges_is_deterministic_and_re_evaluates_through_runtime_physics ... ok
+test reynolds_and_m2_4b_propulsion_both_change_trim ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\longitudinal_trim_sweep_m2_6a.rs (target\debug\deps\longitudinal_trim_sweep_m2_6a-66b5859be6c9f2e9.exe)
+
+running 11 tests
+test residuals_helper_is_within_matches_shared_request_tolerances ... ok
+test sweep_request_validation_fails_closed_on_invalid_speed_list ... ok
+test sweep_outcome_helpers_match_variants ... ok
+test fixture_remains_synthetic_test_and_does_not_promote_reference_aircraft ... ok
+test successful_points_independently_re_evaluate_within_trim_tolerances ... ok
+test public_integrity_detail_api_is_reachable_from_outside_the_module ... ok
+test deliberately_bounded_infeasible_point_is_a_deterministic_trim_failure_point ... ok
+test deterministic_ordering_is_explicit_and_partial_results_are_not_built_for_invalid_request ... ok
+test changing_speed_changes_successful_trim_solutions ... ok
+test sweep_produces_one_ordered_result_per_requested_speed ... ok
+test identical_sweeps_produce_identical_structured_results ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\propeller_gyroscopic_m2_8f.rs (target\debug\deps\propeller_gyroscopic_m2_8f-9a3cadaed26442ac.exe)
+
+running 4 tests
+test orthogonal_body_rate_matches_analytic_moment_without_changing_force_or_reaction_torque ... ok
+test spin_direction_and_propeller_orientation_control_gyro_direction ... ok
+test zero_inertia_and_zero_cross_product_conditions_add_no_gyro ... ok
+test gyroscopic_rk4_is_bit_deterministic_and_allocation_free ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\propeller_slipstream_m2_8d.rs (target\debug\deps\propeller_slipstream_m2_8d-b87c19e902399962.exe)
+
+running 11 tests
+test induced_velocity_matches_momentum_theory_and_unsupported_domains_are_zero ... ok
+test axial_v_uses_propeller_location_orientation_wind_and_stage_angular_velocity ... ok
+test finite_wing_solution_uses_each_members_actual_qs_and_adjusted_reynolds ... ok
+test slipstream_then_downwash_then_self_induction_is_discriminating_and_preserves_speed ... ok
+test force_direction_uses_final_physical_flow_and_control_deflection_keeps_slipstream ... ok
+test propulsion_wrench_is_combined_exactly_once_and_fixed_polar_targets_work ... ok
+test authored_factor_scales_vi_and_throttle_enters_only_through_actual_thrust ... ok
+test target_speed_dynamic_pressure_and_reynolds_use_the_physical_wake_vector ... ok
+test trim_qualification_audits_the_exact_runtime_slipstream_flow ... ok
+test empty_v7_and_zero_factor_preserve_uncoupled_v6_physics_bit_exactly ... ok
+test evaluation_allocates_nothing_and_repeated_rk4_is_bit_deterministic ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\propeller_swirl_m2_8e.rs (target\debug\deps\propeller_swirl_m2_8e-a1cd6e843de5b2f1.exe)
+
+running 5 tests
+test swirl_precedes_downwash_and_target_self_induction ... ok
+test spin_sign_and_opposite_radial_positions_reverse_tangential_flow ... ok
+test zero_swirl_is_bit_exact_m2_8d_and_positive_swirl_is_tangential ... ok
+test final_physical_flow_drives_q_reynolds_and_aerodynamic_wrench ... ok
+test repeated_swirl_evaluation_is_bit_deterministic_and_allocation_free ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\reynolds_runtime_m2_3c.rs (target\debug\deps\reynolds_runtime_m2_3c-f08af3349310ad6d.exe)
+
+running 2 tests
+test m2_3c_13_rk4_uses_stage_local_reynolds_instead_of_committed_state_reynolds ... ok
+test m2_3c_20_repeated_reynolds_aware_runs_are_bit_deterministic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests\runtime_soak_m2_12a.rs (target\debug\deps\runtime_soak_m2_12a-2c3572f470bc3cec.exe)
+
+running 4 tests
+test long_deterministic_soak_state_validity ... ok
+test full_aircraft_step_allocates_nothing_after_warmup ... ok
+test exact_long_run_determinism ... ok
+test state_hash_consistency_across_identical_runs ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.06s
+
+     Running tests\sig_kadet_lt40_simulation_m2_10a.rs (target\debug\deps\sig_kadet_lt40_simulation_m2_10a-6c3d1daf0ffa8ce0.exe)
+
+running 6 tests
+test lt40_simulation_initializes ... ok
+test lt40_propulsion_initializes ... ok
+test lt40_control_surfaces_bound ... ok
+test lt40_reynolds_family_path_exercised ... ok
+test lt40_no_nan_inf_at_trainer_speed ... ok
+test lt40_simulation_advances_finite_state ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.72s
+
+     Running tests\system_physics_acceptance_m2_11a.rs (target\debug\deps\system_physics_acceptance_m2_11a-3a9b9e2d807d5a09.exe)
+
+running 9 tests
+test symmetry_no_spontaneous_lateral_forces ... ok
+test energy_drag_invariant ... ok
+test aerodynamic_scaling_density_doubles_force_and_moment ... ok
+test symmetry_mirrored_lateral_response ... ok
+test aerodynamic_scaling_velocity_quadruples_force_and_moment ... ok
+test small_longitudinal_perturbation ... ok
+test trim_dynamic_hold ... ok
+test determinism_exact_replay ... ok
+test long_finite_run ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests\trim_domain_qualification_m2_6c.rs (target\debug\deps\trim_domain_qualification_m2_6c-54594487ce34a12e.exe)
+
+running 46 tests
+test classifier_exact_boundaries_are_supported_typed_statuses ... ok
+test fixed_polar_alpha_in_range_is_qualified ... ok
+test fixed_propeller_table_shaft_speed_domain_is_none ... ok
+test controlled_surface_deflection_changes_section_alpha ... ok
+test fixed_polar_alpha_audit_records_correct_bounds ... ok
+test fixed_propeller_table_j_out_of_range_emits_typed_blocker ... ok
+test dual_node_j_blocker_when_one_node_rejects ... ok
+test blocker_order_follows_explicit_aero_propulsion_residual_integrity_sequence ... ok
+test audit_classification_matches_direct_authored_domain_data ... ok
+test aero_audits_are_in_model_order ... ok
+test fixed_propeller_table_j_in_domain_no_blocker ... ok
+test fixed_polar_out_of_range_emits_typed_alpha_blocker ... ok
+test limits_reject_nan ... ok
+test limits_reject_infinity ... ok
+test limits_reject_negative ... ok
+test limits_accept_zero ... ok
+test downwash_target_audit_uses_the_runtime_rotated_flow ... ok
+test exact_boundary_residual_limits_pass_deterministically ... ok
+test asymmetric_model_trims_successfully_but_can_fail_qualification ... ok
+test finite_wing_effective_alpha_changes_domain_decision ... ok
+test no_propulsion_returns_not_present ... ok
+test full_residual_audit_preserves_signed_values ... ok
+test each_off_axis_residual_threshold_fails_independently ... ok
+test non_finite_residual_makes_mixed_audit_unavailable_and_preserves_blockers ... ok
+test permissive_limits_pass_residual_qualification ... ok
+test propulsion_audit_records_thrust_torque_rpm_and_j ... ok
+test propulsion_audit_uses_accepted_throttle ... ok
+test propulsion_model_returns_present_audit ... ok
+test re_evaluation_equality_check_passes_for_valid_solution ... ok
+test repeated_identical_qualification_is_identical ... ok
+test repeated_qualification_deterministic_to_bits ... ok
+test reynolds_above_range_is_rejected ... ok
+test reynolds_below_range_is_rejected ... ok
+test reynolds_dual_node_alpha_blocker_when_upper_node_rejects ... ok
+test reynolds_in_range_asserts_actual_expected_value ... ok
+test reynolds_in_range_is_qualified ... ok
+test runtime_wrench_bitwise_matches_solution_evaluation ... ok
+test shaft_speed_map_out_of_range_emits_typed_blocker ... ok
+test shaft_speed_map_in_range_has_some_domain ... ok
+test rpm_domain_is_not_declared_without_authored_rpm_support_range ... ok
+test strict_off_axis_zero_limits_produce_exact_typed_blockers ... ok
+test valid_inputs_produce_finite_diagnostics_everywhere ... ok
+test sweep_qualification_preserves_request_ordering ... ok
+test unassigned_v5_element_remains_quasi2d_in_qualification ... ok
+test sweep_trim_failure_maps_to_typed_trim_failure_without_diagnostics ... ok
+test repeated_sweep_qualification_is_deterministically_equal_including_failures ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\wing_tail_downwash_m2_8c.rs (target\debug\deps\wing_tail_downwash_m2_8c-b5b1f5298072aa1f.exe)
+
+running 7 tests
+test pure_rotation_preserves_target_reynolds_and_uses_the_correct_family_interpolation ... ok
+test positive_source_lift_rotates_target_flow_and_composes_target_induced_alpha ... ok
+test unassigned_element_is_unchanged_and_induced_drag_is_individually_accounted ... ok
+test independent_interactions_are_declaration_order_independent ... ok
+test fixed_polar_target_and_negative_source_lift_have_the_expected_direction ... ok
+test empty_and_zero_interactions_preserve_prior_finite_wing_physics_bit_exactly ... ok
+test evaluation_allocates_nothing_and_repeated_rk4_is_bit_deterministic ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running benches\aircraft_runtime_soak.rs (target\debug\deps\aircraft_runtime_soak-7ffa647154714767.exe)
+
+RC Simulation Engine
+mode: aircraft-runtime-benchmark
+model_id: synthetic_non_reference_trim_v4
+physics_hz: 500
+steps: 30000
+simulated_duration_s: 60.0
+elapsed_wall_time_s: 4.0644
+mean_step_wall_time_s: 0.000135481
+steps_per_second: 7381.1
+realtime_factor: 14.76
+
+NOTE: performance data is hardware-dependent and diagnostic only.
+realtime_factor > 1 means faster than realtime at 500 Hz on this machine.
+     Running benches\aircraft_s6_1.rs (target\debug\deps\aircraft_s6_1-d0fc82da75587798.exe)
+Testing B17/aggregate_acro_aero_wrench
+Success
+
+Testing B18/complete_aircraft_step
+Success
+
+     Running unittests src\lib.rs (target\debug\deps\model-36bfcfcce6853f8a.exe)
+
+running 72 tests
+test reference_xfoil::tests::does_not_parse_real_evidence_artifact ... ok
+test reference_xfoil::tests::empty_input ... ok
+test reference_xfoil::tests::header_not_found ... ok
+test reference_xfoil::tests::invalid_forced_transition_lower_negative ... ok
+test reference_xfoil::tests::invalid_forced_transition_nan ... ok
+test reference_xfoil::tests::invalid_forced_transition_upper_above_one ... ok
+test reference_xfoil::tests::inf_value_rejected ... ok
+test reference_xfoil::tests::duplicate_alpha_rejected ... ok
+test reference_xfoil::tests::decreasing_alpha_rejected ... ok
+test reference_xfoil::tests::data_row_column_count_must_match_header ... ok
+test reference_xfoil::tests::cl_cd_cm_preserved_exactly ... ok
+test reference_xfoil::tests::alpha_degrees_to_radians_exact ... ok
+test reference_xfoil::tests::data_stops_at_blank_line ... ok
+test reference_xfoil::tests::diagnostic_columns_preserved ... ok
+test reference_xfoil::tests::header_ignored_deterministically ... ok
+test reference_xfoil::tests::identical_input_identical_output ... ok
+test reference_xfoil::tests::invalid_mach_infinity ... ok
+test reference_xfoil::tests::invalid_mach_nan ... ok
+test reference_xfoil::tests::invalid_mach_negative ... ok
+test reference_xfoil::tests::invalid_ncrit_nan ... ok
+test reference_xfoil::tests::invalid_ncrit_negative ... ok
+test reference_xfoil::tests::invalid_ncrit_zero ... ok
+test reference_xfoil::tests::invalid_reynolds_infinity ... ok
+test reference_xfoil::tests::invalid_reynolds_nan ... ok
+test reference_xfoil::tests::invalid_reynolds_negative ... ok
+test reference_xfoil::tests::invalid_reynolds_zero ... ok
+test reference_xfoil::tests::malformed_row_after_table_start_rejected ... ok
+test reference_xfoil::tests::metadata_forced_transition_boundary_values ... ok
+test reference_xfoil::tests::metadata_mach_zero_is_valid ... ok
+test reference_xfoil::tests::metadata_required_fields_preserved ... ok
+test reference_xfoil::tests::minimal_4col_parses ... ok
+test reference_xfoil::tests::nan_value_rejected ... ok
+test reference_xfoil::tests::negative_cd_rejected ... ok
+test reference_xfoil::tests::negative_zero_cd_is_accepted ... ok
+test reference_xfoil::tests::no_clark_y_data_fabricated ... ok
+test reference_xfoil::tests::parser_does_not_construct_runtime_polar_table ... ok
+test reference_xfoil::tests::six_column_layout_rejected ... ok
+test reference_xfoil::tests::source_ordering_preserved ... ok
+test reference_xfoil::tests::too_few_samples_one ... ok
+test reference_xfoil::tests::standard_7col_parses ... ok
+test reference_xfoil::tests::too_few_samples_zero ... ok
+test reference_xfoil::tests::unsupported_reordered_header_rejected ... ok
+test reference_xfoil::tests::wrong_column_count_rejected ... ok
+test reference_xfoil_convergence::tests::expectation_count_is_deterministic ... ok
+test reference_xfoil_convergence::tests::expectation_rejects_nan_start ... ok
+test reference_xfoil_convergence::tests::expectation_rejects_zero_step ... ok
+test reference_xfoil_evidence::tests::convergence_status_preserved_converged ... ok
+test reference_xfoil_evidence::tests::convergence_status_preserved_unresolved ... ok
+test reference_xfoil_evidence::tests::cdp_does_not_overwrite_cd_or_cm ... ok
+test reference_xfoil_evidence::tests::empty_source_ids_rejected ... ok
+test reference_xfoil_evidence::tests::convergence_status_preserved_failed ... ok
+test reference_xfoil_evidence::tests::duplicate_source_rejected ... ok
+test reference_xfoil_evidence::tests::all_accepted_statuses_serialize_generated_solver ... ok
+test reference_xfoil_evidence::tests::deterministic_serialization ... ok
+test reference_xfoil_evidence::tests::flow_conditions_exact ... ok
+test reference_xfoil_evidence::tests::forced_transition_preserved_when_supplied ... ok
+test reference_xfoil_evidence::tests::generated_solver_class_fixed ... ok
+test reference_xfoil_evidence::tests::invalid_dataset_id_rejected ... ok
+test reference_xfoil_evidence::tests::invalid_method_id_rejected ... ok
+test reference_xfoil_evidence::tests::invalid_source_id_rejected ... ok
+test reference_xfoil_evidence::tests::missing_optional_metadata_not_fabricated ... ok
+test reference_xfoil_evidence::tests::ncrit_preserved ... ok
+test reference_xfoil_evidence::tests::no_runtime_object_constructed ... ok
+test reference_xfoil_evidence::tests::not_applicable_published_rejected_by_builder ... ok
+test reference_xfoil_evidence::tests::end_to_end_through_evidence_loader ... ok
+test reference_xfoil_evidence::tests::sample_mapping_exact ... ok
+test reference_xfoil_evidence::tests::sample_ordering_preserved ... ok
+test reference_xfoil_evidence::tests::source_ordering_preserved ... ok
+test reference_xfoil_evidence::tests::top_xtr_not_used_as_forced_transition ... ok
+test reference_xfoil_evidence::tests::transition_assumptions_preserved ... ok
+test reference_xfoil_evidence::tests::valid_bridge_creation ... ok
+test reference_xfoil_evidence::tests::unresolved_does_not_become_evidence_ready_without_metadata ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\acro_electric_01_oa2b.rs (target\debug\deps\acro_electric_01_oa2b-6b5bf911a8e673e0.exe)
+
+running 2 tests
+test migration_preserves_legacy_airborne_aero_control_and_propulsion_data ... ok
+test acro_electric_01_is_v9_with_symmetric_gear_and_airframe_contacts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\acro_electric_asset_g3c.rs (target\debug\deps\acro_electric_asset_g3c-8747ab97b4d877fd.exe)
+
+running 2 tests
+test production_presentation_maps_all_four_existing_control_bindings ... ok
+test presentation_asset_change_preserves_required_physics_fingerprint ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\airframe_contacts_schema_v9.rs (target\debug\deps\airframe_contacts_schema_v9-c44ecbb341352366.exe)
+
+running 4 tests
+test v8_documents_reject_airframe_contact_fields ... ok
+test absent_contacts_are_empty_and_authored_contacts_preserve_order ... ok
+test invalid_duplicate_and_unknown_contacts_fail_closed ... ok
+test structural_physics_and_order_are_fingerprinted_but_ids_are_not ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\assembly_schema_v1.rs (target\debug\deps\assembly_schema_v1-85f75453c7da608e.exe)
+
+running 10 tests
+test nonfinite_binding_gain_and_unknown_actuator_are_rejected_structurally ... ok
+test v1_binding_section_is_required_and_binding_objects_are_strict ... ok
+test as2_valid_v1_loads_ordered_resolved_control_surface_bindings ... ok
+test as1_v0_continues_to_load_with_no_control_surface_bindings ... ok
+test as4_duplicate_controlled_element_is_rejected ... ok
+test as3_unknown_binding_element_is_rejected ... ok
+test invalid_and_duplicate_binding_ids_are_rejected ... ok
+test as5_zero_binding_gain_is_rejected ... ok
+test v1_fingerprint_excludes_binding_ids_and_presentation_metadata ... ok
+test as6_v1_fingerprint_covers_binding_target_actuator_gain_and_order ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\clark_y_reference_campaign_m2_9f.rs (target\debug\deps\clark_y_reference_campaign_m2_9f-bcf6efef5be0372c.exe)
+
+running 47 tests
+test m2_9f_01_vendored_clark_y_asset_exists ... ok
+test m2_9f_02_first_line_identifies_clark_y_airfoil ... ok
+test m2_9f_06_first_numeric_x_approximately_one ... ok
+test m2_9f_04_no_lednicer_point_count_line ... ok
+test m2_9f_05_point_ordering_te_upper_to_le_to_te_lower ... ok
+test m2_9f_08_final_numeric_x_approximately_one ... ok
+test m2_9f_03_selig_format_coordinates_parse_structurally ... ok
+test m2_9f_07_leading_edge_x_zero_exists_exactly_once ... ok
+test m2_9f_10_normalized_x_within_reference_bounds ... ok
+test m2_9f_09_all_coordinates_finite ... ok
+test m2_9f_11_no_nan_or_inf_coordinates ... ok
+test m2_9f_16_manifest_structural_schema_parse ... ok
+test m2_9f_17_campaign_id_exact ... ok
+test m2_9f_18_run_order_exact ... ok
+test m2_9f_19_reynolds_order_exact ... ok
+test m2_9f_20_no_duplicate_dataset_ids ... ok
+test m2_9f_22_all_alpha_start_minus_12 ... ok
+test m2_9f_21_all_mach_zero ... ok
+test m2_9f_23_all_alpha_end_18 ... ok
+test m2_9f_24_all_alpha_step_half ... ok
+test m2_9f_25_all_max_iterations_200 ... ok
+test m2_9f_26_all_ncrit_9 ... ok
+test m2_9f_27_coverage_reynolds_bounds_match_first_last_run ... ok
+test m2_9f_28_coverage_alpha_bounds_match_sweep_envelope_in_radians ... ok
+test m2_9f_29_require_converged_is_false ... ok
+test m2_9f_30_airfoil_path_resolves_relative_to_manifest_directory ... ok
+test m2_9f_34_no_timestamps_in_deterministic_artifacts ... ok
+test m2_9f_35_no_xfoil_polar_values_committed ... ok
+test m2_9f_36_no_cl_cd_cm_values_invented ... ok
+test m2_9f_37_no_convergence_status_converged_committed ... ok
+test m2_9f_39_existing_m2_9_model_types_still_construct ... ok
+test m2_9f_dataset_ids_are_stable ... ok
+test m2_9f_manifest_airfoil_file_is_relative ... ok
+test m2_9f_manifest_schema_version_is_one ... ok
+test m2_9f_40_source_asset_not_modified_by_validation ... ok
+test m2_9f_reynolds_strictly_increasing ... ok
+test m2_9f_33_no_absolute_machine_specific_paths_in_artifacts ... ok
+test m2_9f_provenance_point_count_matches_actual ... ok
+test m2_9f_15_source_is_not_clarkysm_dat ... ok
+test m2_9f_14_source_format_recorded_as_selig ... ok
+test m2_9f_13_source_file_recorded_as_clarky_dat ... ok
+test m2_9f_provenance_first_last_coordinates_match ... ok
+test m2_9f_38_no_lt40_aircraft_operating_point_claim ... ok
+test m2_9f_12_sha256_matches_provenance_lock ... ok
+test m2_9f_provenance_schema_version_is_one ... ok
+test m2_9f_provenance_airfoil_id ... ok
+test m2_9f_32_repeated_serialization_is_byte_identical ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\downwash_schema_m2_8c.rs (target\debug\deps\downwash_schema_m2_8c-9f91f18e78bbf31f.exe)
+
+running 6 tests
+test valid_v6_resolves_surface_indices_and_factor ... ok
+test factor_must_be_finite_and_non_negative ... ok
+test duplicate_targets_and_chained_graphs_are_rejected ... ok
+test interaction_ids_are_nonempty_unique_stable_ids ... ok
+test unknown_and_identical_surfaces_are_rejected ... ok
+test empty_interactions_are_explicit_and_factor_changes_physics_identity ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\fingerprint.rs (target\debug\deps\fingerprint-9403df8a4f8c3534.exe)
+
+running 14 tests
+test v0_fingerprint_remains_byte_identical_to_s6_baseline ... ok
+test m8_display_name_change_does_not_change_physics_fingerprint ... ok
+test m9_glb_path_change_does_not_change_physics_fingerprint ... ok
+test m1_json_formatting_does_not_change_fingerprint ... ok
+test m6_servo_parameter_change_changes_fingerprint ... ok
+test resolved_polar_relationship_is_fingerprinted ... ok
+test m5_aero_element_position_change_changes_fingerprint ... ok
+test m3_inertia_change_changes_fingerprint ... ok
+test presentation_presence_does_not_change_physics_fingerprint ... ok
+test m2_mass_change_changes_fingerprint ... ok
+test nonphysical_model_id_is_excluded_from_physics_fingerprint ... ok
+test m4_each_aerodynamic_polar_coefficient_changes_fingerprint ... ok
+test m7_motor_and_propeller_changes_change_fingerprint ... ok
+test remaining_declared_physics_fields_are_fingerprinted ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\landing_gear_schema_v8.rs (target\debug\deps\landing_gear_schema_v8-8eb6ca4413b8a6ac.exe)
+
+running 7 tests
+test v7_documents_reject_gear_fields ... ok
+test no_gear_fabricates_no_wheels_and_keeps_v7_fingerprint_stream ... ok
+test v8_without_gear_loads_with_empty_runtime_gear ... ok
+test v8_with_tricycle_gear_resolves_in_order ... ok
+test gear_id_is_a_non_physical_label_in_the_fingerprint ... ok
+test invalid_gear_is_rejected_at_load ... ok
+test every_gear_physics_parameter_and_declaration_order_changes_fingerprint ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\propeller_gyroscopic_schema_m2_8f.rs (target\debug\deps\propeller_gyroscopic_schema_m2_8f-1aa9b62fd527dab9.exe)
+
+running 2 tests
+test negative_and_non_finite_inertia_are_rejected ... ok
+test absent_and_zero_inertia_preserve_the_existing_model_and_fingerprint ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\propeller_slipstream_schema_m2_8d.rs (target\debug\deps\propeller_slipstream_schema_m2_8d-546bfb4af8f2619c.exe)
+
+running 6 tests
+test valid_v7_resolves_ordered_target_indices_and_zero_factor_is_valid ... ok
+test propulsion_is_required_and_factor_must_be_finite_non_negative ... ok
+test explicit_empty_list_is_valid_missing_list_is_structural_and_v6_still_loads ... ok
+test interaction_ids_are_valid_and_unique_and_targets_are_nonempty ... ok
+test unknown_duplicate_and_multiply_assigned_targets_are_rejected ... ok
+test fingerprint_covers_factor_and_resolved_target_membership ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\propeller_swirl_schema_m2_8e.rs (target\debug\deps\propeller_swirl_schema_m2_8e-3ff4deb07b6451be.exe)
+
+running 3 tests
+test negative_and_non_finite_swirl_are_rejected ... ok
+test absent_and_zero_swirl_preserve_m2_8d_schema_semantics ... ok
+test finite_non_negative_swirl_is_resolved_and_changes_the_fingerprint ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\propulsion_runtime_m2_4b.rs (target\debug\deps\propulsion_runtime_m2_4b-51a3cb2683ea3038.exe)
+
+running 5 tests
+test v4_synthetic_fixture_loads_explicit_complete_propulsion ... ok
+test v4_fixed_table_source_loads_and_unknown_or_missing_fields_fail_closed ... ok
+test v4_invalid_esc_and_map_nodes_report_semantic_errors ... ok
+test v4_fingerprint_covers_esc_source_nodes_and_samples ... ok
+test legacy_models_remain_compatible_and_v0_fingerprint_is_unchanged ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\reference_aerodynamics_m2_3a.rs (target\debug\deps\reference_aerodynamics_m2_3a-99b21e9a06e47e8a.exe)
+
+running 10 tests
+test committed_clark_y_template_is_traceable_but_polar_and_runtime_unresolved ... ok
+test dataset_ordering_and_complete_synthetic_multi_re_grid_are_deterministic ... ok
+test missing_grid_coverage_is_reported_exactly ... ok
+test duplicate_and_unresolved_provenance_sources_are_rejected ... ok
+test diagnostics_are_canonical_across_equivalent_authoring_order ... ok
+test unconverged_generated_dataset_is_retained_but_not_ready ... ok
+test bad_duplicate_and_nonfinite_coordinates_fail_closed ... ok
+test duplicate_dataset_ids_and_undistinguished_flow_points_are_rejected ... ok
+test invalid_reynolds_mach_samples_order_and_drag_are_rejected ... ok
+test aerodynamic_evidence_never_constructs_or_mutates_runtime_polars_or_fingerprints ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\reference_framework_v2.rs (target\debug\deps\reference_framework_v2-a9e035b6146032f4.exe)
+
+running 11 tests
+test nonfinite_reference_values_are_rejected_by_strict_json_loading ... ok
+test reference_aircraft_accepts_fully_unknown_optional_specification ... ok
+test reference_aircraft_identity_provenance_and_parameter_status_are_resolved ... ok
+test unknown_parameter_quality_is_preserved_as_typed_status ... ok
+test legacy_v0_and_v1_models_remain_synthetic_and_load_without_reference_metadata ... ok
+test v2_authoring_roundtrip_and_repeated_runtime_loading_are_deterministic ... ok
+test schema_v2_synthetic_classification_is_explicit_and_rejects_reference_metadata ... ok
+test documentary_and_presentation_changes_do_not_change_physics_fingerprint ... ok
+test v2_retains_v1_physics_identity_but_physics_mutations_change_it ... ok
+test duplicate_malformed_and_unresolved_provenance_ids_are_rejected ... ok
+test invalid_reference_dimensions_cg_and_control_travel_are_rejected ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\reference_mass_properties_m2_2d.rs (target\debug\deps\reference_mass_properties_m2_2d-97a5f79434a5e8ed.exe)
+
+running 14 tests
+test m2_2c_aft_station_bridge_negates_x_exactly ... ok
+test committed_unmeasured_template_parses_but_every_authority_gate_is_false ... ok
+test evidenced_direct_whole_aircraft_path_can_close_all_non_runtime_gates ... ok
+test missing_intrinsic_inertia_cannot_be_promoted_as_a_point_mass_result ... ok
+test complete_synthetic_component_build_up_derives_mass_cg_and_full_parallel_axis_tensor ... ok
+test published_range_and_reference_only_components_never_supply_operational_mass ... ok
+test three_reading_aggregation_is_deterministic ... ok
+test non_positive_definite_final_component_build_up_tensor_is_rejected ... ok
+test evidence_references_and_configuration_binding_are_strict ... ok
+test nonsymmetric_and_non_positive_definite_direct_tensors_are_rejected ... ok
+test malformed_nonfinite_negative_mass_and_malformed_tensor_fail_closed ... ok
+test finite_component_arithmetic_cannot_create_non_finite_mass_properties ... ok
+test direct_vs_build_up_disagreements_are_explicit_readiness_blockers ... ok
+test existing_model_versions_and_physics_fingerprint_are_unchanged_by_mass_metadata ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\reference_propulsion_m2_4a.rs (target\debug\deps\reference_propulsion_m2_4a-924d510721b01b5d.exe)
+
+running 39 tests
+test cq_is_deterministically_derived_from_cp ... ok
+test empty_template_is_valid_and_unresolved ... ok
+test artifact_contains_no_recreated_coefficient_rows ... ok
+test historical_configuration_is_not_physical_installation ... ok
+test committed_template_has_no_physical_airframe_identity ... ok
+test installed_configuration_with_mismatched_physical_airframe_id_is_rejected ... ok
+test evaluation_and_parser_ordering_are_deterministic ... ok
+test duplicate_source_ids_are_rejected ... ok
+test inconsistent_propeller_dimensions_are_rejected ... ok
+test duplicate_battery_load_points_are_rejected ... ok
+test duplicate_component_ids_are_rejected ... ok
+test malformed_apc_row_is_rejected ... ok
+test invalid_battery_cell_count_is_rejected ... ok
+test invalid_battery_load_point_is_rejected ... ok
+test invalid_current_is_rejected ... ok
+test invalid_kv_is_rejected ... ok
+test recommendation_is_not_an_installation ... ok
+test invalid_motor_resistance_is_rejected ... ok
+test linked_dataset_requires_source_sha256 ... ok
+test synthetic_apc_like_fixture_parses ... ok
+test malformed_sha256_metadata_is_rejected ... ok
+test measured_configuration_without_physical_airframe_id_is_rejected ... ok
+test unordered_apc_advance_ratio_is_rejected ... ok
+test source_and_dataset_sha256_must_agree ... ok
+test specific_installation_without_physical_airframe_id_is_rejected ... ok
+test source_applicability_must_match_claim_component_identity ... ok
+test committed_apc_sha256_is_calculated_from_exact_bytes ... ok
+test unknown_is_null_and_not_zero ... ok
+test unresolved_photo_is_rejected ... ok
+test synthetic_physically_identified_fixture_sets_configuration_gate_only ... ok
+test unresolved_provenance_is_rejected ... ok
+test unsafe_linked_source_path_is_rejected ... ok
+test recommendation_rejects_every_physical_or_installed_identity_field ... ok
+test evidence_loading_does_not_change_existing_physics_fingerprint ... ok
+test committed_template_loads_linked_apc_data_but_remains_unresolved ... ok
+test runtime_ready_is_always_false ... ok
+test actual_apc_file_preserves_declared_order_and_counts ... ok
+test formally_valid_but_wrong_sha256_is_rejected_against_raw_bytes ... ok
+test same_size_same_lines_parseable_raw_tamper_is_rejected_by_sha256 ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\reference_survey_m2_2c.rs (target\debug\deps\reference_survey_m2_2c-5b09274609502b44.exe)
+
+running 9 tests
+test committed_empty_campaign_is_valid_but_unresolved_and_never_runtime_ready ... ok
+test synthetic_campaign_aggregates_three_readings_and_preserves_bilateral_asymmetry ... ok
+test complete_synthetic_campaign_closes_geometry_from_egv_observations_only ... ok
+test missing_egv_wing_station_cannot_inherit_the_legacy_comparison_value ... ok
+test finite_measurements_cannot_overflow_evidence_summaries ... ok
+test incomplete_or_out_of_tolerance_campaigns_do_not_pass_geometry_gate ... ok
+test survey_metadata_is_outside_the_aircraft_runtime_fingerprint ... ok
+test cross_variant_categories_preserve_identity_semantics ... ok
+test invalid_measurements_and_unresolved_evidence_fail_closed ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\reynolds_runtime_m2_3c.rs (target\debug\deps\reynolds_runtime_m2_3c-1a4143dc0c858d6c.exe)
+
+running 6 tests
+test m2_3c_02_negative_viscosity_is_rejected ... ok
+test m2_3c_01_zero_viscosity_is_rejected ... ok
+test m2_3c_21_fixture_is_synthetic_and_introduces_no_reference_aircraft_runtime ... ok
+test m2_3c_16_legacy_v0_v1_v2_parse_without_reynolds_fields ... ok
+test m2_3c_17_legacy_fingerprints_remain_byte_identical ... ok
+test m2_3c_18_all_new_reynolds_physics_changes_v3_fingerprint ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\semantics_and_smoke.rs (target\debug\deps\semantics_and_smoke-45d28f1c0a29a291.exe)
+
+running 3 tests
+test filesystem_helper_reports_io_error_with_path_context ... ok
+test parsed_runtime_model_exactly_matches_declared_semantics ... ok
+test acro_electric_01_repository_model_smoke_test ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\sig_kadet_lt40_egv_m2_10a.rs (target\debug\deps\sig_kadet_lt40_egv_m2_10a-163dd44e94be653f.exe)
+
+running 14 tests
+test lt40_provisional_is_not_reference_aircraft ... ok
+test lt40_provisional_aero_element_count_and_ids ... ok
+test lt40_provisional_downwash_interaction ... ok
+test lt40_provisional_reynolds_family_bindings ... ok
+test lt40_provisional_wing_geometry_derived_from_lt40_plan ... ok
+test lt40_provisional_rigid_body_has_placeholder_mass ... ok
+test lt40_provisional_propulsion_uses_historical_component_data ... ok
+test lt40_provisional_aero_surfaces ... ok
+test lt40_provisional_tail_geometry_derived_from_lt40_plan ... ok
+test lt40_provisional_loads_successfully ... ok
+test lt40_provisional_control_surface_bindings ... ok
+test lt40_provisional_kinematic_viscosity ... ok
+test lt40_provisional_json_round_trip_deterministic ... ok
+test lt40_provisional_deterministic_fingerprint ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\surface_representation_m2_8a.rs (target\debug\deps\surface_representation_m2_8a-872d3994bd24bf3a.exe)
+
+running 27 tests
+test duplicate_element_within_surface_rejected ... ok
+test member_ordering_preserved ... ok
+test span_axis_normalized ... ok
+test element_ids_resolve_to_correct_indices ... ok
+test derived_aspect_ratio_formula ... ok
+test duplicate_surface_id_rejected ... ok
+test cross_surface_duplicate_element_rejected ... ok
+test derived_area_is_sum_of_member_areas ... ok
+test span_axis_invalid_rejected ... ok
+test span_efficiency_no_upper_cap ... ok
+test empty_surface_membership_rejected ... ok
+test old_schemas_expose_zero_surfaces ... ok
+test identical_input_identical_surface_representation ... ok
+test span_change_changes_fingerprint ... ok
+test span_efficiency_change_changes_fingerprint ... ok
+test identical_input_identical_fingerprint ... ok
+test synthetic_v5_model_remains_synthetic_test ... ok
+test surface_area_and_ar_finite_positive ... ok
+test span_efficiency_validation ... ok
+test unassigned_elements_remain_valid ... ok
+test v5_surface_does_not_change_aerodynamic_behavior ... ok
+test unknown_element_id_rejected ... ok
+test surface_membership_change_changes_fingerprint ... ok
+test span_m_validation ... ok
+test v5_surface_order_preserved ... ok
+test v5_valid_model_loads ... ok
+test v0_v4_backward_compatible ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\validation.rs (target\debug\deps\validation-ba6ec779c35ccf83.exe)
+
+running 34 tests
+test duplicate_json_keys_are_rejected_as_structural_errors ... ok
+test invalid_mass_is_rejected_by_rigid_body_validation ... ok
+test duplicate_polar_id_is_rejected_with_both_indices ... ok
+test invalid_aero_element_is_rejected ... ok
+test duplicate_aero_element_id_is_rejected_with_both_indices ... ok
+test invalid_motor_config_is_rejected ... ok
+test invalid_battery_config_is_rejected ... ok
+test invalid_propeller_config_is_rejected ... ok
+test declaration_order_is_preserved_and_polar_references_are_resolved_to_indices ... ok
+test invalid_quaternion_is_rejected_without_normalization ... ok
+test malformed_json_is_a_parse_error ... ok
+test invalid_polar_and_element_ids_are_rejected ... ok
+test invalid_polar_is_rejected_without_sorting_or_clamping ... ok
+test explicit_presentation_metadata_is_validated_and_excluded_from_fingerprint ... ok
+test missing_polar_reference_is_rejected ... ok
+test invalid_rate_and_expo_are_rejected_without_clamping ... ok
+test missing_required_field_is_rejected ... ok
+test missing_or_wrong_type_schema_version_is_structural_error ... ok
+test non_positive_definite_inertia_is_rejected_by_rigid_body_validation ... ok
+test invalid_model_ids_are_rejected_without_rewriting ... ok
+test absolute_presentation_paths_are_rejected_portably ... ok
+test invalid_propeller_coefficient_table_is_rejected ... ok
+test invalid_servo_travel_and_speed_are_rejected ... ok
+test only_explicit_propeller_spin_names_are_accepted ... ok
+test present_propulsion_must_be_complete ... ok
+test unsupported_v10_schema_is_rejected_before_structure_validation ... ok
+test unknown_nested_field_is_rejected ... ok
+test unknown_root_field_is_rejected ... ok
+test invalid_or_implicit_presentation_bindings_fail_closed ... ok
+test valid_minimal_model_loads ... ok
+test propulsion_may_be_null_or_absent ... ok
+test valid_relative_presentation_path_is_preserved ... ok
+test wrong_field_type_is_rejected ... ok
+test parent_traversal_presentation_paths_are_rejected_portably ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\xfoil_aircraft_family_binding_m2_9l.rs (target\debug\deps\xfoil_aircraft_family_binding_m2_9l-1644bbe17c5d406d.exe)
+
+running 11 tests
+test malformed_json_rejected ... ok
+test unresolved_evidence_rejected ... ok
+test target_element_still_references_same_family_index ... ok
+test fingerprint_changes_with_changed_polar_physics ... ok
+test missing_family_id_rejected ... ok
+test valid_replacement ... ok
+test unrelated_aircraft_config_unchanged ... ok
+test unrelated_families_unchanged ... ok
+test coefficients_alpha_re_exactly_from_evidence ... ok
+test fingerprint_unchanged_when_same_evidence_rebound ... ok
+test deterministic_repeated_binding ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\xfoil_campaign_coverage_m2_9c.rs (target\debug\deps\xfoil_campaign_coverage_m2_9c-7d93b5161b8789f3.exe)
+
+running 30 tests
+test empty_campaign_is_rejected ... ok
+test minimum_and_maximum_reynolds_are_exact ... ok
+test duplicate_dataset_id_is_rejected ... ok
+test campaign_api_has_no_runtime_type_dependency ... ok
+test duplicate_reynolds_is_rejected ... ok
+test increasing_reynolds_campaign_preserves_caller_order ... ok
+test coverage_result_preserves_request_and_dataset_facts ... ok
+test missing_upper_alpha_names_exact_dataset ... ok
+test failed_blocks_when_convergence_is_required ... ok
+test missing_lower_alpha_names_exact_dataset ... ok
+test every_dataset_covering_alpha_range_passes ... ok
+test both_reynolds_gaps_are_reported_lower_then_upper ... ok
+test different_alpha_grids_are_audited_independently ... ok
+test lower_reynolds_gap_has_typed_blocker ... ok
+test convergence_is_preserved_but_not_blocking_when_not_required ... ok
+test decreasing_reynolds_is_rejected_without_sorting ... ok
+test one_valid_dataset_campaign_builds ... ok
+test request_rejects_equal_or_reversed_alpha_bounds ... ok
+test fixture_is_explicitly_synthetic_and_contains_no_real_aircraft_claim ... ok
+test request_rejects_equal_or_reversed_reynolds_bounds ... ok
+test request_rejects_nonfinite_alpha_bounds ... ok
+test polar_datasets_json_is_exact_m2_9b_json_in_order ... ok
+test request_rejects_nonfinite_reynolds_bounds ... ok
+test request_rejects_nonpositive_minimum_reynolds ... ok
+test reynolds_request_strictly_inside_campaign_range_is_covered ... ok
+test simultaneous_blockers_have_exact_deterministic_order ... ok
+test unresolved_blocks_when_convergence_is_required ... ok
+test upper_reynolds_gap_has_typed_blocker ... ok
+test repeated_campaign_serialization_is_byte_identical ... ok
+test multi_dataset_artifact_is_accepted_by_evidence_loader ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\xfoil_evidence_bridge_m2_9b.rs (target\debug\deps\xfoil_evidence_bridge_m2_9b-8aa5580c0f07aa8f.exe)
+
+running 25 tests
+test invalid_dataset_id_rejected ... ok
+test invalid_method_id_rejected ... ok
+test no_real_lt40_coefficients_introduced ... ok
+test convergence_explicit_failed ... ok
+test duplicate_source_rejected ... ok
+test not_applicable_published_rejected ... ok
+test missing_optional_metadata_not_fabricated ... ok
+test forced_transition_from_metadata_not_from_xtr_diagnostics ... ok
+test convergence_explicit_unresolved ... ok
+test alpha_cl_cd_cm_bitwise_preserved ... ok
+test generated_solver_class_in_json ... ok
+test convergence_explicit_converged ... ok
+test notes_null_when_absent ... ok
+test notes_preserved_when_supplied ... ok
+test all_accepted_statuses_build_and_serialize_generated_solver ... ok
+test reynolds_mach_exact ... ok
+test source_ordering_preserved ... ok
+test sample_count_and_ordering ... ok
+test deterministic_repeated_serialization ... ok
+test transition_metadata_preserved ... ok
+test failed_dataset_not_evidence_ready ... ok
+test end_to_end_through_evidence_loader_converged ... ok
+test converged_but_missing_solver_metadata_blocks_evidence_ready ... ok
+test valid_bridge_creation ... ok
+test unresolved_dataset_not_evidence_ready ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\xfoil_evidence_json_m2_9k.rs (target\debug\deps\xfoil_evidence_json_m2_9k-ef4fd96896cde103.exe)
+
+running 16 tests
+test empty_dataset_array_rejected ... ok
+test wrong_type_json_rejected ... ok
+test malformed_json_rejected ... ok
+test truncated_json_rejected ... ok
+test decreasing_reynolds_rejected_via_json ... ok
+test unresolved_dataset_rejected_via_json ... ok
+test duplicate_reynolds_rejected_via_json ... ok
+test failed_dataset_rejected_via_json ... ok
+test alpha_cl_cd_cm_preserved_exactly_via_json ... ok
+test valid_multi_re_family_from_json ... ok
+test deterministic_across_str_and_bytes ... ok
+test mixed_mach_rejected_via_json ... ok
+test native_alpha_grids_preserved_independent ... ok
+test mixed_converged_and_unresolved_rejected_at_first_bad ... ok
+test json_bridge_matches_direct_campaign_builder ... ok
+test deterministic_repeated_result ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\xfoil_polar_import_m2_9a.rs (target\debug\deps\xfoil_polar_import_m2_9a-5d531a990d558c3d.exe)
+
+running 48 tests
+test data_row_column_count_must_match_recognized_header ... ok
+test decreasing_alpha_rejected ... ok
+test cl_cd_cm_exact_preservation ... ok
+test data_stops_at_blank_line ... ok
+test error_display_messages ... ok
+test cdp_is_column_4 ... ok
+test alpha_deg_to_rad_conversion ... ok
+test empty_input ... ok
+test inf_value_rejected ... ok
+test import_is_off_runtime_evidence_only ... ok
+test diagnostic_columns_exact_preservation ... ok
+test header_not_found ... ok
+test does_not_parse_real_evidence_artifact ... ok
+test duplicate_alpha_rejected ... ok
+test invalid_forced_transition_lower_negative ... ok
+test invalid_forced_transition_nan ... ok
+test deterministic_reparse ... ok
+test invalid_forced_transition_upper_above_one ... ok
+test invalid_mach_infinity ... ok
+test invalid_mach_nan ... ok
+test invalid_mach_negative ... ok
+test invalid_ncrit_nan ... ok
+test invalid_ncrit_negative ... ok
+test invalid_ncrit_zero ... ok
+test invalid_reynolds_infinity ... ok
+test invalid_reynolds_nan ... ok
+test invalid_reynolds_negative ... ok
+test invalid_reynolds_zero ... ok
+test malformed_row_after_start_rejected ... ok
+test metadata_all_fields_present ... ok
+test metadata_boundary_values_valid ... ok
+test metadata_optional_fields_absent ... ok
+test minimal_4col_no_diagnostics ... ok
+test nan_value_rejected ... ok
+test negative_cd_rejected ... ok
+test negative_zero_cd_accepted ... ok
+test no_clark_y_data_fabricated ... ok
+test no_separator_line ... ok
+test nonzero_cm_preserved_exactly_from_column_5 ... ok
+test separator_without_spaces_accepted ... ok
+test six_column_pseudo_standard_layout_rejected ... ok
+test source_ordering_preserved ... ok
+test too_few_samples_one ... ok
+test standard_7col_full_parse ... ok
+test too_few_samples_zero ... ok
+test unsupported_reordered_header_rejected ... ok
+test top_bot_xtr_are_columns_6_and_7 ... ok
+test wrong_column_count_rejected ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\xfoil_runtime_family_m2_9h.rs (target\debug\deps\xfoil_runtime_family_m2_9h-98d7d811fbc734f4.exe)
+
+running 20 tests
+test alpha_samples_preserved_exactly ... ok
+test differing_mach_rejected ... ok
+test below_range_reynolds_clamps_to_lowest_node ... ok
+test cm_preserved_exactly ... ok
+test failed_dataset_rejected ... ok
+test cl_preserved_exactly ... ok
+test above_range_reynolds_clamps_to_highest_node ... ok
+test equal_mach_accepted ... ok
+test rejection_identifies_dataset_index_id_status ... ok
+test mach_preserved ... ok
+test independent_alpha_grids_remain_independent ... ok
+test interpolation_between_two_reynolds_nodes ... ok
+test no_fitting_or_resampling_occurs ... ok
+test repeated_conversion_produces_identical_result ... ok
+test cd_preserved_exactly ... ok
+test multiple_converged_datasets_convert_correctly ... ok
+test reynolds_numbers_preserved_exactly ... ok
+test sampling_at_exact_reynolds_reproduces_polar_table ... ok
+test single_converged_dataset_converts_correctly ... ok
+test unresolved_dataset_rejected ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\xfoil_sweep_convergence_m2_9i.rs (target\debug\deps\xfoil_sweep_convergence_m2_9i-d41592e036d9f4f5.exe)
+
+running 34 tests
+test m2_9i_09_exact_alpha_accepted ... ok
+test m2_9i_11_deviation_exactly_at_tolerance_accepted ... ok
+test m2_9i_04_missing_first_point_not_converged ... ok
+test m2_9i_03_missing_middle_point_not_converged ... ok
+test m2_9i_02_descending_complete_sweep_converged ... ok
+test m2_9i_01_ascending_complete_sweep_converged ... ok
+test m2_9i_08_reordered_samples_not_converged ... ok
+test m2_9i_07_duplicate_alpha_not_converged ... ok
+test m2_9i_05_missing_last_point_not_converged ... ok
+test m2_9i_14_zero_step_rejected ... ok
+test m2_9i_06_extra_sample_not_converged ... ok
+test m2_9i_15_positive_step_descending_bounds_rejected ... ok
+test m2_9i_16_negative_step_ascending_bounds_rejected ... ok
+test m2_9i_13_zero_tolerance_exact_comparison ... ok
+test m2_9i_17_nonfinite_start_rejected ... ok
+test m2_9i_12_deviation_outside_tolerance_rejected ... ok
+test m2_9i_10_deviation_inside_tolerance_accepted ... ok
+test m2_9i_18_nonfinite_end_rejected ... ok
+test m2_9i_19_nonfinite_step_rejected ... ok
+test m2_9i_20_nonfinite_tolerance_rejected ... ok
+test m2_9i_21_negative_tolerance_rejected ... ok
+test m2_9i_22_unreachable_endpoint_rejected ... ok
+test m2_9i_23_expected_point_count_deterministic ... ok
+test m2_9i_24_blocker_ordering_deterministic ... ok
+test m2_9i_25_repeated_qualification_identical ... ok
+test m2_9i_26_coefficients_irrelevant ... ok
+test m2_9i_27_parser_success_incomplete_sweep_not_converged ... ok
+test m2_9i_28_no_process_or_runner_concepts ... ok
+test m2_9i_29_only_synthetic_data ... ok
+test m2_9i_30_existing_api_unchanged ... ok
+test m2_9i_convergence_status_mapping ... ok
+test m2_9i_count_blocker_before_alpha_mismatches ... ok
+test m2_9i_single_point_sweep_rejected ... ok
+test m2_9i_unreachable_endpoint_more_than_half_step ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches\model_s6.rs (target\debug\deps\model_s6-f6fc54cd9f97c5d4.exe)
+Testing B15/parse_validate_acro_electric_01
+Success
+
+Testing B16/model_semantic_fingerprint
+Success
+
+     Running unittests src\lib.rs (target\debug\deps\platform-7f9a9d23fb26da4d.exe)
+
+running 21 tests
+test axes::tests::hardware_axis_names_round_trip_and_reject_unknown ... ok
+test backend::tests::absent_analog_trigger_is_missing_not_zero ... ok
+test backend::tests::every_reported_axis_lands_in_the_snapshot ... ok
+test backend::tests::analog_triggers_map_to_their_gilrs_button ... ok
+test axes::tests::raw_state_rejects_non_finite_values_and_tracks_axes ... ok
+test axes::tests::analog_trigger_axes_have_stable_names_and_round_trip ... ok
+test backend::tests::non_finite_reported_values_are_rejected ... ok
+test backend::tests::present_analog_trigger_is_included_with_its_raw_value ... ok
+test backend::tests::standard_axes_map_to_their_gilrs_axis ... ok
+test identity::tests::empty_candidate_list_reports_no_devices ... ok
+test calibration::tests::calibration_is_deterministic_across_repeated_applies ... ok
+test identity::tests::link_reports_ambiguous_match_without_forgetting_history ... ok
+test identity::tests::link_status_tracks_presence_disconnection_and_ambiguity ... ok
+test mapping::tests::centered_axis_handles_zero_positive_negative_and_clamp ... ok
+test mapping::tests::inversion_changes_sign_and_throttle_maps_endpoints ... ok
+test mapping::tests::deadzone_is_zero_inside_continuous_and_rescaled_outside ... ok
+test mapping::tests::mapping_is_deterministic_and_rejects_nonfinite_values ... ok
+test state::tests::absent_controller_uses_keyboard_and_present_controller_is_mapped ... ok
+test state::tests::input_sampling_is_deterministic_for_repeated_physics_steps ... ok
+test state::tests::keyboard_axes_support_press_release_and_simultaneous_keys ... ok
+test state::tests::keyboard_throttle_changes_per_fixed_sample_and_respects_release ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\controller_calibration.rs (target\debug\deps\controller_calibration-27b57bdfe48c1d50.exe)
+
+running 16 tests
+test asymmetric_centered_range_normalizes_each_half_span_independently ... ok
+test centered_center_maps_to_zero_exactly ... ok
+test centered_inversion_flips_the_calibrated_output ... ok
+test centered_max_maps_to_plus_one_exactly ... ok
+test centered_min_maps_to_minus_one_exactly ... ok
+test centered_output_saturates_above_max ... ok
+test non_finite_raw_values_are_rejected_at_apply_time ... ok
+test throttle_min_maps_to_zero_and_max_maps_to_one ... ok
+test deadzone_boundary_is_continuous_and_rescaled_outside ... ok
+test deadzone_centered_on_calibration_center_is_exactly_zero ... ok
+test invalid_deadzone_values_are_rejected ... ok
+test invalid_min_center_max_ordering_is_rejected ... ok
+test non_finite_calibration_values_are_rejected ... ok
+test centered_output_saturates_below_min ... ok
+test throttle_inversion_exchanges_idle_and_full_endpoints ... ok
+test degenerate_calibration_spans_are_rejected ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\controller_profile.rs (target\debug\deps\controller_profile-4bf51ed246a56c30.exe)
+
+running 14 tests
+test duplicate_hardware_axis_assignments_are_rejected ... ok
+test calibrated_raw_state_maps_to_expected_pilot_input ... ok
+test raw_state_rejects_non_finite_values_before_mapping ... ok
+test suggested_profile_shape_is_accepted ... ok
+test malformed_profile_json_is_rejected_as_invalid_profile ... ok
+test analog_trigger_axis_can_serve_as_throttle_and_round_trips ... ok
+test duplicate_axis_assignment_is_rejected_when_decoding_json ... ok
+test missing_requested_hardware_axis_is_an_error_not_zero ... ok
+test profile_json_round_trips_and_serialization_is_stable ... ok
+test missing_schema_version_is_rejected_as_unsupported ... ok
+test invalid_calibration_inside_json_is_rejected_with_typed_errors ... ok
+test unsupported_schema_versions_are_rejected ... ok
+test invalid_json_cannot_produce_a_profile_through_any_public_decode_api ... ok
+test no_resulting_pilot_input_is_nan_or_non_finite ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\dependency_boundary.rs (target\debug\deps\dependency_boundary-bd852ac19fa56626.exe)
+
+running 1 test
+test platform_manifest_has_no_renderer_or_simulation_owner_dependencies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\device_matching.rs (target\debug\deps\device_matching-7b159f9bb54d7818.exe)
+
+running 8 tests
+test exact_uuid_match_wins_regardless_of_other_metadata ... ok
+test ambiguous_matches_are_rejected ... ok
+test missing_matches_are_rejected ... ok
+test empty_uuid_falls_back_to_vendor_product_name ... ok
+test name_only_fallback_requires_an_unambiguous_match ... ok
+test usable_uuid_is_decisive_and_never_falls_back ... ok
+test vendor_product_name_fallback_matches_exact_name ... ok
+test synthetic_matches_are_deterministic_across_repeated_calls ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\rcsim_app-9361575fc74dbb62.exe)
+
+running 171 tests
+test benchmark_app::tests::budget_utilization_and_all_classifications_are_explicit ... ok
+test benchmark_app::tests::nearest_rank_percentiles_support_sorted_unsorted_and_single_samples ... ok
+test benchmark_app::tests::benchmark_production_module_has_no_graphics_hardware_or_serialization_path ... ok
+test controller_app::tests::cli_parser_recognizes_raw_monitor_and_explicit_device ... ok
+test controller_app::tests::cli_parser_recognizes_controller_monitor_and_bounds ... ok
+test controller_app::tests::cli_parser_recognizes_controller_calibrate ... ok
+test controller_app::tests::bounded_monitor_arguments_fail_closed ... ok
+test controller_app::tests::initial_discovery_returns_an_immediately_present_device_without_waiting ... ok
+test controller_app::tests::initial_discovery_retries_until_a_device_appears ... ok
+test controller_app::tests::cli_parser_recognizes_controller_list ... ok
+test controller_app::tests::monitor_sample_formatting_labels_legacy_values ... ok
+test controller_app::tests::initial_discovery_returns_no_devices_after_the_bounded_timeout ... ok
+test benchmark_app::tests::missing_and_malformed_models_return_contextual_load_errors ... ok
+test controller_app::tests::monitor_sample_formatting_represents_non_finite_values_safely ... ok
+test controller_app::tests::multiple_device_listing_preserves_order_and_selected_marker ... ok
+test controller_app::tests::no_device_formatting_is_explicit_and_uses_keyboard_fallback ... ok
+test controller_app::tests::none_to_some_produces_connected_once ... ok
+test controller_app::tests::one_device_formatting_includes_all_available_identity_fields ... ok
+test controller_app::tests::some_a_to_some_b_produces_device_change_once ... ok
+test controller_app::tests::raw_monitor_format_includes_only_axes_present_in_the_snapshot ... ok
+test controller_app::tests::some_to_none_produces_disconnected_once ... ok
+test controller_app::tests::some_to_same_some_produces_no_duplicate_event ... ok
+test controller_app::tests::viewer_status_formats_selected_and_absent_modes ... ok
+test controller_profile_app::tests::device_not_found_and_ambiguity_remain_fail_closed ... ok
+test controller_profile_app::tests::axis_dropping_after_connect_neutralizes_and_resumes_on_complete_sample ... ok
+test controller_profile_app::tests::disconnect_neutralizes_once_and_never_reuses_stale_input ... ok
+test controller_profile_app::tests::incomplete_first_sample_waits_neutral_then_complete_sample_connects ... ok
+test controller_profile_app::tests::only_missing_axis_errors_are_classified_as_transient ... ok
+test controller_profile_app::tests::only_the_same_identity_can_reconnect_and_resume_input ... ok
+test benchmark_app::tests::zero_steps_invalid_numbers_and_zero_physics_rate_are_errors ... ok
+test first_slice_app::tests::markdown_is_generated_from_the_structured_report ... ok
+test first_slice_app::tests::overall_status_propagates_fail_partial_and_pass_without_masking_manual_gaps ... ok
+test first_slice_app::tests::acceptance_production_path_forbids_graphics_hardware_and_child_processes ... ok
+test first_slice_app::tests::status_enum_serializes_with_required_spelling ... ok
+test propulsion_bench_app::tests::parser_rejects_invalid_and_mixed_operating_point_requests ... ok
+test first_slice_app::tests::report_json_roundtrip_is_strict_and_versioned ... ok
+test propulsion_bench_app::tests::out_of_range_advance_ratio_uses_authored_endpoint_clamp ... ok
+test propulsion_bench_app::tests::synthetic_fixture_is_strictly_loadable_and_explicitly_synthetic ... ok
+test propulsion_bench_app::tests::bench_and_aircraft_stage_use_bit_identical_production_propulsion ... ok
+test render_app::tests::absent_presentation_metadata_uses_procedural_fallback ... ok
+test propulsion_bench_app::tests::synthetic_fixed_table_matches_independent_static_analytic_oracle ... ok
+test render_app::tests::altitude_and_airspeed_options_parse_with_manual_flight_defaults_and_overrides ... ok
+test render_app::tests::calibrated_input_stays_neutral_while_requested_controller_is_absent ... ok
+test render_app::tests::ambiguous_device_state_remains_fail_closed ... ok
+test render_app::tests::altitude_and_airspeed_options_reject_nonfinite_nonpositive_and_excessive_values ... ok
+test propulsion_bench_app::tests::fixed_table_and_shaft_speed_map_both_use_production_source_semantics ... ok
+test render_app::tests::camera_config_conversion_is_presentation_only ... ok
+test render_app::tests::calibrated_mode_has_no_keyboard_fallback ... ok
+test render_app::tests::calibrated_startup_with_zero_devices_is_not_fatal_and_stays_neutral ... ok
+test render_app::tests::acro_electric_01_starts_supported_on_the_physical_flat_plane ... ok
+test render_app::tests::camera_options_apply_tuning_and_reject_invalid_values ... ok
+test render_app::tests::camera_settings_parse_without_affecting_physics_options ... ok
+test render_app::tests::camera_options_select_pilot_and_chase_modes ... ok
+test render_app::tests::chase_camera_mode_remains_available ... ok
+test render_app::tests::complete_render_options_parse_together ... ok
+test render_app::tests::connected_startup_status_diagnostics_include_matched_device ... ok
+test render_app::tests::controller_profile_cli_parses_without_changing_legacy_default ... ok
+test render_app::tests::disconnect_neutralizes_and_same_device_resumes_via_reconnect_path ... ok
+test render_app::tests::existing_render_cli_remains_valid_with_controller_diagnostics_present ... ok
+test render_app::tests::dedicated_ground_demo_starts_supported_on_the_physical_flat_plane ... ok
+test render_app::tests::immediately_present_requested_controller_connects_at_startup ... ok
+test render_app::tests::ground_start_with_flying_field_scenery_and_pilot_camera ... ok
+test controller_profile_app::tests::malformed_json_and_unsupported_schema_are_distinct_load_errors ... ok
+test benchmark_app::tests::warmup_is_excluded_and_measured_sample_count_is_exact ... ok
+test controller_profile_app::tests::valid_profile_load_save_round_trip_is_app_owned ... ok
+test render_app::tests::incomplete_first_sample_waits_and_later_complete_sample_connects ... ok
+test render_app::tests::initial_render_snapshot_adapter_preserves_raw_pose_semantics ... ok
+test render_app::tests::later_appearance_of_requested_controller_connects_and_inputs_calibrated ... ok
+test controller_profile_app::tests::missing_path_and_invalid_calibration_keep_actionable_context ... ok
+test render_app::tests::legacy_viewer_mode_keeps_keyboard_fallback_semantics ... ok
+test render_app::tests::pilot_camera_is_default ... ok
+test render_app::tests::play_preset_accepts_shared_render_overrides ... ok
+test propulsion_bench_app::tests::default_sweep_is_ordered_deterministic_finite_and_power_bounded ... ok
+test render_app::tests::play_preset_is_ground_ready_without_changing_render_defaults ... ok
+test render_app::tests::presentation_path_is_resolved_relative_to_model_directory ... ok
+test render_app::tests::render_initial_conditions_apply_positive_altitude_as_negative_ned_z ... ok
+test first_slice_app::tests::output_directory_supports_missing_existing_and_nested_paths ... ok
+test render_app::tests::resolve_presentation_model_without_glb_returns_procedural ... ok
+test render_app::tests::opaque_metadata_builds_explicit_glb_plan_without_changing_fingerprint ... ok
+test render_app::tests::scenery_parser_accepts_flying_field ... ok
+test render_app::tests::resolve_presentation_model_with_missing_glb_returns_explicit_error ... ok
+test render_app::tests::scenery_parser_accepts_none ... ok
+test render_app::tests::scenery_default_is_none ... ok
+test render_app::tests::scenery_parser_rejects_invalid_value ... ok
+test render_app::tests::start_on_ground_flag_parses_explicitly ... ok
+test render_app::tests::airborne_render_initial_ground_diagnostics_remain_zero ... ok
+test render_app::tests::terrain_debug_option_parses_and_defaults_to_final ... ok
+test render_app::tests::throttle_parser_accepts_bounds_and_rejects_invalid_values ... ok
+test render_app::tests::terrain_debug_option_rejects_unknown_modes ... ok
+test render_app::tests::waiting_startup_status_diagnostics_are_explicit ... ok
+test render_app::tests::vegetation_debug_option_parses_all_modes_and_rejects_unknown ... ok
+test render_app::tests::wrong_device_cannot_take_ownership_of_calibrated_input ... ok
+test render_snapshot::tests::alpha_formula_and_clamping_cover_boundaries ... ok
+test render_snapshot::tests::endpoints_and_midpoint_interpolate_position_in_f64 ... ok
+test render_app::tests::flight_reset_is_refused_without_mutation_while_recording ... ok
+test render_app::tests::live_recording_uses_exact_sampled_input_and_s8a_step_semantics ... ok
+test render_snapshot::tests::initial_and_single_snapshot_are_renderable_before_first_step ... ok
+test render_snapshot::tests::large_coordinates_keep_small_relative_displacement_and_repeatability ... ok
+test render_snapshot::tests::ninety_degree_rotation_uses_normalized_shortest_path_slerp ... ok
+test render_app::tests::flight_reset_preserves_calibrated_controller_owner_and_live_input ... ok
+test render_snapshot::tests::same_quaternion_and_q_negated_q_are_equivalent ... ok
+test replay_app::tests::record_cli_rejects_out_of_range_input_without_clamping ... ok
+test telemetry_app::tests::telemetry_cli_rejects_invalid_input_without_clamping ... ok
+test telemetry_app::tests::telemetry_cli_requires_explicit_output_paths ... ok
+test telemetry_experiment::tests::cli_options_require_schedule_and_output ... ok
+test telemetry_experiment::tests::malformed_missing_unknown_and_oversized_schedules_are_rejected ... ok
+test telemetry_experiment::tests::input_ranges_are_rejected_without_clamping ... ok
+test telemetry_experiment::tests::non_finite_initial_and_input_values_are_rejected_by_construction ... ok
+test telemetry_experiment::tests::schema_rate_phase_names_and_steps_fail_closed ... ok
+test render_app::tests::flight_reset_reconstructs_all_mutable_flight_state ... ok
+test telemetry_experiment::tests::valid_schedule_parses_and_initial_state_uses_ned_pitch_semantics ... ok
+test trim_characterization_app::tests::every_non_characterized_outcome_maps_without_fabricated_derivatives ... ok
+test trim_characterization_app::tests::fixture_remains_synthetic_and_unpromoted ... ok
+test trim_characterization_app::tests::malformed_report_json_is_rejected ... ok
+test render_app::tests::play_initial_ground_diagnostics_match_supported_start ... ok
+test trim_characterization_app::tests::parser_preserves_speed_order_and_requires_explicit_steps ... ok
+test trim_characterization_app::tests::characterized_report_fields_are_bit_exact_copies_of_domain_data ... ok
+test render_app::tests::declared_valid_missing_and_invalid_assets_have_explicit_outcomes ... ok
+test render_app::tests::presentation_asset_does_not_change_acro_physics_fingerprint ... ok
+test trim_characterization_app::tests::production_report_source_uses_no_runtime_nondeterminism ... ok
+test render_app::tests::resolve_presentation_model_with_real_glb_returns_glb_asset ... ok
+test trim_characterization_app::tests::current_report_schema_version_is_accepted ... ok
+test trim_characterization_app::tests::markdown_documents_dimensional_local_derivative_semantics ... ok
+test trim_characterization_app::tests::invalid_report_outcome_enum_is_rejected ... ok
+test trim_characterization_app::tests::unavailable_reason_preserves_structured_domain_data ... ok
+test trim_characterization_app::tests::report_summary_and_points_preserve_domain_order_and_counts ... ok
+test trim_characterization_app::tests::valid_report_round_trip_is_exact ... ok
+test trim_characterization_app::tests::unknown_report_root_field_is_rejected ... ok
+test trim_characterization_app::tests::unsupported_report_schema_versions_fail_closed ... ok
+test trim_characterization_app::tests::serialization_and_markdown_are_deterministic ... ok
+test trim_sweep_validation_app::tests::current_report_schema_version_is_accepted ... ok
+test trim_sweep_validation_app::tests::malformed_numeric_value_fails ... ok
+test trim_sweep_validation_app::tests::deliberately_infeasible_bounded_sweep_completes_and_yields_fail ... ok
+test trim_sweep_validation_app::tests::invalid_report_outcome_enum_is_rejected ... ok
+test trim_sweep_validation_app::tests::full_pipeline_writes_two_artifacts_on_pass ... ok
+test trim_sweep_validation_app::tests::malformed_report_json_is_rejected_as_a_decode_error ... ok
+test trim_sweep_validation_app::tests::missing_required_args_fail ... ok
+test trim_sweep_validation_app::tests::no_speed_fails_closed ... ok
+test trim_sweep_validation_app::tests::non_finite_numeric_value_fails ... ok
+test trim_sweep_validation_app::tests::identical_execution_produces_byte_identical_json ... ok
+test trim_sweep_validation_app::tests::report_source_uses_no_runtime_nondeterminism ... ok
+test trim_sweep_validation_app::tests::repeated_speed_mps_preserves_order_exactly ... ok
+test trim_sweep_validation_app::tests::identical_execution_produces_byte_identical_markdown ... ok
+test trim_sweep_validation_app::tests::synthetic_fixture_is_reachable_from_app_manifest ... ok
+test trim_sweep_validation_app::tests::report_fingerprint_equals_loaded_model_fingerprint ... ok
+test trim_characterization_app::tests::runner_writes_the_same_characterized_values_returned_by_the_domain_api ... ok
+test trim_sweep_validation_app::tests::unknown_argument_fails ... ok
+test trim_sweep_validation_app::tests::synthetic_fixture_remains_synthetic_test_and_is_not_promoted ... ok
+test trim_sweep_validation_app::tests::json_counters_equal_m2_6a_counters ... ok
+test trim_sweep_validation_app::tests::runner_creates_missing_output_directory ... ok
+test trim_sweep_validation_app::tests::successful_synthetic_sweep_produces_ordered_success_rows ... ok
+test trim_sweep_validation_app::tests::reports_contain_no_timestamp_or_wall_clock_fields ... ok
+test validation_app::tests::suite_boundaries_apply_documented_steps_without_ambiguity ... ok
+test telemetry_app::tests::telemetry_from_replay_stops_on_s8a_hash_divergence ... ok
+test telemetry_experiment::tests::execution_has_exact_phase_boundaries_and_is_byte_deterministic ... ok
+test xfoil_campaign_app::tests::report_rejects_unsupported_versions_and_unknown_fields ... ok
+test xfoil_campaign_app::tests::report_round_trips ... ok
+test xfoil_runner_app::tests::command_script_is_exact_and_byte_deterministic ... ok
+test xfoil_runner_app::tests::manifest_validation_rejects_non_finite_mach ... ok
+test trim_sweep_validation_app::tests::unknown_report_root_field_is_rejected ... ok
+test trim_sweep_validation_app::tests::valid_report_round_trip_remains_exact ... ok
+test validation_app::tests::suite_v1_has_all_required_unique_manoeuvres_and_valid_inputs ... ok
+test trim_sweep_validation_app::tests::markdown_counters_equal_m2_6a_counters ... ok
+test trim_sweep_validation_app::tests::unsupported_report_schema_versions_fail_closed ... ok
+test first_slice_app::tests::missing_replay_bad_fingerprint_and_bad_glb_are_failures ... ok
+test benchmark_app::tests::timed_and_untimed_runs_have_the_same_final_snapshot_hash ... ok
+test render_snapshot::tests::absent_articulation_metadata_keeps_every_visual_surface_rigid ... ok
+test propulsion_bench_app::tests::production_propulsion_accelerates_the_ground_fixture_on_its_wheels ... ok
+test render_snapshot::tests::physics_replay_inputs_and_state_are_independent_of_render_frame_pattern ... ok
+test render_snapshot::tests::explicit_opaque_metadata_uses_simulated_servo_state_not_keyboard ... ok
+test validation_app::tests::manoeuvre_capture_is_repeatable_and_does_not_change_model_fingerprint ... ok
+
+test result: ok. 171 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.34s
+
+     Running tests\clark_y_reference_campaign_m2_9f.rs (target\debug\deps\clark_y_reference_campaign_m2_9f-78b0fe4213493dec.exe)
+
+running 1 test
+test committed_clark_y_campaign_runs_through_production_cli ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests\propulsion_bench_cli.rs (target\debug\deps\propulsion_bench_cli-009d88a1e05f5892.exe)
+
+running 4 tests
+test csv_has_stable_field_order_and_map_fixture_executes ... ok
+test output_uses_create_new_and_never_overwrites_existing_file ... ok
+test default_sweep_is_byte_deterministic_and_ordered ... ok
+test single_point_json_reports_static_and_flight_operating_points ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests\telemetry_experiment_cli.rs (target\debug\deps\telemetry_experiment_cli-5d1be6db6de33e58.exe)
+
+running 1 test
+test experiment_cli_is_deterministic_and_analyze_reads_its_capture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests\trim_characterization_cli.rs (target\debug\deps\trim_characterization_cli-e3edd81e85dd9502.exe)
+
+running 4 tests
+test operational_error_exits_one_and_never_uses_validation_exit_two ... ok
+test unavailable_outcomes_are_data_and_still_exit_zero ... ok
+test characterized_process_exits_zero_and_writes_exact_canonical_reports ... ok
+test identical_processes_write_byte_identical_json_and_markdown ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests\trim_sweep_cli.rs (target\debug\deps\trim_sweep_cli-be08613552c28497.exe)
+
+running 4 tests
+test operational_error_process_exits_one_without_false_pass ... ok
+test validation_failure_process_exits_two_after_writing_reports ... ok
+test successful_process_exits_zero_and_writes_only_canonical_reports ... ok
+test identical_successful_processes_write_byte_identical_reports ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests\xfoil_campaign_cli.rs (target\debug\deps\xfoil_campaign_cli-ebab6fbba764e643.exe)
+
+running 9 tests
+test one_node_completes_not_qualified_under_the_inherited_range_rule ... ok
+test simultaneous_blockers_preserve_exact_model_order_in_json_and_markdown ... ok
+test valid_multi_dataset_manifest_is_qualified_and_paths_are_manifest_relative ... ok
+test reports_are_byte_identical_ordered_timestamp_free_generated_solver_evidence ... ok
+test explicit_convergence_policy_changes_only_qualification ... ok
+test campaign_order_and_identity_errors_exit_one_without_reports ... ok
+test canonical_metadata_and_coverage_validation_fail_operationally ... ok
+test all_coverage_gap_kinds_are_structured_and_write_reports ... ok
+test malformed_polar_has_dataset_context_and_strict_manifest_rejects_bad_input ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests\xfoil_evidence_bundle_cli.rs (target\debug\deps\xfoil_evidence_bundle_cli-f0d917b1701926ce.exe)
+
+running 33 tests
+test dataset_count_mismatch_is_rejected_with_exit_two ... ok
+test completed_run_count_mismatch_is_rejected_with_exit_two ... ok
+test duplicate_dataset_id_is_rejected_with_exit_two ... ok
+test completed_single_dataset_promotion_succeeds ... ok
+test mach_mismatch_is_rejected_with_exit_two ... ok
+test absolute_polar_reference_is_rejected_with_exit_two ... ok
+test missing_polar_is_rejected_with_exit_two ... ok
+test dataset_id_mismatch_is_rejected_with_exit_two ... ok
+test campaign_id_mismatch_is_rejected_with_exit_two ... ok
+test no_absolute_input_paths_appear_in_bundle_json ... ok
+test converged_artifact_promotes_as_converged ... ok
+test convergence_mismatch_between_execution_and_validation_is_exit_two ... ok
+test missing_validation_manifest_is_rejected ... ok
+test incomplete_execution_is_rejected_with_exit_two ... ok
+test multi_dataset_promotion_preserves_exact_order ... ok
+test malformed_polar_is_rejected_with_exit_two ... ok
+test no_timestamps_or_hostnames_appear_in_bundle_json ... ok
+test no_xfoil_executable_path_appears_in_bundle_json ... ok
+test polar_datasets_json_is_canonical_evidence ... ok
+test non_completed_run_status_is_rejected_with_exit_two ... ok
+test polar_datasets_hash_matches_bundle_manifest ... ok
+test raw_polars_are_copied_byte_identically_and_sha256_locked ... ok
+test reynolds_mismatch_is_rejected_with_exit_two ... ok
+test run_polar_file_mismatch_is_rejected_with_exit_two ... ok
+test run_index_mismatch_is_rejected_with_exit_two ... ok
+test stale_owned_staging_does_not_contaminate_next_bundle ... ok
+test stale_unrelated_file_outside_owned_output_is_not_deleted ... ok
+test repeated_build_into_same_dir_is_byte_identical_and_stale_free ... ok
+test operational_failure_after_partial_work_leaves_no_final_bundle ... ok
+test unresolved_artifact_remains_unresolved ... ok
+test repeated_build_into_two_dirs_is_byte_identical ... ok
+test unsupported_schema_is_rejected_with_exit_two ... ok
+test smaller_bundle_removes_stale_polars_from_larger_previous_bundle ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running tests\xfoil_runner_cli.rs (target\debug\deps\xfoil_runner_cli-939692b4bf4199af.exe)
+
+running 40 tests
+test executable_start_failure_is_operational_exit_one ... ok
+test m2_9j_01_complete_ascending_sweep_converged ... ok
+test m2_9j_02_missing_middle_alpha_unresolved ... ok
+test m2_9j_04_missing_final_alpha_unresolved ... ok
+test m2_9j_03_missing_first_alpha_unresolved ... ok
+test airfoil_input_must_be_readable_utf8_and_nonempty ... ok
+test m2_9j_10_missing_polar_retains_semantics ... ok
+test m2_9j_05_extra_alpha_unresolved ... ok
+test m2_9j_06_reordered_alpha_rows_unresolved ... ok
+test m2_9j_07_duplicate_alpha_unresolved ... ok
+test m2_9j_08_complete_ascending_sweep_different_range ... ok
+test m2_9j_11_malformed_polar_retains_semantics ... ok
+test m2_9j_09_process_failure_retains_semantics ... ok
+test m2_9j_12_parser_success_alone_insufficient ... ok
+test m2_9j_13_process_exit_zero_alone_insufficient ... ok
+test m2_9j_15_complete_parseable_remains_completed ... ok
+test m2_9j_16_exact_reynolds_mach_preserved ... ok
+test m2_9j_17_raw_polar_bytes_preserved ... ok
+test m2_9j_14_incomplete_parseable_not_operational_error ... ok
+test deterministic_fake_produces_byte_identical_path_free_timestamp_free_artifacts ... ok
+test m2_9j_24_degree_radian_conversion_discriminating ... ok
+test m2_9j_23_alpha_tolerance_boundary ... ok
+test m2_9j_21_mixed_status_preserves_ordering ... ok
+test m2_9j_22_multiple_reynolds_independently_qualified ... ok
+test m2_9j_26_m2_9i_called_through_production_api ... ok
+test m2_9j_28_cl_cd_cm_preserved_in_polar ... ok
+test m2_9j_27_no_real_xfoil_required ... ok
+test m2_9j_29_validation_notes_reflect_convergence ... ok
+test m2_9j_30_execution_report_has_convergence_field ... ok
+test m2_9j_19_require_converged_rejects_incomplete ... ok
+test m2_9j_18_require_converged_accepts_complete ... ok
+test m2_9j_20_require_converged_false_preserves_coverage ... ok
+test operational_failure_after_a_successful_run_removes_final_artifacts ... ok
+test m2_9j_25_deterministic_repeated_execution ... ok
+test generated_validation_manifest_preserves_order_is_unresolved_and_flows_through_m2_9d ... ok
+test solver_failure_does_not_prevent_later_independent_runs ... ok
+test valid_execution_uses_explicit_executable_isolated_cwd_and_manifest_relative_airfoil ... ok
+test repeated_output_directory_removes_polars_from_a_larger_previous_campaign ... ok
+test manifest_schema_and_semantic_validation_fail_closed ... ok
+test solver_level_failures_are_typed_data_and_timeout_returns_after_reaping ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s
+
+     Running unittests src\lib.rs (target\debug\deps\renderer-8c2922a26d87d40c.exe)
+
+running 341 tests
+test accumulator::tests::below_dt_produces_zero_steps ... ok
+test accumulator::tests::pathological_frame_delta_is_clamped_and_reported ... ok
+test accumulator::tests::multiple_steps_preserve_fractional_remainder ... ok
+test camera::tests::elevation_horizon_is_zero ... ok
+test accumulator::tests::step_cap_discards_whole_backlog_without_changing_dt ... ok
+test camera::tests::camera_mode_resize_updates_aspect ... ok
+test camera::tests::camera_settings_do_not_touch_physics_fingerprint_path ... ok
+test camera::tests::eye_position_matches_eye_and_target ... ok
+test camera::tests::chase_config_is_presentation_only_and_tunable ... ok
+test camera::tests::camera_mode_builds_both_variants_and_is_finite ... ok
+test camera::tests::elevation_below_horizon_is_negative ... ok
+test accumulator::tests::exactly_dt_produces_one_step ... ok
+test camera::tests::elevation_zenith_is_one ... ok
+test camera::tests::elevation_is_bounded ... ok
+test accumulator::tests::remainder_is_conserved_across_frames ... ok
+test camera::tests::fog_factor_all_outputs_finite_and_bounded ... ok
+test camera::tests::fog_factor_large_distance_approaches_one ... ok
+test camera::tests::fog_factor_monotonically_increases_with_distance ... ok
+test camera::tests::fog_factor_negative_distance_is_zero ... ok
+test camera::tests::fog_factor_zero_density_is_zero ... ok
+test camera::tests::fog_factor_zero_distance_is_zero ... ok
+test camera::tests::identity_camera_is_behind_and_targets_ahead ... ok
+test camera::tests::inclined_attitude_produces_a_finite_non_degenerate_camera ... ok
+test camera::tests::inv_view_projection_is_actual_inverse ... ok
+test camera::tests::inv_view_projection_is_finite_for_all_test_attitudes ... ok
+test camera::tests::level_flight_heading_is_unchanged ... ok
+test camera::tests::minus_ninety_pitch_is_finite_and_keeps_entry_heading ... ok
+test camera::tests::near_minus_ninety_entry_side_stays_continuous ... ok
+test camera::tests::near_plus_ninety_entry_side_stays_continuous ... ok
+test camera::tests::near_plus_ninety_far_side_follows_flipped_nose ... ok
+test camera::tests::near_minus_ninety_far_side_follows_flipped_nose ... ok
+test camera::tests::normal_pitch_matches_legacy_projection_within_tolerance ... ok
+test camera::tests::pilot_camera_handles_degenerate_and_extreme_cases_without_nan ... ok
+test camera::tests::pilot_camera_handles_render_origin_translation ... ok
+test camera::tests::pilot_camera_narrower_fov_zooms_without_moving_positions ... ok
+test camera::tests::pilot_camera_points_at_aircraft ... ok
+test camera::tests::pilot_camera_transform_is_deterministic ... ok
+test camera::tests::pilot_position_remains_fixed_regardless_of_aircraft ... ok
+test camera::tests::plus_ninety_pitch_is_finite_and_keeps_entry_heading ... ok
+test camera::tests::resize_updates_aspect_and_ignores_zero_extent ... ok
+test camera::tests::roll_while_vertical_remains_finite ... ok
+test camera::tests::sun_alignment_at_sun_is_maximum ... ok
+test camera::tests::same_pose_gives_same_camera_result ... ok
+test camera::tests::sun_alignment_opposite_direction_is_minimum ... ok
+test camera::tests::sun_alignment_perpendicular_is_zero ... ok
+test camera::tests::vertical_attitude_uses_a_stable_finite_heading_fallback ... ok
+test camera::tests::vertical_camera_eye_differs_from_target_and_matrix_inverts ... ok
+test camera::tests::yawed_vertical_uses_geometric_fallback_not_global_heading ... ok
+test glb::tests::area_weighted_normals_single_triangle_produce_unit_normal ... ok
+test glb::tests::clamp_unit_factor_rejects_non_finite_values ... ok
+test glb::tests::color_combination_material_times_vertex_color_rgba ... ok
+test glb::tests::degenerate_collapsed_triangle_edge_produces_safe_normal ... ok
+test glb::tests::degenerate_triangle_produces_safe_normal_not_nan ... ok
+test glb::tests::explicit_inf_normal_falls_back_to_safe_normal ... ok
+test glb::tests::explicit_nan_normal_falls_back_to_safe_normal ... ok
+test glb::tests::explicit_non_unit_normal_is_normalized_to_unit_length ... ok
+test glb::tests::explicit_zero_normal_falls_back_to_safe_normal ... ok
+test glb::tests::material_alpha_is_preserved_through_combination ... ok
+test glb::tests::malformed_glb_is_an_explicit_parse_error ... ok
+test glb::tests::material_base_color_factor_defaults_to_white ... ok
+test glb::tests::missing_glb_is_an_explicit_parse_error ... ok
+test glb::tests::missing_vertex_color_defaults_to_white_opaque_so_material_passes_through ... ok
+test glb::tests::base_color_only_glb_still_loads_with_g1d_material_fields ... ok
+test glb::tests::material_factors_are_clamped_to_unit_range ... ok
+test glb::tests::material_metallic_factor_is_parsed ... ok
+test glb::tests::base_color_factor_is_preserved ... ok
+test glb::tests::normalize_or_safe_returns_unit_for_valid_vector ... ok
+test glb::tests::malformed_image_data_produces_explicit_error ... ok
+test glb::tests::multi_primitive_metallic_roughness_factors_are_distinct ... ok
+test glb::tests::acro_glb_asset_loads_with_primitives ... ok
+test glb::tests::material_alpha_is_preserved ... ok
+test glb::tests::material_metallic_roughness_default_to_gltf_spec_when_absent ... ok
+test glb::tests::embedded_jpeg_base_color_texture_loads ... ok
+test glb::tests::embedded_png_base_color_texture_loads ... ok
+test glb::tests::multi_primitive_preserves_distinct_materials ... ok
+test gpu::directional_shadow_regression_tests::shadow_uniforms_match_three_cascade_wgsl_layout ... ok
+test gpu::directional_shadow_regression_tests::shader_keeps_shadows_on_direct_light_only_and_fogs_after_lighting ... ok
+test gpu::glb_articulation_tests::articulation_changes_only_transform_target_and_preserves_material_index ... ok
+test gpu::material_uniform_tests::material_uniform_layout_is_16_bytes ... ok
+test gpu::material_uniform_tests::material_uniform_roundtrips_through_bytes ... ok
+test gpu::directional_shadow_regression_tests::shadow_caster_pass_avoids_depth_texture_aliasing_and_resource_recreation ... ok
+test glb::tests::multi_primitive_multi_texture_correctly_assigned ... ok
+test gpu::material_uniform_tests::procedural_material_parameters_are_non_metal_and_rough ... ok
+test gpu::material_uniform_tests::material_uniform_stores_finite_values ... ok
+test gpu::shader_brdf_regression_tests::direct_brdf_is_finite_and_zero_when_ndot_l_is_exactly_zero ... ok
+test gpu::shader_brdf_regression_tests::direct_brdf_is_finite_when_ndot_l_is_very_close_to_zero ... ok
+test glb::tests::acro_glb_normals_are_finite_and_normalized ... ok
+test gpu::shader_brdf_regression_tests::shader_source_keeps_denominator_floor_and_ndot_l_scale ... ok
+test gpu::terrain_debug_mode_tests::effective_sampler_anisotropy_matches_capability ... ok
+test gpu::terrain_debug_mode_tests::terrain_debug_mode_defaults_to_final ... ok
+test gpu::terrain_debug_mode_tests::terrain_debug_mode_labels_roundtrip ... ok
+test gpu::shader_brdf_regression_tests::direct_brdf_is_finite_at_ndot_v_floor_across_ndot_l ... ok
+test gpu::shader_brdf_regression_tests::direct_brdf_is_finite_at_minimum_roughness_across_directions ... ok
+test gpu::terrain_debug_mode_tests::terrain_debug_mode_u32_mapping_roundtrips ... ok
+test gpu::terrain_gpu_integration_guards::shader_keeps_the_g3a_r_three_frequency_stack ... ok
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_albedo_is_green_dominant ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_macro_matches_g2d_carrier ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_normal_encodes_up_normals ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_roughness_tracks_committed_map ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_headless_gpu_tests::fs_terrain_offscreen_renders_lit_green_grass ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_headless_gpu_tests::terrain_upload_readback_matches_committed_assets ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_gpu_integration_guards::shader_terrain_entry_reuses_pbr_and_stays_textured ... ok
+test gpu::terrain_material_uniform_tests::terrain_material_uniform_clamps_factors_at_load ... ok
+test gpu::terrain_material_uniform_tests::terrain_material_uniform_layout_is_128_bytes ... ok
+test gpu::terrain_gpu_integration_guards::renderer_terrain_resources_are_created_once ... ok
+test gpu::terrain_material_uniform_tests::terrain_material_uniform_roundtrips_through_bytes ... ok
+test gpu::vegetation_tests::scene_pass_aircraft_not_displaced_by_vegetation_pipeline ... ignored, requires a GPU; run with -- --ignored
+test gpu::terrain_material_uniform_tests::terrain_material_uniform_with_debug_mode_only_changes_selector ... ok
+test gpu::terrain_gpu_integration_guards::terrain_material_uploads_the_full_mip_chain_at_startup_only ... ok
+test gpu::vegetation_tests::shadow_pass_aircraft_silhouette_not_displaced_by_vegetation ... ignored, requires a GPU; run with -- --ignored
+test gpu::vegetation_tests::three_cascade_gpu_smoke_writes_every_depth_layer ... ignored, requires a GPU; run with -- --ignored
+test gpu::vegetation_tests::vegetation_all_lod_classes_render_with_decreasing_cost ... ignored, requires a GPU; run with -- --ignored
+test glb::tests::acro_glb_colors_are_finite_and_in_range ... ok
+test glb::tests::sampler_linear_filter_mapping ... ok
+test glb::tests::sampler_clamp_to_edge_mapping ... ok
+test glb::tests::sampler_mirrored_repeat_mapping ... ok
+test gpu::vegetation_tests::fs_vegetation_has_no_independent_tone_mapping_or_gamma ... ok
+test gpu::vegetation_tests::shader_declares_vegetation_entry_points_and_instance_inputs ... ok
+test gpu::vegetation_tests::vegetation_mesh_index_matches_group_part_flattening ... ok
+test gpu::vegetation_tests::vegetation_renders_instances_at_distinct_transforms ... ignored, requires a GPU; run with -- --ignored
+test gpu::vegetation_tests::vegetation_shadow_pass_produces_silhouettes ... ignored, requires a GPU; run with -- --ignored
+test glb::tests::vertex_color_contains_base_color_factor_times_vertex_color ... ok
+test glb::tests::no_texture_uses_no_base_color_texture ... ok
+test glb::tests::texcoord_0_texture_path_loads ... ok
+test glb::tests::sampler_nearest_filter_mapping ... ok
+test gpu::vegetation_tests::vegetation_state_uniform_is_16_bytes ... ok
+test math::tests::webgpu_projection_maps_near_to_zero_and_far_to_one ... ok
+test math::tests::wgsl_packing_is_explicitly_column_major ... ok
+test mesh::tests::ground_is_a_valid_render_only_plane_below_the_grid ... ok
+test glb::tests::sampler_repeat_mapping ... ok
+test mesh::tests::procedural_aircraft_indices_are_all_in_bounds ... ok
+test mesh::tests::procedural_aircraft_mesh_is_valid_and_plausibly_bounded ... ok
+test mesh::tests::procedural_aircraft_normals_are_unit_length ... ok
+test mesh::tests::runtime_ground_and_grid_follow_the_selected_reference_height ... ok
+test mesh::tests::vertex_layout_has_expected_size_and_alignment ... ok
+test pose::tests::body_forward_is_render_local_negative_z ... ok
+test pose::tests::down_maps_to_render_negative_y ... ok
+test mesh::tests::reference_grid_and_axes_are_finite_line_pairs ... ok
+test pose::tests::east_maps_to_render_positive_x ... ok
+test pose::tests::identity_body_orientation_becomes_render_identity ... ok
+test glb::tests::acro_glb_bounds_follow_render_local_coordinate_contract ... ok
+test pose::tests::nontrivial_orientation_obeys_c_r_c_inverse ... ok
+test pose::tests::north_maps_to_render_negative_z ... ok
+test pose::tests::positive_ninety_degree_physical_yaw_turns_nose_from_north_to_east ... ok
+test pose::tests::render_origin_is_applied_componentwise_before_frame_mapping ... ok
+test pose::tests::render_origin_is_subtracted_before_f32_cast ... ok
+test pose::tests::repeated_conversion_is_bit_identical ... ok
+test scenery::tests::all_indices_are_in_bounds ... ok
+test scenery::tests::boundary_belt_is_denser_opposite_flightline ... ok
+test scenery::tests::all_scenery_object_bases_use_same_ground_reference ... ok
+test scenery::tests::all_triangles_have_ccw_winding_from_above ... ok
+test scenery::tests::all_generated_coordinates_are_finite ... ok
+test gpu::vegetation_tests::draw_call_counts_follow_batches_not_instance_count ... ok
+test gpu::vegetation_tests::vegetation_instance_buffer_bytes_scale_with_visible_count ... ok
+test scenery::tests::boundary_vegetation_keeps_central_area_clear ... ok
+test scenery::tests::boundary_geometry_stays_within_preferred_budget ... ok
+test scenery::tests::boundary_vegetation_is_clustered_with_gaps ... ok
+test scenery::tests::boundary_vegetation_stays_within_field_extent ... ok
+test scenery::tests::boundary_vegetation_layout_is_deterministic ... ok
+test scenery::tests::boundary_variation_is_not_uniform_and_stays_in_range ... ok
+test scenery::tests::different_seed_changes_boundary_layout ... ok
+test scenery::tests::different_seeds_produce_different_layouts ... ok
+test scenery::tests::centerline_markings_are_segmented_dashes ... ok
+test scenery::tests::exactly_four_pilot_markers_are_placed ... ok
+test scenery::tests::flightline_stays_outside_the_runway_safety_area ... ok
+test scenery::tests::generated_flying_field_is_not_empty_and_reports_geometry ... ok
+test scenery::tests::no_tree_overlaps_runway_safety_rectangle ... ok
+test scenery::tests::mesh_has_non_zero_geometry ... ok
+test glb::tests::acro_glb_parses_to_a_finite_indexed_triangle_mesh ... ok
+test scenery::tests::same_seed_produces_bit_identical_placement ... ok
+test scenery::tests::production_scenery_contains_no_tree_objects_or_geometry ... ok
+test scenery::tests::runway_dimensions_match_spec ... ok
+test scenery::tests::runway_is_centered_at_origin ... ok
+test scenery::tests::runway_long_axis_is_parallel_to_render_z ... ok
+test scenery::tests::runway_surface_is_above_grass ... ok
+test scenery::tests::tree_positions_are_within_field_bounds ... ok
+test scenery::tests::boundary_instances_are_registered_in_objects ... ok
+test scenery::tests::tree_variation_is_not_uniform ... ok
+test scenery::tests::repeated_generation_produces_identical_scenery ... ok
+test scenery::tests::threshold_markings_are_present_at_both_runway_ends ... ok
+test scenery::tests::scenery_transforms_are_deterministic ... ok
+test shadow::tests::all_cascade_matrices_and_metadata_are_finite ... ok
+test shadow::tests::cascade_selection_honors_boundaries_and_rejects_outside ... ok
+test shadow::tests::invalid_camera_input_fails_closed_to_finite_cascades ... ok
+test scenery::tests::windsock_is_above_ground_and_extends_horizontally ... ok
+test shadow::tests::motion_past_near_texel_updates_near_center ... ok
+test shadow::tests::near_parallel_light_direction_uses_finite_alternate_up ... ok
+test shadow::tests::production_configuration_is_exactly_three_ordered_cascades ... ok
+test scenery::tests::vegetation_layout_is_deterministic ... ok
+test shadow::tests::sub_texel_camera_translation_keeps_all_light_space_xy_stable ... ok
+test shadow::tests::texel_sizes_match_extent_and_resolution ... ok
+test terrain::tests::bilinear_interpolation_at_sample_points_matches_exact ... ok
+test terrain::tests::bilinear_interpolation_clamps_outside_bounds ... ok
+test scenery::tests::legacy_placeholder_trees_are_an_explicit_opt_in ... ok
+test scenery::tests::multiple_boundary_silhouettes_exist ... ok
+test terrain::tests::flat_terrain_all_elevations_equal ... ok
+test terrain::tests::flat_terrain_has_correct_dimensions ... ok
+test scenery::tests::scenery_geometry_stays_within_an_explicit_budget ... ok
+test terrain::tests::flat_terrain_has_correct_vertex_count ... ok
+test terrain::tests::flat_terrain_normals_point_upward ... ok
+test terrain::tests::adjacent_chunks_share_boundary_coordinates ... ok
+test terrain::tests::g2d_alpha_is_exactly_material_alpha ... ok
+test terrain::tests::g2d_color_function_is_deterministic_bitwise ... ok
+test terrain::tests::g2d_elevation_bias_finite_and_bounded ... ok
+test terrain::tests::g2d_color_function_alpha_is_exactly_base ... ok
+test terrain::tests::centered_adjacent_chunk_seams_match ... ok
+test scenery::tests::tree_variants_are_deterministic_and_stay_in_range ... ok
+test terrain::tests::g2d_flat_terrain_elevation_exact_everywhere ... ok
+test terrain::tests::centered_chunk_ordering_is_deterministic ... ok
+test terrain::tests::g2d_adjacent_chunks_share_colors_on_x_and_z_seams ... ok
+test terrain::tests::g2d_centered_seams_match_world_space_colors ... ok
+test terrain::tests::chunk_ordering_is_deterministic ... ok
+test terrain::tests::g2d_flat_terrain_vertex_positions_correct ... ok
+test terrain::tests::g2d_flat_terrain_full_chunk_counts ... ok
+test terrain::tests::g2d_macro_noise_deterministic_and_bounded ... ok
+test terrain::tests::g2d_medium_noise_deterministic_and_bounded ... ok
+test terrain::tests::centered_terrain_extends_in_both_x_directions ... ok
+test terrain::tests::g2d_flat_terrain_normals_still_exact_up ... ok
+test terrain::tests::g2d_noise_continuous_across_lattice_boundaries ... ok
+test terrain::tests::g2d_noise_works_at_origin ... ok
+test terrain::tests::centered_terrain_extends_in_both_z_directions ... ok
+test terrain::tests::g2d_lattice_hash_bounded_including_negative_indices ... ok
+test terrain::tests::g2d_noise_finite_and_bounded_on_negative_coordinates ... ok
+test terrain::tests::g2d_noise_finite_and_bounded_on_positive_coordinates ... ok
+test terrain::tests::g2d_slope_response_bounded_on_inclined_normal ... ok
+test terrain::tests::g2d_custom_material_color_is_respected ... ok
+test terrain::tests::g2d_rolling_elevations_stay_within_expected_band ... ok
+test gpu::vegetation_tests::vegetation_mesh_index_is_contiguous_and_has_no_gaps ... ok
+test terrain::tests::g2d_uv_mapping_unchanged ... ok
+test terrain::tests::g3a_material_configuration_is_deterministic_and_finite ... ok
+test terrain::tests::g2d_geometry_fields_independent_of_color_modulation ... ok
+test terrain::tests::g3a_terrain_tbn_degenerate_fallback_is_finite ... ok
+test terrain::tests::g3a_terrain_tbn_is_exact_on_flat_terrain ... ok
+test terrain::tests::g2d_render_origin_offset_does_not_create_seam ... ok
+test terrain::tests::g3ar_detail_fade_is_monotonic_and_bounded ... ok
+test terrain::tests::g3ar_fade_is_continuous_around_near_and_far ... ok
+test terrain::tests::g3ar_material_defaults_are_pinned ... ok
+test terrain::tests::g3a_terrain_tbn_finite_and_unit_length ... ok
+test terrain::tests::g2d_full_generation_repeatable_bitwise ... ok
+test terrain::tests::g3ar_rotated_secondary_uv_is_deterministic ... ok
+test terrain::tests::g2d_chunk_size_does_not_change_color_at_same_world_position ... ok
+test terrain::tests::g3a_uv_mapping_is_world_space_anchored ... ok
+test terrain::tests::rolling_terrain_elevations_are_finite ... ok
+test terrain::tests::sample_bilinear_render_space_accounts_for_offset ... ok
+test terrain::tests::rolling_terrain_normals_are_finite_and_unit_length ... ok
+test terrain::tests::rolling_terrain_has_no_nan_or_inf ... ok
+test terrain::tests::terrain_bounds_are_correct ... ok
+test terrain::tests::g3ar_detail_and_macro_stacks_stay_finite_with_custom_material ... ok
+test terrain::tests::terrain_chunk_triangle_front_faces_point_up ... ok
+test terrain::tests::terrain_chunk_has_correct_index_count ... ok
+test terrain::tests::terrain_chunk_has_correct_vertex_count ... ok
+test terrain::tests::terrain_material_color_stays_authority_within_bounds ... ok
+test terrain::tests::terrain_chunk_indices_are_in_bounds ... ok
+test terrain::tests::terrain_generation_is_deterministic ... ok
+test terrain::tests::g3a_adjacent_chunk_boundary_uv_and_color_match ... ok
+test terrain::tests::terrain_vertices_have_no_nan_or_inf ... ok
+test terrain_textures::tests::embedded_assets_are_png_files ... ok
+test terrain::tests::g2d_texture_scale_does_not_scale_surface_variation ... ok
+test terrain::tests::terrain_uv_scale_independent_of_tessellation ... ok
+test terrain::tests::centered_terrain_contains_render_origin ... ok
+test terrain::tests::g2d_bounds_contain_all_vertices ... ok
+test terrain::tests::g2d_large_flat_terrain_has_color_variation ... ok
+test terrain::tests::g2d_no_unexpected_empty_chunks ... ok
+test terrain::tests::g3ar_rotated_secondary_uv_is_chunk_boundary_continuous ... ok
+test terrain::tests::g2d_flat_terrain_slope_contribution_is_zero ... ok
+test terrain::tests::g3a_uv_and_color_are_chunk_size_independent ... ok
+test terrain_textures::tests::mip_level_count_is_log2_plus_one ... ok
+test terrain::tests::g2d_variation_sober_for_flat_and_rolling ... ok
+test terrain_textures::tests::embedded_assets_decode_to_committed_dimensions ... ok
+test terrain_textures::tests::noise_is_bounded_and_periodic ... ok
+test terrain_textures::tests::field_wraps_periodically ... ok
+test terrain_textures::tests::albedo_alpha_is_always_255 ... ok
+test terrain_textures::tests::albedo_is_grass_like_green_with_variation ... ok
+test terrain_textures::tests::generated_size_is_reasonable ... ok
+test texture::tests::create_staging_buffer_no_padding_needed ... ok
+test terrain_textures::tests::mip_chain_has_full_level_count_for_all_maps ... ok
+test texture::tests::create_staging_buffer_overflow_returns_error ... ok
+test texture::tests::create_staging_buffer_with_padding ... ok
+test texture::tests::decode_empty_data_returns_error ... ok
+test terrain_textures::tests::mip_chain_levels_have_halved_dimensions_and_pixel_counts ... ok
+test texture::tests::decode_invalid_data_returns_error ... ok
+test texture::tests::default_sampler_config_is_linear_repeat ... ok
+test texture::tests::padded_bytes_per_row_checked_matches_unchecked ... ok
+test texture::tests::padded_bytes_per_row_checked_overflow ... ok
+test texture::tests::padded_bytes_per_row_generic_matches_rgba8_specialization ... ok
+test texture::tests::padded_bytes_per_row_pads_to_alignment ... ok
+test texture::tests::padded_bytes_per_row_r8_aligns_to_copy_alignment ... ok
+test texture::tests::padded_bytes_per_row_returns_unpadded_when_aligned ... ok
+test texture::tests::sampler_filter_from_gltf_min_collapses_mipmaps ... ok
+test texture::tests::row_padding_arithmetic_for_various_widths ... ok
+test texture::tests::sampler_filter_from_gltf_mag_maps_correctly ... ok
+test texture::tests::sampler_wrap_from_gltf_maps_correctly ... ok
+test vegetation::tests::debug_modes_map_cleanly ... ok
+test vegetation::tests::both_species_are_present_within_target_ranges ... ok
+test vegetation::tests::distance_cull_removes_instances_beyond_the_configured_range ... ok
+test vegetation::tests::far_boundary_trees_deserve_lod2_not_cull_at_default_range ... ok
+test vegetation::tests::frustum_handles_altitude_lookdown_and_extreme_positions ... ok
+test vegetation::tests::frustum_keeps_front_centre_visible_and_blocks_behind_camera ... ok
+test vegetation::tests::gpu_instance_layout_is_expected_size_and_aligned ... ok
+test vegetation::tests::lod_hysteresis_does_not_thrash_across_a_boundary ... ok
+test vegetation::tests::lod_thresholds_are_centralized_and_ordered ... ok
+test vegetation::tests::lod_transitions_are_monotonic_for_a_slow_zoom ... ok
+test vegetation::tests::different_seeds_produce_meaningfully_different_layouts ... ok
+test terrain_textures::tests::mip_chain_preserves_periodicity_of_the_base_texture ... ok
+test terrain_textures::tests::mip_albedo_mean_is_stable_down_the_chain ... ok
+test vegetation::tests::near_trees_populate_and_boundary_belt_stays_in_its_ring ... ok
+test vegetation::tests::placement_bounds_and_scales_are_finite_and_bounded ... ok
+test vegetation::tests::placement_enforces_minimum_spacing_everywhere ... ok
+test vegetation::tests::placement_count_is_within_the_field_budget ... ok
+test terrain_textures::tests::mip_normal_levels_are_finite_and_normalized ... ok
+test terrain_textures::tests::mip_roughness_mean_is_stable_down_the_chain ... ok
+test vegetation::tests::placement_respects_runway_and_safety_exclusion ... ok
+test vegetation::tests::visibility_is_grouped_by_asset_and_lod_into_batches ... ok
+test vegetation::tests::placement_is_deterministic_for_the_same_seed ... ok
+test vegetation_assets::tests::conifer_silhouette_is_ragged_not_a_tier_pyramid ... ok
+test vegetation::tests::visible_scratch_capacity_is_reused_across_frames ... ok
+test vegetation_assets::tests::assets_within_each_species_are_visually_distinct ... ok
+test vegetation_assets::tests::deciduous_canopy_has_breaks_not_a_single_dome ... ok
+test vegetation_assets::tests::far_lod_keeps_a_tree_mass_silhouette ... ok
+test vegetation_assets::tests::every_lod_mesh_is_valid_and_finite ... ok
+test vegetation_assets::tests::ground_contact_is_clean_for_every_asset ... ok
+test terrain_textures::tests::committed_assets_match_the_generator_bitwise ... ok
+test vegetation_assets::tests::deterministic_generation_is_reproducible ... ok
+test vegetation_assets::tests::lod0_canopies_are_organic_not_primitive_shells ... ok
+test vegetation_assets::tests::normals_are_unit_length_and_positions_finite ... ok
+test vegetation_assets::tests::lod_triangle_counts_reduce_substantially_and_monotonically ... ok
+test vegetation_assets::tests::glb_export_is_deterministic_and_valid_for_every_asset ... ok
+test vegetation_assets::tests::tree_heights_are_plausible_and_bounds_are_finite ... ok
+test vegetation_assets::tests::production_set_has_two_species_and_three_variants_each ... ok
+test vegetation_assets::tests::triangles_face_outward_when_viewed_from_outside ... ok
+test vegetation_assets::tests::trunk_and_canopy_materials_are_distinct ... ok
+test vegetation_assets::tests::per_asset_triangle_budget_is_reasonable_for_an_rc_field ... ok
+test terrain_textures::tests::normal_texels_are_encoded_unit_vectors ... ok
+test terrain_textures::tests::mip_chain_mip_zero_is_the_committed_base ... ok
+test vegetation_assets::tests::glb_round_trips_through_the_render_glb_loader ... ok
+test terrain_textures::tests::normal_map_convention_is_flat_up_and_bounded ... ok
+test terrain_textures::tests::generation_is_bitwise_deterministic ... ok
+test terrain_textures::tests::roughness_is_linear_in_range_with_variation ... ok
+test terrain_textures::tests::seam_is_indistinguishable_from_interior ... ok
+test terrain_textures::tests::mip_chain_generation_is_bitwise_deterministic ... ok
+test terrain_textures::tests::mip_chain_from_generated_set_matches_committed_chain ... ok
+
+test result: ok. 329 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running unittests src\bin\generate_terrain_textures.rs (target\debug\deps\generate_terrain_textures-ddcc489c60e40053.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\aircraft_asset_g3c.rs (target\debug\deps\aircraft_asset_g3c-0ca2268e04020377.exe)
+
+running 3 tests
+test production_surface_mapping_has_identity_neutral_and_finite_deflections ... ok
+test production_loader_accepts_detailed_indexed_asset ... ok
+test authored_parts_materials_and_surface_primitives_are_distinct ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\dependency_boundary.rs (target\debug\deps\dependency_boundary-e2b9d4391687d2c4.exe)
+
+running 1 test
+test renderer_manifest_has_no_physics_model_or_aircraft_dependencies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\hdr_pipeline_g3b.rs (target\debug\deps\hdr_pipeline_g3b-818ade0340e5d894.exe)
+
+running 14 tests
+test hdr_scene_to_tone_mapped_surface_offscreen ... ignored, requires a GPU; run with -- --ignored
+test exposure_multiplier_maps_ev_stops ... ok
+test neutral_tone_map_is_monotonic_per_channel ... ok
+test neutral_tone_map_preserves_greys_and_compresses_highlights ... ok
+test validate_exposure_ev_rejects_non_finite ... ok
+test neutral_tone_map_is_finite_across_scene_range ... ok
+test resize_recreates_hdr_target_and_bind_group_but_not_pipeline ... ok
+test validate_exposure_ev_accepts_default_and_band_edges ... ok
+test validate_exposure_ev_rejects_out_of_range ... ok
+test exposure_never_leaks_into_physics_boundary ... ok
+test shader_has_hdr_postprocess_contract_without_ldr_clamp ... ok
+test shadow_stays_on_direct_light_only_and_sky_is_directional ... ok
+test renderer_hdr_target_is_rgba16float_and_created_outside_frame_loop ... ok
+test postprocess_wgsl_parses_with_postprocess_entry_points ... ok
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\moving_surfaces_g1e.rs (target\debug\deps\moving_surfaces_g1e-3aaf7e7994c226ea.exe)
+
+running 10 tests
+test differential_ailerons_move_oppositely ... ok
+test elevator_positive_and_negative_rotate_oppositely ... ok
+test neutral_surface_transforms_are_identity ... ok
+test glb_rigid_and_articulated_parts_receive_the_required_composed_transforms ... ok
+test unbound_slots_stay_rigid_and_hinges_validate ... ok
+test root_pose_and_local_transform_compose ... ok
+test rudder_rotates_about_vertical_axis ... ok
+test transform_output_is_deterministic ... ok
+test invalid_glb_primitive_mappings_fail_closed ... ok
+test explicit_glb_primitives_map_all_surfaces_without_names_or_order_fallback ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\shader_wgsl_g3a.rs (target\debug\deps\shader_wgsl_g3a-bd224c5be56871ac.exe)
+
+running 2 tests
+test shader_defines_the_g3a_terrain_entry_points ... ok
+test shader_wgsl_parses_and_validates ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\terrain_visual_g3ar.rs (target\debug\deps\terrain_visual_g3ar-8876f122292b3ffb.exe)
+
+running 7 tests
+test debug_mode_config_mapping_is_total_over_the_uniform_selector ... ok
+test rotated_secondary_uv_is_deterministic_and_world_anchored ... ok
+test detail_fade_is_monotone_smoothstep_within_the_configured_range ... ok
+test rotated_secondary_uv_is_seamless_across_chunk_boundaries ... ok
+test committed_assets_build_the_full_512_to_1_mip_chain ... ok
+test every_mip_level_has_exact_base_two_dimensions_and_payload_size ... ok
+test committed_chain_generation_is_bitwise_deterministic ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running unittests src\lib.rs (target\debug\deps\replay-70c26a7d5dbaf7a6.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\aircraft_replay.rs (target\debug\deps\aircraft_replay-05b24297c3bbfc38.exe)
+
+running 15 tests
+test replay_crate_has_no_renderer_wgpu_or_winit_dependency ... ok
+test snapshot_hash_uses_documented_field_order_and_hamilton_wxyz ... ok
+test recorder_binds_pre_step_n_to_post_step_n_plus_one_hash ... ok
+test recorder_requires_step_zero_and_rejects_noncontiguous_pre_step ... ok
+test json_rejects_unknown_schema_invalid_input_config_and_state ... ok
+test replay_json_is_input_based_and_contains_no_snapshot_trajectory ... ok
+test strict_json_rejects_unknown_fields_at_every_required_level ... ok
+test json_rejects_noncontiguous_frames_and_malformed_hex_values ... ok
+test snapshot_hash_is_deterministic_and_sensitive_to_snapshot_fields ... ok
+test json_roundtrip_preserves_exact_values_fingerprint_and_hashes ... ok
+test player_rejects_config_and_initial_state_mismatches_before_playback ... ok
+test model_id_mismatch_is_distinct_from_physics_fingerprint_mismatch ... ok
+test first_per_step_divergence_reports_pre_and_post_step_indices ... ok
+test committed_acro_dataset_verifies_all_two_thousand_steps ... ok
+test generated_two_thousand_step_replay_verifies_every_hash ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+
+     Running tests\determinism.rs (target\debug\deps\determinism-50af8e62c0423301.exe)
+
+running 6 tests
+test valid_pilot_input_json_roundtrip_preserves_bits_and_field_names ... ok
+test replay_rejects_different_inertia_before_playback ... ok
+test replay_rejects_different_mass_before_playback ... ok
+test replay_rejects_different_timestep_before_playback ... ok
+test replay_deserialization_rejects_invalid_pilot_input_instead_of_clamping ... ok
+test t11_json_roundtrip_replays_identical_snapshot_hashes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests\reynolds_runtime_m2_3c.rs (target\debug\deps\reynolds_runtime_m2_3c-adfd06862b976e42.exe)
+
+running 1 test
+test m2_3c_19_synthetic_reynolds_aware_aircraft_replay_is_deterministic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src\lib.rs (target\debug\deps\sim_core-72c22eee621de8c1.exe)
+
+running 2 tests
+test input::tests::clamps_at_construction_boundary ... ok
+test parameters::tests::rejects_invalid_mass_and_inertia ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\aero_s4.rs (target\debug\deps\aero_s4-33f67c43c0ee4d41.exe)
+
+running 22 tests
+test a13_force_at_body_point_uses_right_handed_moment_arm ... ok
+test a11_positive_lift_points_toward_element_up ... ok
+test a14_intrinsic_cm_has_expected_positive_and_negative_y_sign ... ok
+test a15_complete_identity_frame_case_matches_manual_solution ... ok
+test a16_rotational_local_velocity_changes_alpha_in_expected_direction ... ok
+test a12_lift_is_perpendicular_to_section_velocity ... ok
+test a10_drag_opposes_forward_section_velocity ... ok
+test a2_zero_density_has_zero_wrench_at_nonzero_speed ... ok
+test a17_real_aero_evaluator_recomputes_wrench_at_all_rk4_stages ... ok
+test a3_local_point_velocity_includes_omega_cross_r ... ok
+test a4_world_body_and_element_frame_transforms_are_explicit ... ok
+test a5_alpha_sign_follows_positive_element_down_velocity ... ok
+test a6_polar_exact_sample_is_preserved ... ok
+test a1_zero_airspeed_has_zero_finite_wrench ... ok
+test a7_polar_midpoint_is_linearly_interpolated ... ok
+test a8_polar_clamps_beyond_both_endpoints ... ok
+test a9_invalid_polars_are_rejected ... ok
+test aero_configuration_validation_rejects_invalid_values ... ok
+test aero_rk4_step_allocates_nothing_after_initialization ... ok
+test drag_only_aerodynamics_never_adds_local_kinetic_power ... ok
+test a18_representative_grid_outputs_are_finite ... ok
+test aero_evaluation_allocates_nothing_after_initialization ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\airframe_ground_contacts.rs (target\debug\deps\airframe_ground_contacts-3816396f277c75d4.exe)
+
+running 6 tests
+test airborne_and_clear_points_produce_exactly_zero_wrench ... ok
+test belly_contact_is_unilateral_and_friction_opposes_slip ... ok
+test invalid_structural_contact_is_rejected_before_the_hot_loop ... ok
+test point_at_the_surface_without_penetration_produces_no_spurious_force ... ok
+test symmetric_tip_strikes_generate_opposite_roll_moments ... ok
+test structural_contact_hot_loop_allocates_nothing ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\controls_s5a.rs (target\debug\deps\controls_s5a-c308d3c05c5e0f08.exe)
+
+running 20 tests
+test c10_asymmetric_servo_travel_uses_piecewise_mapping ... ok
+test c11_reversed_servo_inverts_only_the_physical_command ... ok
+test c12_servo_update_respects_exact_speed_limit ... ok
+test c13_servo_captures_reachable_target_without_overshoot ... ok
+test c14_servo_converges_monotonically_to_constant_target ... ok
+test c17_complete_pipeline_matches_manual_one_step_calculation ... ok
+test c4_zero_expo_is_linear_rate_scaling ... ok
+test c18_throttle_bypasses_servo_lag ... ok
+test c15_one_full_step_matches_two_half_steps_before_target_capture ... ok
+test c1_pilot_input_clamps_and_neutralizes_realtime_values ... ok
+test c5_full_expo_is_cubic_rate_scaling ... ok
+test c6_axis_response_has_odd_symmetry_on_deterministic_grid ... ok
+test c16_neutral_state_is_stable_for_many_steps ... ok
+test c19_invalid_control_configuration_is_rejected ... ok
+test c7_response_endpoints_equal_signed_rate ... ok
+test c9_servo_endpoints_map_to_configured_travel ... ok
+test c8_conventional_mixer_preserves_logical_semantics ... ok
+test controls_hot_paths_allocate_nothing_after_initialization ... ok
+test m2_5_steady_controls_equal_the_eventual_rate_limited_targets ... ok
+test c20_repeated_control_run_is_bit_identical ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\propulsion_m2_4b.rs (target\debug\deps\propulsion_m2_4b-5abf291e185d1e42.exe)
+
+running 6 tests
+test esc_rejects_invalid_resistance_and_zero_is_ideal ... ok
+test map_rejects_empty_invalid_nonincreasing_and_duplicate_speeds ... ok
+test bisection_uses_candidate_speed_map_and_stopped_outputs_are_exact_zero ... ok
+test map_samples_exact_interpolated_different_j_grids_and_clamps_with_diagnostics ... ok
+test positive_esc_resistance_reports_loss_and_closes_terminal_power_accounting ... ok
+test fixed_source_legacy_path_is_bit_identical_and_map_hot_path_allocates_nothing ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\propulsion_s5b.rs (target\debug\deps\propulsion_s5b-d4cb3985f65813fd.exe)
+
+running 29 tests
+test p11_motor_kv_ke_and_kt_conversion_is_si_consistent ... ok
+test p10_ideal_esc_conserves_electrical_power ... ok
+test p12_static_solver_matches_independent_quadratic_solution ... ok
+test p14_known_static_thrust_matches_dimensional_formula ... ok
+test p17_local_propeller_velocity_includes_omega_cross_r ... ok
+test p13_solver_result_satisfies_independently_computed_torque_balance ... ok
+test p15_known_propeller_torque_matches_dimensional_formula ... ok
+test p18_non_identity_aircraft_and_propeller_frames_transform_explicitly ... ok
+test p16_forward_airspeed_changes_advance_ratio_and_operating_point ... ok
+test p19_identity_propeller_thrust_points_along_positive_body_x ... ok
+test p20_positive_local_x_spin_reacts_about_negative_x ... ok
+test p23_zero_density_has_zero_propeller_wrench_but_not_forced_zero_rpm ... ok
+test p1_invalid_battery_config_is_rejected ... ok
+test p21_negative_local_x_spin_reacts_about_positive_x ... ok
+test p24_rk4_recomputes_forward_speed_rpm_and_thrust_at_stage_states ... ok
+test p22_off_center_thrust_adds_exact_r_cross_f_moment ... ok
+test p27_shaft_power_does_not_exceed_motor_electrical_input ... ok
+test p28_s5a_throttle_passes_directly_to_propulsion_without_conversion ... ok
+test p2_invalid_motor_config_is_rejected ... ok
+test p3_invalid_propeller_config_is_rejected ... ok
+test p4_invalid_coefficient_table_is_rejected ... ok
+test p5_exact_coefficient_sample_is_preserved ... ok
+test p6_midpoint_coefficients_are_linearly_interpolated ... ok
+test p7_coefficient_sampling_clamps_to_endpoints ... ok
+test p8_zero_throttle_is_exactly_off_at_any_airspeed ... ok
+test p9_electrical_current_and_battery_sag_match_analytical_equations ... ok
+test propulsion_hot_paths_allocate_nothing_after_initialization ... ok
+test p25_representative_propulsion_grid_is_finite ... ok
+test p26_repeated_evaluation_is_bit_identical ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\reynolds_polar_family_m2_3b.rs (target\debug\deps\reynolds_polar_family_m2_3b-c0b07af18e056555.exe)
+
+running 21 tests
+test m2_3b_01_zero_nodes_are_rejected ... ok
+test m2_3b_02_zero_reynolds_is_rejected ... ok
+test m2_3b_03_negative_reynolds_is_rejected ... ok
+test m2_3b_06_construction_canonicalizes_reynolds_order_deterministically ... ok
+test m2_3b_05_duplicate_reynolds_is_rejected ... ok
+test m2_3b_04_nonfinite_reynolds_is_rejected ... ok
+test m2_3b_07_one_node_family_samples_that_node ... ok
+test m2_3b_13_below_range_clamps_and_reports_status ... ok
+test m2_3b_09_midpoint_is_interpolated_in_log_reynolds ... ok
+test m2_3b_10_arbitrary_log_reynolds_fraction_is_preserved ... ok
+test m2_3b_12_different_alpha_grids_are_sampled_before_reynolds_interpolation ... ok
+test m2_3b_08_exact_reynolds_node_preserves_table_result ... ok
+test m2_3b_17_pitching_moment_uses_log_reynolds_interpolation ... ok
+test m2_3b_14_above_range_clamps_and_reports_status ... ok
+test m2_3b_15_out_of_range_sampling_never_extrapolates ... ok
+test m2_3b_11_alpha_interpolation_remains_piecewise_linear ... ok
+test m2_3b_16_drag_coefficient_uses_log_reynolds_interpolation ... ok
+test m2_3b_19_legacy_polar_table_behavior_is_unchanged ... ok
+test m2_3b_18_exact_alpha_sample_is_preserved ... ok
+test m2_3b_20_sampling_allocates_nothing ... ok
+test m2_3b_21_repeated_sampling_is_bit_deterministic ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\reynolds_runtime_m2_3c.rs (target\debug\deps\reynolds_runtime_m2_3c-f0f2a739d4c44f5e.exe)
+
+running 12 tests
+test m2_3c_03_nonfinite_viscosity_is_rejected ... ok
+test m2_3c_04_reynolds_equation_is_correct ... ok
+test m2_3c_05_zero_speed_has_zero_reynolds_and_zero_wrench ... ok
+test m2_3c_06_exact_reynolds_node_is_preserved ... ok
+test m2_3c_07_between_node_sampling_uses_local_reynolds ... ok
+test m2_3c_12_local_element_orientation_path_remains_correct ... ok
+test m2_3c_09_above_family_range_is_diagnostic ... ok
+test m2_3c_15_legacy_fixed_polar_path_is_unchanged ... ok
+test m2_3c_11_rotational_local_velocity_changes_reynolds ... ok
+test m2_3c_10_local_chord_changes_reynolds ... ok
+test m2_3c_08_below_family_range_is_diagnostic ... ok
+test m2_3c_14_reynolds_aero_hot_path_allocates_nothing ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\rigid_body.rs (target\debug\deps\rigid_body-838a2608b612f985.exe)
+
+running 13 tests
+test nonspherical_inertia_has_expected_initial_gyroscopic_acceleration ... ok
+test rk4_evaluator_observes_four_distinct_stage_states_and_state_dependent_force ... ok
+test simulation_step_allocates_nothing_after_initialization ... ok
+test t9_rk4_exhibits_fourth_order_convergence_for_rotation ... ok
+test t4_constant_body_force_without_rotation_matches_analytic_solution ... ok
+test t3_gravity_only_matches_ned_analytic_solution ... ok
+test t7_constant_body_rate_with_spherical_inertia_matches_rotation ... ok
+test t1_stationary_body_zero_gravity_is_unchanged ... ok
+test t2_constant_linear_velocity_matches_analytic_solution ... ok
+test t10_fixed_step_accounting_uses_post_step_semantics ... ok
+test nonidentity_orientation_composes_body_rate_delta_on_the_right ... ok
+test torque_free_nonspherical_body_conserves_energy_and_world_angular_momentum ... ok
+test t8_quaternion_norm_remains_unity_after_long_run ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.55s
+
+     Running tests\snapshot_buffer.rs (target\debug\deps\snapshot_buffer-9eb2c51a48b3e581.exe)
+
+running 1 test
+test t12_snapshot_ring_wraps_and_preserves_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches\aero_s4.rs (target\debug\deps\aero_s4-ef946d474f05ab9a.exe)
+Testing B5/polar_lookup
+Success
+
+Testing B6/aero_element_evaluation
+Success
+
+Testing B7/aero_rk4_step
+Success
+
+     Running benches\controls_s5a.rs (target\debug\deps\controls_s5a-2e106cd53d820fe7.exe)
+Testing B8/rates_expo_three_axes
+Success
+
+Testing B9/servo_single_update
+Success
+
+Testing B10/complete_controls_pipeline
+Success
+
+     Running benches\foundation.rs (target\debug\deps\foundation-99e865f11afae441.exe)
+Testing B1/evaluate_derivative
+Success
+
+Testing B2/rk4_step
+Success
+
+Testing B3/simulation_step/250
+Success
+Testing B3/simulation_step/500
+Success
+Testing B3/simulation_step/1000
+Success
+
+Testing B4/headless_loop/100k_steps
+Success
+
+     Running benches\propulsion_s5b.rs (target\debug\deps\propulsion_s5b-64ceda8981e13318.exe)
+Testing B11/propeller_coefficient_lookup
+Success
+
+Testing B12/electrical_known_omega
+Success
+
+Testing B13/electric_propulsion_operating_point
+Success
+
+Testing B14/propulsion_rk4_step
+Success
+
+     Running unittests src\lib.rs (target\debug\deps\sim_math-164b261b2fd22960.exe)
+
+running 2 tests
+test tests::t5_identity_orientation_preserves_body_vector ... ok
+test tests::t6_positive_ninety_degree_yaw_maps_forward_to_east ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\telemetry-221fd88c43e7f8fc.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\aircraft_telemetry.rs (target\debug\deps\aircraft_telemetry-2385edaac973d243.exe)
+
+running 10 tests
+test telemetry_crate_has_no_renderer_platform_or_gpu_dependency ... ok
+test zero_step_capture_has_a_valid_header_and_empty_summary ... ok
+test frame_maps_exact_post_step_state_input_identity_and_units ... ok
+test invalid_ranges_nonfinite_quaternion_and_steps_are_rejected_without_clamping ... ok
+test jsonl_roundtrip_is_versioned_strict_and_stream_friendly ... ok
+test replay_divergence_stops_before_telemetry_is_emitted_for_bad_step ... ok
+test wall_clock_is_excluded_from_deterministic_summary ... ok
+test telemetry_observation_does_not_change_simulation_results ... ok
+test analyzer_covers_two_thousand_frames_and_ned_altitude_semantics ... ok
+test committed_replay_produces_repeatable_two_thousand_frame_telemetry ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+

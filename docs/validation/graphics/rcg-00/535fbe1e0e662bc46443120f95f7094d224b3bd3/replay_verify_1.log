@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.27s
+     Running `target\release\rcsim-app.exe replay verify --model models/acro_electric_01/model.json --input tests/datasets/aircraft_replay_v1/acro_electric_01_2000.json`
+RC Simulation Engine
+mode: aircraft-replay-verify
+schema_version: 1
+model_id: acro-electric-01
+steps_verified: 2000
+verification: PASS

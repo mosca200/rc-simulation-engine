@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src\lib.rs (target\debug\deps\renderer-0af1e8c0312ac03d.exe)
+
+running 12 tests
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_albedo_is_green_dominant ... ok
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_macro_matches_g2d_carrier ... ok
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_normal_encodes_up_normals ... ok
+test gpu::terrain_headless_gpu_tests::fs_terrain_debug_roughness_tracks_committed_map ... ok
+test gpu::terrain_headless_gpu_tests::fs_terrain_offscreen_renders_lit_green_grass ... ok
+test gpu::terrain_headless_gpu_tests::terrain_upload_readback_matches_committed_assets ... ok
+test gpu::vegetation_tests::scene_pass_aircraft_not_displaced_by_vegetation_pipeline ... ok
+test gpu::vegetation_tests::shadow_pass_aircraft_silhouette_not_displaced_by_vegetation ... ok
+test gpu::vegetation_tests::three_cascade_gpu_smoke_writes_every_depth_layer ... ok
+test gpu::vegetation_tests::vegetation_all_lod_classes_render_with_decreasing_cost ... ok
+test gpu::vegetation_tests::vegetation_renders_instances_at_distinct_transforms ... ok
+test gpu::vegetation_tests::vegetation_shadow_pass_produces_silhouettes ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 329 filtered out; finished in 7.68s
+

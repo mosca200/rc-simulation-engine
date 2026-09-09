@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running `target\release\rcsim-app.exe validate first-slice --output-dir target/graphics_validation/first_slice`
+RC Simulation Engine
+mode: first-slice-validation
+schema_version: 1
+model_id: acro-electric-01
+model_physics_fingerprint: 07c48378ad0f8de786f0927c1bba206681c4153deb50174bf0c518d6eae5ba73
+criteria: 31
+technical_gate: PASS
+manual_gate: PARTIAL
+real_world_gate: PARTIAL
+overall_status: PARTIAL
+report_json: target/graphics_validation/first_slice\report.json
+report_md: target/graphics_validation/first_slice\report.md

@@ -1,0 +1,9 @@
+   Compiling renderer v0.1.0 (C:\Users\andre\OneDrive\Desktop\sim rc ufficiale\.worktrees\rcg-00-baseline\crates\renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running tests\hdr_pipeline_g3b.rs (target\debug\deps\hdr_pipeline_g3b-691775edad83e3b4.exe)
+
+running 1 test
+test hdr_scene_to_tone_mapped_surface_offscreen ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.61s
+
