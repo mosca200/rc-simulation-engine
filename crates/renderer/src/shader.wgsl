@@ -1037,6 +1037,14 @@ fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
     let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
     let base_rgba = input.color * texture_rgba;
 
+    // PV1-R: alpha-mask cutoff for foliage leaf cards. Fragments below the
+    // threshold are discarded so the card silhouette reads as individual
+    // leaves rather than a textured quad. The bark primitive uses an opaque
+    // texture (alpha = 1) so this never clips bark geometry.
+    if (base_rgba.a < 0.45) {
+        discard;
+    }
+
     let metallic = clamp(material.metallic, 0.0, 1.0);
     let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
 
@@ -1044,5 +1052,5 @@ fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
     let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
     let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
-    return vec4<f32>(final_rgb, base_rgba.a);
+    return vec4<f32>(final_rgb, 1.0);
 }
