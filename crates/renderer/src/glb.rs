@@ -280,7 +280,24 @@ pub fn load_glb_asset(path: impl AsRef<Path>) -> Result<GlbAsset, GlbLoadError> 
         path: path.to_path_buf(),
         source,
     })?;
+    load_glb_document(&document, path)
+}
 
+/// Loads a GLB asset from an in-memory byte slice.
+///
+/// PV1: used to embed production vegetation GLB assets into the binary via
+/// `include_bytes!` so the runtime consumes committed asset files instead of
+/// procedural mesh generators.
+pub fn load_glb_bytes(data: &[u8], label: &str) -> Result<GlbAsset, GlbLoadError> {
+    let document = gltf::Gltf::from_slice(data).map_err(|source| GlbLoadError::Parse {
+        path: PathBuf::from(label),
+        source,
+    })?;
+    load_glb_document(&document, Path::new(label))
+}
+
+/// Shared GLB parsing core for both file-backed and byte-slice loading.
+fn load_glb_document(document: &gltf::Gltf, path: &Path) -> Result<GlbAsset, GlbLoadError> {
     if document
         .buffers()
         .any(|buffer| matches!(buffer.source(), Source::Uri(_)))

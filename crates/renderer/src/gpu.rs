@@ -787,10 +787,16 @@ struct GpuVegetation {
     _uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     uniform: VegetationUniform,
-    /// Lit HDR instanced scene pipeline (`vs_vegetation` / `fs_vegetation`).
+    /// Lit HDR instanced scene pipeline for bark (`vs_vegetation` / `fs_vegetation`).
     pipeline: wgpu::RenderPipeline,
-    /// Depth-only instanced shadow caster (`vs_vegetation_shadow`).
+    /// Lit HDR instanced scene pipeline for foliage: identical to `pipeline`
+    /// but with backface culling disabled so leaf cards are visible from both
+    /// sides (PV1-R alpha-masked foliage).
+    foliage_pipeline: wgpu::RenderPipeline,
+    /// Depth-only instanced shadow caster (`vs_vegetation_shadow` / `fs_vegetation_shadow`).
     shadow_pipeline: wgpu::RenderPipeline,
+    /// PV1-R2: two-sided shadow caster for foliage alpha cards.
+    foliage_shadow_pipeline: wgpu::RenderPipeline,
 }
 
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
@@ -1399,8 +1405,8 @@ impl WgpuRenderer {
                     immediate_size: 0,
                 });
             // Depth-only instanced caster layout: camera + identity object +
-            // shadow matrix (no material/state groups are touched by the
-            // shadow vertex path).
+            // shadow matrix + material (PV1-R2: material group added for
+            // alpha-masked foliage shadow discard).
             let vegetation_shadow_pipeline_layout =
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("G3D vegetation shadow pipeline layout"),
@@ -1408,6 +1414,7 @@ impl WgpuRenderer {
                         Some(&camera_bind_group_layout),
                         Some(&object_bind_group_layout),
                         Some(&shadow_pass_bind_group_layout),
+                        Some(&material_bind_group_layout),
                     ],
                     immediate_size: 0,
                 });
@@ -1420,6 +1427,8 @@ impl WgpuRenderer {
                 &vegetation_state_bind_group_layout,
                 &vegetation_pipeline_layout,
                 &vegetation_shadow_pipeline_layout,
+                &material_bind_group_layout,
+                &mut materials,
                 bark_material_index,
                 foliage_material_index,
                 VegetationDebugMode::default(),
@@ -2026,6 +2035,7 @@ impl WgpuRenderer {
                 shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
                 shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
                 let ranges = world.batch_ranges();
+                let mut current_is_foliage = false;
                 for group in 0..GROUP_COUNT {
                     if group % LOD_COUNT > 1 {
                         continue;
@@ -2038,7 +2048,20 @@ impl WgpuRenderer {
                     let asset = group / LOD_COUNT;
                     let lod = (group % LOD_COUNT) as u8;
                     for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                        // PV1-R2: switch shadow pipeline for foliage (two-sided
+                        // + alpha discard) vs bark (backface culled).
+                        let is_foliage = matches!(part, VegetationPart::Foliage);
+                        if is_foliage != current_is_foliage {
+                            if is_foliage {
+                                shadow_pass.set_pipeline(&vegetation.foliage_shadow_pipeline);
+                            } else {
+                                shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
+                            }
+                            current_is_foliage = is_foliage;
+                        }
                         let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                        let material = &self.materials[mesh.material_index];
+                        shadow_pass.set_bind_group(3, &material.bind_group, &[]);
                         shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                         shadow_pass.set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
                         shadow_pass.set_index_buffer(
@@ -2163,12 +2186,13 @@ impl WgpuRenderer {
             {
                 let visible = world.visible();
                 if !visible.is_empty() {
-                    render_pass.set_pipeline(&vegetation.pipeline);
                     render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
                     render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
                     render_pass.set_bind_group(4, &vegetation.uniform_bind_group, &[]);
                     let ranges = world.batch_ranges();
+                    let mut current_is_foliage = false;
+                    render_pass.set_pipeline(&vegetation.pipeline);
                     for group in 0..GROUP_COUNT {
                         let start = ranges[group * 2];
                         let count = ranges[group * 2 + 1];
@@ -2178,6 +2202,17 @@ impl WgpuRenderer {
                         let asset = group / LOD_COUNT;
                         let lod = (group % LOD_COUNT) as u8;
                         for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                            // PV1-R: switch to the two-sided foliage pipeline
+                            // for leaf cards; bark keeps backface culling.
+                            let is_foliage = matches!(part, VegetationPart::Foliage);
+                            if is_foliage != current_is_foliage {
+                                if is_foliage {
+                                    render_pass.set_pipeline(&vegetation.foliage_pipeline);
+                                } else {
+                                    render_pass.set_pipeline(&vegetation.pipeline);
+                                }
+                                current_is_foliage = is_foliage;
+                            }
                             let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
                             let material = &self.materials[mesh.material_index];
                             render_pass.set_bind_group(3, &material.bind_group, &[]);
@@ -2787,6 +2822,12 @@ fn vegetation_mesh_index(asset: usize, lod: u8, part: VegetationPart) -> usize {
 /// `bark_material_index` / `foliage_material_index` reference the shared
 /// `WgpuRenderer::materials` vector (both white-texture PBR materials with
 /// the `part_metallic`/`part_roughness` factors from the asset spec).
+///
+/// PV1-R: when a production asset carries embedded base-color textures
+/// (extracted from the GLB by `decode_committed_lod`), per-asset PBR
+/// materials are created and pushed onto `materials`. All LODs of the same
+/// asset share the LOD0 texture. Assets without textures fall back to the
+/// shared `bark_material_index` / `foliage_material_index`.
 #[allow(clippy::too_many_arguments)]
 fn build_gpu_vegetation(
     device: &wgpu::Device,
@@ -2796,6 +2837,8 @@ fn build_gpu_vegetation(
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
     pipeline_layout: &wgpu::PipelineLayout,
     shadow_pipeline_layout: &wgpu::PipelineLayout,
+    material_bind_group_layout: &wgpu::BindGroupLayout,
+    materials: &mut Vec<GpuMaterial>,
     bark_material_index: usize,
     foliage_material_index: usize,
     debug_mode: VegetationDebugMode,
@@ -2805,6 +2848,43 @@ fn build_gpu_vegetation(
     // `vegetation_mesh_index`.
     let mut meshes = Vec::with_capacity(world.assets().len() * LOD_COUNT * PART_COUNT);
     for asset in world.assets().assets() {
+        // PV1-R: resolve per-asset material indices. If LOD0 carries embedded
+        // base-color textures, create dedicated PBR materials; otherwise fall
+        // back to the shared vertex-colour materials.
+        let lod0 = asset.lods.lod(0).expect("LOD0 always present");
+        let (asset_bark_mat, asset_foliage_mat) = if let (Some(bark_tex), Some(foliage_tex)) = (
+            lod0.bark_base_color.as_ref(),
+            lod0.foliage_base_color.as_ref(),
+        ) {
+            let bark_mat = create_gpu_material(
+                device,
+                material_bind_group_layout,
+                queue,
+                bark_tex,
+                &SamplerConfig::default_sampler(),
+                crate::vegetation_assets::part_metallic(VegetationPart::Bark),
+                crate::vegetation_assets::part_roughness(VegetationPart::Bark),
+            )
+            .expect("vegetation bark texture uploads");
+            let foliage_mat = create_gpu_material(
+                device,
+                material_bind_group_layout,
+                queue,
+                foliage_tex,
+                &SamplerConfig::default_sampler(),
+                crate::vegetation_assets::part_metallic(VegetationPart::Foliage),
+                crate::vegetation_assets::part_roughness(VegetationPart::Foliage),
+            )
+            .expect("vegetation foliage texture uploads");
+            let bi = materials.len();
+            materials.push(bark_mat);
+            let fi = materials.len();
+            materials.push(foliage_mat);
+            (bi, fi)
+        } else {
+            (bark_material_index, foliage_material_index)
+        };
+
         for class in 0..LOD_COUNT {
             let lod = asset
                 .lods
@@ -2830,8 +2910,8 @@ fn build_gpu_vegetation(
                     index_buffer,
                     index_count: mesh.indices().len() as u32,
                     material_index: match part {
-                        VegetationPart::Bark => bark_material_index,
-                        VegetationPart::Foliage => foliage_material_index,
+                        VegetationPart::Bark => asset_bark_mat,
+                        VegetationPart::Foliage => asset_foliage_mat,
                     },
                 });
             }
@@ -2864,7 +2944,10 @@ fn build_gpu_vegetation(
     });
 
     let pipeline = create_vegetation_pipeline(device, shader, pipeline_layout);
+    let foliage_pipeline = create_vegetation_foliage_pipeline(device, shader, pipeline_layout);
     let shadow_pipeline = create_vegetation_shadow_pipeline(device, shader, shadow_pipeline_layout);
+    let foliage_shadow_pipeline =
+        create_vegetation_foliage_shadow_pipeline(device, shader, shadow_pipeline_layout);
 
     // Startup upload of the initial visible set so the first frame is not
     // empty even before the first `update_visibility` call runs.
@@ -2881,7 +2964,9 @@ fn build_gpu_vegetation(
         uniform_bind_group,
         uniform,
         pipeline,
+        foliage_pipeline,
         shadow_pipeline,
+        foliage_shadow_pipeline,
     }
 }
 
@@ -3402,9 +3487,60 @@ fn create_vegetation_pipeline(
     })
 }
 
+/// PV1-R: foliage variant of the vegetation lit pipeline with backface
+/// culling disabled. Leaf cards are flat quads that must be visible from
+/// both sides; the alpha cutoff in `fs_vegetation` discards transparent
+/// fragments so only the leaf silhouette survives.
+fn create_vegetation_foliage_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G3D vegetation foliage lit pipeline (two-sided)"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_vegetation"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vegetation_vertex_buffers(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_vegetation"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// G3D: depth-only instanced vegetation caster for the fixed directional
-/// shadow map (`vs_vegetation_shadow`). Same raster state and instance layout
-/// as `create_shadow_pipeline`, with the per-instance transform on slot 1.
+/// shadow map (`vs_vegetation_shadow` / `fs_vegetation_shadow`). PV1-R2:
+/// includes a fragment stage for alpha-masked discard so foliage cards cast
+/// shaped shadows instead of solid quads.
 fn create_vegetation_shadow_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -3440,7 +3576,60 @@ fn create_vegetation_shadow_pipeline(
             },
         }),
         multisample: wgpu::MultisampleState::default(),
-        fragment: None,
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_vegetation_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// PV1-R2: two-sided shadow caster for foliage alpha cards. Same as the bark
+/// shadow pipeline but with culling disabled so leaf cards cast from both sides.
+fn create_vegetation_foliage_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("G3D vegetation foliage shadow pipeline (two-sided)"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_vegetation_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vegetation_vertex_buffers(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: SHADOW_DEPTH_BIAS_CONSTANT,
+                slope_scale: SHADOW_DEPTH_BIAS_SLOPE_SCALE,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_vegetation_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
         multiview_mask: None,
         cache: None,
     })
@@ -5188,7 +5377,8 @@ mod vegetation_tests {
         // no pow() gamma) so trees join the HDR scene, not an LDR side path.
         let source = include_str!("shader.wgsl");
         let body = source
-            .split_once("fn fs_vegetation")
+            // PV1-R2: use "fn fs_vegetation(" to avoid matching fs_vegetation_shadow
+            .split_once("fn fs_vegetation(")
             .expect("fs_vegetation present")
             .1;
         let body = body
@@ -5487,6 +5677,7 @@ mod vegetation_tests {
 
         // Production assembly: real `build_gpu_vegetation` (persistent buffers,
         // instance buffer, pipelines).
+        let mut materials = vec![bark_material, foliage_material];
         let gpu = build_gpu_vegetation(
             &device,
             &queue,
@@ -5495,11 +5686,13 @@ mod vegetation_tests {
             &state_layout,
             &pipeline_layout,
             &shadow_pipeline_layout,
+            &material_layout,
+            &mut materials,
+            0,
             1,
-            2,
             debug_mode,
         );
-        // NOTE: bark/foliage material indexes in the test are 1/2 (they are the
+        // NOTE: bark/foliage material indexes in the test are 0/1 (they are the
         // only materials pushed here — the fallback is deliberately absent).
 
         // Visibility + instance upload (the exact per-frame renderer steps). Two
@@ -5580,9 +5773,9 @@ mod vegetation_tests {
                 for part in [VegetationPart::Bark, VegetationPart::Foliage] {
                     let mesh = &gpu.meshes[vegetation_mesh_index(asset, lod, part)];
                     let material = if part == VegetationPart::Bark {
-                        &bark_material
+                        &materials[0]
                     } else {
-                        &foliage_material
+                        &materials[1]
                     };
                     pass.set_bind_group(3, &material.bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -6105,6 +6298,7 @@ mod vegetation_tests {
             part_metallic(VegetationPart::Foliage),
             part_roughness(VegetationPart::Foliage),
         );
+        let mut materials = vec![bark_mat, foliage_mat];
         let gpu_veg = build_gpu_vegetation(
             &device,
             &queue,
@@ -6113,6 +6307,8 @@ mod vegetation_tests {
             &state_layout,
             &veg_layout,
             &veg_shadow_layout,
+            &material_layout,
+            &mut materials,
             0,
             1,
             VegetationDebugMode::Final,
@@ -6265,9 +6461,9 @@ mod vegetation_tests {
                 for part in [VegetationPart::Bark, VegetationPart::Foliage] {
                     let mesh = &gpu_veg.meshes[vegetation_mesh_index(asset, lod, part)];
                     let material = if part == VegetationPart::Bark {
-                        &bark_mat
+                        &materials[0]
                     } else {
-                        &foliage_mat
+                        &materials[1]
                     };
                     pass.set_bind_group(3, &material.bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -6559,18 +6755,37 @@ mod vegetation_tests {
             ],
             immediate_size: 0,
         });
-        let gpu_veg = build_gpu_vegetation(
-            &device,
-            &queue,
-            &shader,
-            &world,
-            &state_layout,
-            &veg_scene_layout,
-            &veg_shadow_layout,
-            0,
-            1,
-            VegetationDebugMode::Final,
-        );
+        let gpu_veg = {
+            let bark_m = create_white_texture_material(
+                &device,
+                &material_layout,
+                &queue,
+                part_metallic(VegetationPart::Bark),
+                part_roughness(VegetationPart::Bark),
+            );
+            let foliage_m = create_white_texture_material(
+                &device,
+                &material_layout,
+                &queue,
+                part_metallic(VegetationPart::Foliage),
+                part_roughness(VegetationPart::Foliage),
+            );
+            let mut mats = vec![bark_m, foliage_m];
+            build_gpu_vegetation(
+                &device,
+                &queue,
+                &shader,
+                &world,
+                &state_layout,
+                &veg_scene_layout,
+                &veg_shadow_layout,
+                &material_layout,
+                &mut mats,
+                0,
+                1,
+                VegetationDebugMode::Final,
+            )
+        };
         queue.write_buffer(
             &gpu_veg.instance_buffer,
             0,

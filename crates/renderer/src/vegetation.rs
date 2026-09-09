@@ -26,17 +26,15 @@ use crate::Mat4;
 use crate::scenery::{
     DEFAULT_GROUND_Y, FIELD_HALF_EXTENT_M, TREE_MIN_DISTANCE_FROM_RUNWAY_M, runway_safety_rect,
 };
-use crate::vegetation_assets::{
-    SPECIES_TARGET, VARIANTS_PER_SPECIES_TARGET, VegetationAssetSet, VegetationSpecies,
-};
+use crate::vegetation_assets::{VegetationAssetSet, VegetationSpecies};
 
 /// Number of LOD classes (LOD3 billboard is a documented residual gap).
 pub const LOD_COUNT: usize = 3;
 /// Render parts per LOD (bark + foliage).
 pub const PART_COUNT: usize = 2;
-/// Batch-group count: one group per (asset, LOD). With the production set of
-/// `SPECIES_TARGET × VARIANTS_PER_SPECIES_TARGET` assets.
-pub const GROUP_COUNT: usize = SPECIES_TARGET * VARIANTS_PER_SPECIES_TARGET * LOD_COUNT;
+/// Batch-group count: one group per (asset, LOD). PV1-R2: 4 production assets
+/// (pine_a, fir_a, broadleaf_a, broadleaf_b) × 3 LOD classes = 12 groups.
+pub const GROUP_COUNT: usize = 4 * LOD_COUNT;
 
 /// Default vegetation seed (matches the former `scenery::DEFAULT_TREE_SEED`).
 pub const DEFAULT_VEGETATION_SEED: u64 = 42;
@@ -381,29 +379,25 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
 }
 
 /// Asset variant weights per species (uneven so the mix does not read as a
-/// uniform row of look-alikes). Deciduous A/B/C occupy asset slots 0/1/2,
-/// conifers 3/4/5.
+/// uniform row of look-alikes). PV1-R2: 4 assets — conifer 0/1 (pine/fir),
+/// deciduous 2/3 (broadleaf_a / broadleaf_b).
 #[must_use]
 fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
     match species {
-        // Assets 0..2 (deciduous oak / birch / willow).
+        // Assets 2..3 (broadleaf_a / broadleaf_b).
         VegetationSpecies::Deciduous => {
-            if variant_roll < 0.38 {
-                0
-            } else if variant_roll < 0.72 {
-                1
-            } else {
+            if variant_roll < 0.5 {
                 2
+            } else {
+                3
             }
         }
-        // Assets 3..5 (conifer pine / spruce / fir).
+        // Assets 0..1 (conifer pine_a / fir_a).
         VegetationSpecies::Conifer => {
-            if variant_roll < 0.42 {
-                3
-            } else if variant_roll < 0.78 {
-                4
+            if variant_roll < 0.5 {
+                0
             } else {
-                5
+                1
             }
         }
     }
