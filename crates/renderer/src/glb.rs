@@ -1,5 +1,7 @@
 //! G1C: glTF/GLB asset loading with base-color texture support.
 //! G1D: glTF metallic/roughness factor parsing for PBR material response.
+//! GLB scene-node foundation: scene selection, recursive node traversal,
+//! node transform composition (matrix or TRS) and mesh instancing.
 //!
 //! Loads the G1A/G1B/G1C/G1D subset of glTF 2.0:
 //! - POSITION (required)
@@ -10,6 +12,14 @@
 //! - pbrMetallicRoughness.baseColorTexture (G1C)
 //! - pbrMetallicRoughness.metallicFactor (G1D)
 //! - pbrMetallicRoughness.roughnessFactor (G1D)
+//! - default scene selection, node hierarchy, node transforms, mesh instances
+//!
+//! The scene graph is traversed from the default scene (or the only scene when
+//! no default is declared): root nodes first, then children recursively in
+//! document order (deterministic pre-order). Every node carrying a mesh
+//! produces one [`GlbSceneInstance`] with the composed world transform
+//! (`parent_world * local`); mesh geometry and materials are stored once per
+//! glTF mesh in [`GlbAsset::meshes`] and never duplicated per instance.
 //!
 //! G1D deliberately does NOT yet load:
 //! - metallicRoughnessTexture
@@ -34,9 +44,12 @@
 //! base_rgba = baseColorFactor * vertex_COLOR_0 * textureSample(baseColorTexture, TEXCOORD_0)
 //! ```
 
+use crate::Mat4;
 use crate::mesh::{MeshError, SAFE_NORMAL, SAFE_UV, Vertex};
 use crate::texture::{DecodedTexture, SamplerConfig, TextureLoadError, decode_image};
 use gltf::buffer::Source;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -125,6 +138,14 @@ pub enum GlbLoadError {
     },
     #[error("GLB asset {path} image {image_index} has no buffer view data")]
     MissingImageBufferView { path: PathBuf, image_index: usize },
+    #[error(
+        "GLB asset {path} declares {scene_count} scenes but no default scene; a single-scene asset would be loaded unambiguously"
+    )]
+    MissingDefaultScene { path: PathBuf, scene_count: usize },
+    #[error("GLB asset {path} node hierarchy contains a cycle at node {node_index}")]
+    CycleInNodeHierarchy { path: PathBuf, node_index: usize },
+    #[error("GLB asset {path} node {node_index} has a non-finite or unusable transform")]
+    NonFiniteNodeTransform { path: PathBuf, node_index: usize },
 }
 
 /// Per-primitive material data extracted from the glTF document.
@@ -147,6 +168,7 @@ impl PrimitiveMaterial {
         binary: &[u8],
         path: &Path,
         primitive_index: usize,
+        texture_cache: &mut HashMap<usize, (DecodedTexture, SamplerConfig)>,
     ) -> Result<Self, GlbLoadError> {
         let pbr = material.pbr_metallic_roughness();
         let base_color_factor = pbr.base_color_factor();
@@ -170,22 +192,32 @@ impl PrimitiveMaterial {
             let texture = info.texture();
             let source = texture.source();
             let texture_index = source.index();
-            // FIX 6: Borrow directly from the GLB binary blob instead of copying.
-            let source_data = extract_image_data(source, binary, path)?;
-            let decoded =
-                decode_image(source_data).map_err(|decode_error| GlbLoadError::MalformedImage {
-                    path: path.to_path_buf(),
-                    texture_index,
-                    source: decode_error,
-                })?;
-
-            Some(decoded)
+            // Shared meshes/instances must not re-decode the same embedded
+            // image: decode once per glTF texture index and clone the pixels.
+            let cached = match texture_cache.entry(texture_index) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    // FIX 6: Borrow directly from the GLB binary blob instead of copying.
+                    let source_data = extract_image_data(source, binary, path)?;
+                    let decoded = decode_image(source_data).map_err(|decode_error| {
+                        GlbLoadError::MalformedImage {
+                            path: path.to_path_buf(),
+                            texture_index,
+                            source: decode_error,
+                        }
+                    })?;
+                    let sampler_config = SamplerConfig::from_gltf_sampler(&texture.sampler());
+                    entry.insert((decoded, sampler_config))
+                }
+            };
+            Some(cached.0.clone())
         } else {
             None
         };
 
         let sampler_config = if let Some(info) = pbr.base_color_texture() {
-            SamplerConfig::from_gltf_sampler(&info.texture().sampler())
+            let texture_index = info.texture().source().index();
+            texture_cache[&texture_index].1
         } else {
             SamplerConfig::default_sampler()
         };
@@ -251,10 +283,46 @@ pub struct RenderPrimitive {
     pub material: PrimitiveMaterial,
 }
 
+/// Deduplicated geometry + material definition for one glTF mesh.
+///
+/// Meshes referenced by several nodes are stored once; each referencing node
+/// becomes a separate [`GlbSceneInstance`] instead of duplicating geometry.
+#[derive(Debug, Clone)]
+pub struct GlbMesh {
+    /// Index of this mesh inside the glTF document (`meshes` array).
+    pub gltf_mesh_index: usize,
+    /// Triangle primitives of the mesh, in document order.
+    pub primitives: Vec<RenderPrimitive>,
+}
+
+/// One renderable placement of a loaded mesh produced by scene traversal.
+///
+/// `world_transform` is the row-major composition `parent_world * local`
+/// expressed in the glTF local (asset) coordinate space; it is deliberately
+/// kept separate from the geometry so the GPU layer can instance meshes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlbSceneInstance {
+    /// Index of the glTF node that produced this instance.
+    pub node_index: usize,
+    /// Optional node name as authored (Blender object name survives here).
+    pub node_name: Option<String>,
+    /// Slot index into [`GlbAsset::meshes`] for the referenced mesh.
+    pub mesh_index: usize,
+    /// Composed world transform (row-major, `parent_world * local`).
+    pub world_transform: Mat4,
+}
+
 /// A loaded GLB asset with one or more primitives.
+///
+/// `primitives` keeps the historical flat contract (active meshes in glTF
+/// mesh-index order, primitives in document order) for existing consumers;
+/// `meshes`/`instances` carry the scene-graph semantics for the future GPU
+/// integration.
 #[derive(Debug, Clone)]
 pub struct GlbAsset {
     pub primitives: Vec<RenderPrimitive>,
+    pub meshes: Vec<GlbMesh>,
+    pub instances: Vec<GlbSceneInstance>,
 }
 
 impl GlbAsset {
@@ -314,133 +382,191 @@ fn load_glb_document(document: &gltf::Gltf, path: &Path) -> Result<GlbAsset, Glb
             path: path.to_path_buf(),
         })?;
 
-    let mut primitives = Vec::new();
-    let mut triangle_primitive_count = 0_usize;
-
-    for (primitive_index, primitive) in document
-        .meshes()
-        .flat_map(|mesh| mesh.primitives())
-        .enumerate()
-    {
-        if primitive.mode() != gltf::mesh::Mode::Triangles {
-            continue;
-        }
-        triangle_primitive_count += 1;
-
-        let reader = primitive.reader(|buffer| match buffer.source() {
-            Source::Bin => Some(binary),
-            Source::Uri(_) => None,
+    // Scene selection: the declared default scene wins; a single-scene asset
+    // without a default is unambiguous; anything else is an explicit error
+    // instead of silently loading every global mesh.
+    let scene_count = document.scenes().count();
+    let scene = document.default_scene().or_else(|| {
+        (scene_count == 1).then(|| document.scenes().next().expect("single scene present"))
+    });
+    let Some(scene) = scene else {
+        return Err(GlbLoadError::MissingDefaultScene {
+            path: path.to_path_buf(),
+            scene_count,
         });
+    };
 
-        let positions: Vec<[f32; 3]> = reader
-            .read_positions()
-            .ok_or_else(|| GlbLoadError::MissingPositions {
-                path: path.to_path_buf(),
-                primitive_index,
-            })?
-            .collect();
+    // Deterministic pre-order traversal: roots in document order, every node
+    // before its children, children in document order. Cycles fail safe.
+    let mut visited = vec![false; document.nodes().count()];
+    let mut raw_instances: Vec<RawSceneInstance> = Vec::new();
+    for root in scene.nodes() {
+        visit_node(
+            path,
+            root,
+            &Mat4::identity(),
+            &mut visited,
+            &mut raw_instances,
+        )?;
+    }
 
-        let primitive_indices: Vec<u32> = reader
-            .read_indices()
-            .ok_or_else(|| GlbLoadError::MissingIndices {
-                path: path.to_path_buf(),
-                primitive_index,
-            })?
-            .into_u32()
-            .collect();
+    // Only meshes reachable from the selected scene are decoded. Slots keep
+    // ascending glTF mesh order so the historical flat `primitives` contract
+    // (and articulation primitive indices) stay stable for existing assets.
+    let mut active_mesh_indices: Vec<usize> = raw_instances
+        .iter()
+        .map(|instance| instance.gltf_mesh_index)
+        .collect();
+    active_mesh_indices.sort_unstable();
+    active_mesh_indices.dedup();
 
-        let colors: Option<Vec<[f32; 4]>> = reader
-            .read_colors(0)
-            .map(|values| values.into_rgba_f32().collect());
-        if colors
-            .as_ref()
-            .is_some_and(|colors| colors.len() != positions.len())
-        {
-            return Err(GlbLoadError::MismatchedColors {
-                path: path.to_path_buf(),
-                primitive_index,
-            });
-        }
+    let mut texture_cache: HashMap<usize, (DecodedTexture, SamplerConfig)> = HashMap::new();
+    let mut meshes: Vec<GlbMesh> = Vec::with_capacity(active_mesh_indices.len());
+    let mut primitives: Vec<RenderPrimitive> = Vec::new();
+    let mut triangle_primitive_count = 0_usize;
+    let mut flat_primitive_index = 0_usize;
 
-        let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|values| values.collect());
-        if normals
-            .as_ref()
-            .is_some_and(|normals| normals.len() != positions.len())
-        {
-            return Err(GlbLoadError::MismatchedNormals {
-                path: path.to_path_buf(),
-                primitive_index,
-            });
-        }
-
-        let tex_coords: Option<Vec<[f32; 2]>> = reader
-            .read_tex_coords(0)
-            .map(|values| values.into_f32().collect());
-        if tex_coords
-            .as_ref()
-            .is_some_and(|tex_coords| tex_coords.len() != positions.len())
-        {
-            return Err(GlbLoadError::MismatchedTexCoords {
-                path: path.to_path_buf(),
-                primitive_index,
-            });
-        }
-
-        for attr in primitive.attributes() {
-            match attr.0 {
-                gltf::Semantic::TexCoords(set) if set != 0 => {
-                    return Err(GlbLoadError::UnsupportedTexCoord {
-                        path: path.to_path_buf(),
-                        primitive_index,
-                        requested: set,
-                    });
-                }
-                _ => {}
+    for gltf_mesh_index in active_mesh_indices.clone() {
+        let mesh = document
+            .meshes()
+            .nth(gltf_mesh_index)
+            .expect("active mesh index comes from this document");
+        let mut mesh_primitives: Vec<RenderPrimitive> = Vec::new();
+        for primitive in mesh.primitives() {
+            let primitive_index = flat_primitive_index;
+            flat_primitive_index += 1;
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                continue;
             }
-        }
+            triangle_primitive_count += 1;
 
-        let material = primitive
-            .material()
-            .index()
-            .and_then(|index| document.materials().nth(index))
-            .map(|material| {
-                PrimitiveMaterial::from_gltf_material(&material, binary, path, primitive_index)
-            })
-            .transpose()?
-            .unwrap_or_else(PrimitiveMaterial::default_material);
+            let reader = primitive.reader(|buffer| match buffer.source() {
+                Source::Bin => Some(binary),
+                Source::Uri(_) => None,
+            });
 
-        let computed_normals = match normals {
-            Some(explicit) => explicit.into_iter().map(normalize_or_safe).collect(),
-            None => generate_area_weighted_vertex_normals(&positions, &primitive_indices),
-        };
+            let positions: Vec<[f32; 3]> = reader
+                .read_positions()
+                .ok_or_else(|| GlbLoadError::MissingPositions {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                })?
+                .collect();
 
-        let mut vertices = Vec::with_capacity(positions.len());
-        for (index, position) in positions.into_iter().enumerate() {
-            let vertex_color = colors
+            let primitive_indices: Vec<u32> = reader
+                .read_indices()
+                .ok_or_else(|| GlbLoadError::MissingIndices {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                })?
+                .into_u32()
+                .collect();
+
+            let colors: Option<Vec<[f32; 4]>> = reader
+                .read_colors(0)
+                .map(|values| values.into_rgba_f32().collect());
+            if colors
                 .as_ref()
-                .map_or([1.0_f32, 1.0, 1.0, 1.0], |colors| colors[index]);
+                .is_some_and(|colors| colors.len() != positions.len())
+            {
+                return Err(GlbLoadError::MismatchedColors {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                });
+            }
 
-            let combined_color = [
-                material.base_color_factor[0] * vertex_color[0],
-                material.base_color_factor[1] * vertex_color[1],
-                material.base_color_factor[2] * vertex_color[2],
-                material.base_color_factor[3] * vertex_color[3],
-            ];
+            let normals: Option<Vec<[f32; 3]>> =
+                reader.read_normals().map(|values| values.collect());
+            if normals
+                .as_ref()
+                .is_some_and(|normals| normals.len() != positions.len())
+            {
+                return Err(GlbLoadError::MismatchedNormals {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                });
+            }
 
-            vertices.push(Vertex {
-                position,
-                normal: computed_normals[index],
-                color: combined_color,
-                uv: tex_coords
+            let tex_coords: Option<Vec<[f32; 2]>> = reader
+                .read_tex_coords(0)
+                .map(|values| values.into_f32().collect());
+            if tex_coords
+                .as_ref()
+                .is_some_and(|tex_coords| tex_coords.len() != positions.len())
+            {
+                return Err(GlbLoadError::MismatchedTexCoords {
+                    path: path.to_path_buf(),
+                    primitive_index,
+                });
+            }
+
+            for attr in primitive.attributes() {
+                match attr.0 {
+                    gltf::Semantic::TexCoords(set) if set != 0 => {
+                        return Err(GlbLoadError::UnsupportedTexCoord {
+                            path: path.to_path_buf(),
+                            primitive_index,
+                            requested: set,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            let material = primitive
+                .material()
+                .index()
+                .and_then(|index| document.materials().nth(index))
+                .map(|material| {
+                    PrimitiveMaterial::from_gltf_material(
+                        &material,
+                        binary,
+                        path,
+                        primitive_index,
+                        &mut texture_cache,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_else(PrimitiveMaterial::default_material);
+
+            let computed_normals = match normals {
+                Some(explicit) => explicit.into_iter().map(normalize_or_safe).collect(),
+                None => generate_area_weighted_vertex_normals(&positions, &primitive_indices),
+            };
+
+            let mut vertices = Vec::with_capacity(positions.len());
+            for (index, position) in positions.into_iter().enumerate() {
+                let vertex_color = colors
                     .as_ref()
-                    .map_or(SAFE_UV, |tex_coords| tex_coords[index]),
+                    .map_or([1.0_f32, 1.0, 1.0, 1.0], |colors| colors[index]);
+
+                let combined_color = [
+                    material.base_color_factor[0] * vertex_color[0],
+                    material.base_color_factor[1] * vertex_color[1],
+                    material.base_color_factor[2] * vertex_color[2],
+                    material.base_color_factor[3] * vertex_color[3],
+                ];
+
+                vertices.push(Vertex {
+                    position,
+                    normal: computed_normals[index],
+                    color: combined_color,
+                    uv: tex_coords
+                        .as_ref()
+                        .map_or(SAFE_UV, |tex_coords| tex_coords[index]),
+                });
+            }
+
+            mesh_primitives.push(RenderPrimitive {
+                vertices,
+                indices: primitive_indices,
+                material,
             });
         }
-
-        primitives.push(RenderPrimitive {
-            vertices,
-            indices: primitive_indices,
-            material,
+        primitives.extend(mesh_primitives.clone());
+        meshes.push(GlbMesh {
+            gltf_mesh_index,
+            primitives: mesh_primitives,
         });
     }
 
@@ -450,7 +576,155 @@ fn load_glb_document(document: &gltf::Gltf, path: &Path) -> Result<GlbAsset, Glb
         });
     }
 
-    Ok(GlbAsset { primitives })
+    let instances = raw_instances
+        .into_iter()
+        .map(|raw| GlbSceneInstance {
+            node_index: raw.node_index,
+            node_name: raw.node_name,
+            mesh_index: active_mesh_indices
+                .binary_search(&raw.gltf_mesh_index)
+                .expect("instance meshes are active by construction"),
+            world_transform: raw.world_transform,
+        })
+        .collect();
+
+    Ok(GlbAsset {
+        primitives,
+        meshes,
+        instances,
+    })
+}
+
+/// Traversal output for one node placement inside the active scene.
+struct RawSceneInstance {
+    node_index: usize,
+    node_name: Option<String>,
+    gltf_mesh_index: usize,
+    world_transform: Mat4,
+}
+
+/// Recursive pre-order node visit: compose `parent_world * local`, emit one
+/// instance per node mesh reference, then descend into children in document
+/// order. Revisiting a node means a malformed cyclic hierarchy.
+fn visit_node(
+    path: &Path,
+    node: gltf::Node,
+    parent_world: &Mat4,
+    visited: &mut Vec<bool>,
+    out: &mut Vec<RawSceneInstance>,
+) -> Result<(), GlbLoadError> {
+    let node_index = node.index();
+    if visited[node_index] {
+        return Err(GlbLoadError::CycleInNodeHierarchy {
+            path: path.to_path_buf(),
+            node_index,
+        });
+    }
+    visited[node_index] = true;
+    let local = node_local_transform(path, node_index, node.transform())?;
+    let world_transform = *parent_world * local;
+    if let Some(mesh) = node.mesh() {
+        out.push(RawSceneInstance {
+            node_index,
+            node_name: node.name().map(str::to_owned),
+            gltf_mesh_index: mesh.index(),
+            world_transform,
+        });
+    }
+    for child in node.children() {
+        visit_node(path, child, &world_transform, visited, out)?;
+    }
+    Ok(())
+}
+
+/// glTF node transform: explicit column-major matrix or TRS decomposition
+/// composed as `T * R * S` in the renderer row-major convention.
+fn node_local_transform(
+    path: &Path,
+    node_index: usize,
+    transform: gltf::scene::Transform,
+) -> Result<Mat4, GlbLoadError> {
+    let local = match transform {
+        gltf::scene::Transform::Matrix { matrix } => mat4_from_gltf_columns(matrix),
+        gltf::scene::Transform::Decomposed {
+            translation,
+            rotation,
+            scale,
+        } => {
+            let Some(rotation) = mat4_from_gltf_quaternion(rotation) else {
+                return Err(GlbLoadError::NonFiniteNodeTransform {
+                    path: path.to_path_buf(),
+                    node_index,
+                });
+            };
+            let translation = Mat4::from_rows([
+                [1.0, 0.0, 0.0, translation[0]],
+                [0.0, 1.0, 0.0, translation[1]],
+                [0.0, 0.0, 1.0, translation[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            let scale = Mat4::from_rows([
+                [scale[0], 0.0, 0.0, 0.0],
+                [0.0, scale[1], 0.0, 0.0],
+                [0.0, 0.0, scale[2], 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            translation * rotation * scale
+        }
+    };
+    if !local.is_finite() {
+        return Err(GlbLoadError::NonFiniteNodeTransform {
+            path: path.to_path_buf(),
+            node_index,
+        });
+    }
+    Ok(local)
+}
+
+/// glTF stores node matrices column-major (`matrix[column][row]` in the gltf
+/// crate); the renderer `Mat4` is row-major.
+fn mat4_from_gltf_columns(columns: [[f32; 4]; 4]) -> Mat4 {
+    Mat4::from_rows([
+        [columns[0][0], columns[1][0], columns[2][0], columns[3][0]],
+        [columns[0][1], columns[1][1], columns[2][1], columns[3][1]],
+        [columns[0][2], columns[1][2], columns[2][2], columns[3][2]],
+        [columns[0][3], columns[1][3], columns[2][3], columns[3][3]],
+    ])
+}
+
+/// glTF rotation quaternion `(x, y, z, w)` to a row-major rotation matrix.
+/// Finite non-unit quaternions are normalized; unusable ones yield `None`.
+fn mat4_from_gltf_quaternion(quaternion: [f32; 4]) -> Option<Mat4> {
+    let [x, y, z, w] = quaternion;
+    if !quaternion.iter().copied().all(f32::is_finite) {
+        return None;
+    }
+    let norm = (x * x + y * y + z * z + w * w).sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
+    }
+    let (x, y, z, w) = (x / norm, y / norm, z / norm, w / norm);
+    Some(Mat4::from_rows([
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+            0.0,
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+            0.0,
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+            0.0,
+        ],
+        [0.0, 0.0, 0.0, 1.0],
+    ]))
 }
 
 /// Legacy API: Load a GLB and merge all primitives into a single mesh.
@@ -569,6 +843,30 @@ mod test_glb_builder {
         second_primitive: Option<SecondPrimitive>,
         second_image_data: Option<Vec<u8>>,
         second_image_mime: Option<&'static str>,
+        mesh_count: usize,
+        scene_graph: Option<SceneGraphSpec>,
+    }
+
+    /// One glTF node for synthetic scene-graph tests.
+    #[derive(Clone, Debug, Default)]
+    pub struct NodeSpec {
+        pub mesh: Option<usize>,
+        pub children: Vec<usize>,
+        pub translation: Option<[f32; 3]>,
+        /// `(x, y, z, w)` quaternion.
+        pub rotation: Option<[f32; 4]>,
+        pub scale: Option<[f32; 3]>,
+        /// glTF column-major flat matrix (16 values).
+        pub matrix: Option<[f32; 16]>,
+    }
+
+    /// Scene graph override for synthetic tests: explicit nodes, scenes and
+    /// optional default scene index (`None` omits the `scene` key).
+    #[derive(Clone, Debug)]
+    pub struct SceneGraphSpec {
+        pub nodes: Vec<NodeSpec>,
+        pub scenes: Vec<Vec<usize>>,
+        pub default_scene: Option<usize>,
     }
 
     pub struct SecondPrimitive {
@@ -601,6 +899,8 @@ mod test_glb_builder {
                 second_primitive: None,
                 second_image_data: None,
                 second_image_mime: None,
+                mesh_count: 1,
+                scene_graph: None,
             }
         }
 
@@ -678,6 +978,20 @@ mod test_glb_builder {
         pub fn with_second_image(mut self, data: Vec<u8>, mime: &'static str) -> Self {
             self.second_image_data = Some(data);
             self.second_image_mime = Some(mime);
+            self
+        }
+
+        /// Emit `count` meshes that all reference the same primitive accessors,
+        /// so tests can exercise instancing and unused-mesh semantics.
+        pub fn with_mesh_count(mut self, count: usize) -> Self {
+            self.mesh_count = count;
+            self
+        }
+
+        /// Override the emitted node/scene graph (default: one node, one scene,
+        /// scene 0 as default).
+        pub fn with_scene_graph(mut self, spec: SceneGraphSpec) -> Self {
+            self.scene_graph = Some(spec);
             self
         }
 
@@ -1247,9 +1561,98 @@ mod test_glb_builder {
             let _ = total_bin_len;
             let _ = next_bv_idx;
 
+            // Meshes: `mesh_count` entries sharing the same primitive accessors
+            // (tests use this for instancing / unused-mesh semantics).
+            let mesh_json = format!(r#"{{"primitives":[{}]}}"#, primitives_json.join(","));
+            let meshes_json = vec![mesh_json; self.mesh_count.max(1)].join(",");
+
+            // Node/scene graph: synthetic override or the historical default.
+            let (nodes_json, scenes_json, scene_key) = match &self.scene_graph {
+                Some(spec) => {
+                    let nodes_json = spec
+                        .nodes
+                        .iter()
+                        .map(|node| {
+                            let mut fields = Vec::new();
+                            if let Some(mesh) = node.mesh {
+                                fields.push(format!(r#""mesh":{}"#, mesh));
+                            }
+                            if !node.children.is_empty() {
+                                fields.push(format!(
+                                    r#""children":[{}]"#,
+                                    node.children
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                ));
+                            }
+                            if let Some(translation) = &node.translation {
+                                fields.push(format!(
+                                    r#""translation":[{},{},{}]"#,
+                                    translation[0], translation[1], translation[2]
+                                ));
+                            }
+                            if let Some(rotation) = &node.rotation {
+                                fields.push(format!(
+                                    r#""rotation":[{},{},{},{}]"#,
+                                    rotation[0], rotation[1], rotation[2], rotation[3]
+                                ));
+                            }
+                            if let Some(scale) = &node.scale {
+                                fields.push(format!(
+                                    r#""scale":[{},{},{}]"#,
+                                    scale[0], scale[1], scale[2]
+                                ));
+                            }
+                            if let Some(matrix) = &node.matrix {
+                                fields.push(format!(
+                                    r#""matrix":[{}]"#,
+                                    matrix
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                ));
+                            }
+                            format!("{{{}}}", fields.join(","))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let scenes_json = spec
+                        .scenes
+                        .iter()
+                        .map(|roots| {
+                            format!(
+                                r#"{{"nodes":[{}]}}"#,
+                                roots
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let scene_key = spec
+                        .default_scene
+                        .map(|index| format!(r#","scene":{}"#, index))
+                        .unwrap_or_default();
+                    (nodes_json, scenes_json, scene_key)
+                }
+                None => (
+                    r#"{"mesh":0}"#.to_string(),
+                    r#"{"nodes":[0]}"#.to_string(),
+                    r#","scene":0"#.to_string(),
+                ),
+            };
+
             format!(
-                r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{}]}}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{}],"accessors":[{}]{}{}{}{}}}"#,
-                primitives_json.join(","),
+                r#"{{"asset":{{"version":"2.0"}}{},"scenes":[{}],"nodes":[{}],"meshes":[{}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{}],"accessors":[{}]{}{}{}{}}}"#,
+                scene_key,
+                scenes_json,
+                nodes_json,
+                meshes_json,
                 // Recalculate total bin length from buffer views.
                 buffer_views.iter().map(|(_, _, len)| len).sum::<usize>(),
                 bv_json_entries.join(","),
@@ -1989,5 +2392,408 @@ mod tests {
         assert!((verts[1].color[0] - 0.8).abs() < 0.01);
         // Vertex 2: 0.8 * 0.0 = 0.0
         assert!((verts[2].color[0]).abs() < 0.01);
+    }
+
+    // ── GLB scene-node foundation tests ────────────────────────────────────
+
+    use test_glb_builder::{NodeSpec, SceneGraphSpec};
+
+    fn load_scene(spec: SceneGraphSpec, mesh_count: usize) -> GlbAsset {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_mesh_count(mesh_count)
+            .with_scene_graph(spec)
+            .build();
+        load_glb_bytes(&glb, "scene-graph-test.glb").expect("synthetic scene GLB must load")
+    }
+
+    fn translation_of(instance: &GlbSceneInstance) -> [f32; 3] {
+        let rows = instance.world_transform.rows();
+        [rows[0][3], rows[1][3], rows[2][3]]
+    }
+
+    #[test]
+    fn default_scene_is_selected_when_declared() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        translation: Some([10.0, 0.0, 0.0]),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0], vec![1]],
+                default_scene: Some(1),
+            },
+            1,
+        );
+        assert_eq!(asset.instances.len(), 1);
+        assert_eq!(asset.instances[0].node_index, 1);
+        assert_eq!(translation_of(&asset.instances[0]), [10.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn single_scene_without_default_key_is_loaded() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: None,
+            },
+            1,
+        );
+        assert_eq!(asset.instances.len(), 1);
+        assert_eq!(asset.meshes.len(), 1);
+    }
+
+    #[test]
+    fn missing_default_scene_with_multiple_scenes_is_explicit_error() {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_mesh_count(2)
+            .with_scene_graph(SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(1),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0], vec![1]],
+                default_scene: None,
+            })
+            .build();
+        let error = load_glb_bytes(&glb, "no-default.glb").expect_err("must reject ambiguity");
+        assert!(
+            matches!(
+                error,
+                GlbLoadError::MissingDefaultScene { scene_count: 2, .. }
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn root_translation_becomes_instance_world_transform() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    translation: Some([1.0, 2.0, 3.0]),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        assert_eq!(translation_of(&asset.instances[0]), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            asset.instances[0].world_transform,
+            Mat4::from_rows([
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 2.0],
+                [0.0, 0.0, 1.0, 3.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ])
+        );
+    }
+
+    #[test]
+    fn nested_parent_child_transforms_compose() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        children: vec![1],
+                        translation: Some([1.0, 0.0, 0.0]),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        translation: Some([0.0, 2.0, 0.0]),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        assert_eq!(asset.instances.len(), 2);
+        assert_eq!(translation_of(&asset.instances[0]), [1.0, 0.0, 0.0]);
+        assert_eq!(translation_of(&asset.instances[1]), [1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn rotation_quaternion_is_applied_to_instance() {
+        // 90 degrees about +Z: (x, y, z, w) = (0, 0, sqrt(0.5), sqrt(0.5)).
+        let half = 0.5_f32.sqrt();
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    rotation: Some([0.0, 0.0, half, half]),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        let rows = asset.instances[0].world_transform.rows();
+        assert!(rows[0][0].abs() < 1e-5);
+        assert!((rows[0][1] + 1.0).abs() < 1e-5);
+        assert!((rows[1][0] - 1.0).abs() < 1e-5);
+        assert!(rows[1][1].abs() < 1e-5);
+    }
+
+    #[test]
+    fn scale_is_applied_to_instance() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    scale: Some([2.0, 3.0, 4.0]),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        let rows = asset.instances[0].world_transform.rows();
+        assert_eq!(rows[0][0], 2.0);
+        assert_eq!(rows[1][1], 3.0);
+        assert_eq!(rows[2][2], 4.0);
+    }
+
+    #[test]
+    fn matrix_transform_is_interpreted_column_major() {
+        // Column-major flat translation (5, 6, 7).
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    matrix: Some([
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 6.0, 7.0,
+                        1.0,
+                    ]),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        assert_eq!(translation_of(&asset.instances[0]), [5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn two_nodes_same_mesh_produce_two_instances_and_one_mesh() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        translation: Some([1.0, 0.0, 0.0]),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        translation: Some([2.0, 0.0, 0.0]),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0, 1]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        assert_eq!(asset.meshes.len(), 1, "shared mesh decoded once");
+        assert_eq!(asset.primitives.len(), 1);
+        assert_eq!(asset.instances.len(), 2);
+        assert_eq!(asset.instances[0].mesh_index, 0);
+        assert_eq!(asset.instances[1].mesh_index, 0);
+        assert_eq!(translation_of(&asset.instances[0]), [1.0, 0.0, 0.0]);
+        assert_eq!(translation_of(&asset.instances[1]), [2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn unused_mesh_outside_active_scene_is_not_loaded() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(1),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0], vec![1]],
+                default_scene: Some(0),
+            },
+            2,
+        );
+        assert_eq!(asset.meshes.len(), 1);
+        assert_eq!(asset.meshes[0].gltf_mesh_index, 0);
+        assert_eq!(asset.instances.len(), 1);
+        assert_eq!(asset.instances[0].mesh_index, 0);
+    }
+
+    #[test]
+    fn traversal_order_is_deterministic_preorder() {
+        let asset = load_scene(
+            SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        children: vec![1, 2],
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        children: vec![3],
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            },
+            1,
+        );
+        let order: Vec<usize> = asset.instances.iter().map(|i| i.node_index).collect();
+        assert_eq!(order, vec![0, 1, 3, 2]);
+    }
+
+    #[test]
+    fn load_glb_asset_and_load_glb_bytes_are_equivalent() {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_scene_graph(SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        children: vec![1],
+                        translation: Some([4.0, 0.0, 0.0]),
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        mesh: Some(0),
+                        scale: Some([2.0, 2.0, 2.0]),
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            })
+            .build();
+        let path = test_glb_builder::write_glb_to_temp(&glb, "scene_equivalence.glb");
+        let from_file = load_glb_asset(&path).expect("file load");
+        let from_bytes = load_glb_bytes(&glb, "scene_equivalence.glb").expect("byte load");
+        assert_eq!(from_file.instances, from_bytes.instances);
+        assert_eq!(from_file.meshes.len(), from_bytes.meshes.len());
+        assert_eq!(from_file.primitives.len(), from_bytes.primitives.len());
+    }
+
+    #[test]
+    fn zero_quaternion_rotation_is_rejected() {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_scene_graph(SceneGraphSpec {
+                nodes: vec![NodeSpec {
+                    mesh: Some(0),
+                    rotation: Some([0.0, 0.0, 0.0, 0.0]),
+                    ..Default::default()
+                }],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            })
+            .build();
+        let error = load_glb_bytes(&glb, "zero-quat.glb").expect_err("must reject");
+        assert!(
+            matches!(
+                error,
+                GlbLoadError::NonFiniteNodeTransform { node_index: 0, .. }
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cyclic_node_hierarchy_is_rejected() {
+        let glb = test_glb_builder::GlbBuilder::new()
+            .with_scene_graph(SceneGraphSpec {
+                nodes: vec![
+                    NodeSpec {
+                        mesh: Some(0),
+                        children: vec![1],
+                        ..Default::default()
+                    },
+                    NodeSpec {
+                        children: vec![0],
+                        ..Default::default()
+                    },
+                ],
+                scenes: vec![vec![0]],
+                default_scene: Some(0),
+            })
+            .build();
+        let error = load_glb_bytes(&glb, "cycle.glb").expect_err("must reject cycles");
+        assert!(
+            matches!(error, GlbLoadError::CycleInNodeHierarchy { .. }),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn acro_production_glb_keeps_identity_instances_and_full_mesh_coverage() {
+        let path = acro_asset();
+        let asset = load_glb_asset(&path).expect("production Acro GLB must load");
+        assert!(!asset.instances.is_empty());
+        for instance in &asset.instances {
+            assert_eq!(
+                instance.world_transform,
+                Mat4::identity(),
+                "Acro nodes must stay identity for the backward-compatible contract"
+            );
+        }
+        let covered: Vec<usize> = asset
+            .meshes
+            .iter()
+            .map(|mesh| mesh.gltf_mesh_index)
+            .collect();
+        let referenced: Vec<usize> = {
+            let mut indices: Vec<usize> = asset
+                .instances
+                .iter()
+                .map(|instance| instance.mesh_index)
+                .collect();
+            indices.sort_unstable();
+            indices.dedup();
+            indices
+        };
+        assert_eq!(covered, referenced, "every loaded mesh is instanced");
+        let primitive_total: usize = asset.meshes.iter().map(|mesh| mesh.primitives.len()).sum();
+        assert_eq!(primitive_total, asset.primitives.len());
     }
 }
