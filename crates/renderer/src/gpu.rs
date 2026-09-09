@@ -643,12 +643,42 @@ struct ShadowTarget {
 
 /// G1C: Persistent GPU material resources.
 struct GpuMaterial {
-    _texture: wgpu::Texture,
-    _texture_view: wgpu::TextureView,
-    _sampler: wgpu::Sampler,
+    // Textured materials own their upload resources. GLB primitives without a
+    // base-color texture bind `WgpuRenderer::_white_fallback_texture` instead,
+    // so they leave these resource owners empty while retaining a distinct
+    // material uniform and bind group.
+    _owned_texture: Option<wgpu::Texture>,
+    _owned_texture_view: Option<wgpu::TextureView>,
+    _owned_sampler: Option<wgpu::Sampler>,
     // G1D: metallic/roughness uniform buffer (static, written once at upload).
     _material_uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+/// One persistent neutral base-color texture and sampler for material bindings
+/// that have no glTF `baseColorTexture`.
+struct WhiteFallbackTexture {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+/// CPU-side description of the static GPU binding required by one GLB
+/// primitive. It deliberately owns no GPU resources so its semantics can be
+/// regression-tested without a device.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GlbMaterialUpload {
+    uses_white_fallback: bool,
+    metallic: f32,
+    roughness: f32,
+}
+
+fn glb_material_upload(material: &crate::PrimitiveMaterial) -> GlbMaterialUpload {
+    GlbMaterialUpload {
+        uses_white_fallback: material.base_color_texture.is_none(),
+        metallic: material.metallic_factor,
+        roughness: material.roughness_factor,
+    }
 }
 
 /// G3A-R: persistent GPU terrain material (dedicated bind group at group 4).
@@ -847,6 +877,9 @@ pub struct WgpuRenderer {
     shadow_light_direction: [f32; 3],
 
     // G1C: Material system.
+    // Persistent neutral texture/sampler shared by the procedural fallback and
+    // every untextured GLB primitive. Their PBR uniforms remain per-material.
+    _white_fallback_texture: WhiteFallbackTexture,
     materials: Vec<GpuMaterial>,
     _fallback_material_index: usize,
 
@@ -1119,9 +1152,14 @@ impl WgpuRenderer {
             },
         );
 
-        // White fallback material.
-        let fallback_material =
-            create_white_fallback_material(&device, &material_bind_group_layout, &queue);
+        // One persistent neutral white texture/sampler is shared by the
+        // procedural fallback and GLB primitives without baseColorTexture.
+        let white_fallback_texture = create_white_fallback_texture(&device, &queue);
+        let fallback_material = create_white_fallback_material(
+            &device,
+            &material_bind_group_layout,
+            &white_fallback_texture,
+        );
         let mut materials = vec![fallback_material];
         let fallback_material_index = 0;
 
@@ -1142,22 +1180,33 @@ impl WgpuRenderer {
         };
         if let Some((glb_asset, articulation)) = glb_and_plan {
             for (primitive_index, primitive) in glb_asset.primitives.iter().enumerate() {
-                let material_index = if let Some(texture) = &primitive.material.base_color_texture {
-                    let gpu_material = create_gpu_material(
+                let upload = glb_material_upload(&primitive.material);
+                let gpu_material = if upload.uses_white_fallback {
+                    create_shared_white_texture_material(
+                        &device,
+                        &material_bind_group_layout,
+                        &white_fallback_texture,
+                        upload.metallic,
+                        upload.roughness,
+                    )
+                } else {
+                    let texture = primitive
+                        .material
+                        .base_color_texture
+                        .as_ref()
+                        .expect("textured GLB material must retain its decoded texture");
+                    create_gpu_material(
                         &device,
                         &material_bind_group_layout,
                         &queue,
                         texture,
                         &primitive.material.sampler_config,
-                        primitive.material.metallic_factor,
-                        primitive.material.roughness_factor,
-                    )?;
-                    let index = materials.len();
-                    materials.push(gpu_material);
-                    index
-                } else {
-                    fallback_material_index
+                        upload.metallic,
+                        upload.roughness,
+                    )?
                 };
+                let material_index = materials.len();
+                materials.push(gpu_material);
                 if primitive.vertices.is_empty() {
                     continue;
                 }
@@ -1646,6 +1695,7 @@ impl WgpuRenderer {
             shadow_cascade_uniform_buffers,
             shadow_pass_bind_groups,
             shadow_light_direction,
+            _white_fallback_texture: white_fallback_texture,
             materials,
             _fallback_material_index: fallback_material_index,
             aircraft_batches,
@@ -2322,29 +2372,21 @@ impl WgpuRenderer {
 fn create_white_fallback_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    queue: &wgpu::Queue,
+    white_texture: &WhiteFallbackTexture,
 ) -> GpuMaterial {
-    create_white_texture_material(
+    create_shared_white_texture_material(
         device,
         layout,
-        queue,
+        white_texture,
         PROCEDURAL_METALLIC,
         PROCEDURAL_ROUGHNESS,
     )
 }
 
-/// G1D/G3D: white-texture material with explicit PBR factors.
-///
-/// Used by the shared fallback (procedural aircraft / scenery) and by the G3D
-/// bark/foliage vegetation materials, whose meshes carry linear vertex colors
-/// and only need a neutral texel to modulate.
-fn create_white_texture_material(
+fn create_white_fallback_texture(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
     queue: &wgpu::Queue,
-    metallic: f32,
-    roughness: f32,
-) -> GpuMaterial {
+) -> WhiteFallbackTexture {
     let size = wgpu::Extent3d {
         width: 1,
         height: 1,
@@ -2360,7 +2402,7 @@ fn create_white_texture_material(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -2389,40 +2431,103 @@ fn create_white_texture_material(
         ..Default::default()
     });
 
-    // G1D: procedural/fallback materials are explicit non-metals with high
-    // roughness so terrain, scenery, and the procedural aircraft never turn
-    // accidentally chromatic under the PBR response. G3D passes the same
-    // factors through for the bark/foliage vegetation materials.
-    let material_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    WhiteFallbackTexture {
+        _texture: texture,
+        view,
+        sampler,
+    }
+}
+
+fn create_material_binding(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    texture_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    metallic: f32,
+    roughness: f32,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let material_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("white material uniform"),
         contents: bytemuck::bytes_of(&MaterialUniform::new(metallic, roughness)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fallback material bind group"),
+        label: Some("white material bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture_view),
+                resource: wgpu::BindingResource::TextureView(texture_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: material_uniform_buffer.as_entire_binding(),
+                resource: material_uniform.as_entire_binding(),
             },
         ],
     });
 
+    (material_uniform, bind_group)
+}
+
+/// Create a per-material PBR binding using the renderer's one persistent
+/// neutral white texture. This is the GLB untextured path: only the texel is
+/// shared; metallic and roughness stay in the primitive's own uniform.
+fn create_shared_white_texture_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    white_texture: &WhiteFallbackTexture,
+    metallic: f32,
+    roughness: f32,
+) -> GpuMaterial {
+    let (material_uniform, bind_group) = create_material_binding(
+        device,
+        layout,
+        &white_texture.view,
+        &white_texture.sampler,
+        metallic,
+        roughness,
+    );
+
     GpuMaterial {
-        _texture: texture,
-        _texture_view: texture_view,
-        _sampler: sampler,
-        _material_uniform: material_uniform_buffer,
+        _owned_texture: None,
+        _owned_texture_view: None,
+        _owned_sampler: None,
+        _material_uniform: material_uniform,
+        bind_group,
+    }
+}
+
+/// G1D/G3D: white-texture material with explicit PBR factors.
+///
+/// Used by the G3D bark/foliage vegetation materials, whose meshes carry
+/// linear vertex colors and only need a neutral texel to modulate. The
+/// renderer's procedural fallback and untextured GLB path use its persistent
+/// `WhiteFallbackTexture` through `create_shared_white_texture_material`.
+fn create_white_texture_material(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    queue: &wgpu::Queue,
+    metallic: f32,
+    roughness: f32,
+) -> GpuMaterial {
+    let WhiteFallbackTexture {
+        _texture,
+        view,
+        sampler,
+    } = create_white_fallback_texture(device, queue);
+    let (material_uniform, bind_group) =
+        create_material_binding(device, layout, &view, &sampler, metallic, roughness);
+
+    GpuMaterial {
+        _owned_texture: Some(_texture),
+        _owned_texture_view: Some(view),
+        _owned_sampler: Some(sampler),
+        _material_uniform: material_uniform,
         bind_group,
     }
 }
@@ -2515,9 +2620,9 @@ fn create_gpu_material(
     });
 
     Ok(GpuMaterial {
-        _texture: texture,
-        _texture_view: texture_view,
-        _sampler: sampler,
+        _owned_texture: Some(texture),
+        _owned_texture_view: Some(texture_view),
+        _owned_sampler: Some(sampler),
         _material_uniform: material_uniform_buffer,
         bind_group,
     })
@@ -3963,10 +4068,65 @@ mod material_uniform_tests {
     fn procedural_material_parameters_are_non_metal_and_rough() {
         // Terrain/scenery/procedural aircraft must never become chromed.
         assert_eq!(PROCEDURAL_METALLIC, 0.0);
-        assert!(
-            (0.5..=1.0).contains(&PROCEDURAL_ROUGHNESS),
-            "procedural roughness must stay high for a matte response"
+        assert_eq!(PROCEDURAL_ROUGHNESS, 0.85);
+    }
+}
+
+#[cfg(test)]
+mod glb_material_upload_tests {
+    use super::*;
+    use crate::texture::DecodedTexture;
+
+    fn primitive_material(
+        base_color_texture: Option<DecodedTexture>,
+        metallic_factor: f32,
+        roughness_factor: f32,
+    ) -> crate::PrimitiveMaterial {
+        crate::PrimitiveMaterial {
+            base_color_factor: [0.7, 0.4, 0.2, 1.0],
+            base_color_texture,
+            metallic_factor,
+            roughness_factor,
+            sampler_config: SamplerConfig::default_sampler(),
+        }
+    }
+
+    #[test]
+    fn untextured_glb_material_uses_white_fallback_without_losing_pbr_factors() {
+        let upload = glb_material_upload(&primitive_material(None, 0.23, 0.67));
+
+        assert_eq!(
+            upload,
+            GlbMaterialUpload {
+                uses_white_fallback: true,
+                metallic: 0.23,
+                roughness: 0.67,
+            }
         );
+    }
+
+    #[test]
+    fn distinct_untextured_glb_materials_keep_distinct_pbr_factors() {
+        let first = glb_material_upload(&primitive_material(None, 0.0, 0.25));
+        let second = glb_material_upload(&primitive_material(None, 0.8, 0.9));
+
+        assert!(first.uses_white_fallback && second.uses_white_fallback);
+        assert_ne!(first, second);
+        assert_eq!((first.metallic, first.roughness), (0.0, 0.25));
+        assert_eq!((second.metallic, second.roughness), (0.8, 0.9));
+    }
+
+    #[test]
+    fn textured_glb_material_keeps_its_texture_path_and_pbr_factors() {
+        let texture = DecodedTexture {
+            width: 1,
+            height: 1,
+            rgba8: vec![128, 64, 32, 255],
+        };
+        let upload = glb_material_upload(&primitive_material(Some(texture), 0.4, 0.6));
+
+        assert!(!upload.uses_white_fallback);
+        assert_eq!((upload.metallic, upload.roughness), (0.4, 0.6));
     }
 }
 
