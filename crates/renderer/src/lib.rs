@@ -33,7 +33,8 @@ pub use camera::{
     exponential_fog_factor, sun_alignment, view_elevation,
 };
 pub use glb::{
-    GlbAsset, GlbLoadError, PrimitiveMaterial, RenderPrimitive, load_glb_asset, load_glb_mesh,
+    GlbAsset, GlbLoadError, GlbMesh, GlbSceneInstance, PrimitiveMaterial, RenderPrimitive,
+    load_glb_asset, load_glb_mesh,
 };
 pub use gpu::{
     DEFAULT_EXPOSURE_EV, ExposureError, PresentationAsset, RenderTerrainMode, RendererError,
