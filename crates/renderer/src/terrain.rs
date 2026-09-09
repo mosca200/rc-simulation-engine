@@ -59,7 +59,7 @@ use std::f32::consts::PI;
 
 /// Default terrain texture scale in metres.
 ///
-/// At 4.0m per tile, a 512x512 texture covers a 2km x 2km field with
+/// At 4.0m per tile, a 1024x1024 texture covers a 2km x 2km field with
 /// reasonable ground detail without appearing stretched.
 pub const DEFAULT_TERRAIN_TEXTURE_SCALE_M: f32 = 4.0;
 

@@ -669,6 +669,13 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
             ar_cos * uv.x - ar_sin * uv.y,
             ar_sin * uv.x + ar_cos * uv.y,
         ) * ar_scale + ar_offset;
+    // PV2: decorrelate the macro carrier as well as the 4 m base tile. The
+    // second macro sample has an unrelated angle/period, so 30-80 m tonal
+    // patches cannot reveal a single repeated square in oblique views.
+    let macro_ar_uv = vec2<f32>(
+            TERRAIN_MACRO_AR_COS * macro_uv.x - TERRAIN_MACRO_AR_SIN * macro_uv.y,
+            TERRAIN_MACRO_AR_SIN * macro_uv.x + TERRAIN_MACRO_AR_COS * macro_uv.y,
+        ) * TERRAIN_MACRO_AR_SCALE + TERRAIN_MACRO_AR_OFFSET;
 
     // G3A-R: detail distance fade — 1.0 close, 0.0 far, smoothstep
     // (zero-derivative ends, no popping).
@@ -682,6 +689,7 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     let albedo_base = textureSample(terrain_albedo_texture, terrain_sampler, base_uv);
     let albedo_ar = textureSample(terrain_albedo_texture, terrain_sampler, ar_uv);
     let albedo_macro_s = textureSample(terrain_albedo_texture, terrain_sampler, macro_uv);
+    let albedo_macro_ar_s = textureSample(terrain_albedo_texture, terrain_sampler, macro_ar_uv);
     let albedo_detail_s = textureSample(terrain_albedo_texture, terrain_sampler, detail_uv);
 
     // Base + rotated second sample 50/50: tile borders of the two samples run
@@ -689,7 +697,11 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     var albedo = mix(albedo_base, albedo_ar, TERRAIN_ALBEDO_AR_BLEND);
     // Soft macro tone: multiplicative luminance modulation around the sample
     // mean, so large patches breathe without a hue shift or contrast boost.
-    let macro_luminance = dot(albedo_macro_s.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let macro_luminance = mix(
+        dot(albedo_macro_s.rgb, vec3<f32>(0.299, 0.587, 0.114)),
+        dot(albedo_macro_ar_s.rgb, vec3<f32>(0.299, 0.587, 0.114)),
+        TERRAIN_MACRO_AR_BLEND,
+    );
     let macro_gain = 1.0 + (macro_luminance - 0.5) * TERRAIN_MACRO_ALBEDO_GAIN * 2.0;
     albedo = vec4<f32>(albedo.rgb * macro_gain, albedo.a);
     // Fine near-field grain, mean-preserving, distance-faded.
@@ -808,6 +820,11 @@ const TERRAIN_DETAIL_NORMAL_BLEND: f32 = 0.55;
 const TERRAIN_ROUGHNESS_BASE_WEIGHT: f32 = 0.70;
 const TERRAIN_ROUGHNESS_MACRO_WEIGHT: f32 = 0.10;
 const TERRAIN_ROUGHNESS_DETAIL_WEIGHT: f32 = 0.20;
+const TERRAIN_MACRO_AR_SCALE: f32 = 0.71;
+const TERRAIN_MACRO_AR_COS: f32 = 0.6156615;
+const TERRAIN_MACRO_AR_SIN: f32 = -0.7880108;
+const TERRAIN_MACRO_AR_OFFSET: vec2<f32> = vec2<f32>(0.419, 0.173);
+const TERRAIN_MACRO_AR_BLEND: f32 = 0.43;
 
 // ---------------------------------------------------------------------------
 // Unlit fragment: pass-through vertex color for debug geometry (grid, axes).
