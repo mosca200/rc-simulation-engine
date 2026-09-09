@@ -57,6 +57,10 @@ const DEFAULT_ALTITUDE_M: f64 = 30.0;
 const DEFAULT_AIRSPEED_MPS: f64 = 18.0;
 const PLAY_CHASE_DISTANCE_M: f32 = 3.0;
 const PLAY_CHASE_HEIGHT_M: f32 = 0.95;
+const EXPLICIT_PILOT_POSITION_RENDER_M: [f32; 3] = [0.0, 1.8, 20.0];
+const EXPLICIT_CHASE_DISTANCE_M: f32 = 3.5;
+const EXPLICIT_CHASE_HEIGHT_M: f32 = 1.25;
+const EXPLICIT_CAMERA_FOV_DEG: f32 = 55.0;
 const MAXIMUM_ALTITUDE_M: f64 = 10_000.0;
 const MAXIMUM_AIRSPEED_MPS: f64 = 200.0;
 const PHYSICS_DT: Duration = Duration::from_millis(2);
@@ -133,6 +137,91 @@ impl Default for CameraSelection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraMode {
+    Pilot,
+    Chase,
+}
+
+impl CameraMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pilot => "pilot",
+            Self::Chase => "chase",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingCameraOptions {
+    mode: Option<CameraMode>,
+    vertical_fov_deg: Option<f32>,
+    chase_distance_m: Option<f32>,
+    chase_height_m: Option<f32>,
+    pilot_position_render_m: Option<[f32; 3]>,
+}
+
+impl PendingCameraOptions {
+    fn resolve(self, default: CameraSelection) -> Result<CameraSelection, RenderAppError> {
+        let base = match self.mode {
+            Some(CameraMode::Pilot) => CameraSelection::Pilot {
+                position_render_m: EXPLICIT_PILOT_POSITION_RENDER_M,
+                vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+            },
+            Some(CameraMode::Chase) => CameraSelection::Chase {
+                distance_behind_m: EXPLICIT_CHASE_DISTANCE_M,
+                height_above_m: EXPLICIT_CHASE_HEIGHT_M,
+                vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+            },
+            None => default,
+        };
+
+        match base {
+            CameraSelection::Pilot {
+                position_render_m,
+                vertical_fov_deg,
+            } => {
+                if self.chase_distance_m.is_some() {
+                    return Err(RenderAppError::IncompatibleCameraOption {
+                        option: "--chase-distance-m",
+                        required_mode: CameraMode::Chase.label(),
+                        actual_mode: CameraMode::Pilot.label(),
+                    });
+                }
+                if self.chase_height_m.is_some() {
+                    return Err(RenderAppError::IncompatibleCameraOption {
+                        option: "--chase-height-m",
+                        required_mode: CameraMode::Chase.label(),
+                        actual_mode: CameraMode::Pilot.label(),
+                    });
+                }
+                Ok(CameraSelection::Pilot {
+                    position_render_m: self.pilot_position_render_m.unwrap_or(position_render_m),
+                    vertical_fov_deg: self.vertical_fov_deg.unwrap_or(vertical_fov_deg),
+                })
+            }
+            CameraSelection::Chase {
+                distance_behind_m,
+                height_above_m,
+                vertical_fov_deg,
+            } => {
+                if self.pilot_position_render_m.is_some() {
+                    return Err(RenderAppError::IncompatibleCameraOption {
+                        option: "--pilot-position",
+                        required_mode: CameraMode::Pilot.label(),
+                        actual_mode: CameraMode::Chase.label(),
+                    });
+                }
+                Ok(CameraSelection::Chase {
+                    distance_behind_m: self.chase_distance_m.unwrap_or(distance_behind_m),
+                    height_above_m: self.chase_height_m.unwrap_or(height_above_m),
+                    vertical_fov_deg: self.vertical_fov_deg.unwrap_or(vertical_fov_deg),
+                })
+            }
+        }
+    }
+}
+
 impl RenderOptions {
     pub fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Self, RenderAppError> {
         Self::parse_with_defaults(Self::render_defaults(), &mut arguments)
@@ -178,6 +267,7 @@ impl RenderOptions {
         mut options: Self,
         arguments: &mut impl Iterator<Item = String>,
     ) -> Result<Self, RenderAppError> {
+        let mut pending_camera = PendingCameraOptions::default();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -285,19 +375,8 @@ impl RenderOptions {
                         .next()
                         .ok_or(RenderAppError::MissingArgumentValue("--camera"))?;
                     match value.as_str() {
-                        "pilot" => {
-                            options.camera = CameraSelection::Pilot {
-                                position_render_m: [0.0, 1.8, 20.0],
-                                vertical_fov_deg: 55.0,
-                            };
-                        }
-                        "chase" => {
-                            options.camera = CameraSelection::Chase {
-                                distance_behind_m: 3.5,
-                                height_above_m: 1.25,
-                                vertical_fov_deg: 55.0,
-                            };
-                        }
+                        "pilot" => pending_camera.mode = Some(CameraMode::Pilot),
+                        "chase" => pending_camera.mode = Some(CameraMode::Chase),
                         _ => return Err(RenderAppError::UnknownCamera(value)),
                     }
                 }
@@ -311,7 +390,7 @@ impl RenderOptions {
                     if !fov.is_finite() || !(10.0..=120.0).contains(&fov) {
                         return Err(RenderAppError::InvalidCameraFov(value));
                     }
-                    options.camera = apply_fov(options.camera, fov);
+                    pending_camera.vertical_fov_deg = Some(fov);
                 }
                 "--chase-distance-m" => {
                     let value = arguments
@@ -323,7 +402,7 @@ impl RenderOptions {
                     if !distance.is_finite() || distance <= 0.0 || distance > 1_000.0 {
                         return Err(RenderAppError::InvalidChaseDistance(value));
                     }
-                    options.camera = apply_chase_distance(options.camera, distance);
+                    pending_camera.chase_distance_m = Some(distance);
                 }
                 "--chase-height-m" => {
                     let value = arguments
@@ -335,7 +414,7 @@ impl RenderOptions {
                     if !height.is_finite() || !(-100.0..=1_000.0).contains(&height) {
                         return Err(RenderAppError::InvalidChaseHeight(value));
                     }
-                    options.camera = apply_chase_height(options.camera, height);
+                    pending_camera.chase_height_m = Some(height);
                 }
                 "--pilot-position" => {
                     let value = arguments
@@ -343,7 +422,7 @@ impl RenderOptions {
                         .ok_or(RenderAppError::MissingArgumentValue("--pilot-position"))?;
                     let position = parse_position(&value)
                         .ok_or_else(|| RenderAppError::InvalidPilotPosition(value.clone()))?;
-                    options.camera = apply_pilot_position(options.camera, position);
+                    pending_camera.pilot_position_render_m = Some(position);
                 }
                 "--help" | "-h" => {
                     super::print_usage();
@@ -352,6 +431,7 @@ impl RenderOptions {
                 _ => return Err(RenderAppError::UnknownArgument(argument)),
             }
         }
+        options.camera = pending_camera.resolve(options.camera)?;
         Ok(options)
     }
 }
@@ -380,14 +460,22 @@ pub enum RenderAppError {
     InvalidExposureEv(String),
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
     UnknownCamera(String),
-    #[error("invalid camera FOV `{0}`; expected a finite value inside (10, 120) degrees")]
+    #[error("invalid camera FOV `{0}`; expected a finite value inside [10, 120] degrees")]
     InvalidCameraFov(String),
-    #[error("invalid chase distance `{0}`; expected a finite positive value")]
+    #[error("invalid chase distance `{0}`; expected a finite value inside (0, 1000] metres")]
     InvalidChaseDistance(String),
-    #[error("invalid chase height `{0}`; expected a finite value")]
+    #[error("invalid chase height `{0}`; expected a finite value inside [-100, 1000] metres")]
     InvalidChaseHeight(String),
     #[error("invalid pilot position `{0}`; expected three finite numbers `x,y,z`")]
     InvalidPilotPosition(String),
+    #[error(
+        "camera option {option} requires final camera mode `{required_mode}`, but final mode is `{actual_mode}`"
+    )]
+    IncompatibleCameraOption {
+        option: &'static str,
+        required_mode: &'static str,
+        actual_mode: &'static str,
+    },
     #[error("failed to load render model from {path}: {source}")]
     ModelLoad {
         path: PathBuf,
@@ -1434,68 +1522,6 @@ fn parse_position(value: &str) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
-fn apply_fov(camera: CameraSelection, fov_deg: f32) -> CameraSelection {
-    match camera {
-        CameraSelection::Pilot {
-            position_render_m, ..
-        } => CameraSelection::Pilot {
-            position_render_m,
-            vertical_fov_deg: fov_deg,
-        },
-        CameraSelection::Chase {
-            distance_behind_m,
-            height_above_m,
-            ..
-        } => CameraSelection::Chase {
-            distance_behind_m,
-            height_above_m,
-            vertical_fov_deg: fov_deg,
-        },
-    }
-}
-
-fn apply_chase_distance(camera: CameraSelection, distance_behind_m: f32) -> CameraSelection {
-    match camera {
-        CameraSelection::Pilot { .. } => camera,
-        CameraSelection::Chase {
-            height_above_m,
-            vertical_fov_deg,
-            ..
-        } => CameraSelection::Chase {
-            distance_behind_m,
-            height_above_m,
-            vertical_fov_deg,
-        },
-    }
-}
-
-fn apply_chase_height(camera: CameraSelection, height_above_m: f32) -> CameraSelection {
-    match camera {
-        CameraSelection::Pilot { .. } => camera,
-        CameraSelection::Chase {
-            distance_behind_m,
-            vertical_fov_deg,
-            ..
-        } => CameraSelection::Chase {
-            distance_behind_m,
-            height_above_m,
-            vertical_fov_deg,
-        },
-    }
-}
-
-fn apply_pilot_position(camera: CameraSelection, position_render_m: [f32; 3]) -> CameraSelection {
-    match camera {
-        CameraSelection::Chase { .. } => camera,
-        CameraSelection::Pilot {
-            vertical_fov_deg, ..
-        } => CameraSelection::Pilot {
-            position_render_m,
-            vertical_fov_deg,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1525,6 +1551,19 @@ mod tests {
         let mut options = RenderOptions::parse(std::iter::empty()).unwrap();
         options.model_path = acro_model_path();
         options
+    }
+
+    fn parse_render_camera(arguments: &[&str]) -> Result<CameraSelection, RenderAppError> {
+        RenderOptions::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+            .map(|options| options.camera)
+    }
+
+    fn assert_camera_orders_equal(first: &[&str], second: &[&str]) {
+        assert_eq!(
+            parse_render_camera(first).unwrap(),
+            parse_render_camera(second).unwrap(),
+            "camera result differs for {first:?} and {second:?}"
+        );
     }
 
     fn acro_model_with_presentation_path(glb_path: &str) -> model::AircraftModel {
@@ -1623,11 +1662,24 @@ mod tests {
     fn camera_options_select_pilot_and_chase_modes() {
         let pilot =
             RenderOptions::parse(["--camera", "pilot"].map(str::to_owned).into_iter()).unwrap();
-        assert!(matches!(pilot.camera, CameraSelection::Pilot { .. }));
+        assert_eq!(
+            pilot.camera,
+            CameraSelection::Pilot {
+                position_render_m: EXPLICIT_PILOT_POSITION_RENDER_M,
+                vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+            }
+        );
 
         let chase =
             RenderOptions::parse(["--camera", "chase"].map(str::to_owned).into_iter()).unwrap();
-        assert!(matches!(chase.camera, CameraSelection::Chase { .. }));
+        assert_eq!(
+            chase.camera,
+            CameraSelection::Chase {
+                distance_behind_m: EXPLICIT_CHASE_DISTANCE_M,
+                height_above_m: EXPLICIT_CHASE_HEIGHT_M,
+                vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+            }
+        );
 
         let default = RenderOptions::parse(std::iter::empty()).unwrap();
         assert!(matches!(default.camera, CameraSelection::Pilot { .. }));
@@ -1752,6 +1804,154 @@ mod tests {
             RenderOptions::parse(["--pilot-position", "1,2"].map(str::to_owned).into_iter()),
             Err(RenderAppError::InvalidPilotPosition(_))
         ));
+    }
+
+    #[test]
+    fn camera_option_permutations_resolve_to_the_same_selection() {
+        assert_camera_orders_equal(
+            &["--camera", "pilot", "--camera-fov", "42"],
+            &["--camera-fov", "42", "--camera", "pilot"],
+        );
+        assert_camera_orders_equal(
+            &["--camera", "chase", "--chase-distance-m", "8"],
+            &["--chase-distance-m", "8", "--camera", "chase"],
+        );
+        assert_camera_orders_equal(
+            &["--camera", "chase", "--chase-height-m", "2.5"],
+            &["--chase-height-m", "2.5", "--camera", "chase"],
+        );
+        assert_camera_orders_equal(
+            &["--camera", "pilot", "--pilot-position", "4,1.7,30"],
+            &["--pilot-position", "4,1.7,30", "--camera", "pilot"],
+        );
+    }
+
+    #[test]
+    fn three_camera_tunings_are_order_independent() {
+        let first = [
+            "--camera",
+            "chase",
+            "--camera-fov",
+            "35",
+            "--chase-distance-m",
+            "8",
+            "--chase-height-m",
+            "2.5",
+        ];
+        let second = [
+            "--chase-height-m",
+            "2.5",
+            "--camera-fov",
+            "35",
+            "--chase-distance-m",
+            "8",
+            "--camera",
+            "chase",
+        ];
+        assert_camera_orders_equal(&first, &second);
+        assert_eq!(
+            parse_render_camera(&first).unwrap(),
+            CameraSelection::Chase {
+                distance_behind_m: 8.0,
+                height_above_m: 2.5,
+                vertical_fov_deg: 35.0,
+            }
+        );
+    }
+
+    #[test]
+    fn mode_specific_camera_options_reject_incompatible_final_modes() {
+        for arguments in [
+            ["--camera", "pilot", "--chase-distance-m", "8"],
+            ["--chase-distance-m", "8", "--camera", "pilot"],
+        ] {
+            assert!(matches!(
+                parse_render_camera(&arguments),
+                Err(RenderAppError::IncompatibleCameraOption {
+                    option: "--chase-distance-m",
+                    required_mode: "chase",
+                    actual_mode: "pilot",
+                })
+            ));
+        }
+        for arguments in [
+            ["--camera", "pilot", "--chase-height-m", "2.5"],
+            ["--chase-height-m", "2.5", "--camera", "pilot"],
+        ] {
+            assert!(matches!(
+                parse_render_camera(&arguments),
+                Err(RenderAppError::IncompatibleCameraOption {
+                    option: "--chase-height-m",
+                    required_mode: "chase",
+                    actual_mode: "pilot",
+                })
+            ));
+        }
+        for arguments in [
+            ["--camera", "chase", "--pilot-position", "4,1.7,30"],
+            ["--pilot-position", "4,1.7,30", "--camera", "chase"],
+        ] {
+            assert!(matches!(
+                parse_render_camera(&arguments),
+                Err(RenderAppError::IncompatibleCameraOption {
+                    option: "--pilot-position",
+                    required_mode: "pilot",
+                    actual_mode: "chase",
+                })
+            ));
+        }
+
+        assert!(matches!(
+            parse_render_camera(&["--chase-distance-m", "8"]),
+            Err(RenderAppError::IncompatibleCameraOption { .. })
+        ));
+        assert!(matches!(
+            RenderOptions::parse_play(
+                ["--pilot-position", "4,1.7,30"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(RenderAppError::IncompatibleCameraOption { .. })
+        ));
+    }
+
+    #[test]
+    fn camera_numeric_options_reject_nonfinite_out_of_range_and_malformed_values() {
+        for value in ["10", "120"] {
+            assert!(parse_render_camera(&["--camera-fov", value]).is_ok());
+        }
+        for value in ["0.001", "1000"] {
+            assert!(
+                parse_render_camera(&["--camera", "chase", "--chase-distance-m", value]).is_ok()
+            );
+        }
+        for value in ["-100", "1000"] {
+            assert!(parse_render_camera(&["--camera", "chase", "--chase-height-m", value]).is_ok());
+        }
+        for value in ["9.9", "120.1", "NaN", "inf", "not-a-number"] {
+            assert!(matches!(
+                parse_render_camera(&["--camera-fov", value]),
+                Err(RenderAppError::InvalidCameraFov(_))
+            ));
+        }
+        for value in ["0", "-1", "1000.1", "NaN", "inf", "not-a-number"] {
+            assert!(matches!(
+                parse_render_camera(&["--chase-distance-m", value]),
+                Err(RenderAppError::InvalidChaseDistance(_))
+            ));
+        }
+        for value in ["-100.1", "1000.1", "NaN", "inf", "not-a-number"] {
+            assert!(matches!(
+                parse_render_camera(&["--chase-height-m", value]),
+                Err(RenderAppError::InvalidChaseHeight(_))
+            ));
+        }
+        for value in ["1,2", "1,2,3,4", "1,NaN,3", "1,inf,3", "bad"] {
+            assert!(matches!(
+                parse_render_camera(&["--pilot-position", value]),
+                Err(RenderAppError::InvalidPilotPosition(_))
+            ));
+        }
     }
 
     #[test]
