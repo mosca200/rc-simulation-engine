@@ -1,392 +1,280 @@
 """
-PV1-R2: Production vegetation asset processor.
+PV1-R3: Production vegetation asset processor.
 
-Imports REAL Poly Haven CC0 .blend source models, preserves authored geometry,
-generates runtime LODs via decimation, and exports GLB files with the
-2-primitive (bark + foliage) structure the renderer expects.
-
-NO procedural reconstruction. All geometry derives from the authored source.
-
-Source models (CC0 Poly Haven):
-  pine_tree_01   — conifer, 3 authored variants with trunk+twig+needle parts
-  fir_tree_01    — conifer, similar structure
-  tree_small_02  — broadleaf, authored leaf card clusters
-  jacaranda_tree — broadleaf, authored crown geometry
-
-Pipeline:
-  SOURCE .blend → import → separate bark/foliage by material →
-  decimate for LOD → export GLB (2 primitives: bark + foliage)
+Imports REAL Poly Haven CC0 .blend source models for geometry, loads
+CC0 textures from disk, creates proper PBR materials, exports GLB
+with embedded base-color textures (bark diffuse + foliage RGBA).
 """
-
-import bpy
-import bmesh
-import os
-import sys
-import json
-
-# ── Paths ──────────────────────────────────────────────────────────────────
+import bpy, bmesh, os, json, struct
+from mathutils import Vector
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# PV1-R2 FIX: robust repo-root resolution.
-# SCRIPT_DIR = <repo>/tools/vegetation_processing → 2 levels up = repo root.
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 SOURCE_DIR = os.path.join(SCRIPT_DIR, "source_models")
+TEX_DIR = os.path.join(SCRIPT_DIR, "textures")
 OUTPUT_DIR = os.path.join(REPO_ROOT, "crates", "renderer", "assets", "vegetation")
-LOG_PATH = os.path.join(SCRIPT_DIR, "processing_log.json")
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Verify we're writing to the correct location
-assert os.path.isdir(os.path.join(REPO_ROOT, "crates", "renderer")), \
-    f"REPO_ROOT resolution failed: {REPO_ROOT} is not the repo root"
-
 LOG = []
+def log(m): print(m, flush=True); LOG.append(m)
 
-def log(msg):
-    print(msg, flush=True)
-    LOG.append(msg)
-
-# ── Helpers ────────────────────────────────────────────────────────────────
+# Texture manifest: maps species to texture files on disk
+MANIFEST = {
+    'pine_a': {
+        'bark_diff': os.path.join(TEX_DIR, 'pine_tree_01', 'bark_diff_2k.jpg'),
+        'foliage_diff': os.path.join(TEX_DIR, 'pine_tree_01', 'twig_diff_2k.jpg'),
+        'foliage_alpha': os.path.join(TEX_DIR, 'pine_tree_01', 'twig_alpha_2k.jpg'),
+    },
+    'fir_a': {
+        'bark_diff': os.path.join(TEX_DIR, 'fir_tree_01', 'bark_diff_2k.jpg'),
+        'foliage_diff': os.path.join(TEX_DIR, 'fir_tree_01', 'twig_diff_2k.jpg'),
+        'foliage_alpha': os.path.join(TEX_DIR, 'fir_tree_01', 'twig_alpha_2k.jpg'),
+    },
+    'broadleaf_a': {
+        'bark_diff': os.path.join(TEX_DIR, 'tree_small_02', 'branch_diff_2k.jpg'),
+        'foliage_diff': os.path.join(TEX_DIR, 'tree_small_02', 'leaves_diff_2k.jpg'),
+        'foliage_alpha': os.path.join(TEX_DIR, 'tree_small_02', 'leaves_alpha_2k.jpg'),
+    },
+    'broadleaf_b': {
+        'bark_diff': os.path.join(TEX_DIR, 'jacaranda_tree', 'branches_diff_2k.jpg'),
+        'foliage_diff': os.path.join(TEX_DIR, 'jacaranda_tree', 'leaves_diff_2k.jpg'),
+        'foliage_alpha': os.path.join(TEX_DIR, 'jacaranda_tree', 'leaves_alpha_2k.jpg'),
+    },
+}
 
 def clear_scene():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
-    for block in bpy.data.meshes:
-        if block.users == 0:
-            bpy.data.meshes.remove(block)
-    for block in bpy.data.materials:
-        if block.users == 0:
-            bpy.data.materials.remove(block)
-    for block in bpy.data.collections:
-        if block.users == 0:
-            bpy.data.collections.remove(block)
+    for c in list(bpy.data.collections):
+        if c.users == 0: bpy.data.collections.remove(c)
+    for m in list(bpy.data.materials):
+        if m.users == 0: bpy.data.materials.remove(m)
+    for m in list(bpy.data.meshes):
+        if m.users == 0: bpy.data.meshes.remove(m)
+    for i in list(bpy.data.images):
+        if i.users == 0: bpy.data.images.remove(i)
 
+def link_all():
+    sc = bpy.context.scene.collection
+    for o in list(bpy.data.objects):
+        if o.type != 'MESH': continue
+        if sc.objects.get(o.name) is None: sc.objects.link(o)
+        o.hide_set(False); o.hide_select = False; o.hide_viewport = False
+    bpy.context.view_layer.update()
 
-def get_mesh_objects():
-    return [o for o in bpy.data.objects if o.type == 'MESH']
-
-
-def join_objects(objects, name):
-    """Join a list of objects into one mesh."""
-    if not objects:
-        return None
-    # Make all objects visible and selectable
-    for obj in objects:
-        obj.hide_set(False)
-        obj.hide_select = False
-        obj.hide_viewport = False
+def join_meshes(objects, name):
+    if not objects: return None
+    for o in objects:
+        o.hide_set(False); o.hide_select = False; o.hide_viewport = False
     bpy.ops.object.select_all(action='DESELECT')
-    for obj in objects:
-        obj.select_set(True)
+    for o in objects: o.select_set(True)
     bpy.context.view_layer.objects.active = objects[0]
-    if len(objects) > 1:
-        bpy.ops.object.join()
-    result = bpy.context.active_object
-    result.name = name
-    return result
+    if len(objects) > 1: bpy.ops.object.join()
+    r = bpy.context.active_object; r.name = name
+    # Consolidate to single material slot
+    while len(r.data.materials) > 1:
+        r.active_material_index = len(r.data.materials) - 1
+        bpy.ops.object.material_slot_remove()
+    return r
 
+def load_image(path):
+    img = bpy.data.images.load(path, check_existing=True)
+    img.pack()
+    return img
 
-def decimate_mesh(obj, ratio, name=None):
-    """Apply decimate modifier and apply it. Removes shape keys first."""
-    if obj is None:
-        return None
+def create_pbr_material(name, diff_path, alpha_path=None, tex_size=512):
+    """Create a PBR material with base-color texture.
+    If alpha_path given, creates combined RGBA (RGB=diff, A=alpha)."""
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    out = nodes.new('ShaderNodeOutputMaterial')
+    out.location = (400, 0)
+    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.location = (0, 0)
+    bsdf.inputs['Roughness'].default_value = 0.7
+    bsdf.inputs['Metallic'].default_value = 0.0
+    links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
+
+    diff_img = bpy.data.images.load(diff_path, check_existing=True)
+
+    if alpha_path:
+        alpha_img = bpy.data.images.load(alpha_path, check_existing=True)
+        # Create combined RGBA image
+        rgba = bpy.data.images.new(f"{name}_rgba", width=tex_size, height=tex_size, alpha=True)
+        rgba.colorspace_settings.name = 'sRGB'
+
+        dw, dh = diff_img.size
+        aw, ah = alpha_img.size
+        dp = list(diff_img.pixels)
+        ap = list(alpha_img.pixels)
+
+        pixels = [0.0] * (tex_size * tex_size * 4)
+        for y in range(tex_size):
+            sy = int(y * dh / tex_size)
+            ay_ = int(y * ah / tex_size)
+            for x in range(tex_size):
+                sx = int(x * dw / tex_size)
+                si = (sy * dw + sx) * 4
+                ti = (y * tex_size + x) * 4
+                if si + 2 < len(dp):
+                    pixels[ti] = dp[si]
+                    pixels[ti+1] = dp[si+1]
+                    pixels[ti+2] = dp[si+2]
+                ax = int(x * aw / tex_size)
+                ai = (ay_ * aw + ax) * 4
+                pixels[ti+3] = ap[ai] if ai < len(ap) else 1.0
+
+        rgba.pixels.foreach_set(pixels)
+        rgba.pack()
+        rgba.update()
+        base_img = rgba
+    else:
+        base_img = diff_img
+
+    tex = nodes.new('ShaderNodeTexImage')
+    tex.image = base_img
+    tex.location = (-300, 0)
+    tex.interpolation = 'Smart'
+    links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+
+    # Set alpha mode for foliage
+    if alpha_path:
+        mat.blend_method = 'CLIP'
+        mat.alpha_threshold = 0.45
+
+    return mat
+
+def decimate(obj, ratio, target_tris=None):
+    """Standard decimate. No remesh fallback (too destructive)."""
+    if obj is None or ratio >= 1.0: return obj
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
-    # Remove shape keys (they prevent modifier application)
     while obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 0:
         obj.shape_key_remove(obj.data.shape_keys.key_blocks[0])
-    # Remove any existing modifiers that might interfere
-    for mod in list(obj.modifiers):
-        obj.modifiers.remove(mod)
-    # Apply decimate
-    mod = obj.modifiers.new(name="Decimate", type='DECIMATE')
+    for m in list(obj.modifiers): obj.modifiers.remove(m)
+    mod = obj.modifiers.new("Dec", 'DECIMATE')
     mod.ratio = max(ratio, 0.001)
-    try:
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-    except RuntimeError:
-        # Fallback: try dissolve method
-        mod.decimate_type = 'DISSOLVE'
-        mod.ratio = max(ratio, 0.001)
-        try:
-            bpy.ops.object.modifier_apply(modifier=mod.name)
-        except RuntimeError:
-            log(f"  WARNING: decimate failed for {obj.name}, keeping original")
-    if name:
-        obj.name = name
+    try: bpy.ops.object.modifier_apply(modifier=mod.name)
+    except: pass
     return obj
 
-
-def count_tris(obj):
-    if obj is None:
-        return 0
-    return len(obj.data.polygons)
-
-
-def duplicate_obj(obj, name):
-    """Duplicate a mesh object."""
-    if obj is None:
-        return None
+def tris(o): return len(o.data.polygons) if o else 0
+def dup(o, n):
+    if not o: return None
     bpy.ops.object.select_all(action='DESELECT')
-    obj.hide_set(False)
-    obj.hide_viewport = False
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
+    o.hide_set(False); o.select_set(True)
+    bpy.context.view_layer.objects.active = o
     bpy.ops.object.duplicate()
-    dup = bpy.context.active_object
-    dup.name = name
-    return dup
+    d = bpy.context.active_object; d.name = n; return d
+def rm(o):
+    if o and o.name in bpy.data.objects: bpy.data.objects.remove(o, do_unlink=True)
 
-
-def consolidate_materials(obj, mat_name):
-    """Set all faces of obj to use a single material, creating it if needed."""
-    if obj is None:
-        return
-    mat = bpy.data.materials.get(mat_name)
-    if mat is None:
-        mat = bpy.data.materials.new(name=mat_name)
-    # Clear all material slots and assign one
-    obj.data.materials.clear()
-    obj.data.materials.append(mat)
-    # Set all faces to material index 0
-    for face in obj.data.polygons:
-        face.material_index = 0
-
-
-def export_glb(filepath, bark_obj, foliage_obj):
-    """Export bark + foliage as exactly 2-primitive GLB."""
-    # Consolidate materials so each mesh produces exactly 1 primitive
-    consolidate_materials(bark_obj, "bark")
-    consolidate_materials(foliage_obj, "foliage")
+def export_glb(path, bark, foliage):
     bpy.ops.object.select_all(action='DESELECT')
-    for obj in [bark_obj, foliage_obj]:
-        if obj is not None:
-            obj.select_set(True)
-    bpy.context.view_layer.objects.active = bark_obj or foliage_obj
-    bpy.ops.export_scene.gltf(
-        filepath=filepath,
-        export_format='GLB',
-        use_selection=True,
-        export_apply=True,
-        export_materials='EXPORT',
-    )
+    for o in [bark, foliage]:
+        if o: o.select_set(True)
+    bpy.context.view_layer.objects.active = bark or foliage
+    bpy.ops.export_scene.gltf(filepath=path, export_format='GLB',
+        use_selection=True, export_apply=True, export_materials='EXPORT')
 
-
-def safe_remove(obj):
-    if obj and obj.name in bpy.data.objects:
-        bpy.data.objects.remove(obj, do_unlink=True)
-
-
-# ── Species processing ─────────────────────────────────────────────────────
-
-def process_conifer(source_name, runtime_name):
-    """Process a conifer source model (pine_tree_01 or fir_tree_01)."""
-    source_path = os.path.join(SOURCE_DIR, f"{source_name}_1k.blend")
-    log(f"\n{'='*60}")
-    log(f"Processing: {source_name} → {runtime_name}")
-    log(f"Source: {source_path}")
+def process(source_name, runtime_name, bark_kw, foliage_kw):
+    src = os.path.join(SOURCE_DIR, f"{source_name}_1k.blend")
+    tex = MANIFEST[runtime_name]
+    log(f"\n{'='*60}\n{source_name} → {runtime_name}")
 
     clear_scene()
-    bpy.ops.wm.open_mainfile(filepath=source_path)
+    bpy.ops.wm.open_mainfile(filepath=src)
+    link_all()
 
-    # PV1-R2: Poly Haven .blend files hide objects in disabled collections.
-    # Move ALL mesh objects to the scene's active collection so they are
-    # selectable and joinable.
-    scene_col = bpy.context.scene.collection
-    for obj in list(bpy.data.objects):
-        if obj.type != 'MESH':
-            continue
-        # Link to scene collection if not already there
-        if scene_col.objects.get(obj.name) is None:
-            scene_col.objects.link(obj)
-        obj.hide_set(False)
-        obj.hide_select = False
-        obj.hide_viewport = False
-    bpy.context.view_layer.update()
+    meshes = [o for o in bpy.data.objects if o.type == 'MESH']
+    bp, fp = [], []
+    for o in meshes:
+        if len(o.data.materials) != 1 or not o.data.materials: continue
+        mn = o.data.materials[0].name.lower()
+        if any(k in mn for k in bark_kw): bp.append(o)
+        elif any(k in mn for k in foliage_kw): fp.append(o)
+    log(f"  Bark:{len(bp)} Foliage:{len(fp)}")
 
-    all_meshes = get_mesh_objects()
-    log(f"  Source meshes: {len(all_meshes)}")
+    # Save mesh data BEFORE any join (join destroys non-active objects)
+    src_bark_data = [(o.data.name, o.matrix_world.copy()) for o in bp if o.data]
+    src_foliage_data = [(o.data.name, o.matrix_world.copy()) for o in fp if o.data]
 
-    # Classify by material name keywords
-    bark_parts = []   # trunk + bark + dead_branches
-    foliage_parts = []  # twig + needle + branch (foliage with alpha)
+    bark = join_meshes(bp, "bark")
+    foliage = join_meshes(fp, "foliage")
 
-    for obj in all_meshes:
-        # Skip the massive combined LOD meshes (a_LOD0, b_LOD0, etc.)
-        name = obj.name
-        is_combined = False
-        for variant in ['_a_', '_b_', '_c_']:
-            if variant in name and '_LOD' in name:
-                is_combined = True
-                break
-        if is_combined:
-            continue
-        if not obj.data.materials:
-            continue
-        mat_name = obj.data.materials[0].name.lower()
-        if any(k in mat_name for k in ['trunk', 'bark', 'dead']):
-            bark_parts.append(obj)
-        elif any(k in mat_name for k in ['twig', 'needle', 'branch']):
-            foliage_parts.append(obj)
+    # Create PBR materials with textures from disk
+    bark_mat = create_pbr_material("bark", tex['bark_diff'])
+    foliage_mat = create_pbr_material("foliage", tex['foliage_diff'],
+                                       tex.get('foliage_alpha'))
 
-    log(f"  Bark parts: {len(bark_parts)}, Foliage parts: {len(foliage_parts)}")
+    # Assign materials
+    if bark:
+        bark.data.materials.clear()
+        bark.data.materials.append(bark_mat)
+    if foliage:
+        foliage.data.materials.clear()
+        foliage.data.materials.append(foliage_mat)
 
-    # Join into 2 primitives
-    bark_joined = join_objects(bark_parts, "bark_src")
-    foliage_joined = join_objects(foliage_parts, "foliage_src")
+    bt, ft = tris(bark), tris(foliage)
+    log(f"  Source: bark={bt} foliage={ft}")
 
-    bark_tris = count_tris(bark_joined)
-    foliage_tris = count_tris(foliage_joined)
-    log(f"  Source bark: {bark_tris} tris, foliage: {foliage_tris} tris")
+    for ratio, lod in [(0.12,"lod0"),(0.04,"lod1"),(0.015,"lod2")]:
+        target_total = int((bt + ft) * ratio)
+        # Create fresh duplicates from source data for each LOD
+        bark_dups = []
+        for i, (dname, mx) in enumerate(src_bark_data):
+            mesh = bpy.data.meshes.get(dname)
+            if not mesh: continue
+            obj = bpy.data.objects.new(f"bd_{lod}_{i}", mesh.copy())
+            bpy.context.scene.collection.objects.link(obj)
+            obj.matrix_world = mx
+            if tris(obj) > 50: decimate(obj, ratio)
+            bark_dups.append(obj)
+        foliage_dups = []
+        for i, (dname, mx) in enumerate(src_foliage_data):
+            mesh = bpy.data.meshes.get(dname)
+            if not mesh: continue
+            obj = bpy.data.objects.new(f"fd_{lod}_{i}", mesh.copy())
+            bpy.context.scene.collection.objects.link(obj)
+            obj.matrix_world = mx
+            if tris(obj) > 20: decimate(obj, ratio)
+            foliage_dups.append(obj)
 
-    # LOD generation — ratios tuned for runtime budget (~15-25K LOD0 target)
-    lod_configs = [
-        (0.12, "lod0"),   # → ~12K tris for conifers
-        (0.05, "lod1"),   # → ~5K
-        (0.02, "lod2"),   # → ~2K
-    ]
+        bl = join_meshes(bark_dups, f"bark_{lod}")
+        fl = join_meshes(foliage_dups, f"foliage_{lod}")
 
-    for ratio, lod_name in lod_configs:
-        bark_lod = duplicate_obj(bark_joined, f"bark_{lod_name}")
-        foliage_lod = duplicate_obj(foliage_joined, f"foliage_{lod_name}")
+        if bl:
+            bl.data.materials.clear(); bl.data.materials.append(bark_mat)
+        if fl:
+            fl.data.materials.clear(); fl.data.materials.append(foliage_mat)
 
-        if bark_lod and bark_tris > 100:
-            decimate_mesh(bark_lod, ratio)
-        if foliage_lod and foliage_tris > 50:
-            decimate_mesh(foliage_lod, ratio)
-
-        b_tris = count_tris(bark_lod)
-        f_tris = count_tris(foliage_lod)
-        log(f"  {lod_name}: bark={b_tris} tris, foliage={f_tris} tris, total={b_tris+f_tris}")
-
-        out_path = os.path.join(OUTPUT_DIR, f"field_{runtime_name}_{lod_name}.glb")
-        export_glb(out_path, bark_lod, foliage_lod)
-        log(f"  Exported: {out_path}")
-
-        safe_remove(bark_lod)
-        safe_remove(foliage_lod)
-
-    safe_remove(bark_joined)
-    safe_remove(foliage_joined)
-
-
-def process_broadleaf(source_name, runtime_name):
-    """Process a broadleaf source model (tree_small_02 / jacaranda_tree)."""
-    source_path = os.path.join(SOURCE_DIR, f"{source_name}_1k.blend")
-    log(f"\n{'='*60}")
-    log(f"Processing: {source_name} → {runtime_name}")
-    log(f"Source: {source_path}")
-
-    clear_scene()
-    bpy.ops.wm.open_mainfile(filepath=source_path)
-
-    # PV1-R2: Poly Haven .blend files hide objects in disabled collections.
-    # Move ALL mesh objects to the scene's active collection so they are
-    # selectable and joinable.
-    scene_col = bpy.context.scene.collection
-    for obj in list(bpy.data.objects):
-        if obj.type != 'MESH':
-            continue
-        # Link to scene collection if not already there
-        if scene_col.objects.get(obj.name) is None:
-            scene_col.objects.link(obj)
-        obj.hide_set(False)
-        obj.hide_select = False
-        obj.hide_viewport = False
-    bpy.context.view_layer.update()
-
-    all_meshes = get_mesh_objects()
-    log(f"  Source meshes: {len(all_meshes)}")
-
-    bark_parts = []
-    foliage_parts = []
-
-    for obj in all_meshes:
-        # Skip massive combined LOD meshes (multi-material)
-        if len(obj.data.materials) > 1:
-            continue
-        if not obj.data.materials:
-            continue
-        mat_name = obj.data.materials[0].name.lower()
-        if any(k in mat_name for k in ['leave', 'leaf', 'foliage', 'crown']):
-            foliage_parts.append(obj)
-        elif any(k in mat_name for k in ['trunk', 'branch', 'bark']):
-            bark_parts.append(obj)
-
-    log(f"  Bark parts: {len(bark_parts)}, Foliage parts: {len(foliage_parts)}")
-
-    bark_joined = join_objects(bark_parts, "bark_src")
-    foliage_joined = join_objects(foliage_parts, "foliage_src")
-
-    bark_tris = count_tris(bark_joined)
-    foliage_tris = count_tris(foliage_joined)
-    log(f"  Source bark: {bark_tris} tris, foliage: {foliage_tris} tris")
-
-    # LOD generation — ratios tuned for runtime budget
-    lod_configs = [
-        (0.15, "lod0"),   # → ~15K for broadleaf
-        (0.06, "lod1"),   # → ~6K
-        (0.02, "lod2"),   # → ~2K
-    ]
-
-    for ratio, lod_name in lod_configs:
-        bark_lod = duplicate_obj(bark_joined, f"bark_{lod_name}")
-        foliage_lod = duplicate_obj(foliage_joined, f"foliage_{lod_name}")
-
-        if bark_lod and bark_tris > 100:
-            decimate_mesh(bark_lod, ratio)
-        if foliage_lod and foliage_tris > 50:
-            decimate_mesh(foliage_lod, ratio)
-
-        b_tris = count_tris(bark_lod)
-        f_tris = count_tris(foliage_lod)
-        log(f"  {lod_name}: bark={b_tris} tris, foliage={f_tris} tris, total={b_tris+f_tris}")
-
-        out_path = os.path.join(OUTPUT_DIR, f"field_{runtime_name}_{lod_name}.glb")
-        export_glb(out_path, bark_lod, foliage_lod)
-        log(f"  Exported: {out_path}")
-
-        safe_remove(bark_lod)
-        safe_remove(foliage_lod)
-
-    safe_remove(bark_joined)
-    safe_remove(foliage_joined)
-
-
-# ── Main ───────────────────────────────────────────────────────────────────
+        b_, f_ = tris(bl), tris(fl)
+        log(f"  {lod}: bark={b_} foliage={f_} total={b_+f_}")
+        export_glb(os.path.join(OUTPUT_DIR, f"field_{runtime_name}_{lod}.glb"), bl, fl)
+        rm(bl); rm(fl)
+    rm(bark); rm(foliage)
 
 def main():
-    log("PV1-R2 Production Vegetation Asset Processor")
+    log("PV1-R3 Processor (textures from disk)")
     log(f"REPO_ROOT: {REPO_ROOT}")
-    log(f"SOURCE_DIR: {SOURCE_DIR}")
-    log(f"OUTPUT_DIR: {OUTPUT_DIR}")
 
-    # Verify source files exist
-    for name in ['pine_tree_01_1k.blend', 'fir_tree_01_1k.blend',
-                 'tree_small_02_1k.blend', 'jacaranda_tree_1k.blend']:
-        path = os.path.join(SOURCE_DIR, name)
-        if not os.path.isfile(path):
-            log(f"ERROR: source file missing: {path}")
-            return
+    process('pine_tree_01', 'pine_a',
+            ['trunk','bark','dead'], ['twig','needle','branch'])
+    process('fir_tree_01', 'fir_a',
+            ['trunk','bark','dead'], ['twig','needle','branch'])
+    process('tree_small_02', 'broadleaf_a',
+            ['trunk','branch'], ['leave','leaf','foliage'])
+    process('jacaranda_tree', 'broadleaf_b',
+            ['trunk','branch'], ['leave','leaf','foliage','crown'])
 
-    # Process conifers (real Poly Haven geometry)
-    process_conifer('pine_tree_01', 'pine_a')
-    process_conifer('fir_tree_01', 'fir_a')
-
-    # Process broadleaves (real Poly Haven geometry)
-    process_broadleaf('tree_small_02', 'broadleaf_a')
-    process_broadleaf('jacaranda_tree', 'broadleaf_b')
-
-    # Write processing log
-    with open(LOG_PATH, 'w') as f:
+    log(f"\n{'='*60}\nDone. 12 GLB → {OUTPUT_DIR}")
+    with open(os.path.join(SCRIPT_DIR, "processing_log.json"), 'w') as f:
         json.dump(LOG, f, indent=2)
-
-    log(f"\n{'='*60}")
-    log("All 4 species processed. 12 GLB files exported.")
-    log(f"Output: {OUTPUT_DIR}")
-    log(f"Log: {LOG_PATH}")
-    log(f"{'='*60}")
-
 
 if __name__ == "__main__":
     main()
