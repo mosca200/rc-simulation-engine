@@ -32,9 +32,9 @@ use crate::vegetation_assets::{VegetationAssetSet, VegetationSpecies};
 pub const LOD_COUNT: usize = 3;
 /// Render parts per LOD (bark + foliage).
 pub const PART_COUNT: usize = 2;
-/// Batch-group count: one group per (asset, LOD). PV1-R: 3 production assets
-/// (pine_a, fir_a, broadleaf_a) × 3 LOD classes = 9 groups.
-pub const GROUP_COUNT: usize = 3 * LOD_COUNT;
+/// Batch-group count: one group per (asset, LOD). PV1-R2: 4 production assets
+/// (pine_a, fir_a, broadleaf_a, broadleaf_b) × 3 LOD classes = 12 groups.
+pub const GROUP_COUNT: usize = 4 * LOD_COUNT;
 
 /// Default vegetation seed (matches the former `scenery::DEFAULT_TREE_SEED`).
 pub const DEFAULT_VEGETATION_SEED: u64 = 42;
@@ -379,13 +379,19 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
 }
 
 /// Asset variant weights per species (uneven so the mix does not read as a
-/// uniform row of look-alikes). PV1-R: 3 assets — conifer 0/1 (pine/fir),
-/// deciduous 2 (broadleaf).
+/// uniform row of look-alikes). PV1-R2: 4 assets — conifer 0/1 (pine/fir),
+/// deciduous 2/3 (broadleaf_a / broadleaf_b).
 #[must_use]
 fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
     match species {
-        // Asset 2 (broadleaf_a).
-        VegetationSpecies::Deciduous => 2,
+        // Assets 2..3 (broadleaf_a / broadleaf_b).
+        VegetationSpecies::Deciduous => {
+            if variant_roll < 0.5 {
+                2
+            } else {
+                3
+            }
+        }
         // Assets 0..1 (conifer pine_a / fir_a).
         VegetationSpecies::Conifer => {
             if variant_roll < 0.5 {

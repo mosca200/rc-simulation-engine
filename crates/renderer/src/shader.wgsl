@@ -999,17 +999,40 @@ fn vs_vegetation(input: VegetationVertexInput) -> VegetationVertexOutput {
 }
 
 // G3E depth-only instanced caster for the vegetation shadow passes. Shares the
-// exact instance transform; no fragment stage and no color target.
+// exact instance transform. PV1-R2: adds a fragment stage for alpha-masked
+// foliage shadows so leaf cards cast shaped shadows instead of solid quads.
+struct VegetationShadowOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
 @vertex
-fn vs_vegetation_shadow(input: VegetationVertexInput) -> @builtin(position) vec4<f32> {
+fn vs_vegetation_shadow(input: VegetationVertexInput) -> VegetationShadowOutput {
+    var output: VegetationShadowOutput;
     let transformed = transform_vegetation_vertex(
         input.position,
         input.normal,
         input.instance_position_yaw,
         input.instance_scale_tint.x,
     );
-    return shadow_cascade.light_view_projection
+    output.clip_position = shadow_cascade.light_view_projection
         * vec4<f32>(transformed.world_position, 1.0);
+    output.uv = input.uv;
+    output.color = tinted_vertex_color(input.color, input.instance_scale_tint.yzw);
+    return output;
+}
+
+// PV1-R2: shadow fragment with alpha cutoff for foliage leaf cards.
+// No colour output (depth-only target); the discard carves the leaf
+// silhouette into the shadow map.
+@fragment
+fn fs_vegetation_shadow(input: VegetationShadowOutput) {
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let base_alpha = input.color.a * texture_rgba.a;
+    if (base_alpha < 0.45) {
+        discard;
+    }
 }
 
 // Lit vegetation fragment: the exact fs_lit chain (texture * vertex color,
