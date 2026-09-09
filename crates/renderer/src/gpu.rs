@@ -5621,6 +5621,7 @@ mod vegetation_tests {
                     Some(&camera_layout),
                     Some(&object_layout),
                     Some(&shadow_pass_layout),
+                    Some(&material_layout),
                 ],
                 immediate_size: 0,
             });
@@ -5951,6 +5952,8 @@ mod vegetation_tests {
         let object_layout = matrix_bind_group_layout(&device, "g3d shadow test object layout");
         let shadow_pass_layout =
             shadow_pass_bind_group_layout(&device, "g3d shadow test shadow layout");
+        let material_layout =
+            material_bind_group_layout(&device, "g3d shadow test material layout");
         let shadow_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("g3d shadow vegetation pipeline layout"),
@@ -5958,6 +5961,7 @@ mod vegetation_tests {
                     Some(&camera_layout),
                     Some(&object_layout),
                     Some(&shadow_pass_layout),
+                    Some(&material_layout),
                 ],
                 immediate_size: 0,
             });
@@ -6101,11 +6105,31 @@ mod vegetation_tests {
             pass.set_bind_group(0, &camera_bind_group, &[]);
             pass.set_bind_group(1, &object_bind_group, &[]);
             pass.set_bind_group(2, &shadow_pass_bind_group, &[]);
-            for ((vertex_buffer, index_buffer), index_count) in vertex_buffers
+            // PV1-R2: the shadow fragment entry samples the material alpha for
+            // foliage discard; bind bark/foliage materials as production does.
+            let shadow_materials = [
+                create_white_texture_material(
+                    &device,
+                    &material_layout,
+                    &queue,
+                    part_metallic(VegetationPart::Bark),
+                    part_roughness(VegetationPart::Bark),
+                ),
+                create_white_texture_material(
+                    &device,
+                    &material_layout,
+                    &queue,
+                    part_metallic(VegetationPart::Foliage),
+                    part_roughness(VegetationPart::Foliage),
+                ),
+            ];
+            for (mesh_index, ((vertex_buffer, index_buffer), index_count)) in vertex_buffers
                 .iter()
                 .zip(index_buffers.iter())
                 .zip(index_counts.iter())
+                .enumerate()
             {
+                pass.set_bind_group(3, &shadow_materials[mesh_index].bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -6252,6 +6276,7 @@ mod vegetation_tests {
                 Some(&camera_layout),
                 Some(&object_layout),
                 Some(&shadow_pass_layout),
+                Some(&material_layout),
             ],
             immediate_size: 0,
         });
@@ -6686,6 +6711,7 @@ mod vegetation_tests {
         let camera_layout = camera_bind_group_layout(&device, "shadow iso camera layout");
         let object_layout = matrix_bind_group_layout(&device, "shadow iso object layout");
         let shadow_pass_layout = shadow_pass_bind_group_layout(&device, "shadow iso shadow layout");
+        let material_layout = material_bind_group_layout(&device, "shadow iso material layout");
 
         // Standard shadow pipeline (aircraft caster path).
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -6706,6 +6732,7 @@ mod vegetation_tests {
                 Some(&camera_layout),
                 Some(&object_layout),
                 Some(&shadow_pass_layout),
+                Some(&material_layout),
             ],
             immediate_size: 0,
         });
@@ -6742,7 +6769,6 @@ mod vegetation_tests {
 
         // Build vegetation GPU resources (shadow pipeline only needed here).
         let state_layout = vegetation_state_bind_group_layout(&device, "shadow iso state layout");
-        let material_layout = material_bind_group_layout(&device, "shadow iso material layout");
         let env_layout = environment_bind_group_layout(&device, "shadow iso env layout");
         let veg_scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow iso veg scene layout"),
@@ -6755,37 +6781,35 @@ mod vegetation_tests {
             ],
             immediate_size: 0,
         });
-        let gpu_veg = {
-            let bark_m = create_white_texture_material(
-                &device,
-                &material_layout,
-                &queue,
-                part_metallic(VegetationPart::Bark),
-                part_roughness(VegetationPart::Bark),
-            );
-            let foliage_m = create_white_texture_material(
-                &device,
-                &material_layout,
-                &queue,
-                part_metallic(VegetationPart::Foliage),
-                part_roughness(VegetationPart::Foliage),
-            );
-            let mut mats = vec![bark_m, foliage_m];
-            build_gpu_vegetation(
-                &device,
-                &queue,
-                &shader,
-                &world,
-                &state_layout,
-                &veg_scene_layout,
-                &veg_shadow_layout,
-                &material_layout,
-                &mut mats,
-                0,
-                1,
-                VegetationDebugMode::Final,
-            )
-        };
+        let bark_m = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Bark),
+            part_roughness(VegetationPart::Bark),
+        );
+        let foliage_m = create_white_texture_material(
+            &device,
+            &material_layout,
+            &queue,
+            part_metallic(VegetationPart::Foliage),
+            part_roughness(VegetationPart::Foliage),
+        );
+        let mut mats = vec![bark_m, foliage_m];
+        let gpu_veg = build_gpu_vegetation(
+            &device,
+            &queue,
+            &shader,
+            &world,
+            &state_layout,
+            &veg_scene_layout,
+            &veg_shadow_layout,
+            &material_layout,
+            &mut mats,
+            0,
+            1,
+            VegetationDebugMode::Final,
+        );
         queue.write_buffer(
             &gpu_veg.instance_buffer,
             0,
@@ -6907,6 +6931,12 @@ mod vegetation_tests {
                 let lod = (group % LOD_COUNT) as u8;
                 for part in [VegetationPart::Bark, VegetationPart::Foliage] {
                     let mesh = &gpu_veg.meshes[vegetation_mesh_index(asset, lod, part)];
+                    let material = if matches!(part, VegetationPart::Foliage) {
+                        &mats[1]
+                    } else {
+                        &mats[0]
+                    };
+                    pass.set_bind_group(3, &material.bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     pass.set_vertex_buffer(1, gpu_veg.instance_buffer.slice(..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
