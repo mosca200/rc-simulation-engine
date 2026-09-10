@@ -1,4 +1,4 @@
-//! RV2-1 shared renderer facade.
+//! Shared V1/V2 renderer facade.
 //!
 //! This module is the single architectural seam that lets the application
 //! choose a rendering backend at runtime (`--renderer v1` / `--renderer v2`)
@@ -9,9 +9,8 @@
 //! - [`DesktopRenderer`] is a statically-dispatched facade: it owns a private
 //!   `Backend` enum and `match`es on it. There is no trait object, no generic
 //!   dependency injection, and no framework abstraction.
-//! - The V2 variant is the RV2-1 parity shell ([`crate::renderer_v2`]), which
-//!   currently delegates to V1. The application never sees the shell type, so
-//!   future V2 internals stay hidden behind this facade.
+//! - The V2 variant owns its foundation state behind [`crate::renderer_v2`].
+//!   The application never sees those internals.
 //!
 //! The facade exposes exactly the small contract the app already used against
 //! [`WgpuRenderer`]: async construction with a presentation asset, `render`,
@@ -38,7 +37,7 @@ pub enum RendererVersion {
     /// The frozen V1 production renderer (`WgpuRenderer`).
     #[default]
     V1,
-    /// The Rendering V2 backend (an RV2-1 parity shell delegating to V1).
+    /// The Rendering V2 backend.
     V2,
 }
 
@@ -80,8 +79,8 @@ impl RendererVersion {
 /// Private so the V2 shell type never leaks into the public API; dispatch is a
 /// plain `match`, keeping the facade statically dispatched.
 enum Backend {
-    V1(WgpuRenderer),
-    V2(RendererV2Shell),
+    V1(Box<WgpuRenderer>),
+    V2(Box<RendererV2Shell>),
 }
 
 /// Runtime renderer facade shared by the V1 and V2 backends.
@@ -96,15 +95,12 @@ impl DesktopRenderer {
     /// Construct the selected backend with a presentation asset and optional
     /// scenery.
     ///
-    /// Both branches forward the identical arguments to the V1 constructor
-    /// (the V2 parity shell wraps V1 in RV2-1), so presentation settings,
-    /// ground reference, terrain mode, scenery and camera config are preserved
-    /// for either selection.
+    /// Both branches forward identical presentation settings, ground
+    /// reference, terrain mode, scenery, and camera configuration.
     ///
     /// # Errors
     ///
-    /// Returns the V1 [`RendererError`] values unchanged, since RV2-1 routes
-    /// GPU/surface creation through V1 for both backends.
+    /// Returns the shared renderer initialization errors unchanged.
     pub async fn new_with_presentation(
         version: RendererVersion,
         window: Arc<Window>,
@@ -115,7 +111,7 @@ impl DesktopRenderer {
         camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
         let backend = match version {
-            RendererVersion::V1 => Backend::V1(
+            RendererVersion::V1 => Backend::V1(Box::new(
                 WgpuRenderer::new_with_presentation(
                     window,
                     asset,
@@ -125,8 +121,8 @@ impl DesktopRenderer {
                     camera_config,
                 )
                 .await?,
-            ),
-            RendererVersion::V2 => Backend::V2(
+            )),
+            RendererVersion::V2 => Backend::V2(Box::new(
                 RendererV2Shell::new_with_presentation(
                     window,
                     asset,
@@ -136,7 +132,7 @@ impl DesktopRenderer {
                     camera_config,
                 )
                 .await?,
-            ),
+            )),
         };
         Ok(Self { backend })
     }

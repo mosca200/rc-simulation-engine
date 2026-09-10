@@ -31,6 +31,12 @@
 //! `queue.present(surface_texture)` to schedule the acquired surface texture
 //! for presentation.
 
+use crate::device::{DeviceContext, DeviceFeaturePolicy};
+use crate::profiling::Profiler;
+use crate::render_graph::{CompiledGraph, PassId};
+use crate::resources::{
+    DepthTarget, HdrTarget, create_depth_target, create_hdr_scene_bind_group, create_hdr_target,
+};
 use crate::scenery::{SceneryMesh, SceneryPreset};
 use crate::shadow::{
     SHADOW_CASCADE_COUNT, SHADOW_CASCADE_SPLITS_M, SHADOW_DEPTH_BIAS_CONSTANT,
@@ -57,13 +63,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use std::f32::consts::PI;
-use std::{
-    mem::size_of,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
-};
+use std::{mem::size_of, sync::Arc};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -73,9 +73,6 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 // lighting write scene-referred linear values here; the postprocess pass
 // resolves exposure + tone mapping to the sRGB surface.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const GPU_ERROR_NONE: u8 = 0;
-const GPU_ERROR_OUT_OF_MEMORY: u8 = 1;
-const GPU_ERROR_OTHER: u8 = 2;
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
 const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
@@ -616,22 +613,12 @@ impl TerrainMaterialUniform {
     }
 }
 
-struct DepthTarget {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
-}
-
 /// G3B: persistent linear HDR scene target (Rgba16Float).
 ///
 /// Opaque geometry, terrain, aircraft, sky and lighting write scene-referred
 /// linear values here; the postprocess pass samples it and resolves exposure +
 /// tone mapping to the sRGB surface. Created at startup and recreated only on
 /// resize — never per frame. The view is re-bound on resize.
-struct HdrTarget {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
-}
-
 /// G3E: persistent three-layer depth texture sampled by the lit pass and
 /// written one layer at a time by the cascade caster passes. It is independent
 /// from the resize-dependent scene depth target.
@@ -831,12 +818,7 @@ struct GpuVegetation {
 
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
-    _instance: wgpu::Instance,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface_configuration: wgpu::SurfaceConfiguration,
-    surface_is_configured: bool,
+    device_context: DeviceContext,
 
     sky_pipeline: wgpu::RenderPipeline,
     triangle_pipeline: wgpu::RenderPipeline,
@@ -915,7 +897,6 @@ pub struct WgpuRenderer {
     exposure_ev: f32,
     _shadow_sampler: wgpu::Sampler,
     camera: CameraMode,
-    asynchronous_gpu_error: Arc<AtomicU8>,
 
     show_debug_overlays: bool,
     // G3A-R: presentation-only terrain debug channel (uniform-driven).
@@ -942,101 +923,66 @@ impl WgpuRenderer {
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
+        Self::new_with_presentation_policy(
+            window,
+            asset,
+            ground_below_render_origin_m,
+            terrain_mode,
+            scenery_preset,
+            camera_config,
+            DeviceFeaturePolicy::V1Legacy,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_v2_with_presentation(
+        window: Arc<Window>,
+        asset: PresentationAsset<'_>,
+        ground_below_render_origin_m: f32,
+        terrain_mode: RenderTerrainMode,
+        scenery_preset: Option<SceneryPreset>,
+        camera_config: CameraConfig,
+    ) -> Result<Self, RendererError> {
+        Self::new_with_presentation_policy(
+            window,
+            asset,
+            ground_below_render_origin_m,
+            terrain_mode,
+            scenery_preset,
+            camera_config,
+            DeviceFeaturePolicy::V2OptionalTimestamp,
+        )
+        .await
+    }
+
+    async fn new_with_presentation_policy(
+        window: Arc<Window>,
+        asset: PresentationAsset<'_>,
+        ground_below_render_origin_m: f32,
+        terrain_mode: RenderTerrainMode,
+        scenery_preset: Option<SceneryPreset>,
+        camera_config: CameraConfig,
+        feature_policy: DeviceFeaturePolicy,
+    ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
         }
 
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance
-            .create_surface(window)
-            .map_err(RendererError::CreateSurface)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-                apply_limit_buckets: false,
-            })
-            .await
-            .map_err(|error| RendererError::AdapterNotFound(error.to_string()))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("G1C device"),
-                required_features: wgpu::Features::empty(),
-                // G3A: the terrain material bind group lives at group 4, one
-                // beyond the WebGPU default `max_bind_groups` of 4. Native
-                // backends advertise up to 8; raising the cap to the adapter's
-                // own advertised value keeps the pipeline valid on every device.
-                required_limits: wgpu::Limits {
-                    max_bind_groups: adapter.limits().max_bind_groups,
-                    ..wgpu::Limits::default()
-                },
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|error| RendererError::RequestDevice(error.to_string()))?;
-
-        // G3A-R: anisotropic filtering is a downlevel capability in wgpu 30.
-        // When the backend supports it, request the WebGPU maximum of 16x
-        // (the RTX 3090 target supports it natively); otherwise fall back to
-        // 1x so less capable adapters stay valid. The sampler is created with
-        // this value; wgpu additionally clamps to [1, 16] internally.
-        let terrain_sampler_anisotropy = effective_sampler_anisotropy(
-            adapter
-                .get_downlevel_capabilities()
-                .flags
-                .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING),
-        );
-
-        let asynchronous_gpu_error = Arc::new(AtomicU8::new(GPU_ERROR_NONE));
-        let callback_error = Arc::clone(&asynchronous_gpu_error);
-        device.on_uncaptured_error(Arc::new(move |error| {
-            let code = match error {
-                wgpu::Error::OutOfMemory { .. } => GPU_ERROR_OUT_OF_MEMORY,
-                wgpu::Error::Validation { .. } | wgpu::Error::Internal { .. } => GPU_ERROR_OTHER,
-            };
-            // Debug aid: surface the wgpu validation detail that the atomic
-            // only collapses to a code. Correctly diagnosed slices have no
-            // uncaptured errors, so this line stays silent in production.
-            eprintln!("GpuValidation diagnostic: {error}");
-            callback_error.store(code, Ordering::Release);
-        }));
-
-        let capabilities = surface.get_capabilities(&adapter);
-        let fallback_format = capabilities
-            .formats
-            .first()
-            .copied()
-            .ok_or(RendererError::SurfaceWithoutFormats)?;
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .unwrap_or(fallback_format);
-        let alpha_mode = capabilities
-            .alpha_modes
-            .first()
-            .copied()
-            .ok_or(RendererError::SurfaceWithoutAlphaModes)?;
-        let surface_configuration = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
-            alpha_mode,
-            view_formats: Vec::new(),
-        };
-        let surface_is_configured = size.width > 0 && size.height > 0;
-        if surface_is_configured {
-            surface.configure(&device, &surface_configuration);
+        let device_context = DeviceContext::new(window, feature_policy).await?;
+        if feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp {
+            device_context.capabilities().log_v2_snapshot();
         }
+        let device = device_context.device().clone();
+        let queue = device_context.queue().clone();
+        let format = device_context.surface_format();
+        let surface_width = device_context.surface_width();
+        let surface_height = device_context.surface_height();
+
+        // G3A-R: preserve the legacy anisotropy fallback, now sourced from
+        // the immutable capability snapshot shared by both renderer paths.
+        let terrain_sampler_anisotropy =
+            effective_sampler_anisotropy(device_context.capabilities().anisotropic_filtering);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("G1C sky+material+texture+lighting+atmosphere shader"),
@@ -1603,20 +1549,13 @@ impl WgpuRenderer {
                 )
             });
 
-        let depth_target = create_depth_target(
-            &device,
-            surface_configuration.width,
-            surface_configuration.height,
-        );
+        let depth_target =
+            create_depth_target(&device, surface_width, surface_height, DEPTH_FORMAT);
 
         // G3B: linear HDR scene target + postprocess pass, created once here
         // (and recreated on resize only). No texture/sampler/bind group/
         // pipeline creation happens on the frame path.
-        let hdr_target = create_hdr_target(
-            &device,
-            surface_configuration.width,
-            surface_configuration.height,
-        );
+        let hdr_target = create_hdr_target(&device, surface_width, surface_height, HDR_FORMAT);
         let postprocess_bind_group_layout =
             postprocess_bind_group_layout(&device, "G3B postprocess layout");
         let postprocess_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1664,12 +1603,7 @@ impl WgpuRenderer {
             create_postprocess_pipeline(&device, &shader, &postprocess_pipeline_layout, format);
 
         Ok(Self {
-            _instance: instance,
-            surface,
-            device,
-            queue,
-            surface_configuration,
-            surface_is_configured,
+            device_context,
             sky_pipeline,
             triangle_pipeline,
             line_pipeline,
@@ -1717,7 +1651,6 @@ impl WgpuRenderer {
             exposure_ev: DEFAULT_EXPOSURE_EV,
             _shadow_sampler: shadow_sampler,
             camera: camera_config.build(size.width, size.height),
-            asynchronous_gpu_error,
             show_debug_overlays: false,
             terrain_debug_mode: TerrainDebugMode::default(),
             vegetation_world,
@@ -1773,7 +1706,8 @@ impl WgpuRenderer {
     /// default is [`TerrainDebugMode::Final`], which is the production path.
     pub fn set_terrain_debug_mode(&mut self, mode: TerrainDebugMode) {
         self.terrain_debug_mode = mode;
-        self.terrain_material.update_debug_mode(&self.queue, mode);
+        self.terrain_material
+            .update_debug_mode(self.device_context.queue(), mode);
     }
 
     /// Current terrain debug channel.
@@ -1806,7 +1740,7 @@ impl WgpuRenderer {
             && vegetation.uniform.debug_mode != mode.as_u32()
         {
             vegetation.uniform.debug_mode = mode.as_u32();
-            self.queue.write_buffer(
+            self.device_context.queue().write_buffer(
                 &vegetation._uniform_buffer,
                 0,
                 bytemuck::bytes_of(&vegetation.uniform),
@@ -1858,54 +1792,80 @@ impl WgpuRenderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            self.surface_is_configured = false;
+        if !self.device_context.resize_surface(width, height) {
             return;
         }
-        self.surface_configuration.width = width;
-        self.surface_configuration.height = height;
         self.camera.resize(width, height);
-        self.reconfigure_surface();
-        self.depth_target = create_depth_target(&self.device, width, height);
+        self.depth_target =
+            create_depth_target(self.device_context.device(), width, height, DEPTH_FORMAT);
         // G3B: the linear HDR scene target tracks the surface size; the
         // postprocess bind group is re-created to reference the new view.
         // Pipelines, sampler and uniform buffer are NOT recreated here.
-        self.hdr_target = create_hdr_target(&self.device, width, height);
+        self.hdr_target =
+            create_hdr_target(self.device_context.device(), width, height, HDR_FORMAT);
         self.postprocess_bind_group = create_hdr_scene_bind_group(
-            &self.device,
+            self.device_context.device(),
             &self._postprocess_bind_group_layout,
             &self.hdr_target.view,
             &self.postprocess_sampler,
             &self.postprocess_uniform_buffer,
             "G3B postprocess bind group (resized)",
         );
-        self.surface_is_configured = true;
     }
 
     pub fn reconfigure_surface(&mut self) {
-        if self.surface_configuration.width > 0 && self.surface_configuration.height > 0 {
-            self.surface
-                .configure(&self.device, &self.surface_configuration);
-            self.surface_is_configured = true;
-        }
+        self.device_context.reconfigure_surface();
     }
 
+    /// Render through the frozen V1 schedule. This path does not construct or
+    /// consult the V2 graph and retains the legacy empty-feature device policy.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
+        self.render_scheduled(frame, None, None)
+    }
+
+    pub(crate) fn create_v2_profiler(&self) -> Profiler {
+        Profiler::new(
+            self.device_context.device(),
+            self.device_context.queue(),
+            self.device_context.capabilities(),
+        )
+    }
+
+    pub(crate) fn render_v2(
+        &mut self,
+        frame: &RenderFrame,
+        graph: &CompiledGraph,
+        profiler: &mut Profiler,
+    ) -> Result<(), SurfaceError> {
+        self.render_scheduled(frame, Some(graph), Some(profiler))
+    }
+
+    fn render_scheduled(
+        &mut self,
+        frame: &RenderFrame,
+        graph: Option<&CompiledGraph>,
+        mut profiler: Option<&mut Profiler>,
+    ) -> Result<(), SurfaceError> {
         self.check_asynchronous_gpu_error()?;
-        if !self.surface_is_configured {
+        if !self.device_context.is_surface_configured() {
             return Ok(());
         }
 
-        let (surface_texture, reconfigure_after_present) = match self.surface.get_current_texture()
-        {
-            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
-            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded),
-            wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::Outdated),
-            wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost),
-            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
-        };
+        const LEGACY_PASS_ORDER: [PassId; PassId::COUNT] = [
+            PassId::ShadowNear,
+            PassId::ShadowMid,
+            PassId::ShadowFar,
+            PassId::Scene,
+            PassId::Postprocess,
+        ];
+        let pass_order = graph.map_or(LEGACY_PASS_ORDER.as_slice(), CompiledGraph::execution_order);
+        debug_assert_eq!(pass_order.len(), PassId::COUNT);
+        if let Some(profiler) = profiler.as_deref_mut() {
+            profiler.begin_frame(self.device_context.device());
+        }
+
+        let (surface_texture, reconfigure_after_present) =
+            self.device_context.acquire_surface_texture()?;
 
         // Compute camera uniforms on the stack.
         let aircraft_pose = frame.aircraft_pose();
@@ -1918,13 +1878,16 @@ impl WgpuRenderer {
             .unwrap_or(identity);
         let camera_uniform = CameraUniform::new(&vp, &inv_vp, eye);
 
-        self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
+        self.device_context.queue().write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::bytes_of(&camera_uniform),
+        );
 
         // FIX 2: Update aircraft object uniform with the current pose model matrix.
         let aircraft_model_matrix = aircraft_pose.model_matrix();
         let aircraft_object_uniform = ObjectUniform::from_matrix(&aircraft_model_matrix);
-        self.queue.write_buffer(
+        self.device_context.queue().write_buffer(
             &self.aircraft_object_buffer,
             0,
             bytemuck::bytes_of(&aircraft_object_uniform),
@@ -1937,14 +1900,14 @@ impl WgpuRenderer {
         let shadow_cascades =
             build_shadow_cascades(self.shadow_light_direction, eye, camera_target);
         let shadow_uniform = ShadowUniform::from_cascades(&shadow_cascades);
-        self.queue.write_buffer(
+        self.device_context.queue().write_buffer(
             &self.shadow_uniform_buffer,
             0,
             bytemuck::bytes_of(&shadow_uniform),
         );
         for (index, cascade) in shadow_cascades.iter().enumerate() {
             let cascade_uniform = ShadowCascadeUniform::from_cascade(cascade);
-            self.queue.write_buffer(
+            self.device_context.queue().write_buffer(
                 &self.shadow_cascade_uniform_buffers[index],
                 0,
                 bytemuck::bytes_of(&cascade_uniform),
@@ -1964,7 +1927,7 @@ impl WgpuRenderer {
             let visibility_elapsed = visibility_start.elapsed();
             let visible = world.visible();
             if !visible.is_empty() {
-                self.queue.write_buffer(
+                self.device_context.queue().write_buffer(
                     &vegetation.instance_buffer,
                     0,
                     bytemuck::cast_slice(visible),
@@ -2007,7 +1970,7 @@ impl WgpuRenderer {
                     .hinge
                     .local_matrix(frame.surfaces().deflection(batch.surface));
             let uniform = ObjectUniform::from_matrix(&composed);
-            self.queue.write_buffer(
+            self.device_context.queue().write_buffer(
                 &self.surface_object_buffers[batch.object_buffer_index],
                 0,
                 bytemuck::bytes_of(&uniform),
@@ -2016,7 +1979,7 @@ impl WgpuRenderer {
 
         // G3B: postprocess exposure (presentation-only). One 16-byte write to
         // the persistent uniform buffer; no resource is created per frame.
-        self.queue.write_buffer(
+        self.device_context.queue().write_buffer(
             &self.postprocess_uniform_buffer,
             0,
             bytemuck::bytes_of(&PostProcessUniform::new(self.exposure_ev)),
@@ -2025,349 +1988,447 @@ impl WgpuRenderer {
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("G1C frame encoder"),
-            });
-        for cascade_index in 0..SHADOW_CASCADE_COUNT {
-            // G3E: one depth-only caster pass per persistent array layer.
-            // The terrain receives every object shadow but deliberately does
-            // not cast into itself. The RC field height mesh spans the entire
-            // cascade and its coarse long-range relief otherwise produces a
-            // map-sized false occluder over the runway. Scenery, batched
-            // vegetation, rigid aircraft geometry, and articulated surfaces
-            // retain their established caster paths.
-            let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-                view: &self.shadow_target.cascade_views[cascade_index],
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            };
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(
-                    [
-                        "G3E near cascade shadow depth pass",
-                        "G3E mid cascade shadow depth pass",
-                        "G3E far cascade shadow depth pass",
-                    ][cascade_index],
-                ),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(depth_attachment),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
-            // Group 0 is unused by `vs_shadow`, but binding the existing camera
-            // group keeps the depth pipeline layout contiguous and portable.
-            shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            shadow_pass.set_bind_group(2, &self.shadow_pass_bind_groups[cascade_index], &[]);
+        let mut encoder =
+            self.device_context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("G1C frame encoder"),
+                });
+        // V1 compatibility anchor: `for cascade_index in 0..SHADOW_CASCADE_COUNT`
+        // encoded the same three passes before RV2. The graph-driven path
+        // resolves those logical IDs to the same persistent array layers.
+        // First legacy label: "G3E near cascade shadow depth pass",
+        for pass_id in &pass_order[..SHADOW_CASCADE_COUNT] {
+            let cascade_index = shadow_cascade_index(*pass_id);
+            record_profiled_pass(
+                &mut profiler,
+                *pass_id,
+                &mut encoder,
+                |encoder, timestamp_writes| {
+                    // G3E: one depth-only caster pass per persistent array layer.
+                    // The terrain receives every object shadow but deliberately does
+                    // not cast into itself. The RC field height mesh spans the entire
+                    // cascade and its coarse long-range relief otherwise produces a
+                    // map-sized false occluder over the runway. Scenery, batched
+                    // vegetation, rigid aircraft geometry, and articulated surfaces
+                    // retain their established caster paths.
+                    let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_target.cascade_views[cascade_index],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    };
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(pass_id.label()),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(depth_attachment),
+                        timestamp_writes,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    shadow_pass.set_pipeline(&self.shadow_pipeline);
+                    // Group 0 is unused by `vs_shadow`, but binding the existing camera
+                    // group keeps the depth pipeline layout contiguous and portable.
+                    shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    shadow_pass.set_bind_group(
+                        2,
+                        &self.shadow_pass_bind_groups[cascade_index],
+                        &[],
+                    );
 
-            shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-            if let Some(ref scenery) = self.scenery {
-                shadow_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
-                shadow_pass
-                    .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                shadow_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
-            }
-
-            // G3D: instanced vegetation shadows — LOD0/LOD1 cast, LOD2 skips
-            // the caster (economical; the far tier is beyond the field's
-            // operational shadows anyway). Draw calls depend on active
-            // (asset, LOD) batch groups × parts, never on the tree count.
-            if let (Some(vegetation), Some(world)) =
-                (self.vegetation.as_ref(), self.vegetation_world.as_ref())
-                && !world.visible().is_empty()
-            {
-                shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
-                shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-                let ranges = world.batch_ranges();
-                let mut current_is_foliage = false;
-                for group in 0..GROUP_COUNT {
-                    if group % LOD_COUNT > 1 {
-                        continue;
-                    }
-                    let start = ranges[group * 2];
-                    let count = ranges[group * 2 + 1];
-                    if count == 0 {
-                        continue;
-                    }
-                    let asset = group / LOD_COUNT;
-                    let lod = (group % LOD_COUNT) as u8;
-                    for part in [VegetationPart::Bark, VegetationPart::Foliage] {
-                        // PV1-R2: switch shadow pipeline for foliage (two-sided
-                        // + alpha discard) vs bark (backface culled).
-                        let is_foliage = matches!(part, VegetationPart::Foliage);
-                        if is_foliage != current_is_foliage {
-                            if is_foliage {
-                                shadow_pass.set_pipeline(&vegetation.foliage_shadow_pipeline);
-                            } else {
-                                shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
-                            }
-                            current_is_foliage = is_foliage;
-                        }
-                        let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
-                        let material = &self.materials[mesh.material_index];
-                        shadow_pass.set_bind_group(3, &material.bind_group, &[]);
-                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        shadow_pass.set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
+                    shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                    if let Some(ref scenery) = self.scenery {
+                        shadow_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
                         shadow_pass.set_index_buffer(
-                            mesh.index_buffer.slice(..),
+                            scenery.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
-                        shadow_pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+                        shadow_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
                     }
-                }
-            }
 
-            // G3D FIX (23ae238): restore the standard shadow pipeline after instanced
-            // vegetation shadow draws. The vegetation shadow pipeline uses a
-            // different vertex layout (slot 1 = per-instance transform) and
-            // the `vs_vegetation_shadow` entry point; aircraft and surface
-            // casters must use the non-instanced `vs_shadow` with their own
-            // object transform.
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
+                    // G3D: instanced vegetation shadows — LOD0/LOD1 cast, LOD2 skips
+                    // the caster (economical; the far tier is beyond the field's
+                    // operational shadows anyway). Draw calls depend on active
+                    // (asset, LOD) batch groups × parts, never on the tree count.
+                    if let (Some(vegetation), Some(world)) =
+                        (self.vegetation.as_ref(), self.vegetation_world.as_ref())
+                        && !world.visible().is_empty()
+                    {
+                        shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
+                        shadow_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                        let ranges = world.batch_ranges();
+                        let mut current_is_foliage = false;
+                        for group in 0..GROUP_COUNT {
+                            if group % LOD_COUNT > 1 {
+                                continue;
+                            }
+                            let start = ranges[group * 2];
+                            let count = ranges[group * 2 + 1];
+                            if count == 0 {
+                                continue;
+                            }
+                            let asset = group / LOD_COUNT;
+                            let lod = (group % LOD_COUNT) as u8;
+                            for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                                // PV1-R2: switch shadow pipeline for foliage (two-sided
+                                // + alpha discard) vs bark (backface culled).
+                                let is_foliage = matches!(part, VegetationPart::Foliage);
+                                if is_foliage != current_is_foliage {
+                                    if is_foliage {
+                                        shadow_pass
+                                            .set_pipeline(&vegetation.foliage_shadow_pipeline);
+                                    } else {
+                                        shadow_pass.set_pipeline(&vegetation.shadow_pipeline);
+                                    }
+                                    current_is_foliage = is_foliage;
+                                }
+                                let mesh =
+                                    &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                                let material = &self.materials[mesh.material_index];
+                                shadow_pass.set_bind_group(3, &material.bind_group, &[]);
+                                shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                                shadow_pass
+                                    .set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
+                                shadow_pass.set_index_buffer(
+                                    mesh.index_buffer.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                shadow_pass.draw_indexed(
+                                    0..mesh.index_count,
+                                    0,
+                                    start..start + count,
+                                );
+                            }
+                        }
+                    }
 
-            shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
-            for batch in &self.aircraft_batches {
-                shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                shadow_pass
-                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
-            }
+                    // G3D FIX (23ae238): restore the standard shadow pipeline after instanced
+                    // vegetation shadow draws. The vegetation shadow pipeline uses a
+                    // different vertex layout (slot 1 = per-instance transform) and
+                    // the `vs_vegetation_shadow` entry point; aircraft and surface
+                    // casters must use the non-instanced `vs_shadow` with their own
+                    // object transform.
+                    shadow_pass.set_pipeline(&self.shadow_pipeline);
 
-            for batch in &self.surface_batches {
-                shadow_pass.set_bind_group(
-                    1,
-                    &self.surface_object_bind_groups[batch.object_buffer_index],
-                    &[],
-                );
-                shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                shadow_pass
-                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
-            }
+                    shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+                    for batch in &self.aircraft_batches {
+                        shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            batch.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                    }
+
+                    for batch in &self.surface_batches {
+                        shadow_pass.set_bind_group(
+                            1,
+                            &self.surface_object_bind_groups[batch.object_buffer_index],
+                            &[],
+                        );
+                        shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            batch.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                    }
+                },
+            );
         }
         {
-            // G3B: the scene pass now renders to the linear HDR target. The
-            // surface receives only the resolved postprocess output below.
-            let color_attachment = wgpu::RenderPassColorAttachment {
-                view: &self.hdr_target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    // Scene-referred HDR clear: the procedural sky pass covers
-                    // the full viewport, so this is only a safety fill.
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            };
-            let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_target.view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            };
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("G1C scene pass"),
-                color_attachments: &[Some(color_attachment)],
-                depth_stencil_attachment: Some(depth_attachment),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let pass_id = pass_order[3];
+            debug_assert_eq!(pass_id, PassId::Scene);
+            record_profiled_pass(
+                &mut profiler,
+                pass_id,
+                &mut encoder,
+                |encoder, timestamp_writes| {
+                    // G3B: the scene pass now renders to the linear HDR target. The
+                    // surface receives only the resolved postprocess output below.
+                    let color_attachment = wgpu::RenderPassColorAttachment {
+                        view: &self.hdr_target.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // Scene-referred HDR clear: the procedural sky pass covers
+                            // the full viewport, so this is only a safety fill.
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    };
+                    let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_target.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    };
+                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(pass_id.label()),
+                        color_attachments: &[Some(color_attachment)],
+                        depth_stencil_attachment: Some(depth_attachment),
+                        timestamp_writes,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
 
-            // --- Sky pass (background) ---
-            render_pass.set_pipeline(&self.sky_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            // Sky uses identity object (group 1) â€” sky is at infinity.
-            render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
-
-            // --- Scene geometry ---
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_pipeline(&self.triangle_pipeline);
-            render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-
-            // G3A: terrain chunks use the dedicated terrain pipeline and its own
-            // bind group (identity object transform, world-local).
-            render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-            render_pass.set_pipeline(&self.terrain_pipeline);
-            render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
-            for chunk in &self.terrain_chunks {
-                render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
-            }
-
-            // G2A: Scenery (flying field, markers). Drawn with the
-            // shared lit pipeline — the terrain pipeline is terrain-only.
-            if let Some(ref scenery) = self.scenery {
-                let scenery_material = &self.materials[self.scenery_material_index];
-                render_pass.set_pipeline(&self.triangle_pipeline);
-                render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-                render_pass.set_bind_group(3, &scenery_material.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(scenery.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
-            }
-
-            // G3D: instanced production vegetation (scene pass). Each active
-            // (asset, LOD) group draws bark + foliage with their dedicated PBR
-            // materials; the instance range comes from `batch_ranges`, so the
-            // number of draw calls depends on the batches, never on the tree
-            // count. Same linear HDR target, sun, sky, fog and shadow response
-            // as every other lit surface.
-            if let (Some(vegetation), Some(world)) =
-                (self.vegetation.as_ref(), self.vegetation_world.as_ref())
-            {
-                let visible = world.visible();
-                if !visible.is_empty() {
+                    // --- Sky pass (background) ---
+                    render_pass.set_pipeline(&self.sky_pipeline);
                     render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    // Sky uses identity object (group 1) â€” sky is at infinity.
                     render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
                     render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-                    render_pass.set_bind_group(4, &vegetation.uniform_bind_group, &[]);
-                    let ranges = world.batch_ranges();
-                    let mut current_is_foliage = false;
-                    render_pass.set_pipeline(&vegetation.pipeline);
-                    for group in 0..GROUP_COUNT {
-                        let start = ranges[group * 2];
-                        let count = ranges[group * 2 + 1];
-                        if count == 0 {
-                            continue;
-                        }
-                        let asset = group / LOD_COUNT;
-                        let lod = (group % LOD_COUNT) as u8;
-                        for part in [VegetationPart::Bark, VegetationPart::Foliage] {
-                            // PV1-R: switch to the two-sided foliage pipeline
-                            // for leaf cards; bark keeps backface culling.
-                            let is_foliage = matches!(part, VegetationPart::Foliage);
-                            if is_foliage != current_is_foliage {
-                                if is_foliage {
-                                    render_pass.set_pipeline(&vegetation.foliage_pipeline);
-                                } else {
-                                    render_pass.set_pipeline(&vegetation.pipeline);
+                    render_pass.draw(0..3, 0..1);
+
+                    // --- Scene geometry ---
+                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    render_pass.set_pipeline(&self.triangle_pipeline);
+                    render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+
+                    // G3A: terrain chunks use the dedicated terrain pipeline and its own
+                    // bind group (identity object transform, world-local).
+                    render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                    render_pass.set_pipeline(&self.terrain_pipeline);
+                    render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
+                    for chunk in &self.terrain_chunks {
+                        render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            chunk.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+                    }
+
+                    // G2A: Scenery (flying field, markers). Drawn with the
+                    // shared lit pipeline — the terrain pipeline is terrain-only.
+                    if let Some(ref scenery) = self.scenery {
+                        let scenery_material = &self.materials[self.scenery_material_index];
+                        render_pass.set_pipeline(&self.triangle_pipeline);
+                        render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                        render_pass.set_bind_group(3, &scenery_material.bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, scenery.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            scenery.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..scenery.index_count, 0, 0..1);
+                    }
+
+                    // G3D: instanced production vegetation (scene pass). Each active
+                    // (asset, LOD) group draws bark + foliage with their dedicated PBR
+                    // materials; the instance range comes from `batch_ranges`, so the
+                    // number of draw calls depends on the batches, never on the tree
+                    // count. Same linear HDR target, sun, sky, fog and shadow response
+                    // as every other lit surface.
+                    if let (Some(vegetation), Some(world)) =
+                        (self.vegetation.as_ref(), self.vegetation_world.as_ref())
+                    {
+                        let visible = world.visible();
+                        if !visible.is_empty() {
+                            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                            render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+                            render_pass.set_bind_group(4, &vegetation.uniform_bind_group, &[]);
+                            let ranges = world.batch_ranges();
+                            let mut current_is_foliage = false;
+                            render_pass.set_pipeline(&vegetation.pipeline);
+                            for group in 0..GROUP_COUNT {
+                                let start = ranges[group * 2];
+                                let count = ranges[group * 2 + 1];
+                                if count == 0 {
+                                    continue;
                                 }
-                                current_is_foliage = is_foliage;
+                                let asset = group / LOD_COUNT;
+                                let lod = (group % LOD_COUNT) as u8;
+                                for part in [VegetationPart::Bark, VegetationPart::Foliage] {
+                                    // PV1-R: switch to the two-sided foliage pipeline
+                                    // for leaf cards; bark keeps backface culling.
+                                    let is_foliage = matches!(part, VegetationPart::Foliage);
+                                    if is_foliage != current_is_foliage {
+                                        if is_foliage {
+                                            render_pass.set_pipeline(&vegetation.foliage_pipeline);
+                                        } else {
+                                            render_pass.set_pipeline(&vegetation.pipeline);
+                                        }
+                                        current_is_foliage = is_foliage;
+                                    }
+                                    let mesh =
+                                        &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                                    let material = &self.materials[mesh.material_index];
+                                    render_pass.set_bind_group(3, &material.bind_group, &[]);
+                                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                                    render_pass
+                                        .set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
+                                    render_pass.set_index_buffer(
+                                        mesh.index_buffer.slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                    render_pass.draw_indexed(
+                                        0..mesh.index_count,
+                                        0,
+                                        start..start + count,
+                                    );
+                                }
                             }
-                            let mesh = &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
-                            let material = &self.materials[mesh.material_index];
-                            render_pass.set_bind_group(3, &material.bind_group, &[]);
-                            render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            render_pass.set_vertex_buffer(1, vegetation.instance_buffer.slice(..));
-                            render_pass.set_index_buffer(
-                                mesh.index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            render_pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
                         }
                     }
-                }
-            }
 
-            // G3D FIX: restore the standard lit pipeline after instanced
-            // vegetation draws. The vegetation pipeline uses a different vertex
-            // layout (slot 1 = per-instance transform) and different entry
-            // points; aircraft and surface batches must never inherit it.
-            render_pass.set_pipeline(&self.triangle_pipeline);
+                    // G3D FIX: restore the standard lit pipeline after instanced
+                    // vegetation draws. The vegetation pipeline uses a different vertex
+                    // layout (slot 1 = per-instance transform) and different entry
+                    // points; aircraft and surface batches must never inherit it.
+                    render_pass.set_pipeline(&self.triangle_pipeline);
 
-            // Debug grid/axes: identity object transform.
-            if self.show_debug_overlays {
-                render_pass.set_pipeline(&self.line_pipeline);
-                render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
-                render_pass.draw(0..self.line_vertex_count, 0..1);
-                render_pass.set_pipeline(&self.triangle_pipeline);
-            }
+                    // Debug grid/axes: identity object transform.
+                    if self.show_debug_overlays {
+                        render_pass.set_pipeline(&self.line_pipeline);
+                        render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
+                        render_pass.draw(0..self.line_vertex_count, 0..1);
+                        render_pass.set_pipeline(&self.triangle_pipeline);
+                    }
 
-            // FIX 2: Aircraft batches use the dedicated aircraft object bind group.
-            for batch in &self.aircraft_batches {
-                let material = &self.materials[batch.material_index];
-                render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
-                render_pass.set_bind_group(3, &material.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
-            }
+                    // FIX 2: Aircraft batches use the dedicated aircraft object bind group.
+                    for batch in &self.aircraft_batches {
+                        let material = &self.materials[batch.material_index];
+                        render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+                        render_pass.set_bind_group(3, &material.bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            batch.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                    }
 
-            // G1E: articulated overlays, each with its persistent object uniform.
-            for batch in &self.surface_batches {
-                let material = &self.materials[batch.material_index];
-                render_pass.set_bind_group(
-                    1,
-                    &self.surface_object_bind_groups[batch.object_buffer_index],
-                    &[],
-                );
-                render_pass.set_bind_group(3, &material.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
-            }
+                    // G1E: articulated overlays, each with its persistent object uniform.
+                    for batch in &self.surface_batches {
+                        let material = &self.materials[batch.material_index];
+                        render_pass.set_bind_group(
+                            1,
+                            &self.surface_object_bind_groups[batch.object_buffer_index],
+                            &[],
+                        );
+                        render_pass.set_bind_group(3, &material.bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            batch.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                    }
+                },
+            );
         }
         {
-            // G3B: fullscreen postprocess pass — samples the linear HDR scene
-            // target, applies the manual exposure and the Khronos PBR Neutral
-            // tone mapper, and writes display values to the sRGB surface. The
-            // surface sRGB format performs the final linear->sRGB encode.
-            let display_attachment = wgpu::RenderPassColorAttachment {
-                view: &surface_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
+            let pass_id = pass_order[4];
+            debug_assert_eq!(pass_id, PassId::Postprocess);
+            record_profiled_pass(
+                &mut profiler,
+                pass_id,
+                &mut encoder,
+                |encoder, timestamp_writes| {
+                    // G3B: fullscreen postprocess pass — samples the linear HDR scene
+                    // target, applies the manual exposure and the Khronos PBR Neutral
+                    // tone mapper, and writes display values to the sRGB surface. The
+                    // surface sRGB format performs the final linear->sRGB encode.
+                    let display_attachment = wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    };
+                    let mut postprocess_pass =
+                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(pass_id.label()),
+                            color_attachments: &[Some(display_attachment)],
+                            depth_stencil_attachment: None,
+                            timestamp_writes,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                    postprocess_pass.set_pipeline(&self.postprocess_pipeline);
+                    postprocess_pass.set_bind_group(5, &self.postprocess_bind_group, &[]);
+                    postprocess_pass.draw(0..3, 0..1);
                 },
-            };
-            let mut postprocess_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("G3B HDR postprocess pass"),
-                color_attachments: &[Some(display_attachment)],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            postprocess_pass.set_pipeline(&self.postprocess_pipeline);
-            postprocess_pass.set_bind_group(5, &self.postprocess_bind_group, &[]);
-            postprocess_pass.draw(0..3, 0..1);
+            );
         }
 
-        let _submit_index = self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(surface_texture);
+        if let Some(profiler) = profiler.as_ref() {
+            profiler.finish_encoding(&mut encoder);
+        }
+        let _submit_index = self
+            .device_context
+            .queue()
+            .submit(std::iter::once(encoder.finish()));
+        if let Some(profiler) = profiler.as_deref_mut() {
+            profiler.after_submit();
+        }
+        self.device_context.present(surface_texture);
 
         if reconfigure_after_present {
             self.reconfigure_surface();
         }
 
+        if let Some(profiler) = profiler {
+            profiler.finish_frame();
+        }
         self.check_asynchronous_gpu_error()
     }
 
     fn check_asynchronous_gpu_error(&self) -> Result<(), SurfaceError> {
-        match self.asynchronous_gpu_error.load(Ordering::Acquire) {
-            GPU_ERROR_NONE => Ok(()),
-            GPU_ERROR_OUT_OF_MEMORY => Err(SurfaceError::OutOfMemory),
-            _ => Err(SurfaceError::Validation),
-        }
+        self.device_context.check_asynchronous_gpu_error()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Material creation helpers
 // ---------------------------------------------------------------------------
+
+fn shadow_cascade_index(pass: PassId) -> usize {
+    match pass {
+        PassId::ShadowNear => 0,
+        PassId::ShadowMid => 1,
+        PassId::ShadowFar => 2,
+        PassId::Scene | PassId::Postprocess => {
+            unreachable!("non-shadow pass in the shadow schedule")
+        }
+    }
+}
+
+/// Shared pass-recording helper used by both schedulers. V1 supplies its
+/// fixed legacy pass sequence; V2 supplies `CompiledGraph::execution_order`.
+/// The closure records exactly one real GPU render pass, while this wrapper
+/// adds V2-only bounded CPU/GPU timing when a profiler is present.
+fn record_profiled_pass<F>(
+    profiler: &mut Option<&mut Profiler>,
+    pass: PassId,
+    encoder: &mut wgpu::CommandEncoder,
+    record: F,
+) where
+    F: FnOnce(&mut wgpu::CommandEncoder, Option<wgpu::RenderPassTimestampWrites<'_>>),
+{
+    let cpu_started = profiler.as_ref().map(|profiler| profiler.begin_cpu_pass());
+    let timestamp_writes = profiler
+        .as_ref()
+        .and_then(|profiler| profiler.timestamp_writes(pass));
+    record(encoder, timestamp_writes);
+    if let (Some(profiler), Some(started)) = (profiler.as_deref_mut(), cpu_started) {
+        profiler.end_cpu_pass(pass, started);
+    }
+}
 
 fn create_white_fallback_material(
     device: &wgpu::Device,
@@ -3830,54 +3891,6 @@ fn create_postprocess_pipeline(
     })
 }
 
-fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("depth target"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    DepthTarget {
-        _texture: texture,
-        view,
-    }
-}
-
-/// G3B: persistent linear HDR scene target (Rgba16Float).
-///
-/// Created at startup and recreated on resize only; sampled by the
-/// postprocess pass, never rendered on the frame path creation-wise.
-fn create_hdr_target(device: &wgpu::Device, width: u32, height: u32) -> HdrTarget {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("G3B HDR scene target"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    HdrTarget {
-        _texture: texture,
-        view,
-    }
-}
-
 /// G3B: postprocess bind group layout — HDR scene texture (f32 sampleable),
 /// nearest sampler, and the postprocess uniform (exposure EV).
 fn postprocess_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
@@ -3915,34 +3928,6 @@ fn postprocess_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
 }
 
 /// G3B: postprocess bind group binding the HDR scene view + sampler + uniform.
-fn create_hdr_scene_bind_group(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    hdr_view: &wgpu::TextureView,
-    sampler: &wgpu::Sampler,
-    uniform_buffer: &wgpu::Buffer,
-    label: &str,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(hdr_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: uniform_buffer.as_entire_binding(),
-            },
-        ],
-    })
-}
-
 fn create_shadow_target(device: &wgpu::Device) -> ShadowTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("G3E three-cascade shadow depth array"),
@@ -5205,7 +5190,7 @@ mod terrain_headless_gpu_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, SIZE, SIZE);
+        let depth_target = create_depth_target(&device, SIZE, SIZE, DEPTH_FORMAT);
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -5912,7 +5897,7 @@ mod vegetation_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE);
+        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE, DEPTH_FORMAT);
 
         // Scene pass draw (mirrors `WgpuRenderer::render` vegetation block).
         let mut encoder =
@@ -6622,7 +6607,7 @@ mod vegetation_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE);
+        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE, DEPTH_FORMAT);
 
         // ── Render: vegetation THEN aircraft in the SAME pass ──
         let mut encoder =
