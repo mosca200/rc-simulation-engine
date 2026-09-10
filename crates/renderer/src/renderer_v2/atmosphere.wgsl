@@ -14,10 +14,17 @@
 //     exp(-tau);
 //   * Rayleigh phase 3/(16*pi)*(1 + mu^2) and Henyey-Greenstein Mie phase;
 //   * single scattering integrated along the view ray against the transmittance
-//     LUT;
-//   * multiple scattering approximated by the spherical average of the
-//     second-order in-scattered radiance plus a geometric series that folds in
-//     the ground albedo (the method used by the reference implementation).
+//     LUT, with explicit planet-sphere occlusion of the sun beam: when the
+//     ray from a sample towards the sun intersects the ground sphere, the
+//     direct sun visibility is exactly zero (never the ground-truncated
+//     transmittance);
+//   * multiple scattering following the Hillaire (2020) energy-compensation
+//     closure: a second-order radiance `L_2ndOrder` (isotropic phase, full
+//     spherical integration, ground-bounce component included through the
+//     ground albedo) and a *dimensionless* energy-transfer ratio `f_ms`
+//     derived from it, combined as `Psi_ms = L_2ndOrder / (1 - f_ms)`. The
+//     ground albedo participates in the ground-bounce radiance, never as the
+//     term of the geometric-series denominator.
 //
 // Coordinates: the renderer world is +Y up and the RC field stays local to the
 // render origin. The atmosphere math therefore treats the camera as sitting
@@ -127,6 +134,17 @@ fn sample_radius(r0: f32, mu: f32, distance: f32) -> f32 {
     return sqrt(max(r0 * r0 + 2.0 * r0 * mu * distance + distance * distance, 0.0));
 }
 
+// True when the ray from a sample point at `sample_radius` towards the sun
+// (cosine `sun_mu` against the local up) intersects the ground sphere, i.e.
+// the planet itself occludes the direct sun beam at that point. A strictly
+// positive intersection distance is required, so a ray leaving a point exactly
+// on the surface towards the sky is *not* an occlusion. Near the horizon the
+// predicate degrades gracefully to the geometric tangent condition
+// (discriminant < 0 -> no intersection), never to a NaN.
+fn ray_intersects_ground(sample_radius: f32, sun_mu: f32) -> bool {
+    return ray_sphere_near(sample_radius, sun_mu, atmosphere.planet_radius_m) > 0.0;
+}
+
 // Local up at a point of the view ray, expressed without large-coordinate
 // subtraction: the planet centre sits at render (0, -r0, 0).
 fn sample_up(r0: f32, distance: f32, direction: vec3<f32>, radius: f32) -> vec3<f32> {
@@ -230,7 +248,14 @@ fn single_scattering(
 
         let up = sample_up(r0, t, view_direction, radius);
         let sun_mu = clamp(dot(up, sun_direction), -1.0, 1.0);
-        let sun_transmittance = transmittance_lookup(height, sun_mu);
+        // Planet shadow: when the sun beam from this sample hits the ground
+        // sphere the direct sun visibility is exactly zero. The transmittance
+        // LUT alone is not usable here, because it is integrated only up to
+        // the ground and would leak a bright "sun" through the planet.
+        var sun_transmittance = vec3<f32>(0.0);
+        if (!ray_intersects_ground(radius, sun_mu)) {
+            sun_transmittance = transmittance_lookup(height, sun_mu);
+        }
         let transmittance = exp(-view_optical_depth) * sun_transmittance;
         rayleigh_sum = rayleigh_sum + transmittance * rho_rayleigh * dt;
         mie_sum = mie_sum + transmittance * rho_mie * dt;
@@ -274,21 +299,59 @@ fn fibonacci_direction(index: i32, count: i32) -> vec3<f32> {
     return vec3<f32>(sin_theta * cos(phi), cos_theta, sin_theta * sin(phi));
 }
 
-// Second-order multiple scattering, then the geometric series that folds in the
-// higher-order bounces through the ground albedo.
+// Rec.709 luminance of a linear radiance triple; used only to collapse the
+// energy-transfer ratio to a scalar, exactly as in Hillaire (2020).
+fn luminance3(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Hillaire (2020) energy-compensation multiple scattering.
+//
+// Units: `l_2nd_order` is the second-order in-scattered RADIANCE
+// [W m^-2 sr^-1] driven by the sun irradiance `E = sun_irradiance.rgb`
+// [W m^-2]; it is the full-sphere average of the isotropic-phase single
+// scattering plus the ground-bounce component, which is where the ground
+// albedo participates in the model.
+//
+// `f_ms` is the DIMENSIONLESS energy-transfer ratio of the medium: the
+// fraction of the incoming solar irradiance that one isotropic bounce returns
+// to the medium,
+//
+//     f_ms = 4*pi * luminance(L_2ndOrder) / luminance(E)   (unitless)
+//
+// Because both terms are driven by the same sun irradiance, `f_ms` is
+// independent of the sun intensity even though the LUT keeps the irradiance
+// folded into `l_2nd_order`. The bounce series then closes as
+//
+//     F_ms   = 1 / (1 - f_ms)
+//     Psi_ms = L_2ndOrder * F_ms
+//
+// `l_2nd_order` (a radiance) and `f_ms` (a ratio) are distinct quantities and
+// no radiance ever appears in the geometric-series denominator.
 fn multi_scattering_texel(height_m: f32, sun_mu: f32) -> vec3<f32> {
     let r0 = atmosphere.planet_radius_m + height_m;
     let sun_direction = vec3<f32>(sqrt(max(1.0 - sun_mu * sun_mu, 0.0)), sun_mu, 0.0);
-    var second_order = vec3<f32>(0.0);
+    var l_2nd_order = vec3<f32>(0.0);
     for (var sample_index = 0; sample_index < SPHERE_SAMPLES; sample_index = sample_index + 1) {
         let direction = fibonacci_direction(sample_index, SPHERE_SAMPLES);
-        second_order = second_order
-            + single_scattering(r0, direction.y, direction, sun_direction, true);
+        let mu = clamp(direction.y, -1.0, 1.0);
+        l_2nd_order = l_2nd_order
+            + single_scattering(r0, mu, direction, sun_direction, true);
+        // Ground-bounce component: sunlight reflected by the planet surface
+        // towards this direction re-enters the second-order scattering field.
+        let ground_distance = ray_sphere_near(r0, mu, atmosphere.planet_radius_m);
+        if (ground_distance > 0.0) {
+            l_2nd_order = l_2nd_order
+                + ground_reflection(r0, mu, direction, sun_direction, ground_distance);
+        }
     }
-    second_order = second_order / f32(SPHERE_SAMPLES);
-    let albedo = atmosphere.ground_albedo.rgb;
-    let denominator = max(vec3<f32>(1.0) - second_order * albedo, vec3<f32>(1e-3));
-    return second_order + second_order * albedo / denominator;
+    l_2nd_order = l_2nd_order / f32(SPHERE_SAMPLES);
+    // Dimensionless transfer ratio, clamped into the physically valid
+    // convergence interval [0, 1) *before* the geometric series is formed.
+    let sun_luminance = max(luminance3(atmosphere.sun_irradiance.rgb), 1e-6);
+    let f_ms = clamp(4.0 * PI * luminance3(l_2nd_order) / sun_luminance, 0.0, 0.999);
+    let f_ms_factor = 1.0 / (1.0 - f_ms);
+    return l_2nd_order * f_ms_factor;
 }
 
 fn sky_radiance(view_direction: vec3<f32>) -> vec3<f32> {

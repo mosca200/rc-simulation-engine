@@ -1044,11 +1044,6 @@ impl WgpuRenderer {
         ) == V2EnvironmentMode::Physical
             && atmosphere_parameters.validate().is_ok()
             && sun_state.validate().is_ok();
-        let environment_mode = if physical_requested {
-            V2EnvironmentMode::Physical
-        } else {
-            V2EnvironmentMode::AnalyticalFallback
-        };
         // Generate before any V2-specific layout or pipeline exists, so a
         // failed generation can always fall back to the analytic path without
         // leaving half-configured resources behind.
@@ -1074,6 +1069,14 @@ impl WgpuRenderer {
             None
         };
         let use_physical = physical_environment.is_some();
+        // The reported mode is the one actually in use *after*
+        // create_physical_environment(): a rejected generation logs the
+        // analytic fallback, never the requested-but-failed physical mode.
+        let environment_mode = if use_physical {
+            V2EnvironmentMode::Physical
+        } else {
+            V2EnvironmentMode::AnalyticalFallback
+        };
         tracing::info!(mode = ?environment_mode, "RV2-5 environment mode selected");
         let (
             sky_fragment_entry,

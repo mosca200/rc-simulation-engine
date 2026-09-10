@@ -9,7 +9,6 @@ const PI: f32 = 3.141592653589793;
 const IRRADIANCE_SAMPLE_COUNT: i32 = 512;
 const PREFILTER_SAMPLE_COUNT: i32 = 256;
 const BRDF_SAMPLE_COUNT: i32 = 512;
-const PREFILTER_MIP_COUNT: f32 = 8.0;
 
 struct PrefilterUniform {
     roughness: f32,
@@ -60,13 +59,6 @@ fn radical_inverse_vdc(bits_in: u32) -> f32 {
 
 fn hammersley(index: u32, count: u32) -> vec2<f32> {
     return vec2<f32>(f32(index) / f32(count), radical_inverse_vdc(index));
-}
-
-fn distribution_ggx(ndot_h: f32, roughness: f32) -> f32 {
-    let alpha = roughness * roughness;
-    let alpha_squared = alpha * alpha;
-    let denominator = ndot_h * ndot_h * (alpha_squared - 1.0) + 1.0;
-    return alpha_squared / max(PI * denominator * denominator, 1e-6);
 }
 
 fn geometry_schlick_ggx(ndot_v: f32, roughness: f32) -> f32 {
@@ -155,6 +147,11 @@ fn fs_irradiance_cube(input: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 // GGX prefilter: one roughness per mip, `roughness = mip / (mip_count - 1)`.
 // The outgoing split-sum lobe is integrated with importance sampling; V equals
 // N (the reflection direction), which is the standard split-sum assumption.
+//
+// The environment cube is deliberately a SINGLE-mip texture, so the source is
+// always sampled at LOD 0. The GGX importance sampling itself provides the
+// roughness-dependent filtering; there is no source-mip heuristic and no
+// textureGather/mip-chain requirement.
 @fragment
 fn fs_prefiltered_cube(input: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let n = cube_direction(input.face, input.uv);
@@ -167,23 +164,8 @@ fn fs_prefiltered_cube(input: FullscreenVertexOutput) -> @location(0) vec4<f32> 
         let light = normalize(2.0 * dot(n, half) * half - n);
         let ndot_l = dot(n, light);
         if (ndot_l > 0.0) {
-            let ndot_h = max(dot(n, half), 1e-4);
-            let vdot_h = max(dot(n, half), 1e-4);
-            let pdf = distribution_ggx(ndot_h, roughness) * ndot_h / max(4.0 * vdot_h, 1e-4);
-            let sample_solid_angle = 1.0 / (f32(PREFILTER_SAMPLE_COUNT) * pdf + 1e-4);
-            let texel_solid_angle = 4.0 * PI
-                / (6.0 * prefilter.source_resolution * prefilter.source_resolution);
-            let mip = select(
-                0.0,
-                clamp(
-                    0.5 * log2(sample_solid_angle / texel_solid_angle),
-                    0.0,
-                    PREFILTER_MIP_COUNT - 1.0,
-                ),
-                roughness > 0.0,
-            );
             sum = sum
-                + textureSampleLevel(environment_cube, environment_sampler, light, mip).rgb * ndot_l;
+                + textureSampleLevel(environment_cube, environment_sampler, light, 0.0).rgb * ndot_l;
             weight = weight + ndot_l;
         }
     }

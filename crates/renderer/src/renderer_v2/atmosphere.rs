@@ -608,13 +608,21 @@ fn create_fullscreen_pipeline_layout(
     })
 }
 
-/// Record one fullscreen-triangle pass; cube faces are drawn as `instances`.
+/// Record one fullscreen-triangle pass.
+///
+/// `first_instance`/`instances` drive `@builtin(instance_index)` in the vertex
+/// shader, which is the cube-face selector of every cube pass: face `N` must
+/// be drawn as the single-instance range `N..N+1` so the shader evaluates
+/// `cube_direction(N, uv)`. The `D2` array-layer view only decides *where* the
+/// texels are written, never *which* direction is evaluated, so the two must
+/// stay in lock-step. 2D passes use `first_instance = 0, instances = 1`.
 fn render_fullscreen(
     encoder: &mut wgpu::CommandEncoder,
     label: &'static str,
     view: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     bind_group: &wgpu::BindGroup,
+    first_instance: u32,
     instances: u32,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -640,7 +648,7 @@ fn render_fullscreen(
     });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
-    pass.draw(0..3, 0..instances);
+    pass.draw(0..3, first_instance..first_instance + instances);
 }
 
 /// Per-face (and per-mip) `D2` render view of one cube face.
@@ -1087,6 +1095,7 @@ pub(crate) fn create_physical_environment_with_usage(
         &transmittance_view,
         &transmittance_pipeline,
         &transmittance_bind_group,
+        0,
         1,
     );
     render_fullscreen(
@@ -1095,6 +1104,7 @@ pub(crate) fn create_physical_environment_with_usage(
         &multi_scattering_view,
         &multi_scattering_pipeline,
         &multi_scattering_bind_group,
+        0,
         1,
     );
     render_fullscreen(
@@ -1103,25 +1113,31 @@ pub(crate) fn create_physical_environment_with_usage(
         &sky_view_view,
         &sky_view_pipeline,
         &atmosphere_bind_group,
+        0,
         1,
     );
-    for face_view in &environment_face_views {
+    // Cube faces: face `N` renders into the layer-`N` D2 view AND draws the
+    // instance range `N..N+1`, so `@builtin(instance_index)` inside the shader
+    // equals `N` and `cube_direction(N, uv)` evaluates the correct axis.
+    for (face, face_view) in environment_face_views.iter().enumerate() {
         render_fullscreen(
             &mut encoder,
             "RV2-5 environment cube face pass",
             face_view,
             &environment_pipeline,
             &atmosphere_bind_group,
+            face as u32,
             1,
         );
     }
-    for face_view in &irradiance_face_views {
+    for (face, face_view) in irradiance_face_views.iter().enumerate() {
         render_fullscreen(
             &mut encoder,
             "RV2-5 diffuse irradiance cube face pass",
             face_view,
             &irradiance_pipeline,
             &irradiance_bind_group,
+            face as u32,
             1,
         );
     }
@@ -1134,6 +1150,7 @@ pub(crate) fn create_physical_environment_with_usage(
                 &prefiltered_face_views[index],
                 &prefilter_pipeline,
                 &prefilter_bind_groups[mip as usize],
+                face,
                 1,
             );
         }
@@ -1144,6 +1161,7 @@ pub(crate) fn create_physical_environment_with_usage(
         &brdf_lut_view,
         &brdf_pipeline,
         &brdf_bind_group,
+        0,
         1,
     );
     queue.submit(std::iter::once(encoder.finish()));
@@ -1500,9 +1518,331 @@ mod tests {
                 "heuristic `{forbidden}` must not return"
             );
         }
-        // Multi-scattering must be a real spherical integration.
+        // Multi-scattering must be a real spherical integration closed with
+        // the Hillaire energy-compensation series: a second-order radiance
+        // `l_2nd_order` and a *separate*, dimensionless transfer ratio `f_ms`.
         assert!(atmosphere.contains("multi_scattering_texel"));
-        assert!(atmosphere.contains("second_order * albedo / denominator"));
+        assert!(atmosphere.contains("l_2nd_order"));
+        assert!(atmosphere.contains("f_ms"));
+        assert!(
+            atmosphere.contains(
+                "let f_ms = clamp(4.0 * PI * luminance3(l_2nd_order) / sun_luminance, 0.0, 0.999);"
+            ),
+            "f_ms must be a dimensionless ratio of l_2nd_order against the sun irradiance, clamped before the series"
+        );
+        assert!(
+            atmosphere.contains("let f_ms_factor = 1.0 / (1.0 - f_ms);"),
+            "the geometric series must be formed on f_ms alone"
+        );
+        assert!(
+            atmosphere.contains("return l_2nd_order * f_ms_factor;"),
+            "Psi_ms = L_2ndOrder * F_ms"
+        );
+        // The ground albedo participates through the ground-bounce radiance,
+        // never as the series-denominator term.
+        assert!(
+            atmosphere
+                .contains("ground_reflection(r0, mu, direction, sun_direction, ground_distance)"),
+            "the ground-bounce component must feed l_2nd_order"
+        );
+        // The retired non-Hillaire closure must not come back: no radiance
+        // times ground albedo inside a geometric-series denominator.
+        for forbidden in [
+            "second_order * albedo / denominator",
+            "1.0) - second_order * albedo",
+            "second_order",
+        ] {
+            assert!(
+                !atmosphere.contains(forbidden),
+                "the pre-Hillaire closure `{forbidden}` must not return"
+            );
+        }
+    }
+
+    #[test]
+    fn hillaire_closure_keeps_f_ms_unitless_and_bounded() {
+        let source = include_str!("atmosphere.wgsl").replace("\r\n", "\n");
+        let body = source
+            .split("fn multi_scattering_texel(")
+            .nth(1)
+            .expect("the multi-scattering closure must exist");
+        let body = body.split("\nfn ").next().expect("function body");
+        // f_ms is a ratio of two luminances (unitless), clamped into the
+        // convergence interval [0, 1) *before* the geometric series is formed.
+        let clamp_position = body
+            .find("let f_ms = clamp(")
+            .expect("f_ms must be clamped at construction");
+        let series_position = body
+            .find("1.0 / (1.0 - f_ms)")
+            .expect("the series factor must exist");
+        assert!(
+            clamp_position < series_position,
+            "f_ms must be bounded before the series denominator is evaluated"
+        );
+        assert!(
+            body.contains("0.0, 0.999)"),
+            "f_ms must stay inside the physically valid interval [0, 1)"
+        );
+        // No radiance quantity may enter the series denominator: the only
+        // denominator is (1 - f_ms).
+        assert!(
+            !body.contains("l_2nd_order * albedo") && !body.contains("l_2nd_order) / (1.0"),
+            "no radiance may sit in the geometric-series denominator"
+        );
+        // The sun-irradiance divisor is guarded against division by zero.
+        assert!(body.contains("max(luminance3(atmosphere.sun_irradiance.rgb), 1e-6)"));
+    }
+
+    #[test]
+    fn sun_visibility_is_occluded_by_the_ground_sphere() {
+        let source = include_str!("atmosphere.wgsl").replace("\r\n", "\n");
+        assert!(
+            source.contains("fn ray_intersects_ground(sample_radius: f32, sun_mu: f32) -> bool {"),
+            "the planet-shadow predicate must exist"
+        );
+        assert!(
+            source.contains(
+                "return ray_sphere_near(sample_radius, sun_mu, atmosphere.planet_radius_m) > 0.0;"
+            ),
+            "occlusion must be the ground-sphere intersection test"
+        );
+        let single = source
+            .split("fn single_scattering(")
+            .nth(1)
+            .expect("single scattering must exist");
+        let single = single.split("\nfn ").next().expect("function body");
+        let gate = single
+            .find("if (!ray_intersects_ground(radius, sun_mu)) {")
+            .expect("the sun transmittance must be gated by the planet shadow");
+        let lookup = single
+            .find("sun_transmittance = transmittance_lookup(height, sun_mu);")
+            .expect("the gated lookup must use the transmittance LUT");
+        assert!(
+            gate < lookup,
+            "the ground-truncated transmittance must never be used as sun visibility"
+        );
+        assert!(
+            single.contains("var sun_transmittance = vec3<f32>(0.0);"),
+            "an occluded sun must evaluate to exactly zero visibility"
+        );
+        assert!(
+            !single.contains("let sun_transmittance = transmittance_lookup(height, sun_mu);"),
+            "the unconditional pre-fix lookup must be gone"
+        );
+    }
+
+    /// CPU mirror of the WGSL `ray_sphere_near` scalar quadratic.
+    fn mirrored_ray_sphere_near(r0: f32, mu: f32, radius: f32) -> f32 {
+        let b = r0 * mu;
+        let c = r0 * r0 - radius * radius;
+        let discriminant = b * b - c;
+        if discriminant < 0.0 {
+            return -1.0;
+        }
+        let root = discriminant.sqrt();
+        let near_t = -b - root;
+        if near_t >= 0.0 {
+            return near_t;
+        }
+        let far_t = -b + root;
+        if far_t >= 0.0 {
+            return far_t;
+        }
+        -1.0
+    }
+
+    /// CPU mirror of the WGSL `ray_intersects_ground` predicate.
+    fn mirrored_ray_intersects_ground(sample_radius: f32, sun_mu: f32, planet_radius: f32) -> bool {
+        mirrored_ray_sphere_near(sample_radius, sun_mu, planet_radius) > 0.0
+    }
+
+    #[test]
+    fn ground_sphere_occludes_the_sun_below_the_horizon() {
+        let planet = AtmosphereParameters::earth().planet_radius_m;
+        // A sample 10 km up with the sun 30 degrees below the local horizon
+        // (cos = -0.5) is in the planetary shadow: visibility must be zero.
+        let occluded = mirrored_ray_intersects_ground(planet + 10_000.0, -0.5, planet);
+        assert!(occluded, "sun below the horizon must be occluded");
+        // The same sample with the sun above the horizon sees the sun.
+        let visible = mirrored_ray_intersects_ground(planet + 10_000.0, 0.5, planet);
+        assert!(!visible, "sun above the horizon must be visible");
+        // A sample exactly on the surface with the sun at/above the horizon
+        // must not self-occlude (the tangent solution t = 0 is not > 0).
+        assert!(
+            !mirrored_ray_intersects_ground(planet, 0.0, planet),
+            "the horizon ray from the surface must not be an occlusion"
+        );
+        assert!(
+            !mirrored_ray_intersects_ground(planet, 0.8, planet),
+            "an upward sun ray from the surface must not be an occlusion"
+        );
+        // A shallow downward ray from high altitude that geometrically
+        // escapes past the horizon is not occluded.
+        let high = planet + 55_000.0;
+        let tangent_mu = -(1.0 - (planet / high).powi(2)).sqrt();
+        assert!(
+            !mirrored_ray_intersects_ground(high, tangent_mu * 0.5, planet),
+            "a ray above the tangent must escape"
+        );
+        assert!(
+            mirrored_ray_intersects_ground(high, tangent_mu * 1.5, planet),
+            "a ray below the tangent must hit the ground sphere"
+        );
+        // Near-horizon finiteness: the predicate stays a clean boolean on
+        // both sides of the tangent, never a NaN-producing configuration.
+        for mu in [
+            tangent_mu - 1e-6,
+            tangent_mu,
+            tangent_mu + 1e-6,
+            -1e-6,
+            0.0,
+            1e-6,
+        ] {
+            let t = mirrored_ray_sphere_near(high, mu, planet);
+            assert!(t.is_finite(), "near-horizon intersection must be finite");
+            assert!(
+                mirrored_ray_intersects_ground(high, mu, planet) == (t > 0.0),
+                "the predicate must agree with the intersection distance"
+            );
+        }
+    }
+
+    /// CPU mirror of the WGSL `cube_direction(face, uv)` used by every cube
+    /// generation pass, with the same v-down uv convention as the fullscreen
+    /// vertex shader.
+    fn mirrored_cube_direction(face: u32, uv: (f32, f32)) -> [f32; 3] {
+        let u = uv.0 * 2.0 - 1.0;
+        let v = uv.1 * 2.0 - 1.0;
+        let direction = match face {
+            0 => [1.0, -v, -u],
+            1 => [-1.0, -v, u],
+            2 => [u, 1.0, v],
+            3 => [u, -1.0, -v],
+            4 => [u, -v, 1.0],
+            _ => [-u, -v, -1.0],
+        };
+        let length = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt();
+        [
+            direction[0] / length,
+            direction[1] / length,
+            direction[2] / length,
+        ]
+    }
+
+    #[test]
+    fn cube_face_indices_map_to_the_signed_axis_order() {
+        // Face centres of the generation convention: instance_index N must
+        // evaluate the N-th signed axis, in the WebGPU cube sampling order.
+        let expected: [[f32; 3]; 6] = [
+            [1.0, 0.0, 0.0],  // face 0 = +X
+            [-1.0, 0.0, 0.0], // face 1 = -X
+            [0.0, 1.0, 0.0],  // face 2 = +Y
+            [0.0, -1.0, 0.0], // face 3 = -Y
+            [0.0, 0.0, 1.0],  // face 4 = +Z
+            [0.0, 0.0, -1.0], // face 5 = -Z
+        ];
+        for face in 0..6u32 {
+            let direction = mirrored_cube_direction(face, (0.5, 0.5));
+            for axis in 0..3 {
+                assert!(
+                    (direction[axis] - expected[face as usize][axis]).abs() < 1e-6,
+                    "face {face} centre must point along {:?}, got {direction:?}",
+                    expected[face as usize]
+                );
+            }
+        }
+        // Both cube shaders must carry the identical mapping, so the instance
+        // index routes the same axis in generation and in convolution.
+        for file in ["atmosphere.wgsl", "ibl.wgsl"] {
+            let source = include_str!("atmosphere.wgsl");
+            let source = if file == "ibl.wgsl" {
+                include_str!("ibl.wgsl")
+            } else {
+                source
+            };
+            for axis in [
+                "direction = vec3<f32>(1.0, -v, -u);",
+                "direction = vec3<f32>(-1.0, -v, u);",
+                "direction = vec3<f32>(u, 1.0, v);",
+                "direction = vec3<f32>(u, -1.0, -v);",
+                "direction = vec3<f32>(u, -v, 1.0);",
+                "direction = vec3<f32>(-u, -v, -1.0);",
+            ] {
+                assert!(
+                    source.contains(axis),
+                    "{file} must keep the signed-axis cube mapping `{axis}`"
+                );
+            }
+            assert!(
+                source.contains("output.face = instance_index;"),
+                "{file} must route the face through @builtin(instance_index)"
+            );
+        }
+    }
+
+    #[test]
+    fn cube_face_passes_draw_their_own_instance_range() {
+        let source = production_source();
+        // The single draw must expose the instance range, so face N can be
+        // drawn as `N..N+1` and @builtin(instance_index) equals N.
+        assert!(
+            source.contains("pass.draw(0..3, first_instance..first_instance + instances);"),
+            "render_fullscreen must draw an explicit first_instance range"
+        );
+        assert!(
+            !source.contains("pass.draw(0..3, 0..instances)"),
+            "a 0-based instance range would collapse every face onto face 0"
+        );
+        // Environment and irradiance face loops pass the face index as
+        // first_instance (single-instance draws).
+        assert_eq!(
+            source.matches("face as u32,\n").count(),
+            2,
+            "environment and irradiance face loops must route the face index"
+        );
+        assert!(
+            source.contains("&prefilter_bind_groups[mip as usize],\n                face,"),
+            "the prefiltered specular loop must route the face index"
+        );
+        // The face views and the instance ranges must advance together: the
+        // N-th view of each cube is created from layer N.
+        assert!(
+            source.contains(".map(|face| cube_face_view(environment_cube, 0, face))"),
+            "environment face views must be created per layer"
+        );
+        assert!(
+            source.contains("base_array_layer: face,"),
+            "a cube face render view must target exactly its own layer"
+        );
+    }
+
+    #[test]
+    fn prefilter_source_is_the_single_mip_environment_cube() {
+        // Decision: the environment cube stays at ONE mip (minimal solution);
+        // the GGX convolution therefore samples the source at LOD 0 and the
+        // fake source-mip heuristic must be gone.
+        assert_eq!(ENVIRONMENT_CUBE_MIP_COUNT, 1);
+        assert_eq!(physical_texture_plans()[3].mip_level_count, 1);
+        let ibl = include_str!("ibl.wgsl").replace("\r\n", "\n");
+        assert!(
+            ibl.contains("textureSampleLevel(environment_cube, environment_sampler, light, 0.0)"),
+            "the specular convolution must sample the source at LOD 0"
+        );
+        for forbidden in [
+            "sample_solid_angle",
+            "texel_solid_angle",
+            "PREFILTER_MIP_COUNT",
+        ] {
+            assert!(
+                !ibl.contains(forbidden),
+                "the source-mip heuristic `{forbidden}` must not exist while the environment cube has one mip"
+            );
+        }
+        // The prefiltered cube itself keeps the full 8-mip roughness chain.
+        assert_eq!(SPECULAR_MIP_COUNT, 8);
     }
 
     #[test]
@@ -1564,6 +1904,7 @@ mod tests {
         texture: &wgpu::Texture,
         width: u32,
         height: u32,
+        mip_level: u32,
         array_layer: u32,
     ) -> Vec<f32> {
         let bytes_per_row = (width * RGBA16F_BYTES_PER_TEXEL as u32).div_ceil(256) * 256;
@@ -1579,7 +1920,7 @@ mod tests {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
-                mip_level: 0,
+                mip_level,
                 origin: wgpu::Origin3d {
                     x: 0,
                     y: 0,
@@ -1622,7 +1963,29 @@ mod tests {
         width: u32,
         height: u32,
     ) -> Vec<f32> {
-        read_texture_slice(device, queue, texture, width, height, 0)
+        read_texture_slice(device, queue, texture, width, height, 0, 0)
+    }
+
+    /// The deterministic fallback-adapter device shared by the ignored GPU
+    /// diagnostics tests.
+    fn smoke_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: true,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .expect("a fallback adapter is required for the ignored GPU test");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("RV2-5 physical environment smoke device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("device creation must succeed")
     }
 
     #[test]
@@ -1769,6 +2132,7 @@ mod tests {
                 textures.test_texture(texture),
                 size,
                 size,
+                0,
                 4,
             );
             assert!(
@@ -1779,6 +2143,181 @@ mod tests {
             assert!(
                 face.iter().any(|value| *value > 0.0),
                 "{label} must carry energy"
+            );
+        }
+    }
+
+    /// Centre texel (RGB) of one read-back face slice.
+    fn face_centre(size: u32, face: &[f32]) -> [f32; 3] {
+        let texel = ((size / 2 * size + size / 2) * 4) as usize;
+        [face[texel], face[texel + 1], face[texel + 2]]
+    }
+
+    /// Per-channel mean (RGB) of one read-back face slice, accumulated in f64.
+    fn face_mean(face: &[f32]) -> [f32; 3] {
+        let texels = face.as_chunks::<4>().0;
+        let mut sum = [0.0f64; 3];
+        for texel in texels {
+            for channel in 0..3 {
+                sum[channel] += f64::from(texel[channel]);
+            }
+        }
+        std::array::from_fn(|channel| (sum[channel] / texels.len() as f64) as f32)
+    }
+
+    /// Largest per-channel absolute difference between two RGB triples.
+    fn rgb_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn physical_environment_cube_faces_are_individually_routed() {
+        let (device, queue) = smoke_device();
+        // The pre-existing asymmetric SunState ([0.4, 0.8, -0.3]) makes the
+        // six cube axes physically distinct: the Mie forward-scattering lobe
+        // lives inside the +X face, so with correct instance routing every
+        // face integrates a different sky, while a face-routing collapse
+        // (every pass drawing instance 0) yields six bitwise-identical faces.
+        //
+        // Discriminator choice: near-horizontal *centre* texels are dominated
+        // by the direction-independent multiple-scattering floor (the horizon
+        // single scattering sits below one f16 ulp of that floor), so centres
+        // alone cannot separate the four horizontal faces; per-face f32 means
+        // over the full 12-bit f16 mantissa range can, and bitwise image
+        // inequality catches an exact routing collapse directly.
+        let textures = create_physical_environment_with_usage(
+            &device,
+            &queue,
+            AtmosphereParameters::earth(),
+            earth_sun(),
+            wgpu::TextureUsages::COPY_SRC,
+        )
+        .expect("the Earth preset must generate");
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the initialization submission must complete without validation errors");
+
+        let read_faces = |texture_index: usize, size: u32, mip: u32| -> Vec<Vec<f32>> {
+            (0..CUBE_FACE_COUNT)
+                .map(|face| {
+                    read_texture_slice(
+                        &device,
+                        &queue,
+                        textures.test_texture(texture_index),
+                        size >> mip,
+                        size >> mip,
+                        mip,
+                        face,
+                    )
+                })
+                .collect()
+        };
+
+        // --- Environment cube: all six faces, real routing -----------------
+        let environment = read_faces(3, ENVIRONMENT_CUBE_SIZE, 0);
+        for (index, face) in environment.iter().enumerate() {
+            assert!(
+                face.iter()
+                    .all(|value| value.is_finite() && *value >= -1e-3),
+                "environment face {index} must stay finite and non-negative, horizon included"
+            );
+            assert!(
+                face.iter().any(|value| *value > 0.0),
+                "environment face {index} must carry energy"
+            );
+        }
+        let centres: Vec<[f32; 3]> = environment
+            .iter()
+            .map(|face| face_centre(ENVIRONMENT_CUBE_SIZE, face))
+            .collect();
+        let means: Vec<[f32; 3]> = environment.iter().map(|face| face_mean(face)).collect();
+        eprintln!("environment cube face centres: {centres:?}");
+        eprintln!("environment cube face means:   {means:?}");
+        // +X != -X, +Y != -Y, +Z != -Z: opposite faces sample opposite sky
+        // hemispheres under the asymmetric sun and must differ clearly.
+        for (positive, negative) in [(0usize, 1usize), (2, 3), (4, 5)] {
+            let distance = rgb_distance(means[positive], means[negative]);
+            assert!(
+                distance > 1e-8,
+                "environment faces {positive} and {negative} must not be copies \
+                 (means {:?} vs {:?}, distance {distance})",
+                means[positive],
+                means[negative]
+            );
+        }
+        // Up and down are unambiguous even texel-by-texel: the +Y centre
+        // looks into the sun hemisphere, the -Y centre at the ground bounce.
+        assert!(
+            rgb_distance(centres[2], centres[3]) > 1e-7,
+            "+Y and -Y face centres must differ (got {:?} vs {:?})",
+            centres[2],
+            centres[3]
+        );
+        // The six faces must not be bitwise/near-identical: under a routing
+        // collapse every face image would equal face 0 exactly.
+        for other in 1..CUBE_FACE_COUNT as usize {
+            assert_ne!(
+                environment[0], environment[other],
+                "environment face {other} must not be a bitwise copy of face 0"
+            );
+        }
+        let near_duplicates = means
+            .iter()
+            .filter(|mean| rgb_distance(means[0], **mean) <= 1e-9)
+            .count();
+        assert_eq!(
+            near_duplicates, 1,
+            "only face 0 may match itself; all six face means must be distinct, got {means:?}"
+        );
+
+        // --- Diffuse irradiance cube: same sanity check ---------------------
+        let irradiance = read_faces(4, IRRADIANCE_CUBE_SIZE, 0);
+        let irradiance_means: Vec<[f32; 3]> =
+            irradiance.iter().map(|face| face_mean(face)).collect();
+        eprintln!("irradiance cube face means:      {irradiance_means:?}");
+        for (positive, negative) in [(0usize, 1usize), (2, 3), (4, 5)] {
+            let distance = rgb_distance(irradiance_means[positive], irradiance_means[negative]);
+            assert!(
+                distance > 1e-9,
+                "irradiance faces {positive} and {negative} must not be copies \
+                 (means {:?} vs {:?}, distance {distance})",
+                irradiance_means[positive],
+                irradiance_means[negative]
+            );
+        }
+        for other in 1..CUBE_FACE_COUNT as usize {
+            assert_ne!(
+                irradiance[0], irradiance[other],
+                "irradiance face {other} must not be a bitwise copy of face 0"
+            );
+        }
+
+        // --- Prefiltered specular cube, mip 0: same sanity check ------------
+        // At roughness 0 the GGX lobe degenerates to the face normal, so
+        // mip 0 reproduces the environment cube face and inherits its
+        // per-face distinctness.
+        let prefiltered = read_faces(5, SPECULAR_CUBE_SIZE, 0);
+        let prefiltered_means: Vec<[f32; 3]> =
+            prefiltered.iter().map(|face| face_mean(face)).collect();
+        eprintln!("prefiltered mip-0 face means:    {prefiltered_means:?}");
+        for (positive, negative) in [(0usize, 1usize), (2, 3), (4, 5)] {
+            let distance = rgb_distance(prefiltered_means[positive], prefiltered_means[negative]);
+            assert!(
+                distance > 1e-8,
+                "prefiltered mip-0 faces {positive} and {negative} must not be copies \
+                 (means {:?} vs {:?}, distance {distance})",
+                prefiltered_means[positive],
+                prefiltered_means[negative]
+            );
+        }
+        for other in 1..CUBE_FACE_COUNT as usize {
+            assert_ne!(
+                prefiltered[0], prefiltered[other],
+                "prefiltered mip-0 face {other} must not be a bitwise copy of face 0"
             );
         }
     }
