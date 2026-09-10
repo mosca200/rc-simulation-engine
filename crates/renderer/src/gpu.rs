@@ -37,6 +37,7 @@ use crate::render_graph::{CompiledGraph, PassId};
 use crate::renderer_v2::scene::{
     GpuScene, GpuSceneInstanceRaw, PresentationKind, ScenePath, select_scene_path,
 };
+use crate::renderer_v2::temporal::{InvalidationReason, TemporalState};
 use crate::resources::{
     DepthTarget, HdrTarget, create_depth_target, create_hdr_scene_bind_group, create_hdr_target,
 };
@@ -1863,7 +1864,7 @@ impl WgpuRenderer {
     /// Render through the frozen V1 schedule. This path does not construct or
     /// consult the V2 graph and retains the legacy empty-feature device policy.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
-        self.render_scheduled(frame, None, None)
+        self.render_scheduled(frame, None, None, None)
     }
 
     pub(crate) fn create_v2_profiler(&self) -> Profiler {
@@ -1879,8 +1880,9 @@ impl WgpuRenderer {
         frame: &RenderFrame,
         graph: &CompiledGraph,
         profiler: &mut Profiler,
+        temporal: &mut TemporalState,
     ) -> Result<(), SurfaceError> {
-        self.render_scheduled(frame, Some(graph), Some(profiler))
+        self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal))
     }
 
     fn render_scheduled(
@@ -1888,6 +1890,7 @@ impl WgpuRenderer {
         frame: &RenderFrame,
         graph: Option<&CompiledGraph>,
         mut profiler: Option<&mut Profiler>,
+        mut temporal: Option<&mut TemporalState>,
     ) -> Result<(), SurfaceError> {
         self.check_asynchronous_gpu_error()?;
         if !self.device_context.is_surface_configured() {
@@ -1910,15 +1913,35 @@ impl WgpuRenderer {
         let (surface_texture, reconfigure_after_present) =
             self.device_context.acquire_surface_texture()?;
 
-        // Compute camera uniforms on the stack.
+        // Compute one coherent, unjittered camera sample on the stack. RV2-4
+        // records its deterministic jitter sample but deliberately does not
+        // apply it to the rendering projection yet.
         let aircraft_pose = frame.aircraft_pose();
-        let vp = self.camera.view_projection(aircraft_pose);
-        let (eye, camera_target) = self.camera.eye_and_target(aircraft_pose);
+        let camera_frame = self.camera.frame_matrices(aircraft_pose);
+        let aircraft_model_matrix = aircraft_pose.model_matrix();
+        let prepared_temporal = temporal
+            .as_deref()
+            .map(|state| state.prepare_frame(aircraft_model_matrix, camera_frame));
+        debug_assert!(
+            prepared_temporal
+                .as_ref()
+                .is_none_or(|prepared| prepared.contract_is_finite())
+        );
+        let camera_frame = prepared_temporal
+            .as_ref()
+            .map_or(camera_frame, |prepared| prepared.current_camera());
+        let aircraft_model_matrix = prepared_temporal
+            .as_ref()
+            .map_or(aircraft_model_matrix, |prepared| {
+                prepared.current_aircraft_root()
+            });
+        debug_assert!(camera_frame.view.is_finite());
+        debug_assert!(camera_frame.projection.is_finite());
+        let vp = camera_frame.view_projection;
+        let eye = camera_frame.eye;
+        let camera_target = camera_frame.target;
         let identity = Mat4::identity();
-        let inv_vp = self
-            .camera
-            .inv_view_projection(aircraft_pose)
-            .unwrap_or(identity);
+        let inv_vp = camera_frame.inverse_view_projection.unwrap_or(identity);
         let camera_uniform = CameraUniform::new(&vp, &inv_vp, eye);
 
         self.device_context.queue().write_buffer(
@@ -1928,7 +1951,6 @@ impl WgpuRenderer {
         );
 
         // FIX 2: Update aircraft object uniform with the current pose model matrix.
-        let aircraft_model_matrix = aircraft_pose.model_matrix();
         let aircraft_object_uniform = ObjectUniform::from_matrix(&aircraft_model_matrix);
         self.device_context.queue().write_buffer(
             &self.aircraft_object_buffer,
@@ -2474,9 +2496,19 @@ impl WgpuRenderer {
             profiler.after_submit();
         }
         self.device_context.present(surface_texture);
+        if let (Some(temporal), Some(prepared)) = (temporal.as_deref_mut(), prepared_temporal) {
+            // This is the sole previous-presented commit point. In particular,
+            // acquisition errors and zero-extent early returns never reach it.
+            temporal.commit_presented(prepared);
+        }
 
         if reconfigure_after_present {
             self.reconfigure_surface();
+            if let Some(temporal) = temporal {
+                // The suboptimal frame was presented and committed first; the
+                // following explicit reconfigure begins a fresh generation.
+                temporal.invalidate(InvalidationReason::SurfaceReconfigure);
+            }
         }
 
         if let Some(profiler) = profiler {

@@ -10,6 +10,7 @@
 //! contract with [`crate::backend::DesktopRenderer`].
 
 pub(crate) mod scene;
+pub(crate) mod temporal;
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use crate::{
     SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
 };
 use crate::{profiling::Profiler, render_graph::CompiledGraph};
+use temporal::{InvalidationReason, TemporalState};
 
 /// Foundation owner for the Rendering V2 backend.
 ///
@@ -29,6 +31,7 @@ pub struct RendererV2Shell {
     inner: WgpuRenderer,
     graph: CompiledGraph,
     profiler: Profiler,
+    temporal: TemporalState,
 }
 
 impl RendererV2Shell {
@@ -47,6 +50,7 @@ impl RendererV2Shell {
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
+        let initial_size = window.inner_size();
         let inner = WgpuRenderer::new_v2_with_presentation(
             window,
             asset,
@@ -60,10 +64,12 @@ impl RendererV2Shell {
             .expect("the static RV2 production graph must compile");
         debug_assert_eq!(graph.resource_class_counts(), [3, 2, 1]);
         let profiler = inner.create_v2_profiler();
+        let temporal = TemporalState::new(initial_size.width, initial_size.height);
         Ok(Self {
             inner,
             graph,
             profiler,
+            temporal,
         })
     }
 
@@ -75,17 +81,21 @@ impl RendererV2Shell {
     /// surface-event policy (lost / outdated / timeout / out-of-memory /
     /// validation) behaves identically for V1 and V2.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
-        self.inner.render_v2(frame, &self.graph, &mut self.profiler)
+        self.inner
+            .render_v2(frame, &self.graph, &mut self.profiler, &mut self.temporal)
     }
 
     /// Resize the presentation surface, delegating to the V1 backend.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.inner.resize(width, height);
+        self.temporal.resize(width, height);
     }
 
     /// Recreate the surface after a lost/outdated event, delegating to V1.
     pub fn reconfigure_surface(&mut self) {
         self.inner.reconfigure_surface();
+        self.temporal
+            .invalidate(InvalidationReason::SurfaceReconfigure);
     }
 
     /// Toggle the presentation-only debug overlays, delegating to V1.
