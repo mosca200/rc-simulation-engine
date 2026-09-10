@@ -51,6 +51,63 @@ pub(crate) struct DeviceCapabilities {
     pub(crate) indirect_first_instance: bool,
     pub(crate) multi_draw_indirect_count: bool,
     pub(crate) anisotropic_filtering: bool,
+    /// Rgba16Float capability snapshot (adapter diagnostics + device-legal
+    /// verdict). See [`PhysicalEnvironmentCapability`].
+    pub(crate) physical_environment: PhysicalEnvironmentCapability,
+}
+
+/// Rgba16Float capability snapshot and the production decision derived from it.
+///
+/// The adapter-reported values are diagnostics only: with `wgpu = 30.0.1`,
+/// `adapter.get_texture_format_features` may advertise adapter-specific usages
+/// that were never requested as a device feature. Production therefore decides
+/// on the **device-legal** guaranteed features
+/// (`TextureFormat::guaranteed_format_features(device.features())`), which cover
+/// exactly what the created device may actually do without
+/// `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhysicalEnvironmentCapability {
+    /// Adapter-reported Rgba16Float allowed usages (diagnostic snapshot).
+    pub(crate) adapter_allowed_usages: wgpu::TextureUsages,
+    /// Adapter-reported Rgba16Float filterability (diagnostic snapshot).
+    pub(crate) adapter_filterable: bool,
+    /// Adapter-reported verdict; never used alone to enable the production path.
+    pub(crate) adapter_reported: bool,
+    /// Device-legal verdict; the one used for the production decision.
+    pub(crate) device_legal: bool,
+}
+
+/// Usages the physical atmosphere/IBL resources need from Rgba16Float.
+#[must_use]
+pub(crate) fn physical_environment_required_usages() -> wgpu::TextureUsages {
+    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
+}
+
+/// Adapter-reported verdict for Rgba16Float (diagnostics only).
+#[must_use]
+pub(crate) fn physical_environment_adapter_reported(features: wgpu::TextureFormatFeatures) -> bool {
+    features
+        .allowed_usages
+        .contains(physical_environment_required_usages())
+        && features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+}
+
+/// Device-legal verdict for Rgba16Float.
+///
+/// Only capabilities guaranteed to the *created device* count, so an adapter
+/// that would need `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` can never switch
+/// the production path on.
+#[must_use]
+pub(crate) fn physical_environment_device_legal(device_features: wgpu::Features) -> bool {
+    let features = wgpu::TextureFormat::Rgba16Float.guaranteed_format_features(device_features);
+    features
+        .allowed_usages
+        .contains(physical_environment_required_usages())
+        && features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
 }
 
 impl DeviceCapabilities {
@@ -60,6 +117,7 @@ impl DeviceCapabilities {
         adapter_features: wgpu::Features,
         adapter_limits: wgpu::Limits,
         downlevel: wgpu::DownlevelCapabilities,
+        rgba16float_features: wgpu::TextureFormatFeatures,
     ) -> Self {
         let device_features = device.features();
         let downlevel_flags = downlevel.flags;
@@ -78,6 +136,14 @@ impl DeviceCapabilities {
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
             anisotropic_filtering: downlevel_flags
                 .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING),
+            physical_environment: PhysicalEnvironmentCapability {
+                adapter_allowed_usages: rgba16float_features.allowed_usages,
+                adapter_filterable: rgba16float_features
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE),
+                adapter_reported: physical_environment_adapter_reported(rgba16float_features),
+                device_legal: physical_environment_device_legal(device_features),
+            },
         }
     }
 
@@ -95,6 +161,10 @@ impl DeviceCapabilities {
             indirect_first_instance = self.indirect_first_instance,
             multi_draw_indirect_count = self.multi_draw_indirect_count,
             anisotropic_filtering = self.anisotropic_filtering,
+            physical_environment_adapter_usages = ?self.physical_environment.adapter_allowed_usages,
+            physical_environment_adapter_filterable = self.physical_environment.adapter_filterable,
+            physical_environment_adapter_reported = self.physical_environment.adapter_reported,
+            physical_environment_device_legal = self.physical_environment.device_legal,
             "RV2 device capability snapshot"
         );
     }
@@ -136,6 +206,10 @@ impl DeviceContext {
         let adapter_features = adapter.features();
         let adapter_limits = adapter.limits();
         let downlevel = adapter.get_downlevel_capabilities();
+        // RV2-5 capability probe is intentionally read-only and does not
+        // request adapter-specific features or storage textures.
+        let rgba16float_features =
+            adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
         let required_features = required_features_for_policy(feature_policy, adapter_features);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -202,6 +276,7 @@ impl DeviceContext {
             adapter_features,
             adapter_limits,
             downlevel,
+            rgba16float_features,
         );
 
         Ok(Self {
@@ -331,6 +406,56 @@ mod tests {
                 adapter_features,
             ),
             wgpu::Features::empty()
+        );
+    }
+
+    #[test]
+    fn adapter_reported_rgba16float_capability_is_required() {
+        let unsupported = wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::TEXTURE_BINDING,
+            flags: wgpu::TextureFormatFeatureFlags::empty(),
+        };
+        assert!(!physical_environment_adapter_reported(unsupported));
+        let supported = wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            flags: wgpu::TextureFormatFeatureFlags::FILTERABLE,
+        };
+        assert!(physical_environment_adapter_reported(supported));
+    }
+
+    #[test]
+    fn device_legal_decision_ignores_adapter_specific_usages() {
+        // The adapter snapshot may advertise usages the created device never
+        // received (they need TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES). The
+        // production decision must be taken on the guaranteed features.
+        let adapter_only = wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::STORAGE_BINDING,
+            flags: wgpu::TextureFormatFeatureFlags::FILTERABLE,
+        };
+        assert!(physical_environment_adapter_reported(adapter_only));
+
+        // Rgba16Float is renderable, bindable and filterable by the WebGPU
+        // spec, so the device-legal verdict is true even with no extra device
+        // features requested.
+        assert!(physical_environment_device_legal(wgpu::Features::empty()));
+        assert!(
+            !wgpu::Features::empty()
+                .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        );
+    }
+
+    #[test]
+    fn required_usages_are_texture_binding_and_render_attachment() {
+        assert_eq!(
+            physical_environment_required_usages(),
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
+        );
+        assert!(!physical_environment_required_usages().contains(wgpu::TextureUsages::COPY_DST));
+        assert!(
+            !physical_environment_required_usages().contains(wgpu::TextureUsages::STORAGE_BINDING)
         );
     }
 }

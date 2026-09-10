@@ -34,6 +34,10 @@
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
+use crate::renderer_v2::atmosphere::{
+    AtmosphereParameters, EnvironmentTextures, OBSERVER_ALTITUDE_M, SunState, V2EnvironmentMode,
+    create_physical_environment,
+};
 use crate::renderer_v2::scene::{
     GpuScene, GpuSceneInstanceRaw, PresentationKind, ScenePath, select_scene_path,
 };
@@ -228,6 +232,14 @@ struct EnvironmentUniform {
     // G3B: analytic sky response (see WGSL struct docs).
     sky_diffuse: [f32; 4],
     env_specular: [f32; 4],
+    // RV2-5: RGB atmospheric attenuation shared by direct sun and sun disk.
+    sun_transmittance: [f32; 4],
+    // RV2-5 physical atmosphere state:
+    //   x = sun angular radius (radians)
+    //   y = sun disk solid angle (sr)
+    //   z = observer transmittance-LUT v coordinate (baked altitude)
+    //   w = 1 for the physical V2 pipeline set, 0 for analytic
+    atmosphere_state: [f32; 4],
 }
 
 /// G3B: postprocess state (exposure EV) matching the WGSL `PostProcessUniform`.
@@ -416,6 +428,8 @@ impl EnvironmentUniform {
                 DEFAULT_ENV_SPECULAR_RGB[2],
                 DEFAULT_ENV_SPECULAR_STRENGTH,
             ],
+            sun_transmittance: [1.0, 1.0, 1.0, 1.0],
+            atmosphere_state: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -862,6 +876,9 @@ pub struct WgpuRenderer {
     _environment_buffer: wgpu::Buffer,
     shadow_uniform_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
+    // RV2-5: present only when the physical Rgba16Float path is device-legal.
+    // The analytic fallback owns no physical resources at all.
+    _environment_textures: Option<EnvironmentTextures>,
     shadow_cascade_uniform_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
     shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
     shadow_light_direction: [f32; 3],
@@ -998,6 +1015,86 @@ impl WgpuRenderer {
             presentation_kind,
         );
 
+        // RV2-5: the physical environment needs the V2 feature policy, a
+        // device-legal Rgba16Float render-target/binding/filtering capability,
+        // and physically valid parameters. The adapter-reported snapshot is
+        // only logged (with the capability capture) and never decides alone.
+        let atmosphere_parameters = AtmosphereParameters::earth();
+        // One SunState drives the sky, the sun disk, direct PBR, the shadow
+        // cascades and the environment generation. Its irradiance keeps the
+        // established engine scale (`PI * intensity`), so the direct PBR energy
+        // is preserved while the disk radiance stays physically far above the
+        // sky radiance.
+        let sun_state = SunState::from_irradiance(
+            DEFAULT_LIGHT_DIRECTION,
+            [
+                DEFAULT_SUN_COLOR_RGB[0] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
+                DEFAULT_SUN_COLOR_RGB[1] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
+                DEFAULT_SUN_COLOR_RGB[2] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
+            ],
+            SunState::EARTH_ANGULAR_RADIUS_RADIANS,
+        )
+        .with_atmosphere_transmittance(atmosphere_parameters);
+        let physical_requested = V2EnvironmentMode::select(
+            feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp,
+            device_context
+                .capabilities()
+                .physical_environment
+                .device_legal,
+        ) == V2EnvironmentMode::Physical
+            && atmosphere_parameters.validate().is_ok()
+            && sun_state.validate().is_ok();
+        // Generate before any V2-specific layout or pipeline exists, so a
+        // failed generation can always fall back to the analytic path without
+        // leaving half-configured resources behind.
+        let physical_environment = if physical_requested {
+            match create_physical_environment(&device, &queue, atmosphere_parameters, sun_state) {
+                Ok(textures) => {
+                    tracing::info!(
+                        bytes = crate::renderer_v2::atmosphere::physical_environment_bytes(),
+                        passes = crate::renderer_v2::atmosphere::INITIALIZATION_PASSES.len(),
+                        "RV2-5 physical GPU atmosphere + IBL generated"
+                    );
+                    Some(textures)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error,
+                        "RV2-5 physical environment rejected; analytic fallback"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let use_physical = physical_environment.is_some();
+        // The reported mode is the one actually in use *after*
+        // create_physical_environment(): a rejected generation logs the
+        // analytic fallback, never the requested-but-failed physical mode.
+        let environment_mode = if use_physical {
+            V2EnvironmentMode::Physical
+        } else {
+            V2EnvironmentMode::AnalyticalFallback
+        };
+        tracing::info!(mode = ?environment_mode, "RV2-5 environment mode selected");
+        let (
+            sky_fragment_entry,
+            lit_fragment_entry,
+            terrain_fragment_entry,
+            vegetation_fragment_entry,
+        ) = if use_physical {
+            (
+                "fs_sky_v2",
+                "fs_lit_v2",
+                "fs_terrain_v2",
+                "fs_vegetation_v2",
+            )
+        } else {
+            ("fs_sky", "fs_lit", "fs_terrain", "fs_vegetation")
+        };
+        let environment_textures = physical_environment;
+
         // G3A-R: preserve the legacy anisotropy fallback, now sourced from
         // the immutable capability snapshot shared by both renderer paths.
         let terrain_sampler_anisotropy =
@@ -1010,8 +1107,14 @@ impl WgpuRenderer {
 
         let camera_bind_group_layout = camera_bind_group_layout(&device, "camera layout");
         let object_bind_group_layout = matrix_bind_group_layout(&device, "object layout");
-        let environment_bind_group_layout =
-            environment_bind_group_layout(&device, "environment layout");
+        let environment_bind_group_layout = if use_physical {
+            environment_bind_group_layout_with_physical(
+                &device,
+                "RV2-5 physical environment layout",
+            )
+        } else {
+            environment_bind_group_layout(&device, "environment layout")
+        };
         let shadow_pass_bind_group_layout =
             shadow_pass_bind_group_layout(&device, "directional shadow pass layout");
         let material_bind_group_layout = material_bind_group_layout(&device, "material layout");
@@ -1072,7 +1175,13 @@ impl WgpuRenderer {
                 immediate_size: 0,
             });
 
-        let sky_pipeline = create_sky_pipeline(&device, &shader, &sky_pipeline_layout, HDR_FORMAT);
+        let sky_pipeline = create_sky_pipeline(
+            &device,
+            &shader,
+            &sky_pipeline_layout,
+            HDR_FORMAT,
+            sky_fragment_entry,
+        );
         let triangle_pipeline = create_pipeline(
             &device,
             &shader,
@@ -1083,7 +1192,7 @@ impl WgpuRenderer {
                 cull_mode: Some(wgpu::Face::Back),
                 depth_write_enabled: true,
                 label: "G1C lit triangle pipeline",
-                fragment_entry_point: "fs_lit",
+                fragment_entry_point: lit_fragment_entry,
             },
         );
         let line_pipeline = create_pipeline(
@@ -1100,8 +1209,15 @@ impl WgpuRenderer {
             },
         );
         let shadow_pipeline = create_shadow_pipeline(&device, &shader, &shadow_pipeline_layout);
-        let v2_gpu_scene_pipeline = (scene_path == ScenePath::V2Instanced)
-            .then(|| create_gpu_scene_pipeline(&device, &shader, &lit_pipeline_layout, HDR_FORMAT));
+        let v2_gpu_scene_pipeline = (scene_path == ScenePath::V2Instanced).then(|| {
+            create_gpu_scene_pipeline(
+                &device,
+                &shader,
+                &lit_pipeline_layout,
+                HDR_FORMAT,
+                lit_fragment_entry,
+            )
+        });
         let v2_gpu_scene_shadow_pipeline = (scene_path == ScenePath::V2Instanced)
             .then(|| create_gpu_scene_shadow_pipeline(&device, &shader, &shadow_pipeline_layout));
 
@@ -1117,7 +1233,7 @@ impl WgpuRenderer {
                 cull_mode: Some(wgpu::Face::Back),
                 depth_write_enabled: true,
                 label: "G3A terrain lit triangle pipeline",
-                fragment_entry_point: "fs_terrain",
+                fragment_entry_point: terrain_fragment_entry,
             },
         );
 
@@ -1468,6 +1584,7 @@ impl WgpuRenderer {
                 bark_material_index,
                 foliage_material_index,
                 VegetationDebugMode::default(),
+                vegetation_fragment_entry,
             );
             (Some(world), Some(gpu))
         } else {
@@ -1508,15 +1625,35 @@ impl WgpuRenderer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        let default_environment = EnvironmentUniform::default_environment();
+        let mut default_environment = EnvironmentUniform::default_environment();
+        default_environment.sun_transmittance = [
+            sun_state.transmittance[0],
+            sun_state.transmittance[1],
+            sun_state.transmittance[2],
+            1.0,
+        ];
+        default_environment.atmosphere_state = [
+            sun_state.angular_radius_radians,
+            sun_state.solid_angle(),
+            (OBSERVER_ALTITUDE_M / atmosphere_parameters.atmosphere_height_m)
+                .max(0.0)
+                .sqrt(),
+            use_physical as u32 as f32,
+        ];
+        if use_physical {
+            // Physical mode: the shader derives the direct irradiance from the
+            // same solar disk radiance that lights the sky and the environment.
+            default_environment.sun_color = [
+                sun_state.radiance[0],
+                sun_state.radiance[1],
+                sun_state.radiance[2],
+                DEFAULT_SUN_COS_ANGULAR_RADIUS,
+            ];
+        }
         // G3E: derive the shadow camera direction from the exact normalized
         // direction uploaded into EnvironmentUniform, so the sun disk,
         // direct PBR lighting, and all cascade layers can never diverge.
-        let shadow_light_direction = [
-            default_environment.light_direction[0],
-            default_environment.light_direction[1],
-            default_environment.light_direction[2],
-        ];
+        let shadow_light_direction = sun_state.direction;
         let initial_shadow_cascades =
             build_shadow_cascades(shadow_light_direction, [0.0, 2.0, 8.0], [0.0, 0.0, 0.0]);
         let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1567,15 +1704,27 @@ impl WgpuRenderer {
             &identity_object_buffer,
             "identity object bind group",
         );
-        let environment_bind_group = create_environment_bind_group(
-            &device,
-            &environment_bind_group_layout,
-            &environment_buffer,
-            &shadow_target.view,
-            &shadow_sampler,
-            &shadow_uniform_buffer,
-            "environment bind group",
-        );
+        let environment_bind_group = match environment_textures.as_ref() {
+            Some(textures) => create_environment_bind_group_with_textures(
+                &device,
+                &environment_bind_group_layout,
+                &environment_buffer,
+                &shadow_target.view,
+                &shadow_sampler,
+                &shadow_uniform_buffer,
+                textures,
+                "RV2-5 physical environment bind group",
+            ),
+            None => create_environment_bind_group(
+                &device,
+                &environment_bind_group_layout,
+                &environment_buffer,
+                &shadow_target.view,
+                &shadow_sampler,
+                &shadow_uniform_buffer,
+                "environment bind group",
+            ),
+        };
         let shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT] =
             std::array::from_fn(|index| {
                 create_shadow_pass_bind_group(
@@ -1669,6 +1818,7 @@ impl WgpuRenderer {
             _environment_buffer: environment_buffer,
             shadow_uniform_buffer,
             environment_bind_group,
+            _environment_textures: environment_textures,
             shadow_cascade_uniform_buffers,
             shadow_pass_bind_groups,
             shadow_light_direction,
@@ -3171,6 +3321,7 @@ fn build_gpu_vegetation(
     bark_material_index: usize,
     foliage_material_index: usize,
     debug_mode: VegetationDebugMode,
+    fragment_entry_point: &'static str,
 ) -> GpuVegetation {
     // Static meshes: one buffer pair per (asset, LOD, part). The Vec index is
     // positional: (asset * LOD_COUNT + lod) * PART_COUNT + part, matching
@@ -3272,8 +3423,10 @@ fn build_gpu_vegetation(
         }],
     });
 
-    let pipeline = create_vegetation_pipeline(device, shader, pipeline_layout);
-    let foliage_pipeline = create_vegetation_foliage_pipeline(device, shader, pipeline_layout);
+    let pipeline =
+        create_vegetation_pipeline(device, shader, pipeline_layout, fragment_entry_point);
+    let foliage_pipeline =
+        create_vegetation_foliage_pipeline(device, shader, pipeline_layout, fragment_entry_point);
     let shadow_pipeline = create_vegetation_shadow_pipeline(device, shader, shadow_pipeline_layout);
     let foliage_shadow_pipeline =
         create_vegetation_foliage_shadow_pipeline(device, shader, shadow_pipeline_layout);
@@ -3358,52 +3511,172 @@ fn vegetation_state_bind_group_layout(device: &wgpu::Device, label: &str) -> wgp
     })
 }
 
+/// G1C+G3E base environment entries: uniform, cascade depth array, comparison
+/// sampler and the shadow receiver state.
+fn environment_base_layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+    [
+        // Existing environment/light/atmosphere uniform.
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(size_of::<EnvironmentUniform>() as u64),
+            },
+            count: None,
+        },
+        // G3E: comparison-sampled depth array and receiver state. They extend
+        // the established environment boundary while the lit pipeline
+        // remains at groups 0..3.
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(size_of::<ShadowUniform>() as u64),
+            },
+            count: None,
+        },
+    ]
+}
+
+/// V1 environment layout: the shared base slots only.
+///
+/// Deliberately free of every RV2-5 physical binding, so a V1 renderer never
+/// depends on the atmosphere LUTs, the cubemaps, the BRDF LUT or the Rgba16Float
+/// physical capability.
 fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
-        entries: &[
-            // Existing environment/light/atmosphere uniform.
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(size_of::<EnvironmentUniform>() as u64),
-                },
-                count: None,
-            },
-            // G3E: comparison-sampled depth array and receiver state. They extend
-            // the established environment boundary while the lit pipeline
-            // remains at groups 0..3.
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(size_of::<ShadowUniform>() as u64),
-                },
-                count: None,
-            },
-        ],
+        entries: &environment_base_layout_entries(),
     })
+}
+
+/// RV2-5 V2-only extension of the environment layout.
+///
+/// The physical bindings live at 12..20 and are declared **only** for the V2
+/// environment, so V1 pipelines never reference them and V1 keeps its previous
+/// bind-group/layout contract untouched.
+fn environment_bind_group_layout_with_physical(
+    device: &wgpu::Device,
+    label: &str,
+) -> wgpu::BindGroupLayout {
+    let base = environment_base_layout_entries();
+    let physical = physical_environment_layout_entries();
+    let mut entries: Vec<wgpu::BindGroupLayoutEntry> =
+        Vec::with_capacity(base.len() + physical.len());
+    entries.extend_from_slice(&base);
+    entries.extend_from_slice(&physical);
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &entries,
+    })
+}
+
+/// RV2-5 physical environment entries (bindings 12..20).
+fn physical_environment_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 13,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 14,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 15,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 16,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 17,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 18,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 19,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 20,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+    ]
 }
 
 /// G3E caster-pass group 2. It exposes one cascade matrix at binding 4, so the
@@ -3558,6 +3831,11 @@ fn matrix_bind_group(
     })
 }
 
+/// V1 environment layout: the uniform + shadow receiver slots only.
+///
+/// Deliberately free of every RV2-5 physical binding, so a V1 renderer never
+/// depends on the atmosphere LUTs, the cubemaps, the BRDF LUT or the Rgba16Float
+/// physical capability.
 fn create_environment_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -3586,6 +3864,78 @@ fn create_environment_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: shadow_uniform_buffer.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// V2 physical environment bind group: the V1 slots plus the RV2-5 resources.
+#[allow(clippy::too_many_arguments)]
+fn create_environment_bind_group_with_textures(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    environment_buffer: &wgpu::Buffer,
+    shadow_texture_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+    shadow_uniform_buffer: &wgpu::Buffer,
+    textures: &EnvironmentTextures,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: environment_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(shadow_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadow_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::TextureView(&textures.environment_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(&textures.prefiltered_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::TextureView(&textures.irradiance_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: wgpu::BindingResource::TextureView(&textures.transmittance),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: wgpu::BindingResource::TextureView(&textures.multi_scattering),
+            },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: wgpu::BindingResource::TextureView(&textures.sky_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: wgpu::BindingResource::Sampler(&textures.cube_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: wgpu::BindingResource::Sampler(&textures.lut_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: wgpu::BindingResource::TextureView(&textures.brdf_lut),
             },
         ],
     })
@@ -3755,6 +4105,7 @@ fn create_gpu_scene_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
+    fragment_entry_point: &'static str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("RV2 instanced forward HDR rigid GLB pipeline"),
@@ -3795,7 +4146,7 @@ fn create_gpu_scene_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_lit"),
+            entry_point: Some(fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -3904,6 +4255,7 @@ fn create_vegetation_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
+    fragment_entry_point: &'static str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("G3D vegetation lit pipeline"),
@@ -3933,7 +4285,7 @@ fn create_vegetation_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_vegetation"),
+            entry_point: Some(fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
@@ -3954,6 +4306,7 @@ fn create_vegetation_foliage_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
+    fragment_entry_point: &'static str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("G3D vegetation foliage lit pipeline (two-sided)"),
@@ -3983,7 +4336,7 @@ fn create_vegetation_foliage_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_vegetation"),
+            entry_point: Some(fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
@@ -4099,6 +4452,7 @@ fn create_sky_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
+    fragment_entry_point: &'static str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("G1C sky pipeline"),
@@ -4128,7 +4482,7 @@ fn create_sky_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_sky"),
+            entry_point: Some(fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -6159,6 +6513,7 @@ mod vegetation_tests {
             0,
             1,
             debug_mode,
+            "fs_vegetation",
         );
         // NOTE: bark/foliage material indexes in the test are 0/1 (they are the
         // only materials pushed here — the fallback is deliberately absent).
@@ -6804,6 +7159,7 @@ mod vegetation_tests {
             0,
             1,
             VegetationDebugMode::Final,
+            "fs_vegetation",
         );
         queue.write_buffer(
             &gpu_veg.instance_buffer,
@@ -7276,6 +7632,7 @@ mod vegetation_tests {
             0,
             1,
             VegetationDebugMode::Final,
+            "fs_vegetation",
         );
         queue.write_buffer(
             &gpu_veg.instance_buffer,
@@ -7460,6 +7817,108 @@ mod vegetation_tests {
             "aircraft shadow must write depth in the right half \
              (right={right_near}, left={left_near}) — zero means the vegetation \
              shadow pipeline leaked into the aircraft caster draw"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rv2_5_physical_environment_wiring_tests {
+    //! RV2-5 structural guards for the renderer integration: the physical
+    //! resources are persistent initialization-time resources, the runtime graph
+    //! keeps exactly five passes, and the V1 environment layout stays free of
+    //! the physical bindings.
+
+    #[test]
+    fn runtime_graph_keeps_exactly_five_passes() {
+        let graph = crate::render_graph::build_v2_render_graph()
+            .expect("the static RV2 production graph must compile");
+        assert_eq!(
+            graph.execution_order(),
+            [
+                crate::render_graph::PassId::ShadowNear,
+                crate::render_graph::PassId::ShadowMid,
+                crate::render_graph::PassId::ShadowFar,
+                crate::render_graph::PassId::Scene,
+                crate::render_graph::PassId::Postprocess,
+            ]
+        );
+        assert_eq!(crate::render_graph::PassId::COUNT, 5);
+    }
+
+    #[test]
+    fn physical_environment_is_created_only_during_initialization() {
+        let source = include_str!("gpu.rs");
+        let (initialization, after_render) = source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path");
+        let (frame_path, _) = after_render
+            .split_once("fn check_asynchronous_gpu_error")
+            .expect("frame path must end before asynchronous error handling");
+
+        assert!(
+            initialization.contains("create_physical_environment("),
+            "the physical environment must be generated during initialization"
+        );
+        for forbidden in [
+            "create_physical_environment(",
+            "create_physical_environment_with_usage(",
+            "EnvironmentTextures",
+        ] {
+            assert!(
+                !frame_path.contains(forbidden),
+                "the frame path must never regenerate `{forbidden}`"
+            );
+        }
+        assert!(
+            !frame_path.contains("create_environment_bind_group"),
+            "the environment bind group must stay persistent"
+        );
+    }
+
+    #[test]
+    fn v1_environment_layout_has_no_physical_bindings() {
+        let source = include_str!("gpu.rs");
+        let base = source
+            .split("fn environment_base_layout_entries()")
+            .nth(1)
+            .expect("the base environment entries must exist")
+            .split("fn environment_bind_group_layout(")
+            .next()
+            .expect("the base entries must precede the V1 layout");
+        assert!(
+            !base.contains("binding: 12"),
+            "the V1 environment layout must not declare physical bindings"
+        );
+        let physical = source
+            .split("fn physical_environment_layout_entries()")
+            .nth(1)
+            .expect("the physical entries must exist");
+        for binding in 12..=20 {
+            assert!(
+                physical.contains(&format!("binding: {binding},")),
+                "the physical layout must declare binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_environment_resources_are_optional_and_never_recreated() {
+        let source = include_str!("gpu.rs");
+        assert!(
+            source.contains("_environment_textures: Option<EnvironmentTextures>,"),
+            "the physical resources must be optional so the analytic fallback owns none"
+        );
+        let resize = source
+            .split("pub fn resize(&mut self")
+            .nth(1)
+            .expect("the resize path must exist");
+        let resize_body = resize
+            .split("pub fn reconfigure_surface")
+            .next()
+            .expect("resize body must precede reconfigure_surface");
+        assert!(
+            !resize_body.contains("create_physical_environment"),
+            "resize must never regenerate the physical environment"
         );
     }
 }
