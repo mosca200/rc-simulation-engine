@@ -9,6 +9,8 @@
 //! Later RV2 slices can replace more internals without changing this module's
 //! contract with [`crate::backend::DesktopRenderer`].
 
+pub(crate) mod atmosphere;
+pub(crate) mod ibl;
 pub(crate) mod scene;
 pub(crate) mod temporal;
 

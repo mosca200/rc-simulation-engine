@@ -51,6 +51,20 @@ pub(crate) struct DeviceCapabilities {
     pub(crate) indirect_first_instance: bool,
     pub(crate) multi_draw_indirect_count: bool,
     pub(crate) anisotropic_filtering: bool,
+    /// Rgba16Float capabilities captured before the adapter is released.
+    pub(crate) rgba16float_allowed_usages: wgpu::TextureUsages,
+    pub(crate) rgba16float_filterable: bool,
+    pub(crate) physical_environment: bool,
+}
+
+#[must_use]
+pub(crate) fn physical_environment_supported(features: wgpu::TextureFormatFeatures) -> bool {
+    features
+        .allowed_usages
+        .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT)
+        && features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
 }
 
 impl DeviceCapabilities {
@@ -60,6 +74,7 @@ impl DeviceCapabilities {
         adapter_features: wgpu::Features,
         adapter_limits: wgpu::Limits,
         downlevel: wgpu::DownlevelCapabilities,
+        rgba16float_features: wgpu::TextureFormatFeatures,
     ) -> Self {
         let device_features = device.features();
         let downlevel_flags = downlevel.flags;
@@ -78,6 +93,11 @@ impl DeviceCapabilities {
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
             anisotropic_filtering: downlevel_flags
                 .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING),
+            rgba16float_allowed_usages: rgba16float_features.allowed_usages,
+            rgba16float_filterable: rgba16float_features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE),
+            physical_environment: physical_environment_supported(rgba16float_features),
         }
     }
 
@@ -95,6 +115,9 @@ impl DeviceCapabilities {
             indirect_first_instance = self.indirect_first_instance,
             multi_draw_indirect_count = self.multi_draw_indirect_count,
             anisotropic_filtering = self.anisotropic_filtering,
+            rgba16float_allowed_usages = ?self.rgba16float_allowed_usages,
+            rgba16float_filterable = self.rgba16float_filterable,
+            physical_environment = self.physical_environment,
             "RV2 device capability snapshot"
         );
     }
@@ -136,6 +159,10 @@ impl DeviceContext {
         let adapter_features = adapter.features();
         let adapter_limits = adapter.limits();
         let downlevel = adapter.get_downlevel_capabilities();
+        // RV2-5 capability probe is intentionally read-only and does not
+        // request adapter-specific features or storage textures.
+        let rgba16float_features =
+            adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
         let required_features = required_features_for_policy(feature_policy, adapter_features);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -202,6 +229,7 @@ impl DeviceContext {
             adapter_features,
             adapter_limits,
             downlevel,
+            rgba16float_features,
         );
 
         Ok(Self {
@@ -332,5 +360,20 @@ mod tests {
             ),
             wgpu::Features::empty()
         );
+    }
+
+    #[test]
+    fn physical_environment_requires_filterable_renderable_float16() {
+        let unsupported = wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::TEXTURE_BINDING,
+            flags: wgpu::TextureFormatFeatureFlags::empty(),
+        };
+        assert!(!physical_environment_supported(unsupported));
+        let supported = wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            flags: wgpu::TextureFormatFeatureFlags::FILTERABLE,
+        };
+        assert!(physical_environment_supported(supported));
     }
 }

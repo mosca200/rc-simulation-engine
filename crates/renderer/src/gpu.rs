@@ -34,6 +34,10 @@
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
+use crate::renderer_v2::atmosphere::{
+    AtmosphereParameters, EnvironmentTextures, SunState, V2EnvironmentMode,
+    create_physical_environment,
+};
 use crate::renderer_v2::scene::{
     GpuScene, GpuSceneInstanceRaw, PresentationKind, ScenePath, select_scene_path,
 };
@@ -228,6 +232,10 @@ struct EnvironmentUniform {
     // G3B: analytic sky response (see WGSL struct docs).
     sky_diffuse: [f32; 4],
     env_specular: [f32; 4],
+    // RV2-5: RGB atmospheric attenuation shared by direct sun and sun disk.
+    sun_transmittance: [f32; 4],
+    // x = 1 for physical V2 environment, 0 for analytic fallback/V1.
+    physical_flags: [f32; 4],
 }
 
 /// G3B: postprocess state (exposure EV) matching the WGSL `PostProcessUniform`.
@@ -416,6 +424,8 @@ impl EnvironmentUniform {
                 DEFAULT_ENV_SPECULAR_RGB[2],
                 DEFAULT_ENV_SPECULAR_STRENGTH,
             ],
+            sun_transmittance: [1.0, 1.0, 1.0, 1.0],
+            physical_flags: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -862,6 +872,7 @@ pub struct WgpuRenderer {
     _environment_buffer: wgpu::Buffer,
     shadow_uniform_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
+    _environment_textures: EnvironmentTextures,
     shadow_cascade_uniform_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
     shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
     shadow_light_direction: [f32; 3],
@@ -1508,15 +1519,41 @@ impl WgpuRenderer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        let default_environment = EnvironmentUniform::default_environment();
+        let mut default_environment = EnvironmentUniform::default_environment();
+        let sun_state = SunState::from_direction(DEFAULT_LIGHT_DIRECTION, DEFAULT_SUN_COLOR_RGB)
+            .with_atmosphere_transmittance(AtmosphereParameters::earth());
+        let physical_supported = feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp
+            && device_context.capabilities().physical_environment;
+        let environment_mode = if physical_supported {
+            V2EnvironmentMode::Physical
+        } else {
+            V2EnvironmentMode::AnalyticFallback
+        };
+        default_environment.sun_transmittance = [
+            sun_state.transmittance[0],
+            sun_state.transmittance[1],
+            sun_state.transmittance[2],
+            1.0,
+        ];
+        default_environment.physical_flags = [
+            matches!(environment_mode, V2EnvironmentMode::Physical) as u32 as f32,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let environment_textures = if physical_supported {
+            tracing::info!("RV2 physical environment enabled");
+            create_physical_environment(&device, &queue, AtmosphereParameters::earth(), sun_state)
+        } else {
+            tracing::info!(
+                "RV2 analytic environment fallback + Rgba16Float capability unavailable"
+            );
+            EnvironmentTextures::fallback(&device)
+        };
         // G3E: derive the shadow camera direction from the exact normalized
         // direction uploaded into EnvironmentUniform, so the sun disk,
         // direct PBR lighting, and all cascade layers can never diverge.
-        let shadow_light_direction = [
-            default_environment.light_direction[0],
-            default_environment.light_direction[1],
-            default_environment.light_direction[2],
-        ];
+        let shadow_light_direction = sun_state.direction;
         let initial_shadow_cascades =
             build_shadow_cascades(shadow_light_direction, [0.0, 2.0, 8.0], [0.0, 0.0, 0.0]);
         let environment_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1567,13 +1604,14 @@ impl WgpuRenderer {
             &identity_object_buffer,
             "identity object bind group",
         );
-        let environment_bind_group = create_environment_bind_group(
+        let environment_bind_group = create_environment_bind_group_with_textures(
             &device,
             &environment_bind_group_layout,
             &environment_buffer,
             &shadow_target.view,
             &shadow_sampler,
             &shadow_uniform_buffer,
+            &environment_textures,
             "environment bind group",
         );
         let shadow_pass_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT] =
@@ -1669,6 +1707,7 @@ impl WgpuRenderer {
             _environment_buffer: environment_buffer,
             shadow_uniform_buffer,
             environment_bind_group,
+            _environment_textures: environment_textures,
             shadow_cascade_uniform_buffers,
             shadow_pass_bind_groups,
             shadow_light_direction,
@@ -3402,6 +3441,90 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
                 },
                 count: None,
             },
+            // RV2-5 physical environment resources. V1 binds deterministic
+            // 1x1 fallbacks and continues to select the analytic shader path.
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 14,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 15,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 16,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 17,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 18,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 19,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 20,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -3558,6 +3681,7 @@ fn matrix_bind_group(
     })
 }
 
+#[cfg(test)]
 fn create_environment_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -3565,6 +3689,30 @@ fn create_environment_bind_group(
     shadow_texture_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
     shadow_uniform_buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    let fallback = EnvironmentTextures::fallback(device);
+    create_environment_bind_group_with_textures(
+        device,
+        layout,
+        environment_buffer,
+        shadow_texture_view,
+        shadow_sampler,
+        shadow_uniform_buffer,
+        &fallback,
+        label,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_environment_bind_group_with_textures(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    environment_buffer: &wgpu::Buffer,
+    shadow_texture_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+    shadow_uniform_buffer: &wgpu::Buffer,
+    textures: &EnvironmentTextures,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3586,6 +3734,42 @@ fn create_environment_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: shadow_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::TextureView(&textures.environment_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(&textures.prefiltered_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::TextureView(&textures.irradiance_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: wgpu::BindingResource::TextureView(&textures.transmittance),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: wgpu::BindingResource::TextureView(&textures.multi_scattering),
+            },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: wgpu::BindingResource::TextureView(&textures.sky_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: wgpu::BindingResource::Sampler(&textures.cube_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: wgpu::BindingResource::Sampler(&textures.lut_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: wgpu::BindingResource::TextureView(&textures.brdf_lut),
             },
         ],
     })

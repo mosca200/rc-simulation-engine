@@ -18,7 +18,8 @@
 // anti-repetition rotated second sample, a distance-faded detail normal
 // layer, multi-scale roughness, and presentation-only debug channels driven
 // by a uniform selector (no shader recompiles).
-// Still deliberately out of scope: cascades, IBL textures, or clouds.
+// RV2-5 adds persistent physical atmosphere/IBL resources for the V2 path;
+// the legacy analytic branch remains selected when `physical_flags.x` is 0.
 //
 // G3B adds an HDR outdoor lighting pipeline:
 //   scene HDR pass (Rgba16Float, linear, no LDR clamp)
@@ -69,6 +70,8 @@ struct ObjectUniform {
 // env_specular.xyz:    G3B environment specular color (analytic sky
 //                      reflection tint, pre-wired for future prefiltered IBL).
 // env_specular.w:      environment specular strength scaler.
+// sun_transmittance.xyz: clear-air attenuation shared by direct sun and disk.
+// physical_flags.x:      1 for RV2-5 physical LUT/IBL mode, 0 for analytic.
 struct EnvironmentUniform {
     light_direction: vec4<f32>,
     ambient: vec4<f32>,
@@ -78,6 +81,8 @@ struct EnvironmentUniform {
     sun_color: vec4<f32>,
     sky_diffuse: vec4<f32>,
     env_specular: vec4<f32>,
+    sun_transmittance: vec4<f32>,
+    physical_flags: vec4<f32>,
 };
 
 // G3B: postprocess state for the final display pass.
@@ -166,6 +171,24 @@ var directional_shadow_sampler: sampler_comparison;
 var<uniform> shadow: ShadowUniform;
 @group(2) @binding(4)
 var<uniform> shadow_cascade: ShadowCascadeUniform;
+@group(2) @binding(12)
+var environment_cube: texture_cube<f32>;
+@group(2) @binding(13)
+var prefiltered_environment_cube: texture_cube<f32>;
+@group(2) @binding(14)
+var irradiance_cube: texture_cube<f32>;
+@group(2) @binding(15)
+var transmittance_lut: texture_2d<f32>;
+@group(2) @binding(16)
+var multi_scattering_lut: texture_2d<f32>;
+@group(2) @binding(17)
+var sky_view_lut: texture_2d<f32>;
+@group(2) @binding(18)
+var environment_sampler: sampler;
+@group(2) @binding(19)
+var atmosphere_sampler: sampler;
+@group(2) @binding(20)
+var brdf_lut: texture_2d<f32>;
 
 // G1C: Material texture and sampler.
 // Group 3 is the material bind group, containing the base color texture,
@@ -528,6 +551,10 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
 // sun-driven. Slots for future prefiltered IBL: replace this function's body
 // with a probe sample while keeping the EnvironmentUniform contract.
 fn sky_diffuse_irradiance(n: vec3<f32>) -> vec3<f32> {
+    if (environment.physical_flags.x > 0.5) {
+        let irradiance = textureSample(irradiance_cube, environment_sampler, safe_normalize(n));
+        return irradiance.rgb;
+    }
     let ndot_up = clamp(dot(n, WORLD_UP), 0.0, 1.0);
     // Sky gradient between horizon and zenith above ground (same power curve
     // as the visible sky), and horizon-to-ground below.
@@ -549,7 +576,33 @@ fn sky_diffuse_irradiance(n: vec3<f32>) -> vec3<f32> {
 // subtle; a GGX-like lobe weight (smoothness^2) makes sharp surfaces reflect
 // more and rough surfaces fade toward the diffuse response. Deterministic and
 // documentable — this is the placeholder for a future prefiltered IBL env map.
-fn environment_specular_response(f0: vec3<f32>, roughness: f32, ndot_v: f32) -> vec3<f32> {
+fn environment_specular_response(
+    f0: vec3<f32>,
+    roughness: f32,
+    ndot_v: f32,
+    n: vec3<f32>,
+    world_position: vec3<f32>,
+) -> vec3<f32> {
+    if (environment.physical_flags.x > 0.5) {
+        let v = safe_normalize(camera.camera_position.xyz - world_position);
+        let reflected = safe_normalize(2.0 * dot(n, v) * n - v);
+        let mip = clamp(roughness, 0.0, 1.0) * 7.0;
+        let prefiltered = textureSampleLevel(
+            prefiltered_environment_cube,
+            environment_sampler,
+            reflected,
+            mip,
+        ).rgb;
+        let environment_sample = textureSample(environment_cube, environment_sampler, reflected).rgb;
+        let brdf = textureSample(
+            brdf_lut,
+            atmosphere_sampler,
+            vec2<f32>(clamp(ndot_v, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
+        ).rg;
+        let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
+        return mix(prefiltered, environment_sample, 0.08 * (1.0 - roughness))
+            * (fresnel * brdf.x + brdf.y);
+    }
     let smoothness = clamp(1.0 - roughness, 0.0, 1.0);
     let lobe_weight = smoothness * smoothness;
     let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
@@ -628,7 +681,10 @@ fn lit_pbr_response(
 
     // Direct lighting (see legacy-compat irradiance scale above).
     let irradiance = PI * environment.light_direction.w;
-    let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
+    var direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
+    if (environment.physical_flags.x > 0.5) {
+        direct_unshadowed *= environment.sun_transmittance.rgb;
+    }
     let shadow_visibility = directional_shadow_visibility(world_position);
     let direct = direct_unshadowed * shadow_visibility;
 
@@ -642,8 +698,14 @@ fn lit_pbr_response(
     // subtle, and sharper surfaces (low roughness) are boosted. Pre-wired for
     // future prefiltered IBL by keeping both terms in the environment uniform.
     let ambient_diffuse = diffuse_albedo * sky_diffuse_irradiance(n);
-    let ambient_specular = environment_specular_response(f0, roughness, ndot_v);
-    let ambient = mix(ambient_diffuse, ambient_specular, metallic);
+    let ambient_specular = environment_specular_response(f0, roughness, ndot_v, n, world_position);
+    // Physical mode uses additive energy-conserving diffuse/specular IBL;
+    // analytic fallback keeps the established G3B response byte-compatible.
+    let ambient = select(
+        mix(ambient_diffuse, ambient_specular, metallic),
+        ambient_diffuse + ambient_specular,
+        environment.physical_flags.x > 0.5,
+    );
 
     let lit_rgb = direct + ambient;
     return lit_rgb;
@@ -919,7 +981,29 @@ fn vs_sky_fullscreen(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutpu
 @fragment
 fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     let view_dir = view_direction_from_clip(input.clip_xy);
-    let color = sky_color_for_direction(view_dir);
+    var color = sky_color_for_direction(view_dir);
+    if (environment.physical_flags.x > 0.5) {
+        let azimuth = atan2(view_dir.z, view_dir.x);
+        let elevation = asin(clamp(view_dir.y, -1.0, 1.0));
+        let sky_uv = vec2<f32>(
+            fract(azimuth / (2.0 * PI) + 0.5),
+            clamp(elevation / PI + 0.5, 0.0, 1.0),
+        );
+        // Physical sky is scene-referred HDR and comes from the generated LUT;
+        // the sun disk in that LUT uses the same SunState attenuation as PBR.
+        color = textureSample(sky_view_lut, atmosphere_sampler, sky_uv).rgb;
+        let transmittance = textureSample(
+            transmittance_lut,
+            atmosphere_sampler,
+            vec2<f32>(0.5, clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0)),
+        ).rgb;
+        let multiple_scattering = textureSample(
+            multi_scattering_lut,
+            atmosphere_sampler,
+            vec2<f32>(0.5, clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0)),
+        ).rgb;
+        color = color * (0.85 + 0.15 * transmittance) + multiple_scattering * 0.15;
+    }
     return vec4<f32>(color, 1.0);
 }
 
