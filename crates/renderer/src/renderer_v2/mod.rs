@@ -1,19 +1,12 @@
-//! RV2-1 Rendering V2 parity shell.
+//! RV2-2 Rendering V2 foundation.
 //!
-//! This module is intentionally the *minimum* V2 surface required by RV2-1. It
-//! is a parity shell: every presentation operation delegates straight to the
-//! existing V1 [`WgpuRenderer`], so `--renderer v2` produces exactly the same
-//! [`RenderFrame`] presentation as `--renderer v1` with zero intentional
-//! visual change.
+//! The V2 backend now owns a compiled static render graph and bounded
+//! profiling state while reusing the proven draw-recording implementation.
+//! This slice intentionally makes no visual or shader changes.
 //!
-//! Later RV2 slices will progressively replace the internals of
-//! [`RendererV2Shell`] (render graph, GPU scene, atmosphere, temporal, ...)
-//! without changing this module's contract with the shared
-//! [`crate::backend::DesktopRenderer`] facade, and without the application
-//! ever learning how V2 is implemented internally.
-//!
-//! RV2-1 deliberately does NOT fork `gpu.rs`, duplicate shaders, or introduce
-//! a framework abstraction. The shell owns one V1 renderer and forwards calls.
+//! Later RV2 slices can replace more internals without changing this module's
+//! contract with [`crate::backend::DesktopRenderer`]. No shader or draw logic
+//! is duplicated here.
 
 use std::sync::Arc;
 
@@ -23,14 +16,16 @@ use crate::{
     CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderTerrainMode, RendererError,
     SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
 };
+use crate::{profiling::Profiler, render_graph::CompiledGraph};
 
-/// Parity shell for the Rendering V2 backend.
+/// Foundation owner for the Rendering V2 backend.
 ///
-/// In RV2-1 this wraps a V1 [`WgpuRenderer`] and delegates every call. The
-/// wrapper exists so the shared facade can dispatch to a distinct V2 backend
-/// while the rendered output stays identical to V1.
+/// It combines the shared renderer resources with the V2-only compiled graph
+/// and profiler while keeping the rendered output identical to V1.
 pub struct RendererV2Shell {
     inner: WgpuRenderer,
+    graph: CompiledGraph,
+    profiler: Profiler,
 }
 
 impl RendererV2Shell {
@@ -49,7 +44,7 @@ impl RendererV2Shell {
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
-        let inner = WgpuRenderer::new_with_presentation(
+        let inner = WgpuRenderer::new_v2_with_presentation(
             window,
             asset,
             ground_below_render_origin_m,
@@ -58,7 +53,15 @@ impl RendererV2Shell {
             camera_config,
         )
         .await?;
-        Ok(Self { inner })
+        let graph = crate::render_graph::build_v2_render_graph()
+            .expect("the static RV2 production graph must compile");
+        debug_assert_eq!(graph.resource_class_counts(), [3, 2, 1]);
+        let profiler = inner.create_v2_profiler();
+        Ok(Self {
+            inner,
+            graph,
+            profiler,
+        })
     }
 
     /// Present a shared [`RenderFrame`], delegating to the V1 backend.
@@ -69,7 +72,7 @@ impl RendererV2Shell {
     /// surface-event policy (lost / outdated / timeout / out-of-memory /
     /// validation) behaves identically for V1 and V2.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
-        self.inner.render(frame)
+        self.inner.render_v2(frame, &self.graph, &mut self.profiler)
     }
 
     /// Resize the presentation surface, delegating to the V1 backend.

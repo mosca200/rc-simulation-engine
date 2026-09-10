@@ -14,12 +14,16 @@
 mod accumulator;
 mod backend;
 mod camera;
+mod device;
 mod glb;
 mod gpu;
 mod math;
 mod mesh;
 mod pose;
+mod profiling;
+mod render_graph;
 mod renderer_v2;
+mod resources;
 pub mod scenery;
 mod shadow;
 mod surfaces;
