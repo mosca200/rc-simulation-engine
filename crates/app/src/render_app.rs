@@ -21,11 +21,11 @@ use platform::{
     InputState, KeyboardInputState, KeyboardKey, RawControllerState,
 };
 use renderer::{
-    AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, ExposureError, FixedStepAccumulator,
-    FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderDataError, RenderTerrainMode, RendererError, SurfaceError,
-    SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode, WgpuRenderer, aircraft_mesh,
-    load_glb_asset, scenery::SceneryPreset, validate_exposure_ev,
+    AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, DesktopRenderer, ExposureError,
+    FixedStepAccumulator, FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan,
+    GlbAsset, GlbLoadError, PresentationAsset, RenderDataError, RenderTerrainMode, RendererError,
+    RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode,
+    aircraft_mesh, load_glb_asset, scenery::SceneryPreset, validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -85,6 +85,9 @@ pub struct RenderOptions {
     vegetation_debug: VegetationDebugMode,
     // G3B: presentation-only manual exposure in EV stops (default outdoor).
     exposure_ev: f32,
+    // RV2-1: rendering backend selection (`--renderer v1|v2`); defaults to V1
+    // so every existing command keeps its historical behaviour.
+    renderer: RendererVersion,
 }
 
 /// Presentation-side camera selection parsed from the CLI.
@@ -246,6 +249,7 @@ impl RenderOptions {
             terrain_debug: TerrainDebugMode::default(),
             vegetation_debug: VegetationDebugMode::default(),
             exposure_ev: DEFAULT_EXPOSURE_EV,
+            renderer: RendererVersion::V1,
         }
     }
 
@@ -360,6 +364,13 @@ impl RenderOptions {
                     options.exposure_ev = validate_exposure_ev(ev)
                         .map_err(|_| RenderAppError::InvalidExposureEv(value))?;
                 }
+                "--renderer" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--renderer"))?;
+                    options.renderer = RendererVersion::from_label(&value)
+                        .ok_or_else(|| RenderAppError::InvalidRenderer(value.clone()))?;
+                }
                 "--scenery" => {
                     let value = arguments
                         .next()
@@ -458,6 +469,8 @@ pub enum RenderAppError {
     InvalidVegetationDebug(String),
     #[error("invalid exposure EV `{0}`; expected a finite value inside [-8, 8]")]
     InvalidExposureEv(String),
+    #[error("invalid renderer `{0}`; expected `v1` or `v2`")]
+    InvalidRenderer(String),
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
     UnknownCamera(String),
     #[error("invalid camera FOV `{0}`; expected a finite value inside [10, 120] degrees")]
@@ -848,7 +861,9 @@ struct RenderApplication {
     fixed_step: FixedStepAccumulator,
     last_frame_time: Option<Instant>,
     window: Option<Arc<Window>>,
-    renderer: Option<WgpuRenderer>,
+    renderer: Option<DesktopRenderer>,
+    // RV2-1: backend selected on the CLI; the facade dispatches to it.
+    renderer_version: RendererVersion,
     runtime_error: Option<RenderRuntimeError>,
 }
 
@@ -938,6 +953,7 @@ impl RenderApplication {
             last_frame_time: None,
             window: None,
             renderer: None,
+            renderer_version: options.renderer,
             runtime_error: None,
         })
     }
@@ -1169,7 +1185,8 @@ impl ApplicationHandler for RenderApplication {
             },
             PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
         };
-        let mut renderer = match pollster::block_on(WgpuRenderer::new_with_presentation(
+        let mut renderer = match pollster::block_on(DesktopRenderer::new_with_presentation(
+            self.renderer_version,
             Arc::clone(&window),
             presentation_asset,
             self.ground_below_render_origin_m,
@@ -1743,6 +1760,100 @@ mod tests {
                 "value {value:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn renderer_option_defaults_to_v1_for_render_and_play() {
+        // RV2-1: omitting `--renderer` keeps the historical V1 backend for both
+        // the `render` and `play` commands.
+        assert_eq!(
+            RenderOptions::parse(std::iter::empty()).unwrap().renderer,
+            RendererVersion::V1
+        );
+        assert_eq!(
+            RenderOptions::parse_play(std::iter::empty())
+                .unwrap()
+                .renderer,
+            RendererVersion::V1
+        );
+    }
+
+    #[test]
+    fn renderer_option_selects_v1_and_v2() {
+        assert_eq!(
+            RenderOptions::parse(["--renderer", "v1"].map(str::to_owned).into_iter())
+                .unwrap()
+                .renderer,
+            RendererVersion::V1
+        );
+        assert_eq!(
+            RenderOptions::parse(["--renderer", "v2"].map(str::to_owned).into_iter())
+                .unwrap()
+                .renderer,
+            RendererVersion::V2
+        );
+        // `play` shares the same parser and selection semantics.
+        assert_eq!(
+            RenderOptions::parse_play(["--renderer", "v2"].map(str::to_owned).into_iter())
+                .unwrap()
+                .renderer,
+            RendererVersion::V2
+        );
+    }
+
+    #[test]
+    fn renderer_option_rejects_unknown_value() {
+        for value in ["foo", "v3", "V1", "", "v2 "] {
+            assert!(
+                matches!(
+                    RenderOptions::parse(["--renderer".to_owned(), value.to_owned()].into_iter()),
+                    Err(RenderAppError::InvalidRenderer(_))
+                ),
+                "value {value:?} must be rejected"
+            );
+        }
+        // A missing value is a distinct, clear error.
+        assert!(matches!(
+            RenderOptions::parse(["--renderer".to_owned()].into_iter()),
+            Err(RenderAppError::MissingArgumentValue("--renderer"))
+        ));
+    }
+
+    #[test]
+    fn renderer_option_is_order_independent_with_camera_option() {
+        // The renderer selection must not depend on its position relative to
+        // the camera/presentation options, and must not disturb them.
+        let first = RenderOptions::parse(
+            ["--renderer", "v2", "--camera", "chase"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        let second = RenderOptions::parse(
+            ["--camera", "chase", "--renderer", "v2"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(first.renderer, RendererVersion::V2);
+        assert_eq!(second.renderer, RendererVersion::V2);
+        assert_eq!(first.camera, second.camera);
+        assert!(matches!(first.camera, CameraSelection::Chase { .. }));
+    }
+
+    #[test]
+    fn play_defaults_keep_v1_reference_path_with_other_options() {
+        // The V1 reference path stays the default even when other play options
+        // are supplied without an explicit `--renderer`.
+        let options = RenderOptions::parse_play(
+            ["--scenery", "flying-field", "--debug-overlays"]
+                .map(str::to_owned)
+                .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(options.renderer, RendererVersion::V1);
+        assert_eq!(options.scenery, SceneryPreset::FlyingField);
+        assert!(options.debug_overlays);
     }
 
     #[test]

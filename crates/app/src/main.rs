@@ -450,7 +450,7 @@ fn print_usage() {
         "  rcsim-app propulsion bench [--model PATH] [--throttle V --airspeed-mps MPS | sweep options] [--format table|csv|json] [--output PATH]"
     );
     println!(
-        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--controller-profile PATH] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays] [--terrain-debug final|albedo|normal|roughness|macro|detail] [--vegetation-debug final|lod|culling|bounds] [--exposure-ev EV]"
+        "  rcsim-app render [--model PATH] [--altitude-m M] [--airspeed-mps MPS] [--throttle VALUE] [--controller-profile PATH] [--start-on-ground] [--record-replay PATH] [--scenery none|flying-field] [--camera pilot|chase] [--camera-fov DEG] [--pilot-position X,Y,Z] [--chase-distance-m M] [--chase-height-m M] [--debug-overlays] [--terrain-debug final|albedo|normal|roughness|macro|detail] [--vegetation-debug final|lod|culling|bounds] [--exposure-ev EV] [--renderer v1|v2]"
     );
     println!(
         "  rcsim-app play [render options] (Acro Electric 01, supported ground start, FlyingField, chase camera, zero throttle)"
