@@ -118,6 +118,21 @@ pub enum CameraMode {
     Chase(ChaseCamera),
 }
 
+/// Coherent unjittered camera sample for one candidate presentation frame.
+///
+/// RV2 temporal state stores this presentation-only value after a successful
+/// surface presentation. RV2-4 deliberately does not apply its jitter sample
+/// to these matrices, so the rendered image remains identical to RV2-3.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CameraFrameMatrices {
+    pub(crate) view: Mat4,
+    pub(crate) projection: Mat4,
+    pub(crate) view_projection: Mat4,
+    pub(crate) inverse_view_projection: Option<Mat4>,
+    pub(crate) eye: [f32; 3],
+    pub(crate) target: [f32; 3],
+}
+
 impl CameraMode {
     pub fn resize(&mut self, width: u32, height: u32) {
         match self {
@@ -150,20 +165,24 @@ impl CameraMode {
         }
     }
 
+    /// Produce every unjittered matrix used by one render attempt from one
+    /// camera/pose evaluation.
     #[must_use]
-    pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+    pub(crate) fn frame_matrices(&self, aircraft_pose: &RenderPose) -> CameraFrameMatrices {
         match self {
-            Self::Pilot(camera) => camera.view_projection(aircraft_pose),
-            Self::Chase(camera) => camera.view_projection(aircraft_pose),
+            Self::Pilot(camera) => camera.frame_matrices(aircraft_pose),
+            Self::Chase(camera) => camera.frame_matrices(aircraft_pose),
         }
     }
 
     #[must_use]
+    pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+        self.frame_matrices(aircraft_pose).view_projection
+    }
+
+    #[must_use]
     pub fn inv_view_projection(&self, aircraft_pose: &RenderPose) -> Option<Mat4> {
-        match self {
-            Self::Pilot(camera) => camera.inv_view_projection(aircraft_pose),
-            Self::Chase(camera) => camera.inv_view_projection(aircraft_pose),
-        }
+        self.frame_matrices(aircraft_pose).inverse_view_projection
     }
 }
 
@@ -223,6 +242,11 @@ impl PilotCamera {
 
     #[must_use]
     pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+        self.frame_matrices(aircraft_pose).view_projection
+    }
+
+    #[must_use]
+    fn frame_matrices(&self, aircraft_pose: &RenderPose) -> CameraFrameMatrices {
         let (eye, target) = self.eye_and_target(aircraft_pose);
         let view = look_at_rh(eye, target, RENDER_WORLD_UP);
         let projection = webgpu_perspective(
@@ -232,12 +256,21 @@ impl PilotCamera {
             FAR_PLANE_M,
         )
         .expect("fixed pilot-camera projection parameters are valid");
-        projection * view
+        let view_projection = projection * view;
+        let inverse_view_projection = view_projection.inverse();
+        CameraFrameMatrices {
+            view,
+            projection,
+            view_projection,
+            inverse_view_projection,
+            eye,
+            target,
+        }
     }
 
     #[must_use]
     pub fn inv_view_projection(&self, aircraft_pose: &RenderPose) -> Option<Mat4> {
-        self.view_projection(aircraft_pose).inverse()
+        self.frame_matrices(aircraft_pose).inverse_view_projection
     }
 }
 
@@ -331,6 +364,11 @@ impl ChaseCamera {
 
     #[must_use]
     pub fn view_projection(&self, aircraft_pose: &RenderPose) -> Mat4 {
+        self.frame_matrices(aircraft_pose).view_projection
+    }
+
+    #[must_use]
+    fn frame_matrices(&self, aircraft_pose: &RenderPose) -> CameraFrameMatrices {
         let (eye, target) = self.eye_and_target(aircraft_pose);
         let view = look_at_rh(eye, target, RENDER_WORLD_UP);
         let projection = webgpu_perspective(
@@ -340,7 +378,16 @@ impl ChaseCamera {
             FAR_PLANE_M,
         )
         .expect("fixed chase-camera projection parameters are valid");
-        projection * view
+        let view_projection = projection * view;
+        let inverse_view_projection = view_projection.inverse();
+        CameraFrameMatrices {
+            view,
+            projection,
+            view_projection,
+            inverse_view_projection,
+            eye,
+            target,
+        }
     }
 
     /// Inverse of the view-projection matrix.
@@ -349,7 +396,7 @@ impl ChaseCamera {
     /// camera parameters, but handled cleanly for robustness).
     #[must_use]
     pub fn inv_view_projection(&self, aircraft_pose: &RenderPose) -> Option<Mat4> {
-        self.view_projection(aircraft_pose).inverse()
+        self.frame_matrices(aircraft_pose).inverse_view_projection
     }
 }
 
@@ -1145,5 +1192,48 @@ mod tests {
         let perpendicular = [0.0, 1.0, 0.0];
         let alignment = sun_alignment(perpendicular, sun_dir);
         assert!(alignment.abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn frame_matrices_preserve_pilot_and_chase_unjittered_camera_contracts() {
+        let aircraft = pose(mul_ned(
+            yaw_ned(0.43),
+            mul_ned(pitch_ned(-0.27), roll_ned(0.19)),
+        ));
+        for mode in [
+            CameraConfig::pilot_default().build(1_600, 900),
+            CameraConfig::chase_default().build(1_600, 900),
+        ] {
+            let sample = mode.frame_matrices(&aircraft);
+            let (expected_eye, expected_target) = mode.eye_and_target(&aircraft);
+            let expected_view = look_at_rh(expected_eye, expected_target, RENDER_WORLD_UP);
+            let expected_projection = match mode {
+                CameraMode::Pilot(camera) => webgpu_perspective(
+                    camera.vertical_fov_rad,
+                    camera.aspect_ratio,
+                    NEAR_PLANE_M,
+                    FAR_PLANE_M,
+                )
+                .unwrap(),
+                CameraMode::Chase(camera) => webgpu_perspective(
+                    camera.config.vertical_fov_deg.to_radians(),
+                    camera.aspect_ratio,
+                    NEAR_PLANE_M,
+                    FAR_PLANE_M,
+                )
+                .unwrap(),
+            };
+            let expected_vp = expected_projection * expected_view;
+
+            assert_eq!(sample.eye, expected_eye);
+            assert_eq!(sample.target, expected_target);
+            assert_eq!(sample.view, expected_view);
+            assert_eq!(sample.projection, expected_projection);
+            assert_eq!(sample.view_projection, expected_vp);
+            assert_eq!(sample.inverse_view_projection, expected_vp.inverse());
+            assert_eq!(mode.view_projection(&aircraft), expected_vp);
+            assert_eq!(mode.inv_view_projection(&aircraft), expected_vp.inverse());
+            assert_eq!(mode.eye_position(&aircraft), expected_eye);
+        }
     }
 }
