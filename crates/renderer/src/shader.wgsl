@@ -214,6 +214,23 @@ struct VertexInput {
     @location(3) uv: vec2<f32>,
 };
 
+// RV2-3 rigid GLB scene input. Locations 4-7 are the loader-provided node
+// world transform; 8-10 are its inverse-transpose normal transform. Both are
+// static instance-rate data. The dynamic aircraft root remains `object.model`.
+struct GpuSceneVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) instance_model_0: vec4<f32>,
+    @location(5) instance_model_1: vec4<f32>,
+    @location(6) instance_model_2: vec4<f32>,
+    @location(7) instance_model_3: vec4<f32>,
+    @location(8) instance_normal_0: vec4<f32>,
+    @location(9) instance_normal_1: vec4<f32>,
+    @location(10) instance_normal_2: vec4<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
@@ -332,6 +349,44 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @vertex
 fn vs_shadow(input: VertexInput) -> @builtin(position) vec4<f32> {
     let world_position = object.model * vec4<f32>(input.position, 1.0);
+    return shadow_cascade.light_view_projection * world_position;
+}
+
+// RV2-3 forward-HDR vertex entry. Mesh-local geometry is shared across scene
+// nodes; the final transform is exactly aircraft_root * GLB_world_transform.
+@vertex
+fn vs_gpu_scene(input: GpuSceneVertexInput) -> VertexOutput {
+    let instance_model = mat4x4<f32>(
+        input.instance_model_0,
+        input.instance_model_1,
+        input.instance_model_2,
+        input.instance_model_3,
+    );
+    let instance_normal = mat3x3<f32>(
+        input.instance_normal_0.xyz,
+        input.instance_normal_1.xyz,
+        input.instance_normal_2.xyz,
+    );
+    let world_position = object.model * instance_model * vec4<f32>(input.position, 1.0);
+    var output: VertexOutput;
+    output.clip_position = camera.view_projection * world_position;
+    output.world_normal = normalize(normal_matrix(object.model) * instance_normal * input.normal);
+    output.color = input.color;
+    output.uv = input.uv;
+    output.world_position = world_position.xyz;
+    return output;
+}
+
+// RV2-3 uses the identical instance/root composition in every shadow cascade.
+@vertex
+fn vs_gpu_scene_shadow(input: GpuSceneVertexInput) -> @builtin(position) vec4<f32> {
+    let instance_model = mat4x4<f32>(
+        input.instance_model_0,
+        input.instance_model_1,
+        input.instance_model_2,
+        input.instance_model_3,
+    );
+    let world_position = object.model * instance_model * vec4<f32>(input.position, 1.0);
     return shadow_cascade.light_view_projection * world_position;
 }
 

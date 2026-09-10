@@ -34,6 +34,9 @@
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
+use crate::renderer_v2::scene::{
+    GpuScene, GpuSceneInstanceRaw, PresentationKind, ScenePath, select_scene_path,
+};
 use crate::resources::{
     DepthTarget, HdrTarget, create_depth_target, create_hdr_scene_bind_group, create_hdr_target,
 };
@@ -824,6 +827,10 @@ pub struct WgpuRenderer {
     triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    // RV2-3: rigid-GLB-only instanced pipelines. V1 and articulated/procedural
+    // V2 assets keep the legacy pipelines and flat batch representation.
+    v2_gpu_scene_pipeline: Option<wgpu::RenderPipeline>,
+    v2_gpu_scene_shadow_pipeline: Option<wgpu::RenderPipeline>,
     // G3A: terrain pipeline (dedicated fs_terrain entry, group-4 material).
     terrain_pipeline: wgpu::RenderPipeline,
     // G3B: fullscreen postprocess pipeline (HDR -> exposure -> tone map).
@@ -867,6 +874,8 @@ pub struct WgpuRenderer {
 
     // G1C: Aircraft batches (one per primitive).
     aircraft_batches: Vec<RenderBatch>,
+    // RV2-3: deduplicated `meshes + instances` path for V2 rigid GLBs only.
+    v2_gpu_scene: Option<GpuScene>,
 
     // G1E: persistent articulated procedural or GLB batches.
     surface_batches: Vec<SurfaceRenderBatch>,
@@ -978,6 +987,15 @@ impl WgpuRenderer {
         let format = device_context.surface_format();
         let surface_width = device_context.surface_width();
         let surface_height = device_context.surface_height();
+        let presentation_kind = match asset {
+            PresentationAsset::Glb(_) => PresentationKind::RigidGlb,
+            PresentationAsset::ArticulatedGlb { .. } => PresentationKind::ArticulatedGlb,
+            PresentationAsset::Procedural(_) => PresentationKind::Procedural,
+        };
+        let scene_path = select_scene_path(
+            feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp,
+            presentation_kind,
+        );
 
         // G3A-R: preserve the legacy anisotropy fallback, now sourced from
         // the immutable capability snapshot shared by both renderer paths.
@@ -1081,6 +1099,10 @@ impl WgpuRenderer {
             },
         );
         let shadow_pipeline = create_shadow_pipeline(&device, &shader, &shadow_pipeline_layout);
+        let v2_gpu_scene_pipeline = (scene_path == ScenePath::V2Instanced)
+            .then(|| create_gpu_scene_pipeline(&device, &shader, &lit_pipeline_layout, HDR_FORMAT));
+        let v2_gpu_scene_shadow_pipeline = (scene_path == ScenePath::V2Instanced)
+            .then(|| create_gpu_scene_shadow_pipeline(&device, &shader, &shadow_pipeline_layout));
 
         // G3A: dedicated terrain pipeline — same raster state as the lit
         // triangle pipeline, `fs_terrain` fragment entry, group-4 material.
@@ -1112,11 +1134,47 @@ impl WgpuRenderer {
         // Upload presentation geometry once. Explicitly mapped GLB primitives
         // become articulated batches; every other GLB primitive remains rigid.
         let mut aircraft_batches = Vec::new();
+        let mut v2_gpu_scene = None;
         let mut surface_batches = Vec::new();
         let mut surface_object_buffers = Vec::new();
         let mut surface_object_bind_groups = Vec::new();
 
+        if scene_path == ScenePath::V2Instanced {
+            let PresentationAsset::Glb(glb_asset) = asset else {
+                unreachable!("only rigid GLBs select the RV2-3 GPU scene path")
+            };
+            let mut material_indices = Vec::with_capacity(glb_asset.meshes.len());
+            for mesh in &glb_asset.meshes {
+                let mut mesh_material_indices = Vec::with_capacity(mesh.primitives.len());
+                for primitive in &mesh.primitives {
+                    let gpu_material = create_glb_gpu_material(
+                        &device,
+                        &queue,
+                        &material_bind_group_layout,
+                        &white_fallback_texture,
+                        primitive,
+                    )?;
+                    let material_index = materials.len();
+                    materials.push(gpu_material);
+                    mesh_material_indices.push(material_index);
+                }
+                material_indices.push(mesh_material_indices);
+            }
+            let scene = GpuScene::upload(&device, glb_asset, &material_indices);
+            let stats = scene.stats();
+            tracing::info!(
+                unique_meshes = stats.unique_mesh_count,
+                primitives = stats.primitive_count,
+                instances = stats.scene_instance_count,
+                instance_buffer_bytes = stats.instance_buffer_bytes,
+                draws = stats.draw_count,
+                "RV2 rigid GLB GPU scene uploaded"
+            );
+            v2_gpu_scene = Some(scene);
+        }
+
         let glb_and_plan = match asset {
+            PresentationAsset::Glb(_) if scene_path == ScenePath::V2Instanced => None,
             PresentationAsset::Glb(glb_asset) => Some((glb_asset, None)),
             PresentationAsset::ArticulatedGlb {
                 asset: glb_asset,
@@ -1126,31 +1184,13 @@ impl WgpuRenderer {
         };
         if let Some((glb_asset, articulation)) = glb_and_plan {
             for (primitive_index, primitive) in glb_asset.primitives.iter().enumerate() {
-                let upload = glb_material_upload(&primitive.material);
-                let gpu_material = if upload.uses_white_fallback {
-                    create_shared_white_texture_material(
-                        &device,
-                        &material_bind_group_layout,
-                        &white_fallback_texture,
-                        upload.metallic,
-                        upload.roughness,
-                    )
-                } else {
-                    let texture = primitive
-                        .material
-                        .base_color_texture
-                        .as_ref()
-                        .expect("textured GLB material must retain its decoded texture");
-                    create_gpu_material(
-                        &device,
-                        &material_bind_group_layout,
-                        &queue,
-                        texture,
-                        &primitive.material.sampler_config,
-                        upload.metallic,
-                        upload.roughness,
-                    )?
-                };
+                let gpu_material = create_glb_gpu_material(
+                    &device,
+                    &queue,
+                    &material_bind_group_layout,
+                    &white_fallback_texture,
+                    primitive,
+                )?;
                 let material_index = materials.len();
                 materials.push(gpu_material);
                 if primitive.vertices.is_empty() {
@@ -1608,6 +1648,8 @@ impl WgpuRenderer {
             triangle_pipeline,
             line_pipeline,
             shadow_pipeline,
+            v2_gpu_scene_pipeline,
+            v2_gpu_scene_shadow_pipeline,
             terrain_pipeline,
             postprocess_pipeline,
             _camera_bind_group_layout: camera_bind_group_layout,
@@ -1633,6 +1675,7 @@ impl WgpuRenderer {
             materials,
             _fallback_material_index: fallback_material_index,
             aircraft_batches,
+            v2_gpu_scene,
             surface_batches,
             surface_object_buffers,
             surface_object_bind_groups,
@@ -2113,15 +2156,40 @@ impl WgpuRenderer {
                     shadow_pass.set_pipeline(&self.shadow_pipeline);
 
                     shadow_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
-                    for batch in &self.aircraft_batches {
-                        shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                        shadow_pass.set_index_buffer(
-                            batch.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
+                    if let Some(scene) = self.v2_gpu_scene.as_ref() {
+                        shadow_pass.set_pipeline(
+                            self.v2_gpu_scene_shadow_pipeline
+                                .as_ref()
+                                .expect("V2 GPU scene must own its shadow pipeline"),
                         );
-                        shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                        shadow_pass.set_vertex_buffer(1, scene.instance_buffer.slice(..));
+                        for instance in &scene.instances {
+                            let mesh = &scene.meshes[instance.mesh_index];
+                            for primitive in &mesh.primitives {
+                                shadow_pass.set_vertex_buffer(0, primitive.vertex_buffer.slice(..));
+                                shadow_pass.set_index_buffer(
+                                    primitive.index_buffer.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                shadow_pass.draw_indexed(
+                                    0..primitive.index_count,
+                                    0,
+                                    GpuScene::instance_range(instance),
+                                );
+                            }
+                        }
+                    } else {
+                        for batch in &self.aircraft_batches {
+                            shadow_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                            shadow_pass.set_index_buffer(
+                                batch.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            shadow_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                        }
                     }
 
+                    shadow_pass.set_pipeline(&self.shadow_pipeline);
                     for batch in &self.surface_batches {
                         shadow_pass.set_bind_group(
                             1,
@@ -2297,20 +2365,49 @@ impl WgpuRenderer {
                         render_pass.set_pipeline(&self.triangle_pipeline);
                     }
 
-                    // FIX 2: Aircraft batches use the dedicated aircraft object bind group.
-                    for batch in &self.aircraft_batches {
-                        let material = &self.materials[batch.material_index];
-                        render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
-                        render_pass.set_bind_group(3, &material.bind_group, &[]);
-                        render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(
-                            batch.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
+                    // RV2-3 rigid GLBs use shared mesh buffers plus the static
+                    // scene-instance slot. Every other path keeps the frozen
+                    // flat aircraft batches.
+                    render_pass.set_bind_group(1, &self.aircraft_object_bind_group, &[]);
+                    if let Some(scene) = self.v2_gpu_scene.as_ref() {
+                        render_pass.set_pipeline(
+                            self.v2_gpu_scene_pipeline
+                                .as_ref()
+                                .expect("V2 GPU scene must own its forward pipeline"),
                         );
-                        render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                        render_pass.set_vertex_buffer(1, scene.instance_buffer.slice(..));
+                        for instance in &scene.instances {
+                            let mesh = &scene.meshes[instance.mesh_index];
+                            for primitive in &mesh.primitives {
+                                let material = &self.materials[primitive.material_index];
+                                render_pass.set_bind_group(3, &material.bind_group, &[]);
+                                render_pass.set_vertex_buffer(0, primitive.vertex_buffer.slice(..));
+                                render_pass.set_index_buffer(
+                                    primitive.index_buffer.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                render_pass.draw_indexed(
+                                    0..primitive.index_count,
+                                    0,
+                                    GpuScene::instance_range(instance),
+                                );
+                            }
+                        }
+                    } else {
+                        for batch in &self.aircraft_batches {
+                            let material = &self.materials[batch.material_index];
+                            render_pass.set_bind_group(3, &material.bind_group, &[]);
+                            render_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                            render_pass.set_index_buffer(
+                                batch.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                        }
                     }
 
                     // G1E: articulated overlays, each with its persistent object uniform.
+                    render_pass.set_pipeline(&self.triangle_pipeline);
                     for batch in &self.surface_batches {
                         let material = &self.materials[batch.material_index];
                         render_pass.set_bind_group(
@@ -2442,6 +2539,40 @@ fn create_white_fallback_material(
         PROCEDURAL_METALLIC,
         PROCEDURAL_ROUGHNESS,
     )
+}
+
+fn create_glb_gpu_material(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    white_texture: &WhiteFallbackTexture,
+    primitive: &crate::RenderPrimitive,
+) -> Result<GpuMaterial, RendererError> {
+    let upload = glb_material_upload(&primitive.material);
+    if upload.uses_white_fallback {
+        Ok(create_shared_white_texture_material(
+            device,
+            layout,
+            white_texture,
+            upload.metallic,
+            upload.roughness,
+        ))
+    } else {
+        let texture = primitive
+            .material
+            .base_color_texture
+            .as_ref()
+            .expect("textured GLB material must retain its decoded texture");
+        create_gpu_material(
+            device,
+            layout,
+            queue,
+            texture,
+            &primitive.material.sampler_config,
+            upload.metallic,
+            upload.roughness,
+        )
+    }
 }
 
 fn create_white_fallback_texture(
@@ -3541,6 +3672,136 @@ fn create_shadow_pipeline(
                     3 => Float32x2,
                 ],
             })],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: SHADOW_DEPTH_BIAS_CONSTANT,
+                slope_scale: SHADOW_DEPTH_BIAS_SLOPE_SCALE,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+static GPU_SCENE_MESH_ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    0 => Float32x3,
+    1 => Float32x3,
+    2 => Float32x4,
+    3 => Float32x2,
+];
+static GPU_SCENE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+    4 => Float32x4,
+    5 => Float32x4,
+    6 => Float32x4,
+    7 => Float32x4,
+    8 => Float32x4,
+    9 => Float32x4,
+    10 => Float32x4,
+];
+
+/// RV2-3 rigid GLB scene pipeline. Fragment/material/environment semantics are
+/// exactly the legacy lit path; only the vertex entry and instance slot differ.
+fn create_gpu_scene_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RV2 instanced forward HDR rigid GLB pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_gpu_scene"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &GPU_SCENE_MESH_ATTRIBUTES,
+                }),
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<GpuSceneInstanceRaw>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &GPU_SCENE_INSTANCE_ATTRIBUTES,
+                }),
+            ],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_lit"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// RV2-3 shadow caster for the same persistent mesh/instance buffers used by
+/// the forward HDR pass.
+fn create_gpu_scene_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RV2 instanced rigid GLB shadow pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_gpu_scene_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &GPU_SCENE_MESH_ATTRIBUTES,
+                }),
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<GpuSceneInstanceRaw>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &GPU_SCENE_INSTANCE_ATTRIBUTES,
+                }),
+            ],
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,

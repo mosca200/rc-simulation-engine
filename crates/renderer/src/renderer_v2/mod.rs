@@ -1,12 +1,15 @@
-//! RV2-2 Rendering V2 foundation.
+//! Rendering V2 foundation and rigid-GLB GPU scene path.
 //!
 //! The V2 backend now owns a compiled static render graph and bounded
 //! profiling state while reusing the proven draw-recording implementation.
-//! This slice intentionally makes no visual or shader changes.
+//! RV2-3 additionally routes rigid GLBs through [`scene`] so shared mesh
+//! geometry and deterministic scene-node transforms reach the GPU without
+//! changing the `RenderFrame` boundary.
 //!
 //! Later RV2 slices can replace more internals without changing this module's
-//! contract with [`crate::backend::DesktopRenderer`]. No shader or draw logic
-//! is duplicated here.
+//! contract with [`crate::backend::DesktopRenderer`].
+
+pub(crate) mod scene;
 
 use std::sync::Arc;
 
