@@ -1519,31 +1519,53 @@ mod tests {
             );
         }
         // Multi-scattering must be a real spherical integration closed with
-        // the Hillaire energy-compensation series: a second-order radiance
-        // `l_2nd_order` and a *separate*, dimensionless transfer ratio `f_ms`.
+        // the Hillaire (2020, Eq. 7-8) energy-compensation series: TWO
+        // INDEPENDENT integrals, the unit-source second-order transfer
+        // `l_2nd_order` and the medium-transfer ratio `f_ms`.
         assert!(atmosphere.contains("multi_scattering_texel"));
-        assert!(atmosphere.contains("l_2nd_order"));
-        assert!(atmosphere.contains("f_ms"));
+        assert!(
+            atmosphere.contains("var l_2nd_order = vec3<f32>(0.0);"),
+            "L_2ndOrder must have its own accumulator"
+        );
+        assert!(
+            atmosphere.contains("var f_ms_sum = vec3<f32>(0.0);"),
+            "f_ms must have its own accumulator"
+        );
+        assert!(
+            atmosphere.contains("f_ms_sum = f_ms_sum + ms_transfer_integral(r0, mu);"),
+            "f_ms must be a distinct spherical integral, never a function of l_2nd_order"
+        );
         assert!(
             atmosphere.contains(
-                "let f_ms = clamp(4.0 * PI * luminance3(l_2nd_order) / sun_luminance, 0.0, 0.999);"
+                "single_scattering(r0, mu, direction, sun_direction, true, UNIT_IRRADIANCE)"
             ),
-            "f_ms must be a dimensionless ratio of l_2nd_order against the sun irradiance, clamped before the series"
+            "L_2ndOrder must integrate the single scattering against the unit source E_I = 1"
         );
         assert!(
-            atmosphere.contains("let f_ms_factor = 1.0 / (1.0 - f_ms);"),
-            "the geometric series must be formed on f_ms alone"
+            atmosphere.contains(
+                "let f_ms = clamp(f_ms_sum / f32(SPHERE_SAMPLES), vec3<f32>(0.0), vec3<f32>(0.999));"
+            ),
+            "f_ms must be the sphere-averaged transfer integral, clamped into [0, 1) before the series"
         );
         assert!(
-            atmosphere.contains("return l_2nd_order * f_ms_factor;"),
-            "Psi_ms = L_2ndOrder * F_ms"
+            atmosphere.contains("return l_2nd_order / (1.0 - f_ms);"),
+            "Psi_ms = L_2ndOrder / (1 - f_ms)"
         );
+        // The luminance-ratio shortcut (f_ms derived from L_2ndOrder) and the
+        // pre-Hillaire scalar series factor must never come back.
+        for forbidden in ["luminance3", "sun_luminance", "f_ms_factor"] {
+            assert!(
+                !atmosphere.contains(forbidden),
+                "the forbidden closure term `{forbidden}` must not exist"
+            );
+        }
         // The ground albedo participates through the ground-bounce radiance,
         // never as the series-denominator term.
         assert!(
-            atmosphere
-                .contains("ground_reflection(r0, mu, direction, sun_direction, ground_distance)"),
-            "the ground-bounce component must feed l_2nd_order"
+            atmosphere.contains(
+                "ground_reflection(r0, mu, direction, sun_direction, ground_distance, UNIT_IRRADIANCE)"
+            ),
+            "the ground-bounce component must feed l_2nd_order with E_I = 1"
         );
         // The retired non-Hillaire closure must not come back: no radiance
         // times ground albedo inside a geometric-series denominator.
@@ -1560,57 +1582,151 @@ mod tests {
     }
 
     #[test]
-    fn hillaire_closure_keeps_f_ms_unitless_and_bounded() {
+    fn hillaire_closure_keeps_two_independent_bounded_integrals() {
         let source = include_str!("atmosphere.wgsl").replace("\r\n", "\n");
+
+        // --- Eq. 8 integrand: pure medium transfer -------------------------
+        let transfer = source
+            .split("fn ms_transfer_integral(")
+            .nth(1)
+            .expect("the Hillaire Eq. 8 transfer integral must exist");
+        // Cut at the function's own closing brace (column 0), so the doc
+        // comment of the next function cannot satisfy or fail a guard.
+        let transfer = transfer.split("\n}").next().expect("function body");
+        for forbidden in [
+            // (2) f_ms must not depend on the sun irradiance,
+            "sun_irradiance",
+            // (3) f_ms must not use any phase function,
+            "phase",
+            // (4) f_ms must not use the planet-shadow visibility or any
+            // directional-light angular dependence,
+            "ray_intersects_ground",
+            "sun_direction",
+            "transmittance_lookup",
+        ] {
+            assert!(
+                !transfer.contains(forbidden),
+                "the f_ms integrand must be medium-only and must not contain `{forbidden}`"
+            );
+        }
+        assert!(
+            transfer.contains("let sigma_s = atmosphere.rayleigh_scattering.rgb * rho_rayleigh"),
+            "L_f must integrate the volume scattering coefficient σ_s"
+        );
+        assert!(
+            transfer.contains("transfer = transfer + sigma_s * exp(-optical_depth) * dt;"),
+            "L_f(x, v) = ∫ σ_s(x) T(x, x - t v) dt with T = exp(-τ)"
+        );
+
+        // --- Closure: distinct accumulators, bounded series ----------------
         let body = source
             .split("fn multi_scattering_texel(")
             .nth(1)
             .expect("the multi-scattering closure must exist");
-        let body = body.split("\nfn ").next().expect("function body");
-        // f_ms is a ratio of two luminances (unitless), clamped into the
-        // convergence interval [0, 1) *before* the geometric series is formed.
+        let body = body.split("\n}").next().expect("function body");
+        // (1) Two distinct accumulators fed by two distinct integrals.
+        let l2_position = body
+            .find("single_scattering(r0, mu, direction, sun_direction, true, UNIT_IRRADIANCE)")
+            .expect("the Eq. 7 accumulator must integrate the single scattering");
+        let fms_position = body
+            .find("f_ms_sum = f_ms_sum + ms_transfer_integral(r0, mu);")
+            .expect("the Eq. 8 accumulator must integrate the medium transfer");
+        assert_ne!(
+            l2_position, fms_position,
+            "l_2nd_order and f_ms must be distinct integrals"
+        );
+        // (7) The LUT is built with E_I = 1: the real SunState irradiance
+        // never enters the closure, and f_ms is never derived from
+        // l_2nd_order through any luminance ratio.
+        assert!(
+            !body.contains("sun_irradiance"),
+            "the transfer LUT must not bake the real SunState irradiance"
+        );
+        assert!(
+            !body.contains("luminance"),
+            "f_ms must not be derived from L_2ndOrder"
+        );
+        // (5) f_ms is bounded into [0, 1) *before* the series is formed.
         let clamp_position = body
             .find("let f_ms = clamp(")
             .expect("f_ms must be clamped at construction");
         let series_position = body
-            .find("1.0 / (1.0 - f_ms)")
-            .expect("the series factor must exist");
+            .find("(1.0 - f_ms)")
+            .expect("the series denominator must exist");
         assert!(
             clamp_position < series_position,
             "f_ms must be bounded before the series denominator is evaluated"
         );
         assert!(
-            body.contains("0.0, 0.999)"),
-            "f_ms must stay inside the physically valid interval [0, 1)"
+            body.contains("vec3<f32>(0.0), vec3<f32>(0.999)"),
+            "f_ms must stay inside the physically valid interval [0, 1), per channel"
         );
-        // No radiance quantity may enter the series denominator: the only
-        // denominator is (1 - f_ms).
+        // (6) Psi_ms = L_2ndOrder / (1 - f_ms); no radiance quantity ever
+        // enters the geometric-series denominator.
         assert!(
-            !body.contains("l_2nd_order * albedo") && !body.contains("l_2nd_order) / (1.0"),
+            body.contains("return l_2nd_order / (1.0 - f_ms);"),
+            "Psi_ms = L_2ndOrder * F_ms with F_ms = 1 / (1 - f_ms)"
+        );
+        assert!(
+            !body.contains("l_2nd_order * albedo"),
             "no radiance may sit in the geometric-series denominator"
         );
-        // The sun-irradiance divisor is guarded against division by zero.
-        assert!(body.contains("max(luminance3(atmosphere.sun_irradiance.rgb), 1e-6)"));
+
+        // (8) The real SunState irradiance is read exactly once in the whole
+        // module and applied once per term at consumption, LUT included.
+        assert_eq!(
+            source.matches("atmosphere.sun_irradiance").count(),
+            1,
+            "the real SunState irradiance must be accessed exactly once, in sky_radiance"
+        );
+        let sky = source
+            .split("fn sky_radiance(")
+            .nth(1)
+            .expect("the consumption function must exist");
+        let sky = sky.split("\n}").next().expect("function body");
+        assert!(
+            sky.contains("let sun_irradiance = atmosphere.sun_irradiance.rgb;"),
+            "the single irradiance access must live in the consumption path"
+        );
+        assert!(
+            sky.contains(") * sun_irradiance;"),
+            "the transfer LUT lookup must be scaled by the real irradiance exactly once"
+        );
     }
 
     #[test]
     fn sun_visibility_is_occluded_by_the_ground_sphere() {
         let source = include_str!("atmosphere.wgsl").replace("\r\n", "\n");
+        let predicate = source
+            .split("fn ray_intersects_ground(")
+            .nth(1)
+            .expect("the planet-shadow predicate must exist");
+        let predicate = predicate.split("\n}").next().expect("function body");
+        // Exact-surface band: the degenerate t = 0 tangent root must not hide
+        // the positive exit root, so the band decides directly on the horizon.
         assert!(
-            source.contains("fn ray_intersects_ground(sample_radius: f32, sun_mu: f32) -> bool {"),
-            "the planet-shadow predicate must exist"
+            predicate
+                .contains("if (sample_radius <= planet_radius * (1.0 + SURFACE_BAND_EPSILON)) {"),
+            "the surface band must bypass the degenerate quadratic"
         );
         assert!(
-            source.contains(
-                "return ray_sphere_near(sample_radius, sun_mu, atmosphere.planet_radius_m) > 0.0;"
-            ),
-            "occlusion must be the ground-sphere intersection test"
+            predicate.contains("return sun_mu < 0.0;"),
+            "on the surface the sun is occluded exactly when it is below the horizon"
+        );
+        assert!(
+            predicate
+                .contains("return ray_sphere_near(sample_radius, sun_mu, planet_radius) > 0.0;"),
+            "above the surface band occlusion must stay the ground-sphere intersection test"
+        );
+        assert!(
+            source.contains("const SURFACE_BAND_EPSILON: f32 = 1e-7;"),
+            "the surface band width must be an explicit, documented constant"
         );
         let single = source
             .split("fn single_scattering(")
             .nth(1)
             .expect("single scattering must exist");
-        let single = single.split("\nfn ").next().expect("function body");
+        let single = single.split("\n}").next().expect("function body");
         let gate = single
             .find("if (!ray_intersects_ground(radius, sun_mu)) {")
             .expect("the sun transmittance must be gated by the planet shadow");
@@ -1651,8 +1767,14 @@ mod tests {
         -1.0
     }
 
-    /// CPU mirror of the WGSL `ray_intersects_ground` predicate.
+    /// CPU mirror of the WGSL `ray_intersects_ground` predicate, including the
+    /// exact-surface band where the t = 0 tangent root degenerates the
+    /// quadratic and the decision is taken directly on the horizon.
     fn mirrored_ray_intersects_ground(sample_radius: f32, sun_mu: f32, planet_radius: f32) -> bool {
+        const SURFACE_BAND_EPSILON: f32 = 1e-7;
+        if sample_radius <= planet_radius * (1.0 + SURFACE_BAND_EPSILON) {
+            return sun_mu < 0.0;
+        }
         mirrored_ray_sphere_near(sample_radius, sun_mu, planet_radius) > 0.0
     }
 
@@ -1666,8 +1788,11 @@ mod tests {
         // The same sample with the sun above the horizon sees the sun.
         let visible = mirrored_ray_intersects_ground(planet + 10_000.0, 0.5, planet);
         assert!(!visible, "sun above the horizon must be visible");
-        // A sample exactly on the surface with the sun at/above the horizon
-        // must not self-occlude (the tangent solution t = 0 is not > 0).
+        // A sample exactly on the surface must not self-occlude when the sun
+        // is at or above the horizon (the tangent solution t = 0 is not an
+        // occlusion), but MUST be occluded when the sun is below it: the
+        // degenerate c = 0 quadratic has a second root at t = -2 r mu > 0
+        // that the old nearest-root test could never see.
         assert!(
             !mirrored_ray_intersects_ground(planet, 0.0, planet),
             "the horizon ray from the surface must not be an occlusion"
@@ -1675,6 +1800,14 @@ mod tests {
         assert!(
             !mirrored_ray_intersects_ground(planet, 0.8, planet),
             "an upward sun ray from the surface must not be an occlusion"
+        );
+        assert!(
+            mirrored_ray_intersects_ground(planet, -0.3, planet),
+            "a sun below the horizon from the surface must be occluded"
+        );
+        assert!(
+            mirrored_ray_intersects_ground(planet, -1e-6, planet),
+            "any strictly-below-horizon sun from the surface must be occluded"
         );
         // A shallow downward ray from high altitude that geometrically
         // escapes past the horizon is not occluded.
@@ -1704,6 +1837,144 @@ mod tests {
                 mirrored_ray_intersects_ground(high, mu, planet) == (t > 0.0),
                 "the predicate must agree with the intersection distance"
             );
+        }
+    }
+
+    #[test]
+    fn planet_visibility_matches_the_required_edge_case_matrix() {
+        let planet = AtmosphereParameters::earth().planet_radius_m;
+        // Surface + sun below the horizon => OCCLUDED.
+        for sun_mu in [-1.0f32, -0.5, -1e-3, -1e-6] {
+            assert!(
+                mirrored_ray_intersects_ground(planet, sun_mu, planet),
+                "surface + sun_mu {sun_mu} below the horizon must be occluded"
+            );
+        }
+        // Surface + tangent or sun above the horizon => visible.
+        for sun_mu in [0.0f32, 1e-6, 0.5, 1.0] {
+            assert!(
+                !mirrored_ray_intersects_ground(planet, sun_mu, planet),
+                "surface + sun_mu {sun_mu} at/above the horizon must be visible"
+            );
+        }
+        // f32 evaluation noise around the exact surface (~0.2 m at Earth
+        // scale) stays inside the band and follows the horizon rule.
+        let surface_noise = planet * (1.0 - 5e-8);
+        assert!(
+            mirrored_ray_intersects_ground(surface_noise, -0.2, planet),
+            "just inside the surface band the horizon rule must still occlude"
+        );
+        assert!(
+            !mirrored_ray_intersects_ground(surface_noise, 0.2, planet),
+            "just inside the surface band an upward sun must stay visible"
+        );
+        // The production observer altitude (2 m) is outside the band and
+        // stays on the exact quadratic branch.
+        assert!(
+            planet + 2.0 > planet * (1.0 + 1e-7),
+            "the 2 m observer must stay on the exact quadratic branch"
+        );
+        // Altitude + ray above the tangent => visible; below => occluded.
+        let altitude = planet + 25_000.0;
+        let tangent_mu = -(1.0 - (planet / altitude).powi(2)).sqrt();
+        assert!(
+            !mirrored_ray_intersects_ground(altitude, tangent_mu * 0.5, planet),
+            "altitude + ray above the tangent must be visible"
+        );
+        assert!(
+            mirrored_ray_intersects_ground(altitude, tangent_mu * 1.5, planet),
+            "altitude + ray below the tangent must be occluded"
+        );
+    }
+
+    /// CPU mirror of the WGSL `atmosphere_distance` march length.
+    fn mirrored_atmosphere_distance(r0: f32, mu: f32, p: &AtmosphereParameters) -> f32 {
+        let top = mirrored_ray_sphere_near(r0, mu, p.planet_radius_m + p.atmosphere_height_m);
+        let ground = mirrored_ray_sphere_near(r0, mu, p.planet_radius_m);
+        if ground > 0.0 && (top < 0.0 || ground < top) {
+            ground
+        } else {
+            top.max(0.0)
+        }
+    }
+
+    /// CPU mirror of the WGSL `ms_transfer_integral`: the Hillaire (2020)
+    /// Eq. 8 integrand `L_f(x, v) = ∫ σ_s(x) T(x, x - t v) dt`. The mirror
+    /// takes NO sun input at all — the medium transfer is independent of the
+    /// sun irradiance, of the phase function and of the planet-shadow
+    /// visibility by construction, exactly like the WGSL original.
+    fn mirrored_ms_transfer(r0: f32, mu: f32, p: &AtmosphereParameters) -> [f32; 3] {
+        const STEPS: i32 = 32;
+        let distance = mirrored_atmosphere_distance(r0, mu, p);
+        let dt = distance / STEPS as f32;
+        let mut optical_depth = [0.0f32; 3];
+        let mut transfer = [0.0f32; 3];
+        for step in 0..STEPS {
+            let t = (step as f32 + 0.5) * dt;
+            let radius = (r0 * r0 + 2.0 * r0 * mu * t + t * t).max(0.0).sqrt();
+            let height = (radius - p.planet_radius_m).max(0.0);
+            let rho_rayleigh = (-height / p.rayleigh_scale_height_m).exp();
+            let rho_mie = (-height / p.mie_scale_height_m).exp();
+            let rho_ozone = (1.0 - (height - 25_000.0).abs() / 15_000.0).max(0.0);
+            for channel in 0..3 {
+                let sigma_s = p.rayleigh_scattering[channel] * rho_rayleigh
+                    + p.mie_scattering[channel] * rho_mie;
+                let sigma_t = p.rayleigh_scattering[channel] * rho_rayleigh
+                    + p.mie_extinction[channel] * rho_mie
+                    + p.ozone_absorption[channel] * rho_ozone;
+                optical_depth[channel] += sigma_t * dt;
+                transfer[channel] += sigma_s * (-optical_depth[channel]).exp() * dt;
+            }
+        }
+        transfer
+    }
+
+    /// CPU mirror of the WGSL `fibonacci_direction` deterministic sphere set.
+    fn mirrored_fibonacci_direction(index: i32, count: i32) -> [f32; 3] {
+        const GOLDEN_ANGLE: f32 = 2.399_963_1;
+        let i = index as f32 + 0.5;
+        let cos_theta = 1.0 - 2.0 * i / count as f32;
+        let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+        let phi = i * GOLDEN_ANGLE;
+        [sin_theta * phi.cos(), cos_theta, sin_theta * phi.sin()]
+    }
+
+    #[test]
+    fn ms_transfer_sphere_average_is_bounded_below_one() {
+        let p = AtmosphereParameters::earth();
+        // Sphere-averaged f_ms over the exact 32-sample Fibonacci set of the
+        // WGSL generation, for representative LUT rows.
+        for height in [0.0f32, 2.0, 12_000.0, 40_000.0] {
+            let r0 = p.planet_radius_m + height;
+            let mut sum = [0.0f32; 3];
+            for index in 0..32 {
+                let direction = mirrored_fibonacci_direction(index, 32);
+                let mu = direction[1].clamp(-1.0, 1.0);
+                let transfer = mirrored_ms_transfer(r0, mu, &p);
+                for channel in 0..3 {
+                    // Per-direction transfer: finite, non-negative, < 1.
+                    assert!(
+                        transfer[channel].is_finite() && (0.0..1.0).contains(&transfer[channel]),
+                        "L_f must be a bounded medium transfer at {height} m, got {transfer:?}"
+                    );
+                    sum[channel] += transfer[channel];
+                }
+            }
+            for (channel, channel_sum) in sum.iter().enumerate() {
+                let raw = *channel_sum / 32.0;
+                let f_ms = raw.clamp(0.0, 0.999);
+                // Bounded before the series, and the closed Psi_ms factor
+                // (6) is finite and never below one.
+                assert!(
+                    (0.0..1.0).contains(&f_ms),
+                    "f_ms[{channel}] = {raw} at {height} m must stay in [0, 1) before the clamp"
+                );
+                let factor = 1.0 / (1.0 - f_ms);
+                assert!(
+                    factor.is_finite() && factor >= 1.0,
+                    "the series factor must be finite, got {factor}"
+                );
+            }
         }
     }
 
@@ -2151,6 +2422,131 @@ mod tests {
     fn face_centre(size: u32, face: &[f32]) -> [f32; 3] {
         let texel = ((size / 2 * size + size / 2) * 4) as usize;
         [face[texel], face[texel + 1], face[texel + 2]]
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; run with -- --ignored"]
+    fn transfer_lut_is_sun_independent_and_output_doubles_with_irradiance() {
+        let (device, queue) = smoke_device();
+        let parameters = AtmosphereParameters::earth();
+        let base_sun = earth_sun();
+        // The same sun with exactly double the irradiance: same direction and
+        // angular radius, doubled radiance.
+        let base_irradiance = base_sun.irradiance();
+        let doubled_sun = SunState::from_irradiance(
+            base_sun.direction,
+            [
+                base_irradiance[0] * 2.0,
+                base_irradiance[1] * 2.0,
+                base_irradiance[2] * 2.0,
+            ],
+            base_sun.angular_radius_radians,
+        )
+        .with_atmosphere_transmittance(parameters);
+        assert!(
+            (doubled_sun.irradiance()[1] - 2.0 * base_irradiance[1]).abs()
+                < 1e-3 * base_irradiance[1],
+            "the doubled sun must carry exactly twice the base irradiance"
+        );
+
+        let base = create_physical_environment_with_usage(
+            &device,
+            &queue,
+            parameters,
+            base_sun,
+            wgpu::TextureUsages::COPY_SRC,
+        )
+        .expect("the base sun must generate");
+        let doubled = create_physical_environment_with_usage(
+            &device,
+            &queue,
+            parameters,
+            doubled_sun,
+            wgpu::TextureUsages::COPY_SRC,
+        )
+        .expect("the doubled sun must generate");
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("both initialization submissions must complete");
+
+        // The Hillaire transfer LUT is built with E_I = 1: doubling the real
+        // SunState irradiance must not change a single texel of it.
+        let lut_base = read_first_face(
+            &device,
+            &queue,
+            base.test_texture(1),
+            MULTI_SCATTERING_SIZE.0,
+            MULTI_SCATTERING_SIZE.1,
+        );
+        let lut_doubled = read_first_face(
+            &device,
+            &queue,
+            doubled.test_texture(1),
+            MULTI_SCATTERING_SIZE.0,
+            MULTI_SCATTERING_SIZE.1,
+        );
+        assert!(
+            lut_base.iter().any(|value| *value > 0.0),
+            "the transfer LUT must carry energy"
+        );
+        assert_eq!(
+            lut_base, lut_doubled,
+            "the transfer LUT must be bitwise identical under a doubled sun: \
+             it is a transfer function, the SunState irradiance is not baked in"
+        );
+
+        // Every consumed output is linear in the irradiance: doubling the
+        // SunState irradiance doubles the sky-view LUT and the environment
+        // cube (the single application point is the consumption in
+        // `sky_radiance`, never the LUT itself).
+        for (texture_index, size, label) in [
+            (2usize, SKY_VIEW_SIZE, "sky-view LUT"),
+            (
+                3usize,
+                (ENVIRONMENT_CUBE_SIZE, ENVIRONMENT_CUBE_SIZE),
+                "environment cube face 0",
+            ),
+        ] {
+            let base_values = read_first_face(
+                &device,
+                &queue,
+                base.test_texture(texture_index),
+                size.0,
+                size.1,
+            );
+            let doubled_values = read_first_face(
+                &device,
+                &queue,
+                doubled.test_texture(texture_index),
+                size.0,
+                size.1,
+            );
+            let mut energetic = 0usize;
+            // RGB channels only: alpha is the constant 1.0 coverage flag and
+            // is deliberately NOT linear in the irradiance.
+            let base_texels = base_values.as_chunks::<4>().0;
+            let doubled_texels = doubled_values.as_chunks::<4>().0;
+            for (texel_a, texel_b) in base_texels.iter().zip(doubled_texels) {
+                for channel in 0..3 {
+                    let a = texel_a[channel];
+                    let b = texel_b[channel];
+                    assert!(a.is_finite() && b.is_finite(), "{label} must stay finite");
+                    let expected = 2.0 * a;
+                    assert!(
+                        (b - expected).abs() <= 2e-7 + 1e-3 * expected.abs(),
+                        "{label}: doubling the irradiance must double the output \
+                         (got {a} -> {b}, expected {expected})"
+                    );
+                    if a.abs() > 2e-7 {
+                        energetic += 1;
+                    }
+                }
+            }
+            assert!(
+                energetic > 0,
+                "{label} must carry real energy for the ratio to be meaningful"
+            );
+        }
     }
 
     /// Per-channel mean (RGB) of one read-back face slice, accumulated in f64.

@@ -19,12 +19,17 @@
 //     direct sun visibility is exactly zero (never the ground-truncated
 //     transmittance);
 //   * multiple scattering following the Hillaire (2020) energy-compensation
-//     closure: a second-order radiance `L_2ndOrder` (isotropic phase, full
-//     spherical integration, ground-bounce component included through the
-//     ground albedo) and a *dimensionless* energy-transfer ratio `f_ms`
-//     derived from it, combined as `Psi_ms = L_2ndOrder / (1 - f_ms)`. The
-//     ground albedo participates in the ground-bounce radiance, never as the
-//     term of the geometric-series denominator.
+//     closure (section 5.5.3, Eq. 7-8) with TWO INDEPENDENT spherical
+//     integrals: the second-order scattering transfer `L_2ndOrder` (isotropic
+//     phase, unit source E_I = 1, ground-bounce component included through
+//     the ground albedo) and the *dimensionless* medium-transfer ratio
+//     `f_ms = ∫ L_f p_u dω` with `L_f(x,v) = ∫ σ_s(x) T(x, x - t v) dt`
+//     (no sun irradiance, no phase function, no planet-shadow visibility),
+//     combined as `Psi_ms = L_2ndOrder / (1 - f_ms)`. The LUT therefore
+//     stores a TRANSFER FUNCTION per unit sun irradiance; the real SunState
+//     irradiance is applied exactly once, where the LUT is consumed in
+//     `sky_radiance`. The ground albedo participates in the ground-bounce
+//     radiance, never as the term of the geometric-series denominator.
 //
 // Coordinates: the renderer world is +Y up and the RC field stays local to the
 // render origin. The atmosphere math therefore treats the camera as sitting
@@ -39,6 +44,15 @@ const SPHERE_SAMPLES: i32 = 32;
 const OZONE_CENTER_M: f32 = 25000.0;
 const OZONE_WIDTH_M: f32 = 15000.0;
 const GOLDEN_ANGLE: f32 = 2.399963229728653;
+// Unit directional source E_I = 1 (Hillaire 2020, Eq. 7): the normalized
+// irradiance the multiple-scattering transfer LUT is built against.
+const UNIT_IRRADIANCE: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
+// Relative band around the planet radius inside which the t = 0 tangent root
+// degenerates the ground-intersection quadratic (see `ray_intersects_ground`).
+// f32 evaluation of `sample_radius` at Earth scale carries ~0.2 m of noise,
+// so the band is ~0.64 m: wide enough to swallow that noise, narrow enough to
+// leave a real observer altitude (>= 2 m) on the exact quadratic branch.
+const SURFACE_BAND_EPSILON: f32 = 1e-7;
 
 struct AtmosphereUniform {
     planet_radius_m: f32,
@@ -136,13 +150,31 @@ fn sample_radius(r0: f32, mu: f32, distance: f32) -> f32 {
 
 // True when the ray from a sample point at `sample_radius` towards the sun
 // (cosine `sun_mu` against the local up) intersects the ground sphere, i.e.
-// the planet itself occludes the direct sun beam at that point. A strictly
-// positive intersection distance is required, so a ray leaving a point exactly
-// on the surface towards the sky is *not* an occlusion. Near the horizon the
-// predicate degrades gracefully to the geometric tangent condition
-// (discriminant < 0 -> no intersection), never to a NaN.
+// the planet itself occludes the direct sun beam at that point.
+//
+// Exact-surface edge case: when `sample_radius == planet_radius` the quadratic
+// always has the root t = 0 (c = 0), so the nearest-root test alone can never
+// see the *second* root at t = -2 r mu, which is strictly positive exactly
+// when the sun is below the horizon. Inside the f32 surface band the decision
+// is therefore taken directly on the horizon:
+//   * surface + sun above horizon  -> visible
+//   * surface + tangent (mu = 0)   -> visible
+//   * surface + sun below horizon  -> OCCLUDED
+// Strictly above the band (c > 0) both roots share the sign of -mu, so the
+// nearest root is positive exactly when the sun sits below the local tangent:
+//   * altitude + ray above tangent -> visible
+//   * altitude + ray below tangent -> occluded
+// Near the tangent the predicate degrades gracefully to the geometric
+// condition (discriminant < 0 -> no intersection), never to a NaN.
+// `ray_sphere_near` itself is intentionally left untouched: its other callers
+// (atmosphere_distance, the ground-bounce distance) rely on its current
+// nearest-positive-root contract.
 fn ray_intersects_ground(sample_radius: f32, sun_mu: f32) -> bool {
-    return ray_sphere_near(sample_radius, sun_mu, atmosphere.planet_radius_m) > 0.0;
+    let planet_radius = atmosphere.planet_radius_m;
+    if (sample_radius <= planet_radius * (1.0 + SURFACE_BAND_EPSILON)) {
+        return sun_mu < 0.0;
+    }
+    return ray_sphere_near(sample_radius, sun_mu, planet_radius) > 0.0;
 }
 
 // Local up at a point of the view ray, expressed without large-coordinate
@@ -211,15 +243,17 @@ fn transmittance_lookup(height_m: f32, mu: f32) -> vec3<f32> {
     ).rgb;
 }
 
-// Single scattering along one view ray. The source strength is the sun's
-// irradiance; `isotropic` selects the uniform phase used by the multiple
-// scattering approximation.
+// Single scattering along one view ray. The source strength is the passed
+// `sun_irradiance` (the real SunState irradiance for the sky path, the unit
+// source E_I = 1 for the multiple-scattering transfer LUT); `isotropic`
+// selects the uniform phase used by the multiple scattering approximation.
 fn single_scattering(
     r0: f32,
     view_mu: f32,
     view_direction: vec3<f32>,
     sun_direction: vec3<f32>,
     isotropic: bool,
+    sun_irradiance: vec3<f32>,
 ) -> vec3<f32> {
     let cos_theta = clamp(dot(view_direction, sun_direction), -1.0, 1.0);
     var rayleigh_phase = 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
@@ -261,25 +295,27 @@ fn single_scattering(
         mie_sum = mie_sum + transmittance * rho_mie * dt;
     }
 
-    return atmosphere.sun_irradiance.rgb
+    return sun_irradiance
         * (atmosphere.rayleigh_scattering.rgb * rayleigh_sum * rayleigh_phase
             + atmosphere.mie_scattering.rgb * mie_sum * mie_phase);
 }
 
 // Lambertian response of the ground for view rays that reach the surface.
+// Driven by the same `sun_irradiance` selector as `single_scattering`.
 fn ground_reflection(
     r0: f32,
     view_mu: f32,
     view_direction: vec3<f32>,
     sun_direction: vec3<f32>,
     distance: f32,
+    sun_irradiance: vec3<f32>,
 ) -> vec3<f32> {
     let radius = sample_radius(r0, view_mu, distance);
     let up = sample_up(r0, distance, view_direction, radius);
     let sun_cos = max(dot(up, sun_direction), 0.0);
     let height = max(radius - atmosphere.planet_radius_m, 0.0);
     let sun_transmittance = transmittance_lookup(height, sun_cos);
-    return atmosphere.ground_albedo.rgb * atmosphere.sun_irradiance.rgb
+    return atmosphere.ground_albedo.rgb * sun_irradiance
         * sun_transmittance * sun_cos / PI;
 }
 
@@ -299,78 +335,125 @@ fn fibonacci_direction(index: i32, count: i32) -> vec3<f32> {
     return vec3<f32>(sin_theta * cos(phi), cos_theta, sin_theta * sin(phi));
 }
 
-// Rec.709 luminance of a linear radiance triple; used only to collapse the
-// energy-transfer ratio to a scalar, exactly as in Hillaire (2020).
-fn luminance3(color: vec3<f32>) -> f32 {
-    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+// Hillaire (2020) Eq. 8 inner transfer integral, evaluated by the same
+// deterministic ray march used by the rest of the LUT generation:
+//
+//     L_f(x, v) = ∫ σ_s(x) * T(x, x - t v) dt
+//
+// σ_s is the volume scattering coefficient (Rayleigh + Mie) at the sample
+// point and T the analytic transmittance exp(-τ) accumulated from the ray
+// origin to it. This is the PURE MEDIUM TRANSFER: no sun irradiance, no phase
+// function, no planet-shadow visibility and no directional-light angular
+// dependence enter it. σ_s [m^-1] times dt [m] makes the result a
+// dimensionless RGB ratio, the per-channel fraction of the light scattered at
+// x that the medium carries back along v.
+fn ms_transfer_integral(r0: f32, mu: f32) -> vec3<f32> {
+    let distance = atmosphere_distance(r0, mu);
+    let dt = distance / f32(ATMOSPHERE_STEPS);
+    var optical_depth = vec3<f32>(0.0);
+    var transfer = vec3<f32>(0.0);
+    for (var step = 0; step < ATMOSPHERE_STEPS; step = step + 1) {
+        let t = (f32(step) + 0.5) * dt;
+        let radius = sample_radius(r0, mu, t);
+        let height = max(radius - atmosphere.planet_radius_m, 0.0);
+        let rho_rayleigh = rayleigh_density(height);
+        let rho_mie = mie_density(height);
+        let rho_ozone = ozone_density(height);
+        let sigma_s = atmosphere.rayleigh_scattering.rgb * rho_rayleigh
+            + atmosphere.mie_scattering.rgb * rho_mie;
+        optical_depth = optical_depth
+            + (atmosphere.rayleigh_scattering.rgb * rho_rayleigh
+                + atmosphere.mie_extinction.rgb * rho_mie
+                + atmosphere.ozone_absorption.rgb * rho_ozone) * dt;
+        transfer = transfer + sigma_s * exp(-optical_depth) * dt;
+    }
+    return transfer;
 }
 
-// Hillaire (2020) energy-compensation multiple scattering.
+// Hillaire (2020) energy-compensation multiple scattering, section 5.5.3.
 //
-// Units: `l_2nd_order` is the second-order in-scattered RADIANCE
-// [W m^-2 sr^-1] driven by the sun irradiance `E = sun_irradiance.rgb`
-// [W m^-2]; it is the full-sphere average of the isotropic-phase single
-// scattering plus the ground-bounce component, which is where the ground
-// albedo participates in the model.
+// TWO INDEPENDENT integrals are accumulated over the same deterministic
+// Fibonacci sphere (uniform phase p_u = 1/(4π), so the sphere average of the
+// per-direction integrands IS the integral):
 //
-// `f_ms` is the DIMENSIONLESS energy-transfer ratio of the medium: the
-// fraction of the incoming solar irradiance that one isotropic bounce returns
-// to the medium,
+// 1. `l_2nd_order` — Eq. 7, the second-order scattering transfer
 //
-//     f_ms = 4*pi * luminance(L_2ndOrder) / luminance(E)   (unitless)
+//        L_2ndOrder = ∫Ω L'(xs, -ω) p_u dω
 //
-// Because both terms are driven by the same sun irradiance, `f_ms` is
-// independent of the sun intensity even though the LUT keeps the irradiance
-// folded into `l_2nd_order`. The bounce series then closes as
+//    where L' is the single scattering from the directional light (WITH its
+//    planet-shadow visibility) plus the ground contribution, both driven by
+//    the NORMALIZED unit source E_I = 1. The result is a TRANSFER FUNCTION
+//    [radiance per unit sun irradiance], not a radiance: the real SunState
+//    irradiance is deliberately absent from this LUT and is applied exactly
+//    once, where the LUT is consumed in `sky_radiance`. The ground albedo
+//    participates here, in the ground-bounce radiance.
 //
-//     F_ms   = 1 / (1 - f_ms)
-//     Psi_ms = L_2ndOrder * F_ms
+// 2. `f_ms` — Eq. 8, the dimensionless medium-transfer ratio
 //
-// `l_2nd_order` (a radiance) and `f_ms` (a ratio) are distinct quantities and
-// no radiance ever appears in the geometric-series denominator.
+//        f_ms = ∫Ω L_f(xs, -ω) p_u dω,   L_f(x, v) = ∫ σ_s(x) T(x, x - t v) dt
+//
+//    accumulated by `ms_transfer_integral`: no sun irradiance, no phase
+//    function, no shadow visibility, no directional dependence. It is NOT
+//    derived from `l_2nd_order` by any luminance ratio; the two accumulators
+//    are distinct integrals of distinct integrands.
+//
+// The bounce series then closes, per channel, as
+//
+//     F_ms   = 1 / (1 - f_ms)          (f_ms clamped into [0, 1) first)
+//     Psi_ms = L_2ndOrder * F_ms = L_2ndOrder / (1 - f_ms)
+//
+// and Psi_ms — still a transfer function — is what the LUT stores.
 fn multi_scattering_texel(height_m: f32, sun_mu: f32) -> vec3<f32> {
     let r0 = atmosphere.planet_radius_m + height_m;
     let sun_direction = vec3<f32>(sqrt(max(1.0 - sun_mu * sun_mu, 0.0)), sun_mu, 0.0);
     var l_2nd_order = vec3<f32>(0.0);
+    var f_ms_sum = vec3<f32>(0.0);
     for (var sample_index = 0; sample_index < SPHERE_SAMPLES; sample_index = sample_index + 1) {
         let direction = fibonacci_direction(sample_index, SPHERE_SAMPLES);
         let mu = clamp(direction.y, -1.0, 1.0);
+        // Eq. 7 integrand against the unit source E_I = 1.
         l_2nd_order = l_2nd_order
-            + single_scattering(r0, mu, direction, sun_direction, true);
-        // Ground-bounce component: sunlight reflected by the planet surface
-        // towards this direction re-enters the second-order scattering field.
+            + single_scattering(r0, mu, direction, sun_direction, true, UNIT_IRRADIANCE);
+        // Ground-bounce component: unit-source sunlight reflected by the
+        // planet surface towards this direction re-enters the second-order
+        // scattering field.
         let ground_distance = ray_sphere_near(r0, mu, atmosphere.planet_radius_m);
         if (ground_distance > 0.0) {
             l_2nd_order = l_2nd_order
-                + ground_reflection(r0, mu, direction, sun_direction, ground_distance);
+                + ground_reflection(r0, mu, direction, sun_direction, ground_distance, UNIT_IRRADIANCE);
         }
+        // Eq. 8 integrand: independent medium-transfer accumulation.
+        f_ms_sum = f_ms_sum + ms_transfer_integral(r0, mu);
     }
     l_2nd_order = l_2nd_order / f32(SPHERE_SAMPLES);
-    // Dimensionless transfer ratio, clamped into the physically valid
+    // Dimensionless RGB transfer ratio, clamped into the physically valid
     // convergence interval [0, 1) *before* the geometric series is formed.
-    let sun_luminance = max(luminance3(atmosphere.sun_irradiance.rgb), 1e-6);
-    let f_ms = clamp(4.0 * PI * luminance3(l_2nd_order) / sun_luminance, 0.0, 0.999);
-    let f_ms_factor = 1.0 / (1.0 - f_ms);
-    return l_2nd_order * f_ms_factor;
+    let f_ms = clamp(f_ms_sum / f32(SPHERE_SAMPLES), vec3<f32>(0.0), vec3<f32>(0.999));
+    return l_2nd_order / (1.0 - f_ms);
 }
 
 fn sky_radiance(view_direction: vec3<f32>) -> vec3<f32> {
     let r0 = atmosphere.planet_radius_m + atmosphere.observer_altitude_m;
     let view_mu = clamp(view_direction.y, -1.0, 1.0);
     let sun_direction = atmosphere.sun_direction.xyz;
-    var radiance = single_scattering(r0, view_mu, view_direction, sun_direction, false);
+    // The single access to the real SunState irradiance in this module: every
+    // radiance term below multiplies by it exactly once.
+    let sun_irradiance = atmosphere.sun_irradiance.rgb;
+    var radiance = single_scattering(r0, view_mu, view_direction, sun_direction, false, sun_irradiance);
     let ground_distance = ray_sphere_near(r0, view_mu, atmosphere.planet_radius_m);
     if (ground_distance > 0.0) {
         radiance = radiance
-            + ground_reflection(r0, view_mu, view_direction, sun_direction, ground_distance);
+            + ground_reflection(r0, view_mu, view_direction, sun_direction, ground_distance, sun_irradiance);
     }
     // Isotropic multiple-scattering term; it is a real part of the model
-    // computed from the atmosphere itself, never an aesthetic tint.
+    // computed from the atmosphere itself, never an aesthetic tint. The LUT
+    // holds the unit-source transfer function Psi_ms, so the real SunState
+    // irradiance is applied HERE, exactly once, at consumption.
     radiance = radiance
         + multi_scattering_lookup(
             atmosphere.observer_altitude_m,
             clamp(sun_direction.y, -1.0, 1.0),
-        );
+        ) * sun_irradiance;
     return max(radiance, vec3<f32>(0.0));
 }
 
