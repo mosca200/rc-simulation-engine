@@ -18,8 +18,9 @@
 // anti-repetition rotated second sample, a distance-faded detail normal
 // layer, multi-scale roughness, and presentation-only debug channels driven
 // by a uniform selector (no shader recompiles).
-// RV2-5 adds persistent physical atmosphere/IBL resources for the V2 path;
-// the legacy analytic branch remains selected when `physical_flags.x` is 0.
+// RV2-5 adds persistent physical atmosphere/IBL resources for the V2 path; the
+// legacy analytic entry points remain selected for V1 and for the analytic
+// fallback, and never reference the physical bindings.
 //
 // G3B adds an HDR outdoor lighting pipeline:
 //   scene HDR pass (Rgba16Float, linear, no LDR clamp)
@@ -70,8 +71,13 @@ struct ObjectUniform {
 // env_specular.xyz:    G3B environment specular color (analytic sky
 //                      reflection tint, pre-wired for future prefiltered IBL).
 // env_specular.w:      environment specular strength scaler.
-// sun_transmittance.xyz: clear-air attenuation shared by direct sun and disk.
-// physical_flags.x:      1 for RV2-5 physical LUT/IBL mode, 0 for analytic.
+// sun_transmittance.xyz: physical atmospheric attenuation shared by the direct
+//                      sun term and the analytic sun disk.
+// atmosphere_state.x:  RV2-5 sun angular radius (radians).
+// atmosphere_state.y:  RV2-5 sun disk solid angle (sr); the physical direct
+//                      irradiance is sun_color.xyz * atmosphere_state.y.
+// atmosphere_state.z:  RV2-5 observer transmittance-LUT v coordinate (baked).
+// atmosphere_state.w:  1 when the physical V2 entry points are bound, else 0.
 struct EnvironmentUniform {
     light_direction: vec4<f32>,
     ambient: vec4<f32>,
@@ -82,7 +88,7 @@ struct EnvironmentUniform {
     sky_diffuse: vec4<f32>,
     env_specular: vec4<f32>,
     sun_transmittance: vec4<f32>,
-    physical_flags: vec4<f32>,
+    atmosphere_state: vec4<f32>,
 };
 
 // G3B: postprocess state for the final display pass.
@@ -551,10 +557,6 @@ fn directional_shadow_visibility(world_position: vec3<f32>) -> f32 {
 // sun-driven. Slots for future prefiltered IBL: replace this function's body
 // with a probe sample while keeping the EnvironmentUniform contract.
 fn sky_diffuse_irradiance(n: vec3<f32>) -> vec3<f32> {
-    if (environment.physical_flags.x > 0.5) {
-        let irradiance = textureSample(irradiance_cube, environment_sampler, safe_normalize(n));
-        return irradiance.rgb;
-    }
     let ndot_up = clamp(dot(n, WORLD_UP), 0.0, 1.0);
     // Sky gradient between horizon and zenith above ground (same power curve
     // as the visible sky), and horizon-to-ground below.
@@ -575,39 +577,59 @@ fn sky_diffuse_irradiance(n: vec3<f32>) -> vec3<f32> {
 // metals (F0 ~ albedo) reflect the sky color strongly while dielectrics stay
 // subtle; a GGX-like lobe weight (smoothness^2) makes sharp surfaces reflect
 // more and rough surfaces fade toward the diffuse response. Deterministic and
-// documentable — this is the placeholder for a future prefiltered IBL env map.
+// documentable — the analytic counterpart of the physical split-sum IBL.
 fn environment_specular_response(
+    f0: vec3<f32>,
+    roughness: f32,
+    ndot_v: f32,
+) -> vec3<f32> {
+    let smoothness = clamp(1.0 - roughness, 0.0, 1.0);
+    let lobe_weight = smoothness * smoothness;
+    let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
+    let env_color = mix(environment.sky_horizon.xyz, environment.sky_zenith.xyz, 0.5);
+    return fresnel * env_color * environment.env_specular.xyz * lobe_weight * environment.env_specular.w;
+}
+
+// ---------------------------------------------------------------------------
+// RV2-5 physical image-based lighting
+// ---------------------------------------------------------------------------
+//
+// These helpers are only reachable from the V2 entry points (`fs_lit_v2`,
+// `fs_terrain_v2`, `fs_vegetation_v2`, `fs_sky_v2`), which wgpu validates
+// against the V2-only environment layout. The analytic/V1 entry points never
+// reference their bindings, so V1 keeps its previous layout and output.
+
+/// Diffuse IBL: the cosine-weighted irradiance cubemap.
+fn physical_irradiance(n: vec3<f32>) -> vec3<f32> {
+    return textureSample(irradiance_cube, environment_sampler, safe_normalize(n)).rgb;
+}
+
+/// Specular IBL: prefiltered radiance at the roughness mip times the split-sum
+/// BRDF integration (`F0 * A + B`). Never multiplied by the directional shadow.
+fn physical_specular_response(
     f0: vec3<f32>,
     roughness: f32,
     ndot_v: f32,
     n: vec3<f32>,
     world_position: vec3<f32>,
 ) -> vec3<f32> {
-    if (environment.physical_flags.x > 0.5) {
-        let v = safe_normalize(camera.camera_position.xyz - world_position);
-        let reflected = safe_normalize(2.0 * dot(n, v) * n - v);
-        let mip = clamp(roughness, 0.0, 1.0) * 7.0;
-        let prefiltered = textureSampleLevel(
-            prefiltered_environment_cube,
-            environment_sampler,
-            reflected,
-            mip,
-        ).rgb;
-        let environment_sample = textureSample(environment_cube, environment_sampler, reflected).rgb;
-        let brdf = textureSample(
-            brdf_lut,
-            atmosphere_sampler,
-            vec2<f32>(clamp(ndot_v, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
-        ).rg;
-        let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
-        return mix(prefiltered, environment_sample, 0.08 * (1.0 - roughness))
-            * (fresnel * brdf.x + brdf.y);
-    }
-    let smoothness = clamp(1.0 - roughness, 0.0, 1.0);
-    let lobe_weight = smoothness * smoothness;
+    let v = safe_normalize(camera.camera_position.xyz - world_position);
+    let reflected = safe_normalize(2.0 * dot(n, v) * n - v);
+    // roughness 0 -> mip 0, roughness 1 -> mip 7, continuous and clamped.
+    let mip = clamp(roughness, 0.0, 1.0) * 7.0;
+    let prefiltered = textureSampleLevel(
+        prefiltered_environment_cube,
+        environment_sampler,
+        reflected,
+        mip,
+    ).rgb;
+    let brdf = textureSample(
+        brdf_lut,
+        atmosphere_sampler,
+        vec2<f32>(clamp(ndot_v, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
+    ).rg;
     let fresnel = schlick_fresnel(f0, clamp(ndot_v, 0.0, 1.0));
-    let env_color = mix(environment.sky_horizon.xyz, environment.sky_zenith.xyz, 0.5);
-    return fresnel * env_color * environment.env_specular.xyz * lobe_weight * environment.env_specular.w;
+    return prefiltered * (fresnel * brdf.x + brdf.y);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +663,8 @@ fn environment_specular_response(
 // G3A: shared PBR response used by both fragment paths (`fs_lit` and
 // `fs_terrain`). Returns the lit color BEFORE fog. The operands and order
 // exactly mirror the pre-G3A `fs_lit` body, so the established look is
-// bit-compatible.
+// bit-compatible. This is the analytic/V1 path; `lit_pbr_response_physical`
+// below is the RV2-5 split-sum IBL counterpart.
 fn lit_pbr_response(
     base_rgba: vec4<f32>,
     n: vec3<f32>,
@@ -681,10 +704,7 @@ fn lit_pbr_response(
 
     // Direct lighting (see legacy-compat irradiance scale above).
     let irradiance = PI * environment.light_direction.w;
-    var direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
-    if (environment.physical_flags.x > 0.5) {
-        direct_unshadowed *= environment.sun_transmittance.rgb;
-    }
+    let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l;
     let shadow_visibility = directional_shadow_visibility(world_position);
     let direct = direct_unshadowed * shadow_visibility;
 
@@ -695,17 +715,63 @@ fn lit_pbr_response(
     // keeps the shadow side readable without washing the aircraft out.
     // Sky specular: roughness-aware analytic environment response through the
     // PBR path — metals (high F0) reflect strongly, dielectric clearcoat stays
-    // subtle, and sharper surfaces (low roughness) are boosted. Pre-wired for
-    // future prefiltered IBL by keeping both terms in the environment uniform.
+    // subtle, and sharper surfaces (low roughness) are boosted.
     let ambient_diffuse = diffuse_albedo * sky_diffuse_irradiance(n);
-    let ambient_specular = environment_specular_response(f0, roughness, ndot_v, n, world_position);
-    // Physical mode uses additive energy-conserving diffuse/specular IBL;
-    // analytic fallback keeps the established G3B response byte-compatible.
-    let ambient = select(
-        mix(ambient_diffuse, ambient_specular, metallic),
-        ambient_diffuse + ambient_specular,
-        environment.physical_flags.x > 0.5,
+    let ambient_specular = environment_specular_response(f0, roughness, ndot_v);
+    let ambient = mix(ambient_diffuse, ambient_specular, metallic);
+
+    let lit_rgb = direct + ambient;
+    return lit_rgb;
+}
+
+// RV2-5 physical PBR response.
+//
+// Identical direct term, driven by the single SunState:
+//   direct = sun BRDF * NdotL * SunState.irradiance * atmospheric
+//            transmittance * shadow
+//   ambient = diffuse IBL (irradiance cubemap) + specular IBL
+//             (prefiltered cube at the roughness mip * split-sum BRDF)
+// The IBL terms are additive and are never multiplied by the directional
+// shadow. No analytic environment term is added in physical mode.
+fn lit_pbr_response_physical(
+    base_rgba: vec4<f32>,
+    n: vec3<f32>,
+    world_position: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+) -> vec3<f32> {
+    let l = safe_normalize(environment.light_direction.xyz);
+    let v = safe_normalize(camera.camera_position.xyz - world_position);
+    let h = safe_normalize(v + l);
+
+    let ndot_l = max(dot(n, l), 0.0);
+    let ndot_v = max(dot(n, v), 1e-4);
+    let ndot_h = max(dot(n, h), 0.0);
+    let vdot_h = max(dot(v, h), 0.0);
+
+    let f0 = mix(vec3<f32>(DIELECTRIC_F0), base_rgba.rgb, metallic);
+    let diffuse_albedo = base_rgba.rgb * (1.0 - metallic);
+
+    let alpha = roughness * roughness;
+    let distribution = ggx_distribution(ndot_h, alpha);
+    let geometry = smith_geometry(ndot_v, ndot_l, roughness);
+    let fresnel = schlick_fresnel(f0, vdot_h);
+    let specular_denominator = max(4.0 * ndot_v * ndot_l, 1e-4);
+    let specular = min(
+        distribution * geometry * fresnel / specular_denominator,
+        vec3<f32>(SPECULAR_CLAMP),
     );
+
+    // Sun irradiance from the single SunState: disk radiance * solid angle.
+    let irradiance = environment.sun_color.xyz * environment.atmosphere_state.y;
+    let direct_unshadowed = (diffuse_albedo / PI + specular) * irradiance * ndot_l
+        * environment.sun_transmittance.rgb;
+    let shadow_visibility = directional_shadow_visibility(world_position);
+    let direct = direct_unshadowed * shadow_visibility;
+
+    let ambient_diffuse = diffuse_albedo * physical_irradiance(n);
+    let ambient_specular = physical_specular_response(f0, roughness, ndot_v, n, world_position);
+    let ambient = ambient_diffuse + ambient_specular;
 
     let lit_rgb = direct + ambient;
     return lit_rgb;
@@ -744,7 +810,23 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(final_rgb, base_rgba.a);
 }
 
-// G3A-R: terrain-only fragment entry (dedicated terrain pipeline, group 4).
+// RV2-5 physical counterpart of `fs_lit`. Same material resolution and fog,
+// but the lighting comes from `lit_pbr_response_physical` (single SunState +
+// split-sum IBL). Only this entry point references the physical bindings.
+@fragment
+fn fs_lit_v2(input: VertexOutput) -> @location(0) vec4<f32> {
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let base_rgba = input.color * texture_rgba;
+
+    let metallic = clamp(material.metallic, 0.0, 1.0);
+    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+
+    let n = safe_normalize(input.world_normal);
+    let lit_rgb = lit_pbr_response_physical(base_rgba, n, input.world_position, metallic, roughness);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+
+    return vec4<f32>(final_rgb, base_rgba.a);
+}
 // Same PBR + G2B shadow + fog pipeline as `fs_lit`, preceded by the
 // production grass detail stack:
 //   1. three-frequency albedo stack (macro tone / base + anti-repetition
@@ -761,8 +843,50 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
 // the flat plane and falls back to the world-aligned frame on degenerate
 // fragments, keeping the math finite. All UVs are world-anchored, so the
 // whole stack is invariant to camera and chunking.
+//
+// RV2-5: the material stack is shared through `terrain_surface`, while the two
+// entry points select the analytic (`fs_terrain`, V1) or the physical
+// split-sum IBL response (`fs_terrain_v2`). Keeping the physical sampling out
+// of the shared helpers means a V1 pipeline never references the RV2-5
+// bindings at all.
+struct TerrainSurface {
+    base_rgba: vec4<f32>,
+    albedo: vec4<f32>,
+    n: vec3<f32>,
+    n_ts: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    albedo_macro_s: vec4<f32>,
+    albedo_detail_s: vec4<f32>,
+};
+
 @fragment
 fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
+    let surface = terrain_surface(input);
+    let lit_rgb = lit_pbr_response(
+        surface.base_rgba,
+        surface.n,
+        input.world_position,
+        surface.metallic,
+        surface.roughness,
+    );
+    return terrain_fragment_output(input, surface, lit_rgb);
+}
+
+@fragment
+fn fs_terrain_v2(input: VertexOutput) -> @location(0) vec4<f32> {
+    let surface = terrain_surface(input);
+    let lit_rgb = lit_pbr_response_physical(
+        surface.base_rgba,
+        surface.n,
+        input.world_position,
+        surface.metallic,
+        surface.roughness,
+    );
+    return terrain_fragment_output(input, surface, lit_rgb);
+}
+
+fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // G3A-R: three-frequency world-space UVs. `uv` is the world-anchored
     // base UV (render position / base tile scale); each layer divides the
     // tile scale out and adds its own anchor so layer borders never align.
@@ -903,7 +1027,26 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     let geom_normal = safe_normalize(input.world_normal);
     let n = safe_normalize(tangent * n_ts.x + bitangent * n_ts.y + geom_normal * n_ts.z);
 
-    let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
+    return TerrainSurface(
+        base_rgba,
+        albedo,
+        n,
+        n_ts,
+        metallic,
+        roughness,
+        albedo_macro_s,
+        albedo_detail_s,
+    );
+}
+
+// Shared terrain tail: distance fog plus the presentation-only debug channels.
+// The lit color is computed by each entry point, so this helper never touches
+// the RV2-5 physical bindings and stays usable from the V1 pipeline.
+fn terrain_fragment_output(
+    input: VertexOutput,
+    surface: TerrainSurface,
+    lit_rgb: vec3<f32>,
+) -> vec4<f32> {
     let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
     // G3A-R: presentation-only debug channels. The uniform selector is
@@ -913,17 +1056,17 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     var output_rgb = final_rgb;
     let mode = terrain_material.debug_mode;
     if (mode == 1u) {
-        output_rgb = albedo.rgb;
+        output_rgb = surface.albedo.rgb;
     } else if (mode == 2u) {
-        output_rgb = n_ts * 0.5 + vec3<f32>(0.5);
+        output_rgb = surface.n_ts * 0.5 + vec3<f32>(0.5);
     } else if (mode == 3u) {
-        output_rgb = vec3<f32>(roughness);
+        output_rgb = vec3<f32>(surface.roughness);
     } else if (mode == 4u) {
-        output_rgb = albedo_macro_s.rgb;
+        output_rgb = surface.albedo_macro_s.rgb;
     } else if (mode == 5u) {
-        output_rgb = albedo_detail_s.rgb;
+        output_rgb = surface.albedo_detail_s.rgb;
     }
-    return vec4<f32>(output_rgb, base_rgba.a);
+    return vec4<f32>(output_rgb, surface.base_rgba.a);
 }
 
 // G3A-R: terrain stack tuning constants (WGSL side of the central values in
@@ -981,30 +1124,37 @@ fn vs_sky_fullscreen(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutpu
 @fragment
 fn fs_sky(input: SkyVertexOutput) -> @location(0) vec4<f32> {
     let view_dir = view_direction_from_clip(input.clip_xy);
-    var color = sky_color_for_direction(view_dir);
-    if (environment.physical_flags.x > 0.5) {
-        let azimuth = atan2(view_dir.z, view_dir.x);
-        let elevation = asin(clamp(view_dir.y, -1.0, 1.0));
-        let sky_uv = vec2<f32>(
-            fract(azimuth / (2.0 * PI) + 0.5),
-            clamp(elevation / PI + 0.5, 0.0, 1.0),
-        );
-        // Physical sky is scene-referred HDR and comes from the generated LUT;
-        // the sun disk in that LUT uses the same SunState attenuation as PBR.
-        color = textureSample(sky_view_lut, atmosphere_sampler, sky_uv).rgb;
-        let transmittance = textureSample(
+    return vec4<f32>(sky_color_for_direction(view_dir), 1.0);
+}
+
+// RV2-5 physical sky: samples the production Sky-View LUT (single scattering +
+// the multi-scattering approximation of the generated atmosphere) and adds the
+// analytic sun disk from the same SunState radiance and angular radius. Both
+// stay scene-referred HDR — no clamp, no tone mapping here.
+@fragment
+fn fs_sky_v2(input: SkyVertexOutput) -> @location(0) vec4<f32> {
+    let view_dir = view_direction_from_clip(input.clip_xy);
+    let azimuth = atan2(view_dir.z, view_dir.x);
+    let elevation = asin(clamp(view_dir.y, -1.0, 1.0));
+    let sky_uv = vec2<f32>(
+        fract(azimuth / (2.0 * PI) + 0.5),
+        clamp(elevation / PI + 0.5, 0.0, 1.0),
+    );
+    var color = textureSample(sky_view_lut, atmosphere_sampler, sky_uv).rgb;
+
+    // Solar disk: the same direction, angular radius and radiance as the PBR
+    // direct term, attenuated by the physical transmittance at the observer.
+    let sun_dir = safe_normalize(environment.light_direction.xyz);
+    let cos_radius = cos(environment.atmosphere_state.x);
+    if (dot(view_dir, sun_dir) > cos_radius) {
+        let sun_transmittance = textureSample(
             transmittance_lut,
             atmosphere_sampler,
-            vec2<f32>(0.5, clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0)),
+            vec2<f32>(clamp(sun_dir.y * 0.5 + 0.5, 0.0, 1.0), environment.atmosphere_state.z),
         ).rgb;
-        let multiple_scattering = textureSample(
-            multi_scattering_lut,
-            atmosphere_sampler,
-            vec2<f32>(0.5, clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0)),
-        ).rgb;
-        color = color * (0.85 + 0.15 * transmittance) + multiple_scattering * 0.15;
+        color = color + environment.sun_color.xyz * sun_transmittance;
     }
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(max(color, vec3<f32>(0.0)), 1.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1379,41 @@ fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
 
     let n = safe_normalize(input.world_normal);
     let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+
+    return vec4<f32>(final_rgb, 1.0);
+}
+
+// RV2-5 physical vegetation counterpart: identical material, alpha-mask and
+// debug LOD path, with the physical split-sum IBL lighting.
+@fragment
+fn fs_vegetation_v2(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
+    let mode = vegetation_state.debug_mode;
+    if (mode == 1u) {
+        let lod = u32(input.lod_class + 0.5);
+        var debug_color: vec3<f32>;
+        if (lod == 0u) {
+            debug_color = vec3<f32>(0.05, 0.65, 0.15);
+        } else if (lod == 1u) {
+            debug_color = vec3<f32>(0.85, 0.70, 0.10);
+        } else {
+            debug_color = vec3<f32>(0.90, 0.42, 0.08);
+        }
+        return vec4<f32>(debug_color, 1.0);
+    }
+
+    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let base_rgba = input.color * texture_rgba;
+
+    if (base_rgba.a < 0.45) {
+        discard;
+    }
+
+    let metallic = clamp(material.metallic, 0.0, 1.0);
+    let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+
+    let n = safe_normalize(input.world_normal);
+    let lit_rgb = lit_pbr_response_physical(base_rgba, n, input.world_position, metallic, roughness);
     let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
     return vec4<f32>(final_rgb, 1.0);
