@@ -12,12 +12,14 @@
 //! - Dedicated aircraft object uniform buffer (per-frame updated)
 
 mod accumulator;
+mod backend;
 mod camera;
 mod glb;
 mod gpu;
 mod math;
 mod mesh;
 mod pose;
+mod renderer_v2;
 pub mod scenery;
 mod shadow;
 mod surfaces;
@@ -28,6 +30,7 @@ pub mod vegetation;
 pub mod vegetation_assets;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
+pub use backend::{DesktopRenderer, RendererVersion};
 pub use camera::{
     CameraConfig, CameraMode, ChaseCamera, ChaseCameraConfig, PilotCamera, RENDER_WORLD_UP,
     exponential_fog_factor, sun_alignment, view_elevation,
