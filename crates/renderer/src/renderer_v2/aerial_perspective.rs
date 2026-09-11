@@ -32,6 +32,8 @@ pub(crate) struct AerialPerspectiveUniformRaw {
     pub(crate) mie_scattering: [f32; 4],
     pub(crate) mie_extinction_anisotropy: [f32; 4],
     pub(crate) ozone_absorption: [f32; 4],
+    /// Validation-only switch. Production construction always stores `1.0`.
+    pub(crate) validation_control: [f32; 4],
 }
 
 impl AerialPerspectiveUniformRaw {
@@ -74,7 +76,16 @@ impl AerialPerspectiveUniformRaw {
                 parameters.ozone_absorption[2],
                 0.0,
             ],
+            validation_control: [1.0, 0.0, 0.0, 0.0],
         }
+    }
+
+    /// Select AP compositing for the controlled visual gate without changing
+    /// any RV2-5 physical-environment state or atmospheric coefficient.
+    #[must_use]
+    pub(crate) const fn with_validation_enabled(mut self, enabled: bool) -> Self {
+        self.validation_control[0] = enabled as u32 as f32;
+        self
     }
 
     #[cfg(test)]
@@ -86,6 +97,7 @@ impl AerialPerspectiveUniformRaw {
             .chain(self.mie_scattering)
             .chain(self.mie_extinction_anisotropy)
             .chain(self.ozone_absorption)
+            .chain(self.validation_control)
             .all(f32::is_finite)
     }
 }
@@ -256,11 +268,16 @@ mod tests {
     #[test]
     fn uniform_packing_is_finite_and_wgsl_aligned() {
         let state = state();
-        assert_eq!(size_of::<AerialPerspectiveUniformRaw>(), 96);
+        assert_eq!(size_of::<AerialPerspectiveUniformRaw>(), 112);
         assert_eq!(align_of::<AerialPerspectiveUniformRaw>(), 16);
         assert!(state.is_finite());
         assert_eq!(state.planet_ground[2], -2.0);
         assert_eq!(state.planet_ground[3], 4.0);
+        assert_eq!(state.validation_control[0], 1.0);
+        assert_eq!(
+            state.with_validation_enabled(false).validation_control[0],
+            0.0
+        );
     }
 
     #[test]

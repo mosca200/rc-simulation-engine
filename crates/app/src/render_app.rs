@@ -25,7 +25,8 @@ use renderer::{
     FixedStepAccumulator, FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan,
     GlbAsset, GlbLoadError, PresentationAsset, RenderDataError, RenderTerrainMode, RendererError,
     RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode,
-    aircraft_mesh, load_glb_asset, scenery::SceneryPreset, validate_exposure_ev,
+    aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh, scenery::SceneryPreset,
+    validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -88,6 +89,65 @@ pub struct RenderOptions {
     // RV2-1: rendering backend selection (`--renderer v1|v2`); defaults to V1
     // so every existing command keeps its historical behaviour.
     renderer: RendererVersion,
+    // Developer-only controlled visual gate. None preserves production.
+    rv2_6_validation: Option<Rv26ValidationConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rv26ValidationConfig {
+    case: Rv26ValidationCase,
+    aerial_perspective_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rv26ValidationCase {
+    Near,
+    Distance100M,
+    Distance500M,
+    Distance1000M,
+    FrontLit,
+    SideLit,
+    BackLit,
+}
+
+impl Rv26ValidationCase {
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "near" => Some(Self::Near),
+            "100m" => Some(Self::Distance100M),
+            "500m" => Some(Self::Distance500M),
+            "1000m" => Some(Self::Distance1000M),
+            "frontlit" => Some(Self::FrontLit),
+            "sidelit" => Some(Self::SideLit),
+            "backlit" => Some(Self::BackLit),
+            _ => None,
+        }
+    }
+
+    const fn camera(self) -> CameraSelection {
+        let position_render_m = match self {
+            Self::Near => [0.0, 1.8, 5.0],
+            Self::Distance100M => [0.0, 1.8, 100.0],
+            Self::Distance500M => [0.0, 1.8, 500.0],
+            Self::Distance1000M => [0.0, 1.8, 1_000.0],
+            Self::FrontLit => [80.0, 1.8, -60.0],
+            Self::SideLit => [60.0, 1.8, 80.0],
+            Self::BackLit => [-80.0, 1.8, 60.0],
+        };
+        CameraSelection::Pilot {
+            position_render_m,
+            vertical_fov_deg: 55.0,
+        }
+    }
+
+    const fn target_extent_m(self) -> f32 {
+        match self {
+            Self::Near => 1.0,
+            Self::Distance100M | Self::FrontLit | Self::SideLit | Self::BackLit => 3.0,
+            Self::Distance500M => 15.0,
+            Self::Distance1000M => 30.0,
+        }
+    }
 }
 
 /// Presentation-side camera selection parsed from the CLI.
@@ -250,6 +310,7 @@ impl RenderOptions {
             vegetation_debug: VegetationDebugMode::default(),
             exposure_ev: DEFAULT_EXPOSURE_EV,
             renderer: RendererVersion::V1,
+            rv2_6_validation: None,
         }
     }
 
@@ -272,6 +333,9 @@ impl RenderOptions {
         arguments: &mut impl Iterator<Item = String>,
     ) -> Result<Self, RenderAppError> {
         let mut pending_camera = PendingCameraOptions::default();
+        let mut rv2_6_validation_case = None;
+        let mut rv2_6_validation_ap_enabled = true;
+        let mut rv2_6_validation_ap_explicit = false;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -371,6 +435,30 @@ impl RenderOptions {
                     options.renderer = RendererVersion::from_label(&value)
                         .ok_or_else(|| RenderAppError::InvalidRenderer(value.clone()))?;
                 }
+                "--rv2-6-validation-scene" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue(
+                            "--rv2-6-validation-scene",
+                        ))?;
+                    rv2_6_validation_case = Some(
+                        Rv26ValidationCase::from_label(&value)
+                            .ok_or_else(|| RenderAppError::InvalidRv26ValidationScene(value))?,
+                    );
+                }
+                "--rv2-6-validation-ap" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue(
+                            "--rv2-6-validation-ap",
+                        ))?;
+                    rv2_6_validation_ap_enabled = match value.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        _ => return Err(RenderAppError::InvalidRv26ValidationAp(value)),
+                    };
+                    rv2_6_validation_ap_explicit = true;
+                }
                 "--scenery" => {
                     let value = arguments
                         .next()
@@ -443,6 +531,24 @@ impl RenderOptions {
             }
         }
         options.camera = pending_camera.resolve(options.camera)?;
+        if let Some(case) = rv2_6_validation_case {
+            if options.renderer != RendererVersion::V2 {
+                return Err(RenderAppError::Rv26ValidationRequiresV2);
+            }
+            options.throttle = 0.0;
+            options.start_on_ground = true;
+            options.scenery = SceneryPreset::None;
+            options.camera = case.camera();
+            options.debug_overlays = false;
+            options.terrain_debug = TerrainDebugMode::Final;
+            options.vegetation_debug = VegetationDebugMode::Final;
+            options.rv2_6_validation = Some(Rv26ValidationConfig {
+                case,
+                aerial_perspective_enabled: rv2_6_validation_ap_enabled,
+            });
+        } else if rv2_6_validation_ap_explicit {
+            return Err(RenderAppError::Rv26ValidationApRequiresScene);
+        }
         Ok(options)
     }
 }
@@ -471,6 +577,16 @@ pub enum RenderAppError {
     InvalidExposureEv(String),
     #[error("invalid renderer `{0}`; expected `v1` or `v2`")]
     InvalidRenderer(String),
+    #[error(
+        "invalid RV2-6 validation scene `{0}`; expected `near`, `100m`, `500m`, `1000m`, `frontlit`, `sidelit`, or `backlit`"
+    )]
+    InvalidRv26ValidationScene(String),
+    #[error("invalid RV2-6 validation AP state `{0}`; expected `on` or `off`")]
+    InvalidRv26ValidationAp(String),
+    #[error("RV2-6 validation scenes require `--renderer v2`")]
+    Rv26ValidationRequiresV2,
+    #[error("`--rv2-6-validation-ap` requires `--rv2-6-validation-scene`")]
+    Rv26ValidationApRequiresScene,
     #[error("unknown camera mode `{0}`; expected `pilot` or `chase`")]
     UnknownCamera(String),
     #[error("invalid camera FOV `{0}`; expected a finite value inside [10, 120] degrees")]
@@ -864,11 +980,13 @@ struct RenderApplication {
     renderer: Option<DesktopRenderer>,
     // RV2-1: backend selected on the CLI; the facade dispatches to it.
     renderer_version: RendererVersion,
+    rv2_6_validation: Option<Rv26ValidationConfig>,
     runtime_error: Option<RenderRuntimeError>,
 }
 
 impl RenderApplication {
     fn new(options: RenderOptions) -> Result<Self, RenderAppError> {
+        let rv2_6_validation = options.rv2_6_validation;
         let altitude_m = options.altitude_m;
         let airspeed_mps = options.airspeed_mps;
         let initial_throttle = options.throttle;
@@ -879,7 +997,6 @@ impl RenderApplication {
                 path: model_path.clone(),
                 source,
             })?;
-        let presentation = resolve_presentation_model(&model_path, model.presentation())?;
         let model_id = model.model_id().to_owned();
         let model_fingerprint = model.physics_fingerprint();
         let (initial_state, ground_below_render_origin_m, terrain_mode, initial_ground) =
@@ -900,6 +1017,14 @@ impl RenderApplication {
                 )
             };
         let render_origin_world_ned_m = vector_to_array(initial_state.position_world_m);
+        let presentation = if let Some(validation) = rv2_6_validation {
+            PresentationModel::Procedural(rv2_6_validation_target_mesh(
+                -ground_below_render_origin_m,
+                validation.case.target_extent_m(),
+            ))
+        } else {
+            resolve_presentation_model(&model_path, model.presentation())?
+        };
         let render_snapshots =
             AircraftRenderSnapshotBuffer::new(AircraftRenderSnapshot::initial(&initial_state));
         let environment = AeroEnvironment::new(1.225, Vec3::zeros())?;
@@ -954,6 +1079,7 @@ impl RenderApplication {
             window: None,
             renderer: None,
             renderer_version: options.renderer,
+            rv2_6_validation,
             runtime_error: None,
         })
     }
@@ -1084,7 +1210,12 @@ impl RenderApplication {
                 return;
             }
         }
-        for _ in 0..step_plan.physics_steps() {
+        let physics_steps = if self.rv2_6_validation.is_some() {
+            0
+        } else {
+            step_plan.physics_steps()
+        };
+        for _ in 0..physics_steps {
             let input = match input_mode.sample(PHYSICS_DT.as_secs_f64()) {
                 Ok(input) => input,
                 Err(error) => {
@@ -1183,17 +1314,33 @@ impl ApplicationHandler for RenderApplication {
                 asset,
                 articulation,
             },
+            PresentationModel::Procedural(mesh) if self.rv2_6_validation.is_some() => {
+                PresentationAsset::ValidationTarget(mesh)
+            }
             PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
         };
-        let mut renderer = match pollster::block_on(DesktopRenderer::new_with_presentation(
-            self.renderer_version,
-            Arc::clone(&window),
-            presentation_asset,
-            self.ground_below_render_origin_m,
-            self.terrain_mode,
-            Some(self.scenery_preset),
-            self.camera_config,
-        )) {
+        let renderer_result = if let Some(validation) = self.rv2_6_validation {
+            pollster::block_on(DesktopRenderer::new_v2_for_rv2_6_validation(
+                Arc::clone(&window),
+                presentation_asset,
+                self.ground_below_render_origin_m,
+                self.terrain_mode,
+                Some(self.scenery_preset),
+                self.camera_config,
+                validation.aerial_perspective_enabled,
+            ))
+        } else {
+            pollster::block_on(DesktopRenderer::new_with_presentation(
+                self.renderer_version,
+                Arc::clone(&window),
+                presentation_asset,
+                self.ground_below_render_origin_m,
+                self.terrain_mode,
+                Some(self.scenery_preset),
+                self.camera_config,
+            ))
+        };
+        let mut renderer = match renderer_result {
             Ok(renderer) => renderer,
             Err(error) => {
                 self.fail(
@@ -1799,6 +1946,131 @@ mod tests {
                 .renderer,
             RendererVersion::V2
         );
+    }
+
+    #[test]
+    fn rv2_6_validation_scene_is_v2_only_fixed_and_defaults_ap_on() {
+        for (label, expected_case, expected_camera, extent_m) in [
+            (
+                "near",
+                Rv26ValidationCase::Near,
+                CameraSelection::Pilot {
+                    position_render_m: [0.0, 1.8, 5.0],
+                    vertical_fov_deg: 55.0,
+                },
+                1.0,
+            ),
+            (
+                "100m",
+                Rv26ValidationCase::Distance100M,
+                CameraSelection::Pilot {
+                    position_render_m: [0.0, 1.8, 100.0],
+                    vertical_fov_deg: 55.0,
+                },
+                3.0,
+            ),
+            (
+                "500m",
+                Rv26ValidationCase::Distance500M,
+                CameraSelection::Pilot {
+                    position_render_m: [0.0, 1.8, 500.0],
+                    vertical_fov_deg: 55.0,
+                },
+                15.0,
+            ),
+            (
+                "1000m",
+                Rv26ValidationCase::Distance1000M,
+                CameraSelection::Pilot {
+                    position_render_m: [0.0, 1.8, 1_000.0],
+                    vertical_fov_deg: 55.0,
+                },
+                30.0,
+            ),
+        ] {
+            let options = RenderOptions::parse(
+                ["--renderer", "v2", "--rv2-6-validation-scene", label]
+                    .map(str::to_owned)
+                    .into_iter(),
+            )
+            .unwrap();
+            assert_eq!(
+                options.rv2_6_validation,
+                Some(Rv26ValidationConfig {
+                    case: expected_case,
+                    aerial_perspective_enabled: true,
+                })
+            );
+            assert_eq!(options.camera, expected_camera);
+            assert_eq!(expected_case.target_extent_m(), extent_m);
+            assert_eq!(options.scenery, SceneryPreset::None);
+            assert_eq!(options.throttle, 0.0);
+            assert!(options.start_on_ground);
+        }
+    }
+
+    #[test]
+    fn rv2_6_validation_ap_off_is_scoped_to_the_validation_scene() {
+        let options = RenderOptions::parse(
+            [
+                "--renderer",
+                "v2",
+                "--rv2-6-validation-scene",
+                "frontlit",
+                "--rv2-6-validation-ap",
+                "off",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            options.rv2_6_validation,
+            Some(Rv26ValidationConfig {
+                case: Rv26ValidationCase::FrontLit,
+                aerial_perspective_enabled: false,
+            })
+        );
+
+        assert!(matches!(
+            RenderOptions::parse(
+                ["--rv2-6-validation-ap", "off"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(RenderAppError::Rv26ValidationApRequiresScene)
+        ));
+        assert!(matches!(
+            RenderOptions::parse(
+                ["--renderer", "v1", "--rv2-6-validation-scene", "near"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(RenderAppError::Rv26ValidationRequiresV2)
+        ));
+        assert!(matches!(
+            RenderOptions::parse(
+                ["--renderer", "v2", "--rv2-6-validation-scene", "unknown"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(RenderAppError::InvalidRv26ValidationScene(_))
+        ));
+        assert!(matches!(
+            RenderOptions::parse(
+                [
+                    "--renderer",
+                    "v2",
+                    "--rv2-6-validation-scene",
+                    "near",
+                    "--rv2-6-validation-ap",
+                    "half",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            ),
+            Err(RenderAppError::InvalidRv26ValidationAp(_))
+        ));
     }
 
     #[test]

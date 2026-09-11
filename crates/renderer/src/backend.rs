@@ -137,6 +137,34 @@ impl DesktopRenderer {
         Ok(Self { backend })
     }
 
+    /// Construct the V2 backend for the controlled RV2-6 visual gate.
+    ///
+    /// This is the only public seam that can disable aerial perspective. The
+    /// normal constructor above always keeps the production V2 behavior on.
+    pub async fn new_v2_for_rv2_6_validation(
+        window: Arc<Window>,
+        asset: PresentationAsset<'_>,
+        ground_below_render_origin_m: f32,
+        terrain_mode: RenderTerrainMode,
+        scenery_preset: Option<SceneryPreset>,
+        camera_config: CameraConfig,
+        aerial_perspective_enabled: bool,
+    ) -> Result<Self, RendererError> {
+        let backend = Backend::V2(Box::new(
+            RendererV2Shell::new_with_presentation_for_rv2_6_validation(
+                window,
+                asset,
+                ground_below_render_origin_m,
+                terrain_mode,
+                scenery_preset,
+                camera_config,
+                aerial_perspective_enabled,
+            )
+            .await?,
+        ));
+        Ok(Self { backend })
+    }
+
     /// Read-only backend selection, for diagnostics.
     #[must_use]
     pub const fn version(&self) -> RendererVersion {

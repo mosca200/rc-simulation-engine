@@ -53,6 +53,7 @@ pub use mesh::{
     AircraftMesh, ArticulatedAircraftMesh, LineMesh, MeshError, SAFE_NORMAL, SAFE_UV, Vertex,
     aircraft_mesh, articulated_aircraft_mesh, articulated_binding_table, ground_plane,
     ground_plane_at, reference_grid_and_axes, reference_grid_and_axes_at,
+    rv2_6_validation_target_mesh,
 };
 pub use pose::{RenderDataError, RenderFrame, RenderPose, world_ned_pose_to_render};
 pub use surfaces::{

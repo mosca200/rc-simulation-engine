@@ -141,6 +141,8 @@ pub enum PresentationAsset<'a> {
         articulation: &'a crate::GlbArticulationPlan,
     },
     Procedural(&'a AircraftMesh),
+    /// Developer-only neutral target for controlled visual validation.
+    ValidationTarget(&'a AircraftMesh),
 }
 
 /// Terrain visual mode for the renderer.
@@ -744,6 +746,26 @@ struct GlbBatchTarget {
     hinge: Option<crate::SurfaceHinge>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RendererInitializationPolicy {
+    device_features: DeviceFeaturePolicy,
+    aerial_perspective_enabled: bool,
+}
+
+impl RendererInitializationPolicy {
+    const V1: Self = Self {
+        device_features: DeviceFeaturePolicy::V1Legacy,
+        aerial_perspective_enabled: true,
+    };
+
+    const fn v2(aerial_perspective_enabled: bool) -> Self {
+        Self {
+            device_features: DeviceFeaturePolicy::V2OptionalTimestamp,
+            aerial_perspective_enabled,
+        }
+    }
+}
+
 fn glb_batch_target(
     plan: Option<&crate::GlbArticulationPlan>,
     primitive_index: usize,
@@ -961,18 +983,19 @@ impl WgpuRenderer {
             terrain_mode,
             scenery_preset,
             camera_config,
-            DeviceFeaturePolicy::V1Legacy,
+            RendererInitializationPolicy::V1,
         )
         .await
     }
 
-    pub(crate) async fn new_v2_with_presentation(
+    pub(crate) async fn new_v2_with_presentation_for_rv2_6_validation(
         window: Arc<Window>,
         asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
         terrain_mode: RenderTerrainMode,
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
+        aerial_perspective_enabled: bool,
     ) -> Result<Self, RendererError> {
         Self::new_with_presentation_policy(
             window,
@@ -981,7 +1004,7 @@ impl WgpuRenderer {
             terrain_mode,
             scenery_preset,
             camera_config,
-            DeviceFeaturePolicy::V2OptionalTimestamp,
+            RendererInitializationPolicy::v2(aerial_perspective_enabled),
         )
         .await
     }
@@ -993,13 +1016,14 @@ impl WgpuRenderer {
         terrain_mode: RenderTerrainMode,
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
-        feature_policy: DeviceFeaturePolicy,
+        initialization_policy: RendererInitializationPolicy,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
         }
 
         let size = window.inner_size();
+        let feature_policy = initialization_policy.device_features;
         let device_context = DeviceContext::new(window, feature_policy).await?;
         if feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp {
             device_context.capabilities().log_v2_snapshot();
@@ -1013,6 +1037,7 @@ impl WgpuRenderer {
             PresentationAsset::Glb(_) => PresentationKind::RigidGlb,
             PresentationAsset::ArticulatedGlb { .. } => PresentationKind::ArticulatedGlb,
             PresentationAsset::Procedural(_) => PresentationKind::Procedural,
+            PresentationAsset::ValidationTarget(_) => PresentationKind::Procedural,
         };
         let scene_path = select_scene_path(
             feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp,
@@ -1302,6 +1327,7 @@ impl WgpuRenderer {
                 articulation,
             } => Some((glb_asset, Some(articulation))),
             PresentationAsset::Procedural(_) => None,
+            PresentationAsset::ValidationTarget(_) => None,
         };
         if let Some((glb_asset, articulation)) = glb_and_plan {
             for (primitive_index, primitive) in glb_asset.primitives.iter().enumerate() {
@@ -1363,7 +1389,9 @@ impl WgpuRenderer {
                     });
                 }
             }
-        } else if let PresentationAsset::Procedural(mesh) = asset {
+        } else if let PresentationAsset::Procedural(mesh)
+        | PresentationAsset::ValidationTarget(mesh) = asset
+        {
             if !mesh.vertices().is_empty() {
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("aircraft presentation vertices"),
@@ -1385,7 +1413,10 @@ impl WgpuRenderer {
 
             let articulated = crate::articulated_aircraft_mesh();
             let surface_binding_table = crate::articulated_binding_table();
-            for surface in crate::SurfaceId::control_surfaces() {
+            for surface in crate::SurfaceId::control_surfaces()
+                .into_iter()
+                .filter(|_| matches!(asset, PresentationAsset::Procedural(_)))
+            {
                 let Some(mesh) = articulated.surface(surface) else {
                     continue;
                 };
@@ -1669,7 +1700,8 @@ impl WgpuRenderer {
             let uniform = AerialPerspectiveUniformRaw::new(
                 atmosphere_parameters,
                 ground_below_render_origin_m,
-            );
+            )
+            .with_validation_enabled(initialization_policy.aerial_perspective_enabled);
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("RV2-6 physical aerial perspective uniform"),
                 contents: bytemuck::bytes_of(&uniform),

@@ -106,6 +106,7 @@ struct AerialPerspectiveUniform {
     // xyz: Mie extinction, w: Mie anisotropy.
     mie_extinction_anisotropy: vec4<f32>,
     ozone_absorption: vec4<f32>,
+    validation_control: vec4<f32>,
 };
 
 // G3B: postprocess state for the final display pass.
@@ -821,6 +822,9 @@ fn apply_physical_aerial_perspective(
     surface_radiance: vec3<f32>,
     world_position: vec3<f32>,
 ) -> vec3<f32> {
+    if (aerial_perspective.validation_control.x < 0.5) {
+        return surface_radiance;
+    }
     let physical = integrate_physical_aerial_perspective(
         camera.camera_position.xyz,
         world_position,

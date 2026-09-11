@@ -53,14 +53,36 @@ impl RendererV2Shell {
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
     ) -> Result<Self, RendererError> {
-        let initial_size = window.inner_size();
-        let inner = WgpuRenderer::new_v2_with_presentation(
+        Self::new_with_presentation_for_rv2_6_validation(
             window,
             asset,
             ground_below_render_origin_m,
             terrain_mode,
             scenery_preset,
             camera_config,
+            true,
+        )
+        .await
+    }
+
+    pub async fn new_with_presentation_for_rv2_6_validation(
+        window: Arc<Window>,
+        asset: PresentationAsset<'_>,
+        ground_below_render_origin_m: f32,
+        terrain_mode: RenderTerrainMode,
+        scenery_preset: Option<SceneryPreset>,
+        camera_config: CameraConfig,
+        aerial_perspective_enabled: bool,
+    ) -> Result<Self, RendererError> {
+        let initial_size = window.inner_size();
+        let inner = WgpuRenderer::new_v2_with_presentation_for_rv2_6_validation(
+            window,
+            asset,
+            ground_below_render_origin_m,
+            terrain_mode,
+            scenery_preset,
+            camera_config,
+            aerial_perspective_enabled,
         )
         .await?;
         let graph = crate::render_graph::build_v2_render_graph()

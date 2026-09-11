@@ -106,6 +106,7 @@ fn v1_keeps_legacy_fog_while_physical_geometry_uses_rv2_6() {
     assert!(source.contains("camera.camera_position.xyz"));
     assert!(source.contains("world_position.y - aerial_perspective.planet_ground.z"));
     assert!(source.contains("const AERIAL_PERSPECTIVE_SAMPLE_COUNT: i32 = 4;"));
+    assert!(source.contains("aerial_perspective.validation_control.x < 0.5"));
 }
 
 #[test]
@@ -137,6 +138,13 @@ fn fallback_temporal_and_resource_lifecycle_stay_bounded() {
     assert!(gpu.contains("V2EnvironmentMode::AnalyticalFallback"));
     assert!(gpu.contains("(\"fs_sky\", \"fs_lit\", \"fs_terrain\", \"fs_vegetation\")"));
     assert!(gpu.contains("let aerial_perspective_buffer = use_physical.then(||"));
+    assert!(
+        gpu.contains(".with_validation_enabled(initialization_policy.aerial_perspective_enabled)")
+    );
+
+    let backend = include_str!("../src/backend.rs").replace("\r\n", "\n");
+    assert!(backend.contains("new_v2_for_rv2_6_validation"));
+    assert!(backend.contains("new_with_presentation_for_rv2_6_validation"));
 
     let (_, frame_and_after) = gpu
         .split_once("pub fn render(&mut self, frame: &RenderFrame)")

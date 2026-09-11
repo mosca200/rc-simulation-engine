@@ -2,6 +2,12 @@
 
 Status: technically validated; manual visual and measured performance gates remain open.
 
+> **Controlled-validation update:** the FlyingField/V1 matrix recorded below
+> is superseded because it mixes vegetation distance culling and the RV2-5
+> renderer boundary into the comparison. Use
+> [`rv2_6_controlled_visual.md`](rv2_6_controlled_visual.md) and its V2 AP
+> ON/OFF evidence instead. The historical commands remain only as provenance.
+
 ## Git provenance
 
 - RV2-6 branch: `feature/rv2-6-aerial-perspective`
@@ -135,11 +141,13 @@ coloured, and do not erase the aircraft silhouette. For an A/B control, repeat B
 
 ## Evidence and open findings
 
-- No accepted screenshot is committed. The automated process ran in a desktop session whose winit
-  window was not enumerable by the screenshot session; the attempted capture contained only the
-  IDE desktop and is deliberately excluded from evidence.
-- Manual review of A-G is therefore required. Compilation, GPU smoke, and static shader tests are
-  not a visual PASS.
+- The original FlyingField A-G captures are not accepted evidence for RV2-6 isolation. The
+  controlled V2 AP ON/OFF captures under `docs/validation/rv2_6_controlled_visual/` replace them.
+  Their measured separation is recorded in that document: the seam is isolated and directionally
+  correct, but the difference is below the 8-bit quantization floor of the capture, so these are
+  isolation captures rather than visual-quality evidence.
+- Manual review of the controlled captures remains required. Compilation, GPU smoke, static shader
+  tests, and successful capture are not a visual PASS.
 - The V2 profiler owns persistent CPU timings and optional GPU timestamp queries, but its latest
   snapshot is not exposed through the CLI, overlay, or an evidence file. PresentMon/CapFrameX was
   not available. **GPU COST: NOT YET INSTRUMENTED FOR REPORTING.** No FPS or frame-time metric is
