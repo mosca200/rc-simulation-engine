@@ -419,6 +419,12 @@ Current Kadet state, verified: `models/sig_kadet_lt40_egv/` contains only `model
 which means it also has to introduce the `presentation.articulated_surfaces` block and choose its
 primitive mapping deliberately. There is no legacy index order to preserve.
 
+It does **not** have to invent the bindings: `model.json` already declares four
+`control_surface_bindings` — `aileron-left`, `aileron-right`, `elevator` and `rudder` (element ids
+`wing-left-aileron`, `wing-right-aileron`, `elevator`, `rudder`). The new `articulated_surfaces`
+entries must reference exactly those ids, the way Acro's do, and each is still resolved explicitly:
+no name-based inference is introduced by this pipeline.
+
 Steps:
 
 1. Copy `acro_electric_01_manifest.json` to `sig_kadet_lt40_egv_manifest.json` and re-declare
@@ -432,7 +438,7 @@ Steps:
    re-pointed at components that actually exist. Where the reference lists an entry under
    `unknowns`, do not invent geometry to fill it.
 
-Two properties of the reference data must be respected:
+Three properties of the reference data must be respected:
 
 - **It is evidence, not configuration.** `docs/reference_aircraft/data/sig_kadet_lt40_geometry_v0.json`
   declares `"artifact_kind": "reference_geometry_evidence_not_runtime_configuration"` and
@@ -440,25 +446,69 @@ Two properties of the reference data must be respected:
   `docs/reference_aircraft/sig_kadet_lt40_egv_geometry_reconstruction.md` it is a **visual**
   geometric reference only. It must not feed back into mass properties, aerodynamics, propulsion or
   survey evidence, which stay authoritative in their own committed files, and it must not be
-  converted into a runtime configuration by this pipeline.
-- **It is in a different frame.** The reference uses a documentary origin at the wing root leading
-  edge in the wing reference plane, with **x aft positive, y right positive, z down positive**, and
-  publishes an explicit `runtime_body_conversion`:
-  `x_body_m = cg_x_aft_from_wing_le_m - x_aft_m`, `y_body_m = y_right_m`,
-  `z_body_m = -height_up_m`. Note that this conversion already re-references X to the **CG**, not to
-  the wing leading edge, while `runtime_origin_relation` is `null` with quality `unknown`. The
-  Blender source must be built in the render-body frame (`+X` right, `+Y` up, `-Z` forward) via that
-  conversion — never by copying reference coordinates directly — and the visual datum offset has to
-  be chosen and documented explicitly, the way Acro's `+0.255 m` datum is, without disturbing the
-  physical model.
+  converted into a runtime configuration by this pipeline. The reconstruction doc also states
+  explicitly that unknown values are **not** back-filled from the synthetic `acro_electric_01`
+  model — so Acro must not be used as a substitute for missing Kadet evidence either.
+
+- **It is 2D planform evidence, in two different frames.** The reference provides planform outlines
+  (`wing.right_half_plan_outline_polygon_m`, `ailerons.right_polygon_m`,
+  `horizontal_tail.gross_polygon_m` / `fixed_polygon_m`, `elevator.polygon_m`,
+  `vertical_tail.gross_polygon_m` / `fixed_polygon_m`, `rudder.polygon_m`) with areas, centroids and
+  hinge stations — **not** 3D solids, not airfoil sections, and no fuselage shape. Useful
+  proportions: wingspan `1.778 m` (quality `manufacturer_spec` in the JSON) and reference area
+  `0.580644 m²`. Overall length `1.447 m` / 57 in appears only in the reconstruction doc, is
+  manufacturer specification rather than measurement, and is explicitly *not* used to estimate a
+  tail arm. EGV dimensional equality with the measured plan variant is **unproven** — the
+  measurements come from calibrated scans of the original SIG RC-67 kit plans, not from an EGV
+  airframe, and that gap is the first entry in `unknowns`.
+
+  The frames must not be conflated. The documentary frame has its origin at the wing root leading
+  edge in the wing reference plane, with `x_aft` positive aft, `y` positive right and height positive
+  **up**; horizontal polygons are `[y, x_aft]` and vertical polygons are `[x_aft, h]`. The published
+  `runtime_body_conversion` (`x_body_m = cg_x_aft_from_wing_le_m - x_aft_m`, `y_body_m = y_right_m`,
+  `z_body_m = -height_up_m`) maps that into the **physics body frame, which is FRD** (`+X` forward,
+  `+Y` right, `+Z` down) and re-references X to the **CG**, not to the wing leading edge — while
+  `runtime_origin_relation` stays `null` with quality `unknown`.
+
+  That is **not** the presentation frame. Reaching render-body (`+X` right, `+Y` up, `-Z` forward)
+  takes a second, separate step from FRD. The authority for it is already in the renderer:
+  `crates/renderer/src/pose.rs` defines
+  `NED_TO_RENDER = [[0,1,0],[0,0,-1],[-1,0,0]]` and applies it to the FRD body frame as a similarity
+  transform (`NED_TO_RENDER · R_ned_world_from_frd_body · NED_TO_RENDERᵀ`), so the same matrix maps
+  body vectors:
+
+  ```
+  render_x =  frd_y        (right)
+  render_y = -frd_z        (up)
+  render_z = -frd_x        (forward is -Z)
+  ```
+
+  Composing the two steps for a reference point: `render = (y_right, height_up, -(cg_x_aft - x_aft))`.
+  Applying only `runtime_body_conversion` and treating the result as render-body coordinates yields a
+  rotated asset whose bounds magnitudes can still look plausible, so the mistake is easy to make and
+  easy to miss; `blender_validate_source.py` and `validate_glb.py` both check the orientation
+  convention structurally (foremost component owns global min Z, `*_L` mirrors `*_R` about `X = 0`)
+  precisely to catch it. The visual datum offset then has to be chosen and documented explicitly, the
+  way Acro's `+0.255 m` datum is, without disturbing the physical model.
+
 - **It names surfaces, not components.** The JSON has no component list. Its surface blocks are
   `wing`, `ailerons`, `horizontal_tail`, `elevator`, `vertical_tail` and `rudder`, supported by
   `longitudinal_datums`, `control_travel_geometry`, `propulsion_axis`, `calibration`,
   `consistency_checks` and `unknowns`. A Kadet semantic component set still has to be derived from
-  that evidence — and anything listed under `unknowns` (including the elevator hinge-line height,
-  rudder hinge coordinates and the tail-arm definition) must not be invented. `unknowns[2]` also
-  records that the reference data cannot tell single from split elevator halves, so a
-  `ELEVATOR_L`/`ELEVATOR_R` split must not be assumed.
+  that evidence, and the `unknowns` list is the boundary of what may be modelled. Verbatim, it
+  covers: EGV equality for the original-kit detailed wing and tail planforms; horizontal- and
+  vertical-tail longitudinal positions relative to the wing leading edge; wing-to-tail aerodynamic
+  reference arms; aileron and elevator travel measurement points and radii; the linear-travel
+  measurement convention needed for all angular conversions; EGV motor thrust-axis down/right
+  offsets; surface vertical positions in the runtime CG frame; operational CG and all mass
+  properties; and aerodynamic and propulsion coefficients.
+
+  Note what that implies for the asset: because tail longitudinal position and surface vertical
+  position in the CG frame are both unknown, a Kadet GLB cannot yet be positioned against a
+  physically meaningful datum — only proportioned internally from the planforms. And the reference
+  does **not** state whether the elevator is one piece or split into halves, so an
+  `ELEVATOR_L`/`ELEVATOR_R` split must not be assumed; model what the planform evidence supports
+  and record the rest as a limitation, exactly as Acro's single full-span `HTAIL_FIXED` is recorded.
 
 ## Verification performed in this slice
 

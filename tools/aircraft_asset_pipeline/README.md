@@ -289,11 +289,21 @@ The pipeline is generic: every asset-specific fact lives in one manifest, and ev
 3. Declare the Kadet's real layout honestly, derived from the reference evidence rather than from
    Acro's. Its component set will not look like Acro's, and the `orientation_checks` reference
    components must be re-pointed at components that actually exist. Where the reference data lists
-   an entry under `unknowns`, do not invent geometry to fill it. Note also that the reference frame
-   is **x aft / y right / z down** with a documentary origin at the wing root leading edge, so it
-   must be converted into the render-body frame via its published `runtime_body_conversion`, never
-   copied directly.
-4. Run the same four steps: materialise → validate source → export to scratch → validate GLB.
+   an entry under `unknowns`, do not invent geometry to fill it.
+4. Mind the frames — this is the easy mistake. The reference documentary frame is `x_aft` positive
+   aft / `y` positive right / height positive **up**, origin at the wing root leading edge. Its
+   published `runtime_body_conversion` lands in the **FRD physics body frame** (`+X` forward, `+Y`
+   right, `+Z` down, X re-referenced to the CG) — *not* in the render-body frame the asset needs.
+   Reaching render-body takes a second step, whose authority is
+   `crates/renderer/src/pose.rs :: NED_TO_RENDER`. Composed:
+   `render = (y_right, height_up, -(cg_x_aft - x_aft))`. The reference is also only **2D planform**
+   evidence (outlines, areas, centroids, hinge stations — no fuselage shape, no airfoils, no solids),
+   and EGV dimensional equality is unproven because the measurements come from the original SIG
+   RC-67 kit plans. Note that `models/sig_kadet_lt40_egv/model.json` already declares the four
+   `control_surface_bindings` (`aileron-left`, `aileron-right`, `elevator`, `rudder`), so the new
+   `presentation.articulated_surfaces` block references existing ids rather than inventing them.
+   Full detail: `docs/architecture/renderer_rv2_7a_blender_aircraft_pipeline.md`.
+5. Run the same four steps: materialise → validate source → export to scratch → validate GLB.
 
 See `docs/architecture/renderer_rv2_7a_blender_aircraft_pipeline.md` for the full contract and
 `docs/architecture/renderer_glb_scene_node_foundation.md` for the loader semantics the export
