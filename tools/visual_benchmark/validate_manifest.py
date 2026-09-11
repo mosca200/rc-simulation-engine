@@ -143,16 +143,24 @@ class ManifestValidator:
 
         if "version" not in renderer:
             self.error("renderer.version", "required field missing")
+        elif not isinstance(renderer["version"], str):
+            self.error("renderer.version", f"must be a string, got {type(renderer['version']).__name__}")
         elif renderer["version"] not in ["v1", "v2"]:
             self.error("renderer.version", f"must be 'v1' or 'v2', got '{renderer['version']}'")
 
         if "terrain_debug" in renderer:
-            if renderer["terrain_debug"] not in self.TERRAIN_DEBUG_MODES:
-                self.error("renderer.terrain_debug", f"invalid value '{renderer['terrain_debug']}' (allowed: {sorted(self.TERRAIN_DEBUG_MODES)})")
+            terrain_debug = renderer["terrain_debug"]
+            if not isinstance(terrain_debug, str):
+                self.error("renderer.terrain_debug", f"must be a string, got {type(terrain_debug).__name__}")
+            elif terrain_debug not in self.TERRAIN_DEBUG_MODES:
+                self.error("renderer.terrain_debug", f"invalid value '{terrain_debug}' (allowed: {sorted(self.TERRAIN_DEBUG_MODES)})")
 
         if "vegetation_debug" in renderer:
-            if renderer["vegetation_debug"] not in self.VEGETATION_DEBUG_MODES:
-                self.error("renderer.vegetation_debug", f"invalid value '{renderer['vegetation_debug']}' (allowed: {sorted(self.VEGETATION_DEBUG_MODES)})")
+            vegetation_debug = renderer["vegetation_debug"]
+            if not isinstance(vegetation_debug, str):
+                self.error("renderer.vegetation_debug", f"must be a string, got {type(vegetation_debug).__name__}")
+            elif vegetation_debug not in self.VEGETATION_DEBUG_MODES:
+                self.error("renderer.vegetation_debug", f"invalid value '{vegetation_debug}' (allowed: {sorted(self.VEGETATION_DEBUG_MODES)})")
 
     def _validate_scenery(self):
         scenery = self.manifest.get("scenery")
@@ -167,6 +175,8 @@ class ManifestValidator:
 
         if "preset" not in scenery:
             self.error("scenery.preset", "required field missing")
+        elif not isinstance(scenery["preset"], str):
+            self.error("scenery.preset", f"must be a string, got {type(scenery['preset']).__name__}")
         elif scenery["preset"] not in ["none", "flying-field"]:
             self.error("scenery.preset", f"must be 'none' or 'flying-field', got '{scenery['preset']}'")
 
@@ -183,6 +193,9 @@ class ManifestValidator:
 
         if "mode" not in camera:
             self.error("camera.mode", "required field missing")
+            return
+        elif not isinstance(camera["mode"], str):
+            self.error("camera.mode", f"must be a string, got {type(camera['mode']).__name__}")
             return
         elif camera["mode"] not in ["pilot", "chase"]:
             self.error("camera.mode", f"must be 'pilot' or 'chase', got '{camera['mode']}'")
@@ -317,19 +330,22 @@ class ManifestValidator:
             self.error("capture.format", "required field missing")
         else:
             fmt = capture["format"]
-            if fmt not in ["png", "jpg", "exr"]:
+            if not isinstance(fmt, str):
+                self.error("capture.format", f"must be a string, got {type(fmt).__name__}")
+            elif fmt not in ["png", "jpg", "exr"]:
                 self.error("capture.format", f"must be one of ['png', 'jpg', 'exr'], got '{fmt}'")
+            else:
+                # Check filename extension matches format ONLY if filename is a valid string
+                if "filename" in capture:
+                    filename = capture["filename"]
+                    if isinstance(filename, str) and "." in filename:
+                        ext = filename.split(".")[-1]
+                        if ext != fmt:
+                            self.error("capture", f"filename extension '{ext}' does not match format '{fmt}'")
 
-            # Check filename extension matches format
-            if "filename" in capture:
-                filename = capture["filename"]
-                ext = filename.split(".")[-1]
-                if ext != fmt:
-                    self.error("capture", f"filename extension '{ext}' does not match format '{fmt}'")
-
-            # JPEG quality constraint: only allowed for jpg format
-            if "quality" in capture and fmt != "jpg":
-                self.error("capture.quality", f"only allowed when format='jpg', got format='{fmt}'")
+                # JPEG quality constraint: only allowed for jpg format
+                if "quality" in capture and fmt != "jpg":
+                    self.error("capture.quality", f"only allowed when format='jpg', got format='{fmt}'")
 
         if "frame" in capture:
             frame = capture["frame"]
@@ -354,13 +370,19 @@ class ManifestValidator:
             self.error("tags", "must have at least 1 tag")
         if len(tags) > 20:
             self.error("tags", f"must have at most 20 tags, got {len(tags)}")
-        if len(tags) != len(set(tags)):
-            self.error("tags", "must have unique items")
+        
+        # Validate all elements are strings BEFORE attempting set() for duplicate detection
+        all_strings = True
         for i, tag in enumerate(tags):
             if not isinstance(tag, str):
-                self.error(f"tags[{i}]", "must be a string")
+                self.error(f"tags[{i}]", f"must be a string, got {type(tag).__name__}")
+                all_strings = False
             elif not re.match(r"^[a-z][a-z0-9_-]*$", tag):
                 self.error(f"tags[{i}]", f"must match pattern '^[a-z][a-z0-9_-]*$', got '{tag}'")
+        
+        # Only check for duplicates if all elements are hashable strings
+        if all_strings and len(tags) != len(set(tags)):
+            self.error("tags", "must have unique items")
 
     def _validate_reference_hardware(self):
         hw = self.manifest.get("reference_hardware")

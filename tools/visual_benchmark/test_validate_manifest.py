@@ -478,6 +478,104 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
+    # === Robustness tests: crash-path closure ===
+
+    def test_terrain_debug_array_no_exception(self):
+        """Test that terrain_debug=[] fails without exception (FIX 1)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["terrain_debug"] = []
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_terrain_debug_dict_no_exception(self):
+        """Test that terrain_debug={} fails without exception (FIX 1)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["terrain_debug"] = {}
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_vegetation_debug_array_no_exception(self):
+        """Test that vegetation_debug=[] fails without exception (FIX 1)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["vegetation_debug"] = []
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_vegetation_debug_dict_no_exception(self):
+        """Test that vegetation_debug={} fails without exception (FIX 1)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["vegetation_debug"] = {}
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_tags_nested_array_no_exception(self):
+        """Test that tags=[["bad"]] fails without exception (FIX 2)."""
+        manifest = self.valid_manifest.copy()
+        manifest["tags"] = [["bad"]]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_tags_dict_element_no_exception(self):
+        """Test that tags=[{"bad":1}] fails without exception (FIX 2)."""
+        manifest = self.valid_manifest.copy()
+        manifest["tags"] = [{"bad": 1}]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_capture_filename_null_no_exception(self):
+        """Test that filename=null fails without exception (FIX 3)."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["filename"] = None
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_capture_filename_array_no_exception(self):
+        """Test that filename=[] fails without exception (FIX 3)."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["filename"] = []
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_renderer_version_array_no_exception(self):
+        """Test that renderer.version=[] fails without exception (pattern fix)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["version"] = []
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_scenery_preset_dict_no_exception(self):
+        """Test that scenery.preset={} fails without exception (pattern fix)."""
+        manifest = self.valid_manifest.copy()
+        manifest["scenery"]["preset"] = {}
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_camera_mode_null_no_exception(self):
+        """Test that camera.mode=null fails without exception (pattern fix)."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["mode"] = None
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_capture_format_array_no_exception(self):
+        """Test that capture.format=[] fails without exception (pattern fix)."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["format"] = []
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
