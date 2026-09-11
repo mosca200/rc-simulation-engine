@@ -31,11 +31,5 @@
     "format": "png",
     "frame": 10
   },
-  "tags": ["aircraft", "acro", "static", "front-view", "benchmark"],
-  "reference_hardware": {
-    "gpu": "NVIDIA RTX 4090",
-    "driver_version": "546.33",
-    "os": "Windows 11 23H2",
-    "notes": "Baseline validated on 2026-09-11"
-  }
+  "tags": ["aircraft", "acro", "static", "front-view", "benchmark"]
 }

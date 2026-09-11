@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/mosca200/rc-simulation-engine/schemas/golden_scene_manifest.json",
   "title": "Golden Scene Manifest",
-  "description": "Machine-readable contract for reproducible visual benchmarks of the RC Simulation Engine renderer. v1 supports only runtime-configurable parameters. Future capabilities are documented separately.",
+  "description": "Machine-readable contract for reproducible visual benchmarks of the RC Simulation Engine renderer. v1 supports only runtime-configurable parameters verified against crates/app/src/render_app.rs. Future capabilities are documented separately in docs/architecture/rv2_vis0_visual_benchmark.md.",
   "type": "object",
   "required": [
     "schema_version",
@@ -50,15 +50,15 @@
         },
         "terrain_debug": {
           "type": "string",
-          "enum": ["final", "wireframe", "normals", "uv", "bounds"],
+          "enum": ["final", "albedo", "normal", "roughness", "macro", "detail"],
           "default": "final",
-          "description": "Terrain debug visualization mode. Maps to --terrain-debug CLI flag."
+          "description": "Terrain debug visualization mode. Maps to --terrain-debug CLI flag. Values verified from TerrainDebugMode::from_label in crates/renderer/src/gpu.rs."
         },
         "vegetation_debug": {
           "type": "string",
-          "enum": ["final", "wireframe", "bounds", "lod"],
+          "enum": ["final", "lod", "culling"],
           "default": "final",
-          "description": "Vegetation debug visualization mode. Maps to --vegetation-debug CLI flag."
+          "description": "Vegetation debug visualization mode. Maps to --vegetation-debug CLI flag. Values verified from VegetationDebugMode::from_label in crates/renderer/src/vegetation.rs."
         }
       },
       "description": "Renderer configuration. Only runtime-configurable parameters."
@@ -71,7 +71,7 @@
         "preset": {
           "type": "string",
           "enum": ["none", "flying-field"],
-          "description": "Scenery preset. Maps to --scenery CLI flag. 'none' = empty, 'flying-field' = RC airfield with runway, markings, fence, windsock."
+          "description": "Scenery preset. Maps to --scenery CLI flag. 'none' = empty, 'flying-field' = RC airfield with runway, markings, fence, windsock. Values verified from SceneryPreset enum in crates/renderer/src/scenery.rs."
         }
       },
       "description": "Scenery environment configuration. Only runtime-configurable parameters."
@@ -90,14 +90,14 @@
           "type": "number",
           "minimum": 10,
           "maximum": 120,
-          "description": "Vertical field of view in degrees. Maps to --vertical-fov-deg CLI flag. Typical: 55-70."
+          "description": "Vertical field of view in degrees. Maps to --camera-fov CLI flag. Typical: 55-70."
         },
         "pilot_position_render_m": {
           "type": "array",
           "items": {"type": "number"},
           "minItems": 3,
           "maxItems": 3,
-          "description": "Pilot camera position in render-body frame [x, y, z] in meters. Required when mode='pilot'. Maps to --pilot-position-render-m CLI flag."
+          "description": "Pilot camera position in render-body frame [x, y, z] in meters. Required when mode='pilot'. Maps to --pilot-position CLI flag (format: x,y,z)."
         },
         "chase_distance_behind_m": {
           "type": "number",
@@ -114,15 +114,26 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"mode": {"const": "pilot"}}},
-          "then": {"required": ["pilot_position_render_m"]}
+          "if": {"properties": {"mode": {"const": "pilot"}}, "required": ["mode"]},
+          "then": {
+            "required": ["pilot_position_render_m"],
+            "not": {
+              "anyOf": [
+                {"required": ["chase_distance_behind_m"]},
+                {"required": ["chase_height_above_m"]}
+              ]
+            }
+          }
         },
         {
-          "if": {"properties": {"mode": {"const": "chase"}}},
-          "then": {"required": ["chase_distance_behind_m", "chase_height_above_m"]}
+          "if": {"properties": {"mode": {"const": "chase"}}, "required": ["mode"]},
+          "then": {
+            "required": ["chase_distance_behind_m", "chase_height_above_m"],
+            "not": {"required": ["pilot_position_render_m"]}
+          }
         }
       ],
-      "description": "Camera configuration. Mode-specific parameters are required based on the mode value."
+      "description": "Camera configuration. Mode-specific parameters are required based on the mode value, and fields from the wrong mode are rejected."
     },
     "resolution": {
       "type": "object",
@@ -148,7 +159,7 @@
       "type": "number",
       "minimum": -8,
       "maximum": 8,
-      "description": "Manual exposure value in EV stops. Maps to --exposure-ev CLI flag. 0 = neutral, +1 = 2x brighter, -1 = 2x darker. Runtime range: [-8, 8]."
+      "description": "Manual exposure value in EV stops. Maps to --exposure-ev CLI flag. 0 = neutral, +1 = 2x brighter, -1 = 2x darker. Runtime range [-8, 8] verified from validate_exposure_ev in crates/renderer/src/gpu.rs."
     },
     "aircraft": {
       "type": "object",
@@ -190,7 +201,7 @@
         "filename": {
           "type": "string",
           "pattern": "^[a-z0-9_]+\\.(png|jpg|exr)$",
-          "description": "Output filename. Must match format extension. Example: 'aircraft_acro_static_front_1920x1080.png'."
+          "description": "Output filename. Must match format extension. Stable golden baseline format: <scene_id>_<width>x<height>.png (no timestamp). Example: 'aircraft_acro_static_front_1920x1080.png'."
         },
         "format": {
           "type": "string",
@@ -206,10 +217,19 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100,
-          "default": 95,
-          "description": "JPEG quality 1-100. Only used when format=jpg."
+          "description": "JPEG quality 1-100. Only allowed when format='jpg'. Must be absent for png/exr."
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"format": {"const": "jpg"}},
+            "required": ["format"]
+          },
+          "then": {},
+          "else": {"not": {"required": ["quality"]}}
+        }
+      ],
       "description": "Capture configuration."
     },
     "tags": {
@@ -244,11 +264,7 @@
           "description": "Additional notes about reference hardware setup."
         }
       },
-      "description": "Reference hardware for which this baseline was validated. Optional but recommended."
-    },
-    "reference_image": {
-      "type": "string",
-      "description": "Path to reference image for comparison. Optional. Example: 'baselines/rtx_4090_windows/aircraft_acro_static_front_1920x1080.png'."
+      "description": "Reference hardware for which this baseline was validated. Optional. Should only be populated when a real approved baseline exists on that hardware."
     }
   }
 }

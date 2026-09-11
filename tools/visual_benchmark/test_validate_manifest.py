@@ -61,6 +61,13 @@ class TestManifestValidator(unittest.TestCase):
             json.dump(manifest, f)
         return manifest_path
 
+    def _write_raw_json(self, data: str) -> Path:
+        """Write raw JSON string to temp file and return path."""
+        temp_dir = Path(tempfile.mkdtemp())
+        manifest_path = temp_dir / "manifest.json"
+        manifest_path.write_text(data)
+        return manifest_path
+
     # === Basic validation tests ===
 
     def test_valid_manifest(self):
@@ -77,7 +84,126 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    # === Finding 1: Runtime alignment tests ===
+    # === Finding 1: Debug labels tests ===
+
+    def test_terrain_debug_albedo_valid(self):
+        """Test that terrain_debug=albedo passes validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["terrain_debug"] = "albedo"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 0)
+
+    def test_terrain_debug_wireframe_invalid(self):
+        """Test that terrain_debug=wireframe fails validation (not a runtime value)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["terrain_debug"] = "wireframe"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_vegetation_debug_culling_valid(self):
+        """Test that vegetation_debug=culling passes validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["vegetation_debug"] = "culling"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 0)
+
+    def test_vegetation_debug_bounds_invalid(self):
+        """Test that vegetation_debug=bounds fails validation (not a runtime value)."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["vegetation_debug"] = "bounds"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Finding 3: Boolean is not number tests ===
+
+    def test_exposure_ev_boolean_fails(self):
+        """Test that exposure_ev=true fails validation (bool is not number)."""
+        manifest = self.valid_manifest.copy()
+        manifest["exposure_ev"] = True
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_vertical_fov_deg_boolean_fails(self):
+        """Test that vertical_fov_deg=true fails validation (bool is not number)."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["vertical_fov_deg"] = True
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_warmup_boolean_fails(self):
+        """Test that warmup=true fails validation (bool is not integer)."""
+        manifest = self.valid_manifest.copy()
+        manifest["warmup"] = True
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_capture_frame_boolean_fails(self):
+        """Test that capture.frame=false fails validation (bool is not integer)."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["frame"] = False
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Finding 4: Top-level non-object tests ===
+
+    def test_root_array_fails(self):
+        """Test that root array fails validation without traceback."""
+        manifest_path = self._write_raw_json("[]")
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_root_string_fails(self):
+        """Test that root string fails validation without traceback."""
+        manifest_path = self._write_raw_json('"hello"')
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_root_number_fails(self):
+        """Test that root number fails validation without traceback."""
+        manifest_path = self._write_raw_json("42")
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Finding 8: JPEG quality tests ===
+
+    def test_png_with_quality_fails(self):
+        """Test that PNG format with quality field fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["format"] = "png"
+        manifest["capture"]["quality"] = 95
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_jpg_with_quality_passes(self):
+        """Test that JPG format with quality field passes validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["filename"] = "test.jpg"
+        manifest["capture"]["format"] = "jpg"
+        manifest["capture"]["quality"] = 95
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 0)
+
+    def test_exr_with_quality_fails(self):
+        """Test that EXR format with quality field fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["capture"]["filename"] = "test.exr"
+        manifest["capture"]["format"] = "exr"
+        manifest["capture"]["quality"] = 95
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Runtime alignment tests ===
 
     def test_unknown_top_level_property(self):
         """Test that unknown top-level property fails validation."""
@@ -111,7 +237,7 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    # === Finding 2: Camera reproducibility tests ===
+    # === Camera reproducibility tests ===
 
     def test_missing_required_camera_reconstruction_data_pilot(self):
         """Test that missing pilot position fails validation."""
@@ -153,7 +279,7 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 0)
 
-    # === Finding 4: NaN/Infinity tests ===
+    # === NaN/Infinity tests ===
 
     def test_nan_fov(self):
         """Test that NaN FOV fails validation."""
@@ -187,7 +313,7 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    # === Finding 5: Crash prevention tests ===
+    # === Crash prevention tests ===
 
     def test_wrong_type_vector_no_exception(self):
         """Test that wrong-type vector fails without exception."""
@@ -326,7 +452,7 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 2)
 
-    # === Finding 10: Optional supported blocks validated ===
+    # === Optional blocks validation ===
 
     def test_optional_reference_hardware_validated(self):
         """Test that optional reference_hardware block is validated."""

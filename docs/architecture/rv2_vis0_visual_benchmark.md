@@ -85,8 +85,8 @@ Una cattura è riproducibile se documenta tutti i parametri runtime-configurabil
 
 ### Camera
 - `camera.mode`: `pilot` | `chase` (maps to `--camera`)
-- `camera.vertical_fov_deg`: FOV in gradi (maps to `--vertical-fov-deg`)
-- **Pilot mode:** `camera.pilot_position_render_m` [x, y, z] (maps to `--pilot-position-render-m`)
+- `camera.vertical_fov_deg`: FOV in gradi (maps to `--camera-fov`)
+- **Pilot mode:** `camera.pilot_position_render_m` [x, y, z] (maps to `--pilot-position` with format `x,y,z`)
 - **Chase mode:** `camera.chase_distance_behind_m`, `camera.chase_height_above_m` (maps to `--chase-distance-m`, `--chase-height-m`)
 
 ### Risoluzione e output
@@ -107,8 +107,9 @@ Una cattura è riproducibile se documenta tutti i parametri runtime-configurabil
 
 ### Metadata aggiuntivi
 - `tags`: lista di tag per categorizzazione
-- `reference_hardware`: GPU/driver/OS per cui la baseline è stata validata (opzionale ma raccomandato)
-- `reference_image`: path a immagine di riferimento opzionale
+- `reference_hardware`: GPU/driver/OS per cui la baseline è stata validata (opzionale; dovrebbe essere popolato solo quando esiste una baseline approvata reale su quell'hardware)
+
+**Nota:** `reference_image` era dichiarato nello schema iniziale ma non validato. È stato rimosso da schema e validator in VIS0-A. Sarà reintrodotto come future field quando il capture runner e il sistema di baseline saranno implementati.
 
 ## Naming convention
 
@@ -232,13 +233,18 @@ Non richiedere bitwise equality tra hardware diversi. Invece:
 ## Capacità runtime attuali vs future
 
 ### Supportato nel runtime attuale (v1 manifest)
-- Renderer version: `v1` | `v2`
-- Scenery preset: `none` | `flying-field`
-- Camera mode: `pilot` | `chase`
-- Camera parameters: FOV, pilot position, chase distance/height
-- Exposure EV: `[-8, 8]`
-- Aircraft: model, throttle, start_on_ground
-- Debug modes: terrain_debug, vegetation_debug
+- Renderer version: `v1` | `v2` (maps to `--renderer`)
+- Scenery preset: `none` | `flying-field` (maps to `--scenery`)
+- Camera mode: `pilot` | `chase` (maps to `--camera`)
+- Camera parameters:
+  - `vertical_fov_deg` (maps to `--camera-fov`)
+  - Pilot: `pilot_position_render_m` (maps to `--pilot-position` format `x,y,z`)
+  - Chase: `chase_distance_behind_m`, `chase_height_above_m` (maps to `--chase-distance-m`, `--chase-height-m`)
+- Exposure EV: `[-8, 8]` (maps to `--exposure-ev`)
+- Aircraft: model, throttle, start_on_ground (maps to `--model`, `--throttle`, `--start-on-ground`)
+- Debug modes:
+  - `terrain_debug`: `final`, `albedo`, `normal`, `roughness`, `macro`, `detail` (maps to `--terrain-debug`)
+  - `vegetation_debug`: `final`, `lod`, `culling` (maps to `--vegetation-debug`)
 - Resolution: width, height
 - Warmup frames
 
@@ -253,6 +259,7 @@ Non richiedere bitwise equality tra hardware diversi. Invece:
 - Free camera con look_at
 - Sequence tests (TAA temporal)
 - GPU profiling integration
+- `reference_image`: path a immagine di riferimento per comparison (rimosso da v1 perché non validato; sarà reintrodotto con il capture runner)
 
 **Queste capacità future devono essere documentate come tali, non rese required nel manifest v1.**
 

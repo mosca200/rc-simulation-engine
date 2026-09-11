@@ -22,6 +22,20 @@ from pathlib import Path
 from typing import Any
 
 
+def is_real_number(value: Any) -> bool:
+    """Check if value is a real number (int or float), excluding bool.
+    
+    In Python, isinstance(True, int) == True, but booleans should not be
+    accepted where numbers are required.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def is_real_integer(value: Any) -> bool:
+    """Check if value is a real integer, excluding bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class ValidationError:
     def __init__(self, path: str, message: str):
         self.path = path
@@ -36,7 +50,7 @@ class ManifestValidator:
     ALLOWED_TOP_LEVEL = {
         "schema_version", "scene_id", "description", "renderer", "scenery",
         "camera", "resolution", "exposure_ev", "aircraft", "warmup",
-        "capture", "tags", "reference_hardware", "reference_image"
+        "capture", "tags", "reference_hardware"
     }
 
     # Allowed nested properties per block
@@ -48,6 +62,10 @@ class ManifestValidator:
     ALLOWED_AIRCRAFT = {"model", "throttle", "start_on_ground"}
     ALLOWED_CAPTURE = {"filename", "format", "frame", "quality"}
     ALLOWED_REFERENCE_HARDWARE = {"gpu", "driver_version", "os", "notes"}
+
+    # Debug mode values verified from runtime source
+    TERRAIN_DEBUG_MODES = {"final", "albedo", "normal", "roughness", "macro", "detail"}
+    VEGETATION_DEBUG_MODES = {"final", "lod", "culling"}
 
     def __init__(self, manifest: dict, base_path: Path):
         self.manifest = manifest
@@ -129,12 +147,12 @@ class ManifestValidator:
             self.error("renderer.version", f"must be 'v1' or 'v2', got '{renderer['version']}'")
 
         if "terrain_debug" in renderer:
-            if renderer["terrain_debug"] not in ["final", "wireframe", "normals", "uv", "bounds"]:
-                self.error("renderer.terrain_debug", f"invalid value '{renderer['terrain_debug']}'")
+            if renderer["terrain_debug"] not in self.TERRAIN_DEBUG_MODES:
+                self.error("renderer.terrain_debug", f"invalid value '{renderer['terrain_debug']}' (allowed: {sorted(self.TERRAIN_DEBUG_MODES)})")
 
         if "vegetation_debug" in renderer:
-            if renderer["vegetation_debug"] not in ["final", "wireframe", "bounds", "lod"]:
-                self.error("renderer.vegetation_debug", f"invalid value '{renderer['vegetation_debug']}'")
+            if renderer["vegetation_debug"] not in self.VEGETATION_DEBUG_MODES:
+                self.error("renderer.vegetation_debug", f"invalid value '{renderer['vegetation_debug']}' (allowed: {sorted(self.VEGETATION_DEBUG_MODES)})")
 
     def _validate_scenery(self):
         scenery = self.manifest.get("scenery")
@@ -215,8 +233,8 @@ class ManifestValidator:
             self.error("resolution.width", "required field missing")
         else:
             width = res["width"]
-            if not isinstance(width, int):
-                self.error("resolution.width", "must be an integer")
+            if not is_real_integer(width):
+                self.error("resolution.width", f"must be an integer, got {type(width).__name__}")
             elif width < 320 or width > 7680:
                 self.error("resolution.width", f"must be in range [320, 7680], got {width}")
 
@@ -224,8 +242,8 @@ class ManifestValidator:
             self.error("resolution.height", "required field missing")
         else:
             height = res["height"]
-            if not isinstance(height, int):
-                self.error("resolution.height", "must be an integer")
+            if not is_real_integer(height):
+                self.error("resolution.height", f"must be an integer, got {type(height).__name__}")
             elif height < 240 or height > 4320:
                 self.error("resolution.height", f"must be in range [240, 4320], got {height}")
 
@@ -270,8 +288,8 @@ class ManifestValidator:
 
     def _validate_warmup(self):
         warmup = self.manifest.get("warmup")
-        if not isinstance(warmup, int):
-            self.error("warmup", "must be an integer")
+        if not is_real_integer(warmup):
+            self.error("warmup", f"must be an integer, got {type(warmup).__name__}")
         elif warmup < 0 or warmup > 300:
             self.error("warmup", f"must be in range [0, 300], got {warmup}")
 
@@ -309,17 +327,21 @@ class ManifestValidator:
                 if ext != fmt:
                     self.error("capture", f"filename extension '{ext}' does not match format '{fmt}'")
 
+            # JPEG quality constraint: only allowed for jpg format
+            if "quality" in capture and fmt != "jpg":
+                self.error("capture.quality", f"only allowed when format='jpg', got format='{fmt}'")
+
         if "frame" in capture:
             frame = capture["frame"]
-            if not isinstance(frame, int):
-                self.error("capture.frame", "must be an integer")
+            if not is_real_integer(frame):
+                self.error("capture.frame", f"must be an integer, got {type(frame).__name__}")
             elif frame < 0:
                 self.error("capture.frame", f"must be non-negative, got {frame}")
 
         if "quality" in capture:
             quality = capture["quality"]
-            if not isinstance(quality, int):
-                self.error("capture.quality", "must be an integer")
+            if not is_real_integer(quality):
+                self.error("capture.quality", f"must be an integer, got {type(quality).__name__}")
             elif quality < 1 or quality > 100:
                 self.error("capture.quality", f"must be in range [1, 100], got {quality}")
 
@@ -363,14 +385,14 @@ class ManifestValidator:
         res = self.manifest.get("resolution", {})
         width = res.get("width")
         height = res.get("height")
-        if isinstance(width, int) and isinstance(height, int) and height > 0:
+        if is_real_integer(width) and is_real_integer(height) and height > 0:
             aspect = width / height
             if aspect < 0.5 or aspect > 3.0:
                 self.error("resolution", f"aspect ratio {aspect:.2f} is unusual (expected 0.5-3.0)")
 
     def _validate_finite_number(self, path: str, value: Any, min_val: float, max_val: float, exclusive_min: bool = False):
         """Validate that a value is a finite number within range."""
-        if not isinstance(value, (int, float)):
+        if not is_real_number(value):
             self.error(path, f"must be a number, got {type(value).__name__}")
             return
         if math.isnan(value):
@@ -395,7 +417,7 @@ class ManifestValidator:
             self.error(path, f"must be an array of 3 numbers, got {len(vec)}")
             return
         for i, val in enumerate(vec):
-            if not isinstance(val, (int, float)):
+            if not is_real_number(val):
                 self.error(f"{path}[{i}]", f"must be a number, got {type(val).__name__}")
                 return
             if math.isnan(val):
@@ -418,6 +440,11 @@ def validate_manifest(manifest_path: Path) -> int:
     except json.JSONDecodeError as e:
         print(f"Error: invalid JSON: {e}", file=sys.stderr)
         return 2
+
+    # Check that root is an object
+    if not isinstance(manifest, dict):
+        print(f"Error: manifest root must be an object, got {type(manifest).__name__}", file=sys.stderr)
+        return 1
 
     validator = ManifestValidator(manifest, manifest_path.parent)
     is_valid = validator.validate()
