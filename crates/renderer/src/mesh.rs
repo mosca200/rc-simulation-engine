@@ -150,6 +150,56 @@ pub fn aircraft_mesh() -> AircraftMesh {
     AircraftMesh { vertices, indices }
 }
 
+/// Neutral split-tone target used only by the RV2-6 controlled visual gate.
+///
+/// The target is assembled from four matte boxes so the existing procedural
+/// material path provides both broad luminance regions and a hard local-
+/// contrast boundary. It is generated once at renderer initialization and is
+/// never reachable from the normal production viewer defaults.
+#[must_use]
+pub fn rv2_6_validation_target_mesh(ground_y_render_m: f32, extent_m: f32) -> AircraftMesh {
+    assert!(ground_y_render_m.is_finite());
+    assert!(extent_m.is_finite() && extent_m > 0.0);
+
+    let mut vertices = Vec::with_capacity(24 * 4);
+    let mut indices = Vec::with_capacity(36 * 4);
+    let half_width = extent_m * 0.5;
+    let half_height = extent_m * 0.5;
+    let bottom = ground_y_render_m + 0.02;
+    let middle = bottom + half_height;
+    let top = bottom + extent_m;
+    let half_thickness = (extent_m * 0.025).clamp(0.025, 0.5);
+    let dark = [0.18; 3];
+    let light = [0.72; 3];
+
+    for (minimum, maximum, color) in [
+        (
+            [-half_width, bottom, -half_thickness],
+            [0.0, middle, half_thickness],
+            dark,
+        ),
+        (
+            [0.0, bottom, -half_thickness],
+            [half_width, middle, half_thickness],
+            light,
+        ),
+        (
+            [-half_width, middle, -half_thickness],
+            [0.0, top, half_thickness],
+            light,
+        ),
+        (
+            [0.0, middle, -half_thickness],
+            [half_width, top, half_thickness],
+            dark,
+        ),
+    ] {
+        add_box(&mut vertices, &mut indices, minimum, maximum, color);
+    }
+
+    AircraftMesh::new(vertices, indices).expect("static RV2-6 validation target is valid")
+}
+
 /// G1E: separate movable-surface meshes for the procedural fallback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArticulatedAircraftMesh {
@@ -502,6 +552,20 @@ mod tests {
         assert!(minimum[2] < -0.7 && maximum[2] > 0.6);
         assert!((1.4..=1.8).contains(&(maximum[0] - minimum[0])));
         assert!((1.2..=1.6).contains(&(maximum[2] - minimum[2])));
+    }
+
+    #[test]
+    fn rv2_6_validation_target_is_neutral_grounded_and_deterministic() {
+        let first = rv2_6_validation_target_mesh(-0.25, 3.0);
+        let second = rv2_6_validation_target_mesh(-0.25, 3.0);
+        assert_eq!(first, second);
+        assert_eq!(first.vertices().len(), 24 * 4);
+        assert_eq!(first.indices().len(), 36 * 4);
+        assert!(first.vertices().iter().all(|vertex| {
+            vertex.color[0] == vertex.color[1]
+                && vertex.color[1] == vertex.color[2]
+                && vertex.position[1] >= -0.25 + 0.02
+        }));
     }
 
     #[test]

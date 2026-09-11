@@ -15,8 +15,8 @@
 //! Each frame is organized as:
 //! 1. Three stable cascaded shadow depth passes (scenery, instanced vegetation,
 //!    aircraft, articulated surfaces; terrain is the persistent receiver)
-//! 2. Main scene pass: sky (fullscreen triangle), terrain/scenery (lit + fogged),
-//!    optional debug overlays (unlit), and aircraft batches (lit + fogged)
+//! 2. Main scene pass: sky, atmosphere-composited terrain/scenery/aircraft,
+//!    and optional debug overlays (unlit)
 //!
 //! # Object Transforms
 //!
@@ -34,6 +34,7 @@
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
+use crate::renderer_v2::aerial_perspective::AerialPerspectiveUniformRaw;
 use crate::renderer_v2::atmosphere::{
     AtmosphereParameters, EnvironmentTextures, OBSERVER_ALTITUDE_M, SunState, V2EnvironmentMode,
     create_physical_environment,
@@ -140,6 +141,8 @@ pub enum PresentationAsset<'a> {
         articulation: &'a crate::GlbArticulationPlan,
     },
     Procedural(&'a AircraftMesh),
+    /// Developer-only neutral target for controlled visual validation.
+    ValidationTarget(&'a AircraftMesh),
 }
 
 /// Terrain visual mode for the renderer.
@@ -743,6 +746,26 @@ struct GlbBatchTarget {
     hinge: Option<crate::SurfaceHinge>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RendererInitializationPolicy {
+    device_features: DeviceFeaturePolicy,
+    aerial_perspective_enabled: bool,
+}
+
+impl RendererInitializationPolicy {
+    const V1: Self = Self {
+        device_features: DeviceFeaturePolicy::V1Legacy,
+        aerial_perspective_enabled: true,
+    };
+
+    const fn v2(aerial_perspective_enabled: bool) -> Self {
+        Self {
+            device_features: DeviceFeaturePolicy::V2OptionalTimestamp,
+            aerial_perspective_enabled,
+        }
+    }
+}
+
 fn glb_batch_target(
     plan: Option<&crate::GlbArticulationPlan>,
     primitive_index: usize,
@@ -874,6 +897,9 @@ pub struct WgpuRenderer {
     identity_object_bind_group: wgpu::BindGroup,
 
     _environment_buffer: wgpu::Buffer,
+    // RV2-6: physical-only atmosphere coefficients, allocated once when the
+    // RV2-5 environment is available. V1/fallback own no AP resource.
+    _aerial_perspective_buffer: Option<wgpu::Buffer>,
     shadow_uniform_buffer: wgpu::Buffer,
     environment_bind_group: wgpu::BindGroup,
     // RV2-5: present only when the physical Rgba16Float path is device-legal.
@@ -957,18 +983,19 @@ impl WgpuRenderer {
             terrain_mode,
             scenery_preset,
             camera_config,
-            DeviceFeaturePolicy::V1Legacy,
+            RendererInitializationPolicy::V1,
         )
         .await
     }
 
-    pub(crate) async fn new_v2_with_presentation(
+    pub(crate) async fn new_v2_with_presentation_for_rv2_6_validation(
         window: Arc<Window>,
         asset: PresentationAsset<'_>,
         ground_below_render_origin_m: f32,
         terrain_mode: RenderTerrainMode,
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
+        aerial_perspective_enabled: bool,
     ) -> Result<Self, RendererError> {
         Self::new_with_presentation_policy(
             window,
@@ -977,7 +1004,7 @@ impl WgpuRenderer {
             terrain_mode,
             scenery_preset,
             camera_config,
-            DeviceFeaturePolicy::V2OptionalTimestamp,
+            RendererInitializationPolicy::v2(aerial_perspective_enabled),
         )
         .await
     }
@@ -989,13 +1016,14 @@ impl WgpuRenderer {
         terrain_mode: RenderTerrainMode,
         scenery_preset: Option<SceneryPreset>,
         camera_config: CameraConfig,
-        feature_policy: DeviceFeaturePolicy,
+        initialization_policy: RendererInitializationPolicy,
     ) -> Result<Self, RendererError> {
         if !ground_below_render_origin_m.is_finite() || ground_below_render_origin_m <= 0.0 {
             return Err(RendererError::InvalidGroundReference);
         }
 
         let size = window.inner_size();
+        let feature_policy = initialization_policy.device_features;
         let device_context = DeviceContext::new(window, feature_policy).await?;
         if feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp {
             device_context.capabilities().log_v2_snapshot();
@@ -1009,6 +1037,7 @@ impl WgpuRenderer {
             PresentationAsset::Glb(_) => PresentationKind::RigidGlb,
             PresentationAsset::ArticulatedGlb { .. } => PresentationKind::ArticulatedGlb,
             PresentationAsset::Procedural(_) => PresentationKind::Procedural,
+            PresentationAsset::ValidationTarget(_) => PresentationKind::Procedural,
         };
         let scene_path = select_scene_path(
             feature_policy == DeviceFeaturePolicy::V2OptionalTimestamp,
@@ -1298,6 +1327,7 @@ impl WgpuRenderer {
                 articulation,
             } => Some((glb_asset, Some(articulation))),
             PresentationAsset::Procedural(_) => None,
+            PresentationAsset::ValidationTarget(_) => None,
         };
         if let Some((glb_asset, articulation)) = glb_and_plan {
             for (primitive_index, primitive) in glb_asset.primitives.iter().enumerate() {
@@ -1359,7 +1389,9 @@ impl WgpuRenderer {
                     });
                 }
             }
-        } else if let PresentationAsset::Procedural(mesh) = asset {
+        } else if let PresentationAsset::Procedural(mesh)
+        | PresentationAsset::ValidationTarget(mesh) = asset
+        {
             if !mesh.vertices().is_empty() {
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("aircraft presentation vertices"),
@@ -1381,7 +1413,10 @@ impl WgpuRenderer {
 
             let articulated = crate::articulated_aircraft_mesh();
             let surface_binding_table = crate::articulated_binding_table();
-            for surface in crate::SurfaceId::control_surfaces() {
+            for surface in crate::SurfaceId::control_surfaces()
+                .into_iter()
+                .filter(|_| matches!(asset, PresentationAsset::Procedural(_)))
+            {
                 let Some(mesh) = articulated.surface(surface) else {
                     continue;
                 };
@@ -1661,6 +1696,18 @@ impl WgpuRenderer {
             contents: bytemuck::bytes_of(&default_environment),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let aerial_perspective_buffer = use_physical.then(|| {
+            let uniform = AerialPerspectiveUniformRaw::new(
+                atmosphere_parameters,
+                ground_below_render_origin_m,
+            )
+            .with_validation_enabled(initialization_policy.aerial_perspective_enabled);
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("RV2-6 physical aerial perspective uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        });
         let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("G3E shadow receiver uniform"),
             contents: bytemuck::bytes_of(&ShadowUniform::from_cascades(&initial_shadow_cascades)),
@@ -1712,8 +1759,11 @@ impl WgpuRenderer {
                 &shadow_target.view,
                 &shadow_sampler,
                 &shadow_uniform_buffer,
+                aerial_perspective_buffer
+                    .as_ref()
+                    .expect("physical environment requires the RV2-6 uniform"),
                 textures,
-                "RV2-5 physical environment bind group",
+                "RV2-6 physical environment bind group",
             ),
             None => create_environment_bind_group(
                 &device,
@@ -1816,6 +1866,7 @@ impl WgpuRenderer {
             _identity_object_buffer: identity_object_buffer,
             identity_object_bind_group,
             _environment_buffer: environment_buffer,
+            _aerial_perspective_buffer: aerial_perspective_buffer,
             shadow_uniform_buffer,
             environment_bind_group,
             _environment_textures: environment_textures,
@@ -3570,11 +3621,11 @@ fn environment_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::Bi
     })
 }
 
-/// RV2-5 V2-only extension of the environment layout.
+/// RV2-5/RV2-6 V2-only extension of the environment layout.
 ///
-/// The physical bindings live at 12..20 and are declared **only** for the V2
-/// environment, so V1 pipelines never reference them and V1 keeps its previous
-/// bind-group/layout contract untouched.
+/// RV2-5 keeps its textures at 12..20; RV2-6 adds only the physical uniform at
+/// binding 5. They are declared **only** for the V2 environment, so V1 keeps
+/// its previous bind-group/layout contract untouched.
 fn environment_bind_group_layout_with_physical(
     device: &wgpu::Device,
     label: &str,
@@ -3591,9 +3642,21 @@ fn environment_bind_group_layout_with_physical(
     })
 }
 
-/// RV2-5 physical environment entries (bindings 12..20).
-fn physical_environment_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
+/// V2 physical environment entries (RV2-6 binding 5, RV2-5 bindings 12..20).
+fn physical_environment_layout_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
     [
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(
+                    size_of::<AerialPerspectiveUniformRaw>() as u64
+                ),
+            },
+            count: None,
+        },
         wgpu::BindGroupLayoutEntry {
             binding: 12,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -3869,7 +3932,7 @@ fn create_environment_bind_group(
     })
 }
 
-/// V2 physical environment bind group: the V1 slots plus the RV2-5 resources.
+/// V2 physical environment bind group: shared slots plus RV2-5/RV2-6 state.
 #[allow(clippy::too_many_arguments)]
 fn create_environment_bind_group_with_textures(
     device: &wgpu::Device,
@@ -3878,6 +3941,7 @@ fn create_environment_bind_group_with_textures(
     shadow_texture_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
     shadow_uniform_buffer: &wgpu::Buffer,
+    aerial_perspective_buffer: &wgpu::Buffer,
     textures: &EnvironmentTextures,
     label: &str,
 ) -> wgpu::BindGroup {
@@ -3900,6 +3964,10 @@ fn create_environment_bind_group_with_textures(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: shadow_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: aerial_perspective_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 12,
@@ -7886,13 +7954,17 @@ mod rv2_5_physical_environment_wiring_tests {
             .next()
             .expect("the base entries must precede the V1 layout");
         assert!(
-            !base.contains("binding: 12"),
+            !base.contains("binding: 5") && !base.contains("binding: 12"),
             "the V1 environment layout must not declare physical bindings"
         );
         let physical = source
             .split("fn physical_environment_layout_entries()")
             .nth(1)
             .expect("the physical entries must exist");
+        assert!(
+            physical.contains("binding: 5,"),
+            "the physical layout must declare RV2-6 binding 5"
+        );
         for binding in 12..=20 {
             assert!(
                 physical.contains(&format!("binding: {binding},")),
@@ -7907,6 +7979,10 @@ mod rv2_5_physical_environment_wiring_tests {
         assert!(
             source.contains("_environment_textures: Option<EnvironmentTextures>,"),
             "the physical resources must be optional so the analytic fallback owns none"
+        );
+        assert!(
+            source.contains("_aerial_perspective_buffer: Option<wgpu::Buffer>,"),
+            "the RV2-6 uniform must be absent from the analytic fallback"
         );
         let resize = source
             .split("pub fn resize(&mut self")
