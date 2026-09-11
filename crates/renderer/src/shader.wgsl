@@ -91,6 +91,23 @@ struct EnvironmentUniform {
     atmosphere_state: vec4<f32>,
 };
 
+// RV2-6 V2-only physical aerial-perspective state. The renderer stays in
+// local metre coordinates; planet_ground.z is the render-space ground Y and
+// the planet radius is used only by numerically stable local horizon math.
+struct AerialPerspectiveUniform {
+    // x: planet radius, y: atmosphere height, z: ground render Y,
+    // w: fixed integration sample count (4).
+    planet_ground: vec4<f32>,
+    // x: Rayleigh scale height, y: Mie scale height,
+    // z: ozone centre, w: ozone half-width.
+    density_profile: vec4<f32>,
+    rayleigh_scattering: vec4<f32>,
+    mie_scattering: vec4<f32>,
+    // xyz: Mie extinction, w: Mie anisotropy.
+    mie_extinction_anisotropy: vec4<f32>,
+    ozone_absorption: vec4<f32>,
+};
+
 // G3B: postprocess state for the final display pass.
 // exposure_ev: manual exposure in EV stops; the scene value is multiplied by
 //   exp2(exposure_ev) BEFORE tone mapping (scene-referred HDR -> display).
@@ -177,6 +194,8 @@ var directional_shadow_sampler: sampler_comparison;
 var<uniform> shadow: ShadowUniform;
 @group(2) @binding(4)
 var<uniform> shadow_cascade: ShadowCascadeUniform;
+@group(2) @binding(5)
+var<uniform> aerial_perspective: AerialPerspectiveUniform;
 @group(2) @binding(12)
 var environment_cube: texture_cube<f32>;
 @group(2) @binding(13)
@@ -633,6 +652,184 @@ fn physical_specular_response(
 }
 
 // ---------------------------------------------------------------------------
+// RV2-6 physical aerial perspective
+// ---------------------------------------------------------------------------
+//
+// Four deterministic midpoint samples integrate the bounded RC-scale segment
+// directly in the Scene pass. The result is physical compositing:
+//
+//   Lout = Lsurface * T(camera -> fragment) + Lscattered(camera -> fragment)
+//
+// The RV2-5 multiple-scattering texture stores a sun-independent transfer.
+// The real SunState irradiance is therefore multiplied exactly once below.
+
+const AERIAL_PERSPECTIVE_SAMPLE_COUNT: i32 = 4;
+
+struct PhysicalAerialPerspective {
+    transmittance_rgb: vec3<f32>,
+    inscattered_radiance_rgb: vec3<f32>,
+};
+
+fn aerial_altitude(world_position: vec3<f32>) -> f32 {
+    return clamp(
+        world_position.y - aerial_perspective.planet_ground.z,
+        0.0,
+        aerial_perspective.planet_ground.y,
+    );
+}
+
+fn aerial_rayleigh_density(height_m: f32) -> f32 {
+    return exp(-height_m / aerial_perspective.density_profile.x);
+}
+
+fn aerial_mie_density(height_m: f32) -> f32 {
+    return exp(-height_m / aerial_perspective.density_profile.y);
+}
+
+fn aerial_ozone_density(height_m: f32) -> f32 {
+    return max(
+        0.0,
+        1.0
+            - abs(height_m - aerial_perspective.density_profile.z)
+                / aerial_perspective.density_profile.w,
+    );
+}
+
+fn aerial_extinction(height_m: f32) -> vec3<f32> {
+    return aerial_perspective.rayleigh_scattering.rgb * aerial_rayleigh_density(height_m)
+        + aerial_perspective.mie_extinction_anisotropy.rgb * aerial_mie_density(height_m)
+        + aerial_perspective.ozone_absorption.rgb * aerial_ozone_density(height_m);
+}
+
+fn aerial_scattering(height_m: f32) -> vec3<f32> {
+    return aerial_perspective.rayleigh_scattering.rgb * aerial_rayleigh_density(height_m)
+        + aerial_perspective.mie_scattering.rgb * aerial_mie_density(height_m);
+}
+
+fn aerial_rayleigh_phase(cos_theta: f32) -> f32 {
+    return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
+}
+
+fn aerial_mie_phase(cos_theta: f32) -> f32 {
+    let g = aerial_perspective.mie_extinction_anisotropy.w;
+    let denominator = max(1.0 + g * g - 2.0 * g * cos_theta, 1e-4);
+    return (1.0 - g * g) / (4.0 * PI * pow(denominator, 1.5));
+}
+
+fn aerial_sample_up(sample_position: vec3<f32>, height_m: f32) -> vec3<f32> {
+    // Local tangent-frame construction: no Earth-scale world translation or
+    // subtraction. The large radius only establishes the slowly varying up.
+    return safe_normalize(vec3<f32>(
+        sample_position.x,
+        aerial_perspective.planet_ground.x + height_m,
+        sample_position.z,
+    ));
+}
+
+fn aerial_sun_is_visible(height_m: f32, sun_mu: f32) -> bool {
+    if (sun_mu >= 0.0) {
+        return true;
+    }
+    // Stable equivalent of the ray/sphere horizon test:
+    // sqrt(1 - R^2/(R+h)^2) = sqrt(h(2R+h))/(R+h).
+    // It preserves the exact surface decision without subtracting R-sized
+    // f32 values and naturally permits the depressed horizon at altitude.
+    let planet_radius = aerial_perspective.planet_ground.x;
+    let sample_radius = planet_radius + height_m;
+    let horizon_sine = sqrt(max(height_m * (2.0 * planet_radius + height_m), 0.0))
+        / max(sample_radius, 1.0);
+    return sun_mu >= -horizon_sine;
+}
+
+fn aerial_lut_uv(height_m: f32, sun_mu: f32) -> vec2<f32> {
+    return vec2<f32>(
+        clamp(sun_mu * 0.5 + 0.5, 0.0, 1.0),
+        sqrt(clamp(height_m / aerial_perspective.planet_ground.y, 0.0, 1.0)),
+    );
+}
+
+fn integrate_physical_aerial_perspective(
+    camera_position: vec3<f32>,
+    world_position: vec3<f32>,
+) -> PhysicalAerialPerspective {
+    let segment = world_position - camera_position;
+    let distance = length(segment);
+    if (distance <= 1e-4) {
+        return PhysicalAerialPerspective(vec3<f32>(1.0), vec3<f32>(0.0));
+    }
+
+    let view_direction = segment / distance;
+    let sun_direction = safe_normalize(environment.light_direction.xyz);
+    let cos_theta = clamp(dot(view_direction, sun_direction), -1.0, 1.0);
+    let rayleigh_phase = aerial_rayleigh_phase(cos_theta);
+    let mie_phase = aerial_mie_phase(cos_theta);
+    let sun_irradiance = environment.sun_color.xyz * environment.atmosphere_state.y;
+    let step_length = distance / f32(AERIAL_PERSPECTIVE_SAMPLE_COUNT);
+    var optical_depth = vec3<f32>(0.0);
+    var inscattered = vec3<f32>(0.0);
+
+    for (
+        var sample_index = 0;
+        sample_index < AERIAL_PERSPECTIVE_SAMPLE_COUNT;
+        sample_index = sample_index + 1
+    ) {
+        let sample_distance = (f32(sample_index) + 0.5) * step_length;
+        let sample_position = camera_position + view_direction * sample_distance;
+        let height_m = aerial_altitude(sample_position);
+        let rho_rayleigh = aerial_rayleigh_density(height_m);
+        let rho_mie = aerial_mie_density(height_m);
+        let extinction = aerial_extinction(height_m);
+        let transmittance_to_sample = exp(
+            -(optical_depth + extinction * (0.5 * step_length)),
+        );
+
+        let up = aerial_sample_up(sample_position, height_m);
+        let sun_mu = clamp(dot(up, sun_direction), -1.0, 1.0);
+        var sun_transmittance = vec3<f32>(0.0);
+        if (aerial_sun_is_visible(height_m, sun_mu)) {
+            sun_transmittance = textureSampleLevel(
+                transmittance_lut,
+                atmosphere_sampler,
+                aerial_lut_uv(height_m, sun_mu),
+                0.0,
+            ).rgb;
+        }
+
+        let single_source = sun_irradiance * sun_transmittance
+            * (aerial_perspective.rayleigh_scattering.rgb * rho_rayleigh * rayleigh_phase
+                + aerial_perspective.mie_scattering.rgb * rho_mie * mie_phase);
+        let multiple_transfer = textureSampleLevel(
+            multi_scattering_lut,
+            atmosphere_sampler,
+            aerial_lut_uv(height_m, sun_mu),
+            0.0,
+        ).rgb;
+        let multiple_source = sun_irradiance * multiple_transfer * aerial_scattering(height_m);
+
+        inscattered = inscattered
+            + transmittance_to_sample * (single_source + multiple_source) * step_length;
+        optical_depth = optical_depth + extinction * step_length;
+    }
+
+    return PhysicalAerialPerspective(
+        clamp(exp(-optical_depth), vec3<f32>(0.0), vec3<f32>(1.0)),
+        max(inscattered, vec3<f32>(0.0)),
+    );
+}
+
+fn apply_physical_aerial_perspective(
+    surface_radiance: vec3<f32>,
+    world_position: vec3<f32>,
+) -> vec3<f32> {
+    let physical = integrate_physical_aerial_perspective(
+        camera.camera_position.xyz,
+        world_position,
+    );
+    return surface_radiance * physical.transmittance_rgb
+        + physical.inscattered_radiance_rgb;
+}
+
+// ---------------------------------------------------------------------------
 // Lit fragment: texture * vertex_color * lighting + distance fog.
 //
 // G1C color pipeline (preserved):
@@ -810,9 +1007,8 @@ fn fs_lit(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(final_rgb, base_rgba.a);
 }
 
-// RV2-5 physical counterpart of `fs_lit`. Same material resolution and fog,
-// but the lighting comes from `lit_pbr_response_physical` (single SunState +
-// split-sum IBL). Only this entry point references the physical bindings.
+// RV2 physical counterpart of `fs_lit`. Material resolution is unchanged;
+// physical lighting is followed by RV2-6 transmittance + in-scattering.
 @fragment
 fn fs_lit_v2(input: VertexOutput) -> @location(0) vec4<f32> {
     let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
@@ -823,7 +1019,7 @@ fn fs_lit_v2(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let n = safe_normalize(input.world_normal);
     let lit_rgb = lit_pbr_response_physical(base_rgba, n, input.world_position, metallic, roughness);
-    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+    let final_rgb = apply_physical_aerial_perspective(lit_rgb, input.world_position);
 
     return vec4<f32>(final_rgb, base_rgba.a);
 }
@@ -870,7 +1066,8 @@ fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
         surface.metallic,
         surface.roughness,
     );
-    return terrain_fragment_output(input, surface, lit_rgb);
+    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+    return terrain_fragment_output(surface, final_rgb);
 }
 
 @fragment
@@ -883,7 +1080,8 @@ fn fs_terrain_v2(input: VertexOutput) -> @location(0) vec4<f32> {
         surface.metallic,
         surface.roughness,
     );
-    return terrain_fragment_output(input, surface, lit_rgb);
+    let final_rgb = apply_physical_aerial_perspective(lit_rgb, input.world_position);
+    return terrain_fragment_output(surface, final_rgb);
 }
 
 fn terrain_surface(input: VertexOutput) -> TerrainSurface {
@@ -1039,16 +1237,13 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     );
 }
 
-// Shared terrain tail: distance fog plus the presentation-only debug channels.
-// The lit color is computed by each entry point, so this helper never touches
-// the RV2-5 physical bindings and stays usable from the V1 pipeline.
+// Shared terrain tail for presentation-only debug channels. Each entry point
+// supplies its final atmosphere-composited color, while raw debug channels
+// remain diagnostic and deliberately bypass both fog implementations.
 fn terrain_fragment_output(
-    input: VertexOutput,
     surface: TerrainSurface,
-    lit_rgb: vec3<f32>,
+    final_rgb: vec3<f32>,
 ) -> vec4<f32> {
-    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
-
     // G3A-R: presentation-only debug channels. The uniform selector is
     // defaulted to 0 (FINAL) by the renderer; the lit path above is computed
     // identically regardless of the selector, so the production output is
@@ -1414,7 +1609,7 @@ fn fs_vegetation_v2(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
 
     let n = safe_normalize(input.world_normal);
     let lit_rgb = lit_pbr_response_physical(base_rgba, n, input.world_position, metallic, roughness);
-    let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
+    let final_rgb = apply_physical_aerial_perspective(lit_rgb, input.world_position);
 
     return vec4<f32>(final_rgb, 1.0);
 }
