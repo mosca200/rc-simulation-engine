@@ -16,43 +16,29 @@ from tools.visual_benchmark.validate_manifest import validate_manifest
 
 class TestManifestValidator(unittest.TestCase):
     def setUp(self):
-        """Create a valid base manifest."""
+        """Create a valid base manifest aligned with runtime."""
         self.valid_manifest = {
             "schema_version": "1.0.0",
             "scene_id": "test_scene",
             "description": "Test scene for validation",
             "renderer": {
-                "version": "test@123",
-                "scenery_preset": "FlyingField"
+                "version": "v2"
             },
             "scenery": {
-                "time_of_day": "noon",
-                "weather": "clear"
+                "preset": "flying-field"
             },
             "camera": {
-                "mode": "perspective",
-                "position": [0.0, 1.0, -5.0],
-                "orientation": {
-                    "look_at": [0.0, 0.0, 0.0]
-                },
-                "fov_deg": 60
+                "mode": "pilot",
+                "vertical_fov_deg": 55,
+                "pilot_position_render_m": [0.0, 1.8, 20.0]
             },
             "resolution": {
                 "width": 1920,
                 "height": 1080
             },
             "exposure_ev": 0,
-            "lighting": {
-                "ambient_intensity": 15000,
-                "sun_intensity": 100000
-            },
-            "sun": {
-                "azimuth_deg": 180,
-                "elevation_deg": 45
-            },
             "aircraft": {
-                "model": "models/acro_electric_01/model.json",
-                "position": [0.0, 0.5, 0.0]
+                "model": "models/acro_electric_01/model.json"
             },
             "warmup": 10,
             "capture": {
@@ -75,6 +61,8 @@ class TestManifestValidator(unittest.TestCase):
             json.dump(manifest, f)
         return manifest_path
 
+    # === Basic validation tests ===
+
     def test_valid_manifest(self):
         """Test that a valid manifest passes validation."""
         manifest_path = self._write_manifest(self.valid_manifest)
@@ -89,10 +77,148 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
+    # === Finding 1: Runtime alignment tests ===
+
+    def test_unknown_top_level_property(self):
+        """Test that unknown top-level property fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["unknown_field"] = "value"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_unknown_renderer_property(self):
+        """Test that unknown renderer property fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["unknown_option"] = True
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_invalid_runtime_scenery_label(self):
+        """Test that invalid runtime scenery label fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["scenery"]["preset"] = "TestField"  # Not a real runtime preset
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_invalid_renderer_version(self):
+        """Test that invalid renderer version fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["version"] = "v3"  # Not supported
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Finding 2: Camera reproducibility tests ===
+
+    def test_missing_required_camera_reconstruction_data_pilot(self):
+        """Test that missing pilot position fails validation."""
+        manifest = self.valid_manifest.copy()
+        del manifest["camera"]["pilot_position_render_m"]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_missing_required_camera_reconstruction_data_chase(self):
+        """Test that missing chase distance fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["mode"] = "chase"
+        del manifest["camera"]["pilot_position_render_m"]
+        # Missing chase_distance_behind_m and chase_height_above_m
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_chase_camera_with_pilot_fields(self):
+        """Test that chase mode with pilot fields fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["mode"] = "chase"
+        manifest["camera"]["chase_distance_behind_m"] = 3.5
+        manifest["camera"]["chase_height_above_m"] = 1.25
+        # pilot_position_render_m should not be present in chase mode
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_valid_chase_camera(self):
+        """Test that valid chase camera passes validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["mode"] = "chase"
+        manifest["camera"]["chase_distance_behind_m"] = 3.5
+        manifest["camera"]["chase_height_above_m"] = 1.25
+        del manifest["camera"]["pilot_position_render_m"]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 0)
+
+    # === Finding 4: NaN/Infinity tests ===
+
+    def test_nan_fov(self):
+        """Test that NaN FOV fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["vertical_fov_deg"] = float('nan')
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_infinity_throttle(self):
+        """Test that Infinity throttle fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["throttle"] = float('inf')
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_negative_infinity_exposure(self):
+        """Test that -Infinity exposure fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["exposure_ev"] = float('-inf')
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_nan_in_position(self):
+        """Test that NaN in position fails validation."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["pilot_position_render_m"] = [0.0, float('nan'), 20.0]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Finding 5: Crash prevention tests ===
+
+    def test_wrong_type_vector_no_exception(self):
+        """Test that wrong-type vector fails without exception."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["pilot_position_render_m"] = ["bad", 0, 1]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_null_in_vector_no_exception(self):
+        """Test that null in vector fails without exception."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["pilot_position_render_m"] = [None, 0, 0]
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_wrong_length_vector_no_exception(self):
+        """Test that wrong-length vector fails without exception."""
+        manifest = self.valid_manifest.copy()
+        manifest["camera"]["pilot_position_render_m"] = [0.0, 1.0]  # Only 2 elements
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    # === Other validation tests ===
+
     def test_invalid_fov_too_low(self):
         """Test that FOV below minimum fails validation."""
         manifest = self.valid_manifest.copy()
-        manifest["camera"]["fov_deg"] = 5
+        manifest["camera"]["vertical_fov_deg"] = 5
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
@@ -100,7 +226,7 @@ class TestManifestValidator(unittest.TestCase):
     def test_invalid_fov_too_high(self):
         """Test that FOV above maximum fails validation."""
         manifest = self.valid_manifest.copy()
-        manifest["camera"]["fov_deg"] = 150
+        manifest["camera"]["vertical_fov_deg"] = 150
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
@@ -117,22 +243,6 @@ class TestManifestValidator(unittest.TestCase):
         """Test that invalid resolution height fails validation."""
         manifest = self.valid_manifest.copy()
         manifest["resolution"]["height"] = 5000
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_nan_in_position(self):
-        """Test that NaN in position fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["camera"]["position"] = [0.0, float('nan'), -5.0]
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_infinity_in_exposure(self):
-        """Test that Infinity in exposure fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["exposure_ev"] = float('inf')
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
@@ -170,63 +280,6 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    def test_invalid_scenery_preset(self):
-        """Test that invalid scenery preset fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["renderer"]["scenery_preset"] = "InvalidPreset"
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_invalid_camera_mode(self):
-        """Test that invalid camera mode fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["camera"]["mode"] = "fisheye"
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_invalid_sun_direction_not_normalized(self):
-        """Test that non-normalized sun direction fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["sun"] = {"direction": [1.0, 1.0, 1.0]}  # Not normalized
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_valid_sun_direction_normalized(self):
-        """Test that normalized sun direction passes validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["sun"] = {"direction": [0.0, 0.707, -0.707]}  # Normalized
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 0)
-
-    def test_invalid_quaternion_not_unit(self):
-        """Test that non-unit quaternion fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["camera"]["orientation"] = {"quaternion": [1.0, 1.0, 1.0, 1.0]}
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
-    def test_valid_quaternion_unit(self):
-        """Test that unit quaternion passes validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["camera"]["orientation"] = {"quaternion": [1.0, 0.0, 0.0, 0.0]}
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 0)
-
-    def test_near_greater_than_far(self):
-        """Test that near plane >= far plane fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["camera"]["near_plane_m"] = 100
-        manifest["camera"]["far_plane_m"] = 10
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
     def test_duplicate_tags(self):
         """Test that duplicate tags fail validation."""
         manifest = self.valid_manifest.copy()
@@ -259,14 +312,6 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    def test_invalid_control_surface_deflection(self):
-        """Test that control surface deflection outside [-45, 45] fails validation."""
-        manifest = self.valid_manifest.copy()
-        manifest["aircraft"]["control_state"] = {"aileron_deg": 50}
-        manifest_path = self._write_manifest(manifest)
-        exit_code = validate_manifest(manifest_path)
-        self.assertEqual(exit_code, 1)
-
     def test_file_not_found(self):
         """Test that non-existent manifest file returns exit code 2."""
         manifest_path = Path("/nonexistent/manifest.json")
@@ -280,6 +325,32 @@ class TestManifestValidator(unittest.TestCase):
         manifest_path.write_text("{invalid json")
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 2)
+
+    # === Finding 10: Optional supported blocks validated ===
+
+    def test_optional_reference_hardware_validated(self):
+        """Test that optional reference_hardware block is validated."""
+        manifest = self.valid_manifest.copy()
+        manifest["reference_hardware"] = {"gpu": 123}  # Wrong type
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_optional_terrain_debug_validated(self):
+        """Test that optional terrain_debug is validated."""
+        manifest = self.valid_manifest.copy()
+        manifest["renderer"]["terrain_debug"] = "invalid_mode"
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
+
+    def test_optional_start_on_ground_validated(self):
+        """Test that optional start_on_ground is validated."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["start_on_ground"] = "yes"  # Wrong type
+        manifest_path = self._write_manifest(manifest)
+        exit_code = validate_manifest(manifest_path)
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

@@ -3,60 +3,31 @@
   "scene_id": "aircraft_acro_static_front",
   "description": "Canonical reference scene for Acro Electric 01 aircraft in static front view. Tests aircraft rendering, materials, and basic lighting. This is a benchmark contract example, not an approved golden image.",
   "renderer": {
-    "version": "integration/render-v2@ec3e17f",
-    "scenery_preset": "FlyingField",
-    "vsync": false,
-    "msaa_samples": 4,
-    "taa_enabled": false,
-    "hdr_enabled": true
+    "version": "v2",
+    "terrain_debug": "final",
+    "vegetation_debug": "final"
   },
   "scenery": {
-    "time_of_day": "noon",
-    "weather": "clear",
-    "wind_speed_mps": 0
+    "preset": "flying-field"
   },
   "camera": {
-    "mode": "perspective",
-    "position": [0.0, 1.5, -5.0],
-    "orientation": {
-      "look_at": [0.0, 0.5, 0.0],
-      "up": [0.0, 1.0, 0.0]
-    },
-    "fov_deg": 60,
-    "near_plane_m": 0.1,
-    "far_plane_m": 1000
+    "mode": "pilot",
+    "vertical_fov_deg": 55,
+    "pilot_position_render_m": [0.0, 1.8, 20.0]
   },
   "resolution": {
     "width": 1920,
     "height": 1080
   },
   "exposure_ev": 0,
-  "lighting": {
-    "ambient_intensity": 15000,
-    "sun_intensity": 100000,
-    "shadow_cascades": 3,
-    "shadow_resolution": 2048
-  },
-  "sun": {
-    "azimuth_deg": 180,
-    "elevation_deg": 45
-  },
   "aircraft": {
     "model": "models/acro_electric_01/model.json",
-    "position": [0.0, 0.5, 0.0],
-    "orientation": {
-      "euler_deg": [0.0, 0.0, 0.0]
-    },
     "throttle": 0.0,
-    "control_state": {
-      "aileron_deg": 0.0,
-      "elevator_deg": 0.0,
-      "rudder_deg": 0.0
-    }
+    "start_on_ground": true
   },
   "warmup": 10,
   "capture": {
-    "filename": "aircraft_acro_static_front.png",
+    "filename": "aircraft_acro_static_front_1920x1080.png",
     "format": "png",
     "frame": 10
   },

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/mosca200/rc-simulation-engine/schemas/golden_scene_manifest.json",
   "title": "Golden Scene Manifest",
-  "description": "Machine-readable contract for reproducible visual benchmarks of the RC Simulation Engine renderer.",
+  "description": "Machine-readable contract for reproducible visual benchmarks of the RC Simulation Engine renderer. v1 supports only runtime-configurable parameters. Future capabilities are documented separately.",
   "type": "object",
   "required": [
     "schema_version",
@@ -13,8 +13,6 @@
     "camera",
     "resolution",
     "exposure_ev",
-    "lighting",
-    "sun",
     "aircraft",
     "warmup",
     "capture",
@@ -42,144 +40,89 @@
     },
     "renderer": {
       "type": "object",
-      "required": ["version", "scenery_preset"],
+      "required": ["version"],
       "additionalProperties": false,
       "properties": {
         "version": {
           "type": "string",
-          "description": "Renderer version or branch identifier. Example: 'integration/render-v2@ec3e17f'."
+          "enum": ["v1", "v2"],
+          "description": "Renderer backend version. 'v1' = legacy, 'v2' = physical atmosphere/IBL. Maps to --renderer CLI flag."
         },
-        "scenery_preset": {
+        "terrain_debug": {
           "type": "string",
-          "enum": ["FlyingField", "TestField", "Empty"],
-          "description": "Scenery preset to load. Determines terrain, vegetation, atmosphere configuration."
+          "enum": ["final", "wireframe", "normals", "uv", "bounds"],
+          "default": "final",
+          "description": "Terrain debug visualization mode. Maps to --terrain-debug CLI flag."
         },
-        "vsync": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether vsync is enabled. Should be false for benchmarking."
-        },
-        "msaa_samples": {
-          "type": "integer",
-          "enum": [1, 2, 4, 8],
-          "default": 1,
-          "description": "MSAA sample count. 1 = no MSAA."
-        },
-        "taa_enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether TAA (Temporal Anti-Aliasing) is enabled."
-        },
-        "hdr_enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Whether HDR rendering is enabled."
+        "vegetation_debug": {
+          "type": "string",
+          "enum": ["final", "wireframe", "bounds", "lod"],
+          "default": "final",
+          "description": "Vegetation debug visualization mode. Maps to --vegetation-debug CLI flag."
         }
       },
-      "description": "Renderer configuration."
+      "description": "Renderer configuration. Only runtime-configurable parameters."
     },
     "scenery": {
       "type": "object",
-      "required": ["time_of_day", "weather"],
+      "required": ["preset"],
       "additionalProperties": false,
       "properties": {
-        "time_of_day": {
+        "preset": {
           "type": "string",
-          "enum": ["dawn", "morning", "noon", "afternoon", "dusk", "night"],
-          "description": "Time of day for lighting and atmosphere."
-        },
-        "weather": {
-          "type": "string",
-          "enum": ["clear", "partly_cloudy", "overcast", "fog"],
-          "description": "Weather condition."
-        },
-        "wind_speed_mps": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 50,
-          "default": 0,
-          "description": "Wind speed in meters per second. Affects vegetation animation."
+          "enum": ["none", "flying-field"],
+          "description": "Scenery preset. Maps to --scenery CLI flag. 'none' = empty, 'flying-field' = RC airfield with runway, markings, fence, windsock."
         }
       },
-      "description": "Scenery environment configuration."
+      "description": "Scenery environment configuration. Only runtime-configurable parameters."
     },
     "camera": {
       "type": "object",
-      "required": ["mode", "position", "fov_deg"],
+      "required": ["mode", "vertical_fov_deg"],
       "additionalProperties": false,
       "properties": {
         "mode": {
           "type": "string",
-          "enum": ["perspective", "orthographic"],
-          "description": "Camera projection mode."
+          "enum": ["pilot", "chase"],
+          "description": "Camera mode. Maps to --camera CLI flag."
         },
-        "position": {
+        "vertical_fov_deg": {
+          "type": "number",
+          "minimum": 10,
+          "maximum": 120,
+          "description": "Vertical field of view in degrees. Maps to --vertical-fov-deg CLI flag. Typical: 55-70."
+        },
+        "pilot_position_render_m": {
           "type": "array",
           "items": {"type": "number"},
           "minItems": 3,
           "maxItems": 3,
-          "description": "Camera position in render-body frame [x, y, z] in meters. +X right, +Y up, -Z forward."
+          "description": "Pilot camera position in render-body frame [x, y, z] in meters. Required when mode='pilot'. Maps to --pilot-position-render-m CLI flag."
         },
-        "orientation": {
-          "type": "object",
-          "oneOf": [
-            {
-              "required": ["quaternion"],
-              "additionalProperties": false,
-              "properties": {
-                "quaternion": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 4,
-                  "maxItems": 4,
-                  "description": "Camera orientation as unit quaternion [w, x, y, z]."
-                }
-              }
-            },
-            {
-              "required": ["look_at"],
-              "additionalProperties": false,
-              "properties": {
-                "look_at": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 3,
-                  "maxItems": 3,
-                  "description": "Target point to look at in render-body frame [x, y, z] in meters."
-                },
-                "up": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 3,
-                  "maxItems": 3,
-                  "default": [0, 1, 0],
-                  "description": "Up vector for camera orientation. Default: [0, 1, 0] (world up)."
-                }
-              }
-            }
-          ],
-          "description": "Camera orientation. Either quaternion or look_at target."
-        },
-        "fov_deg": {
-          "type": "number",
-          "minimum": 10,
-          "maximum": 120,
-          "description": "Vertical field of view in degrees. Typical: 60 for standard, 90 for wide."
-        },
-        "near_plane_m": {
+        "chase_distance_behind_m": {
           "type": "number",
           "exclusiveMinimum": 0,
-          "default": 0.1,
-          "description": "Near clipping plane distance in meters."
+          "maximum": 50,
+          "description": "Chase camera distance behind aircraft in meters. Required when mode='chase'. Maps to --chase-distance-m CLI flag."
         },
-        "far_plane_m": {
+        "chase_height_above_m": {
           "type": "number",
-          "exclusiveMinimum": 0,
-          "default": 10000,
-          "description": "Far clipping plane distance in meters."
+          "minimum": -10,
+          "maximum": 50,
+          "description": "Chase camera height above aircraft in meters. Required when mode='chase'. Maps to --chase-height-m CLI flag."
         }
       },
-      "description": "Camera configuration."
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "pilot"}}},
+          "then": {"required": ["pilot_position_render_m"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "chase"}}},
+          "then": {"required": ["chase_distance_behind_m", "chase_height_above_m"]}
+        }
+      ],
+      "description": "Camera configuration. Mode-specific parameters are required based on the mode value."
     },
     "resolution": {
       "type": "object",
@@ -203,172 +146,41 @@
     },
     "exposure_ev": {
       "type": "number",
-      "minimum": -10,
-      "maximum": 20,
-      "description": "Exposure value (EV) in stops. 0 = neutral, +1 = 2x brighter, -1 = 2x darker."
-    },
-    "lighting": {
-      "type": "object",
-      "required": ["ambient_intensity", "sun_intensity"],
-      "additionalProperties": false,
-      "properties": {
-        "ambient_intensity": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100000,
-          "description": "Ambient light intensity in lux. Typical outdoor: 10000-25000."
-        },
-        "sun_intensity": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 200000,
-          "description": "Sun light intensity in lux. Clear day noon: ~100000."
-        },
-        "shadow_cascades": {
-          "type": "integer",
-          "enum": [1, 2, 3, 4],
-          "default": 3,
-          "description": "Number of shadow map cascades."
-        },
-        "shadow_resolution": {
-          "type": "integer",
-          "enum": [512, 1024, 2048, 4096],
-          "default": 2048,
-          "description": "Shadow map resolution per cascade in pixels."
-        }
-      },
-      "description": "Lighting configuration."
-    },
-    "sun": {
-      "type": "object",
-      "oneOf": [
-        {
-          "required": ["direction"],
-          "additionalProperties": false,
-          "properties": {
-            "direction": {
-              "type": "array",
-              "items": {"type": "number"},
-              "minItems": 3,
-              "maxItems": 3,
-              "description": "Sun direction as normalized vector [x, y, z] pointing FROM sun TO scene. Render-body frame."
-            }
-          }
-        },
-        {
-          "required": ["azimuth_deg", "elevation_deg"],
-          "additionalProperties": false,
-          "properties": {
-            "azimuth_deg": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 360,
-              "description": "Sun azimuth in degrees. 0 = north, 90 = east, 180 = south, 270 = west."
-            },
-            "elevation_deg": {
-              "type": "number",
-              "minimum": -90,
-              "maximum": 90,
-              "description": "Sun elevation in degrees. 0 = horizon, 90 = zenith."
-            }
-          }
-        }
-      ],
-      "description": "Sun configuration. Either explicit direction or azimuth/elevation angles."
+      "minimum": -8,
+      "maximum": 8,
+      "description": "Manual exposure value in EV stops. Maps to --exposure-ev CLI flag. 0 = neutral, +1 = 2x brighter, -1 = 2x darker. Runtime range: [-8, 8]."
     },
     "aircraft": {
       "type": "object",
-      "required": ["model", "position"],
+      "required": ["model"],
       "additionalProperties": false,
       "properties": {
         "model": {
           "type": "string",
           "pattern": "^models/[a-z0-9_]+/model\\.json$",
-          "description": "Path to aircraft model.json relative to repo root. Example: 'models/acro_electric_01/model.json'."
-        },
-        "position": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3,
-          "description": "Aircraft position in render-body frame [x, y, z] in meters."
-        },
-        "orientation": {
-          "type": "object",
-          "oneOf": [
-            {
-              "required": ["quaternion"],
-              "additionalProperties": false,
-              "properties": {
-                "quaternion": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 4,
-                  "maxItems": 4,
-                  "description": "Aircraft orientation as unit quaternion [w, x, y, z]."
-                }
-              }
-            },
-            {
-              "required": ["euler_deg"],
-              "additionalProperties": false,
-              "properties": {
-                "euler_deg": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 3,
-                  "maxItems": 3,
-                  "description": "Aircraft orientation as Euler angles [roll, pitch, yaw] in degrees."
-                }
-              }
-            }
-          ],
-          "description": "Aircraft orientation. Either quaternion or Euler angles."
+          "description": "Path to aircraft model.json relative to repo root. Maps to --model CLI flag. Example: 'models/acro_electric_01/model.json'."
         },
         "throttle": {
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "default": 0,
-          "description": "Engine throttle setting 0.0-1.0."
+          "default": 0.55,
+          "description": "Engine throttle setting 0.0-1.0. Maps to --throttle CLI flag."
         },
-        "control_state": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "aileron_deg": {
-              "type": "number",
-              "minimum": -45,
-              "maximum": 45,
-              "default": 0,
-              "description": "Aileron deflection in degrees. Positive = right roll."
-            },
-            "elevator_deg": {
-              "type": "number",
-              "minimum": -45,
-              "maximum": 45,
-              "default": 0,
-              "description": "Elevator deflection in degrees. Positive = pitch up."
-            },
-            "rudder_deg": {
-              "type": "number",
-              "minimum": -45,
-              "maximum": 45,
-              "default": 0,
-              "description": "Rudder deflection in degrees. Positive = yaw right."
-            }
-          },
-          "description": "Control surface deflections."
+        "start_on_ground": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether aircraft starts on ground. Maps to --start-on-ground CLI flag."
         }
       },
-      "description": "Aircraft configuration and pose."
+      "description": "Aircraft configuration. Only runtime-configurable parameters."
     },
     "warmup": {
       "type": "integer",
       "minimum": 0,
       "maximum": 300,
       "default": 10,
-      "description": "Number of frames to render before capture. Allows renderer to stabilize (TAA, shadows, etc.)."
+      "description": "Number of frames to render before capture. Allows renderer to stabilize."
     },
     "capture": {
       "type": "object",
@@ -378,7 +190,7 @@
         "filename": {
           "type": "string",
           "pattern": "^[a-z0-9_]+\\.(png|jpg|exr)$",
-          "description": "Output filename. Must match format extension. Example: 'aircraft_acro_static_front.png'."
+          "description": "Output filename. Must match format extension. Example: 'aircraft_acro_static_front_1920x1080.png'."
         },
         "format": {
           "type": "string",
@@ -436,47 +248,7 @@
     },
     "reference_image": {
       "type": "string",
-      "description": "Path to reference image for comparison. Optional. Example: 'baselines/rtx_4090_windows/aircraft_acro_static_front.png'."
-    },
-    "profiling": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "expected_frame_time_ms": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Expected frame time in milliseconds. For performance regression detection."
-        },
-        "expected_gpu_time_ms": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Expected GPU time in milliseconds."
-        }
-      },
-      "description": "Performance expectations. Optional, for future GPU profiling integration."
-    },
-    "sequence": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "frames": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 600,
-          "description": "Number of frames to capture for sequence tests (TAA, animation)."
-        },
-        "camera_motion": {
-          "type": "string",
-          "enum": ["static", "orbit", "pan", "zoom"],
-          "description": "Camera motion type for sequence."
-        },
-        "aircraft_motion": {
-          "type": "string",
-          "enum": ["static", "flyby", "hover", "maneuver"],
-          "description": "Aircraft motion type for sequence."
-        }
-      },
-      "description": "Sequence test configuration. Optional, for future TAA sequence tests."
+      "description": "Path to reference image for comparison. Optional. Example: 'baselines/rtx_4090_windows/aircraft_acro_static_front_1920x1080.png'."
     }
   }
 }

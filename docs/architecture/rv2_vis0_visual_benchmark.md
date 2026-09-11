@@ -26,11 +26,11 @@ Test funzionali che verificano correttezza computazionale:
 
 ### Visual regression tests
 Confrontano immagini tra versioni per detectar cambiamenti:
-- Bitwise comparison (solo per deterministic GPU)
-- Perceptual metrics (SSIM, PSNR)
+- Perceptual metrics (SSIM, PSNR) con tolerance
 - Edge detection per shimmer/temporal artifacts
+- Human review per qualità fotografica
 
-**Richiedono baseline approvate e hardware consistente.**
+**Non richiedono bitwise equality tra GPU/driver diversi.**
 
 ### Human visual review
 Review qualitativa da parte di umani:
@@ -47,9 +47,9 @@ Verificano che la simulazione fisica sia riproducibile:
 - Fingerprint fisici invariati
 - Replay consistenti
 
-**Indipendenti dal renderer.**
+**Indipendenti dal renderer. Richiedono bitwise determinism dove previsto.**
 
-## Perché bitwise equality NON è un requisito
+## Perché bitwise equality NON è un requisito per visual regression
 
 Screenshot **non sono bitwise-identical** tra:
 - Diverse GPU (NVIDIA vs AMD vs Intel)
@@ -64,47 +64,50 @@ Anche la stessa GPU può produrre output leggermente diversi tra sessioni per:
 - Rasterization order
 - Memory layout differences
 
-**Requisito VIS0:** riproducibilità **semantica** (stessa scena, stessi parametri, stesso risultato visivo), non bitwise.
+**Requisito VIS0:** riproducibilità **semantica** (stessa scena, stessi parametri, stesso risultato visivo entro tolerance), non bitwise.
+
+**Policy:**
+- **Simulation determinism:** bitwise/exact dove previsto (fingerprint fisici, replay)
+- **Visual regression:** perceptual/tolerance-based + human review
+- **Raw pixel delta:** solo diagnostico, non gate
+- **Cross-GPU/driver bitwise:** NON requisito
 
 ## Metadata per riproducibilità
 
-Una cattura è riproducibile se documenta:
+Una cattura è riproducibile se documenta tutti i parametri runtime-configurabili:
 
 ### Scena e renderer
 - `scene_id`: identificatore univoco
-- `renderer`: versione e configurazione
-- `scenery`: preset (FlyingField, ecc.)
+- `renderer.version`: `v1` | `v2` (maps to `--renderer`)
+- `renderer.terrain_debug`: debug mode (maps to `--terrain-debug`)
+- `renderer.vegetation_debug`: debug mode (maps to `--vegetation-debug`)
+- `scenery.preset`: `none` | `flying-field` (maps to `--scenery`)
 
 ### Camera
-- `mode`: perspective/orthographic
-- `position`: [x, y, z] in metri (render-body frame)
-- `orientation`: quaternion [w, x, y, z] o look_at target
-- `fov_deg`: field of view in gradi
+- `camera.mode`: `pilot` | `chase` (maps to `--camera`)
+- `camera.vertical_fov_deg`: FOV in gradi (maps to `--vertical-fov-deg`)
+- **Pilot mode:** `camera.pilot_position_render_m` [x, y, z] (maps to `--pilot-position-render-m`)
+- **Chase mode:** `camera.chase_distance_behind_m`, `camera.chase_height_above_m` (maps to `--chase-distance-m`, `--chase-height-m`)
 
 ### Risoluzione e output
-- `resolution`: [width, height] in pixels
-- `capture.filename`: nome file
-- `capture.format`: png/jpg
+- `resolution.width`, `resolution.height`: in pixels
+- `capture.filename`: nome file (stabile, senza timestamp)
+- `capture.format`: `png` | `jpg` | `exr`
 
-### Esposizione e illuminazione
-- `exposure_ev`: exposure value (EV)
-- `lighting`: configurazione illuminazione
-- `sun.direction`: [x, y, z] normalized o `sun.azimuth_deg` + `sun.elevation_deg`
+### Esposizione
+- `exposure_ev`: exposure value in EV stops, range `[-8, 8]` (maps to `--exposure-ev`)
 
-### Aircraft e pose
-- `aircraft.model`: path al modello
-- `aircraft.position`: [x, y, z] in metri
-- `aircraft.orientation`: quaternion o euler
-- `aircraft.throttle`: 0.0-1.0
-- `aircraft.control_state`: aileron/elevator/rudder angles
+### Aircraft
+- `aircraft.model`: path al model.json (maps to `--model`)
+- `aircraft.throttle`: 0.0-1.0 (maps to `--throttle`)
+- `aircraft.start_on_ground`: boolean (maps to `--start-on-ground`)
 
 ### Temporizzazione
 - `warmup`: frame di warmup prima del capture
-- `capture.frame`: frame specifico da catturare
 
 ### Metadata aggiuntivi
 - `tags`: lista di tag per categorizzazione
-- `reference_hardware`: GPU/driver/OS per cui la baseline è stata validata
+- `reference_hardware`: GPU/driver/OS per cui la baseline è stata validata (opzionale ma raccomandato)
 - `reference_image`: path a immagine di riferimento opzionale
 
 ## Naming convention
@@ -119,11 +122,16 @@ Esempi:
 - `vegetation_forest_dense`
 - `atmosphere_sunset_horizon`
 
-### File names
-Formato: `<scene_id>_<resolution>_<timestamp>.png`
+### Golden baseline filename
+Formato: `<scene_id>_<width>x<height>.png`
 
-Esempi:
-- `aircraft_acro_static_front_1920x1080_20260911_143022.png`
+**STABILE, senza timestamp.** Esempi:
+- `aircraft_acro_static_front_1920x1080.png`
+- `terrain_flyingfield_overview_2560x1440.png`
+
+Il timestamp/run id appartiene a:
+- Evidence run directory (es. `runs/2026-09-11_143022/`)
+- Metadata sidecar (es. `capture_metadata.json`)
 
 ### Directory structure
 ```
@@ -140,13 +148,15 @@ docs/validation/visual_benchmark/
 └── baselines/
     └── reference_hardware/
         ├── rtx_4090_windows/
+        │   └── aircraft_acro_static_front_1920x1080.png
         └── rx_7900_linux/
+            └── aircraft_acro_static_front_1920x1080.png
 ```
 
 ## Golden-scene lifecycle
 
 ### 1. Definition
-Creare manifest JSON con tutti i parametri richiesti.
+Creare manifest JSON con tutti i parametri richiesti, allineati al runtime reale.
 
 ### 2. Validation
 Eseguire `validate_manifest.py` per verificare correttezza sintattica e semantica.
@@ -155,14 +165,14 @@ Eseguire `validate_manifest.py` per verificare correttezza sintattica e semantic
 Il capture runner (non implementato in VIS0) leggerà il manifest e catturerà l'immagine.
 
 ### 4. Review
-- Automated metrics (SSIM, PSNR)
+- Automated metrics (SSIM, PSNR) con tolerance
 - Human review per qualità
 
 ### 5. Approval
 Se l'immagine è approvata, diventa baseline per quel reference hardware.
 
 ### 6. Regression detection
-Future catture vengono confrontate con la baseline.
+Future catture vengono confrontate con la baseline usando metriche perceptual, non bitwise comparison.
 
 ## Regole per aggiornare una baseline
 
@@ -216,8 +226,35 @@ Diverse GPU producono output diversi. VIS0 supporta multiple reference hardware:
 ### Cross-hardware comparison
 Non richiedere bitwise equality tra hardware diversi. Invece:
 - Ogni hardware ha le proprie baseline
-- Metriche perceptual (SSIM) per confronto cross-hardware
+- Metriche perceptual (SSIM) per confronto cross-hardware con tolerance
 - Human review per validare similarità
+
+## Capacità runtime attuali vs future
+
+### Supportato nel runtime attuale (v1 manifest)
+- Renderer version: `v1` | `v2`
+- Scenery preset: `none` | `flying-field`
+- Camera mode: `pilot` | `chase`
+- Camera parameters: FOV, pilot position, chase distance/height
+- Exposure EV: `[-8, 8]`
+- Aircraft: model, throttle, start_on_ground
+- Debug modes: terrain_debug, vegetation_debug
+- Resolution: width, height
+- Warmup frames
+
+### Future capability (non nel v1 manifest)
+- Weather conditions (clear, cloudy, fog)
+- Time of day (dawn, noon, dusk, night)
+- TAA enabled/disabled
+- MSAA samples configurabile
+- HDR toggle
+- Lighting intensity in lux configurabile
+- Sun direction/azimuth/elevation configurabile
+- Free camera con look_at
+- Sequence tests (TAA temporal)
+- GPU profiling integration
+
+**Queste capacità future devono essere documentate come tali, non rese required nel manifest v1.**
 
 ## Futura integrazione con GPU profiling
 
@@ -227,8 +264,8 @@ VIS0 è progettato per supportare futuri profiling:
 ```json
 {
   "profiling": {
-    "frame_time_ms": 16.67,
-    "gpu_time_ms": 12.34,
+    "expected_frame_time_ms": 16.67,
+    "expected_gpu_time_ms": 12.34,
     "draw_calls": 1234,
     "triangles": 5678901,
     "texture_memory_mb": 512
@@ -294,8 +331,8 @@ VIS0 è progettato per supportare:
 - **Aircraft review:** review dettagliata di ogni aircraft model
 - **Terrain:** review qualità terrain rendering
 - **Vegetation:** review qualità vegetation rendering
-- **Atmosphere:** review qualità atmosphere/sky rendering
-- **TAA:** test qualità temporal anti-aliasing
+- **Atmosphere:** review qualità atmosphere/sky rendering (v2 renderer)
+- **TAA:** test qualità temporal anti-aliasing (futuro)
 - **Shadows:** review qualità shadow rendering
 - **Materials:** review qualità PBR materials
 - **Distant aircraft visibility:** test visibilità aircraft a distanza
@@ -335,10 +372,11 @@ Regression Report
 ## Limitazioni VIS0
 
 ### Cosa VIS0 fa
-- Definisce contratto machine-readable
-- Fornisce validator per manifest
-- Fornisce manifest esempio
+- Definisce contratto machine-readable allineato al runtime reale
+- Fornisce validator per manifest con reject di unknown properties
+- Fornisce manifest esempio con soli parametri runtime-configurabili
 - Documenta architettura e policy
+- Distingue capacità attuali da future
 
 ### Cosa VIS0 NON fa
 - Non implementa capture runner
@@ -347,6 +385,7 @@ Regression Report
 - Non confronta immagini
 - Non modifica runtime
 - Non tocca simulazione
+- Non inventa capacità runtime inesistenti
 
 ### Cosa VIS0 NON è
 - Non è un sistema di testing completo
@@ -354,12 +393,31 @@ Regression Report
 - Non è un regression detection system
 - Non è un'interfaccia utente
 
+## Visual metrics futuri
+
+Documentati, non implementati in VIS0:
+
+- **Absolute pixel delta:** solo diagnostico, non gate
+- **SSIM/perceptual metric:** futura, con tolerance
+- **Edge/shimmer temporal metrics:** future, per TAA
+- **Human review:** per qualità fotografica
+
+**Cross-GPU bitwise image equality NON è un requisito.**
+
 ## Conclusione
 
-VIS0 posa le fondamenta per un sistema di benchmark visivi riproducibile e estensibile. Il contratto definito ora permetterà future implementazioni di capture, metriche e review senza breaking changes.
+VIS0 posa le fondamenta per un sistema di benchmark visivi riproducibile e estensibile. Il contratto definito ora:
+- È allineato al runtime reale (nessuna capacità inventata)
+- Distingue chiaramente cosa è supportato ora vs futuro
+- Supporta riproducibilità semantica, non bitwise
+- Richiede metadata completi per ogni cattura
+- Mantiene separazione netta simulation/presentation
+- Supporta multiple reference hardware
+- È estensibile per futuri scenari e metriche
 
 **Principi chiave:**
-- Riproducibilità semantica, non bitwise
+- Solo parametri runtime-configurabili nel v1 manifest
+- Riproducibilità semantica con tolerance, non bitwise
 - Metadata completi per ogni cattura
 - Separazione netta simulation/presentation
 - Supporto per multiple reference hardware
