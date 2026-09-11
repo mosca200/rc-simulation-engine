@@ -42,9 +42,10 @@ use crate::renderer_v2::atmosphere::{
 use crate::renderer_v2::scene::{
     GpuScene, GpuSceneInstanceRaw, PresentationKind, ScenePath, select_scene_path,
 };
-use crate::renderer_v2::temporal::{InvalidationReason, TemporalState};
+use crate::renderer_v2::temporal::{HistorySlot, InvalidationReason, TemporalState};
 use crate::resources::{
-    DepthTarget, HdrTarget, create_depth_target, create_hdr_scene_bind_group, create_hdr_target,
+    DepthTarget, DepthTargetUsage, HdrTarget, TemporalHistoryTargets, create_depth_target,
+    create_hdr_scene_bind_group, create_hdr_target, create_temporal_history_targets,
 };
 use crate::scenery::{SceneryMesh, SceneryPreset};
 use crate::shadow::{
@@ -78,6 +79,13 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const V1_LEGACY_PASS_ORDER: [PassId; 5] = [
+    PassId::ShadowNear,
+    PassId::ShadowMid,
+    PassId::ShadowFar,
+    PassId::Scene,
+    PassId::Postprocess,
+];
 // G3B: linear HDR scene target. Opaque geometry, terrain, aircraft, sky and
 // lighting write scene-referred linear values here; the postprocess pass
 // resolves exposure + tone mapping to the sRGB surface.
@@ -764,6 +772,13 @@ impl RendererInitializationPolicy {
             aerial_perspective_enabled,
         }
     }
+
+    const fn uses_temporal_resources(self) -> bool {
+        matches!(
+            self.device_features,
+            DeviceFeaturePolicy::V2OptionalTimestamp
+        )
+    }
 }
 
 fn glb_batch_target(
@@ -857,6 +872,104 @@ struct GpuVegetation {
     foliage_shadow_pipeline: wgpu::RenderPipeline,
 }
 
+/// V2-only full-resolution temporal history and identity-resolve resources.
+/// These objects are persistent across frames; resize replaces only the two
+/// size-dependent textures and bind groups that reference resized views.
+struct TemporalGpuResources {
+    history: TemporalHistoryTargets,
+    resolve_pipeline: wgpu::RenderPipeline,
+    resolve_bind_group_layout: wgpu::BindGroupLayout,
+    resolve_bind_group: wgpu::BindGroup,
+    postprocess_bind_groups: [wgpu::BindGroup; 2],
+}
+
+struct TemporalResizeBindings<'a> {
+    current_hdr_view: &'a wgpu::TextureView,
+    postprocess_layout: &'a wgpu::BindGroupLayout,
+    postprocess_sampler: &'a wgpu::Sampler,
+    postprocess_uniform: &'a wgpu::Buffer,
+}
+
+impl TemporalGpuResources {
+    fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        current_hdr_view: &wgpu::TextureView,
+        postprocess_layout: &wgpu::BindGroupLayout,
+        postprocess_sampler: &wgpu::Sampler,
+        postprocess_uniform: &wgpu::Buffer,
+    ) -> Self {
+        let history = create_temporal_history_targets(device, width, height, HDR_FORMAT);
+        let resolve_bind_group_layout = temporal_resolve_bind_group_layout(device);
+        let resolve_bind_group = create_temporal_resolve_bind_group(
+            device,
+            &resolve_bind_group_layout,
+            current_hdr_view,
+        );
+        let postprocess_bind_groups = create_temporal_postprocess_bind_groups(
+            device,
+            postprocess_layout,
+            &history,
+            postprocess_sampler,
+            postprocess_uniform,
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("RV2 temporal resolve shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("renderer_v2/temporal_resolve.wgsl").into(),
+            ),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("RV2 temporal resolve pipeline layout"),
+            bind_group_layouts: &[Some(&resolve_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let resolve_pipeline =
+            create_temporal_resolve_pipeline(device, &shader, &pipeline_layout, HDR_FORMAT);
+        Self {
+            history,
+            resolve_pipeline,
+            resolve_bind_group_layout,
+            resolve_bind_group,
+            postprocess_bind_groups,
+        }
+    }
+
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        extent: [u32; 2],
+        extent_changed: bool,
+        bindings: TemporalResizeBindings<'_>,
+    ) {
+        if extent_changed {
+            self.history =
+                create_temporal_history_targets(device, extent[0], extent[1], HDR_FORMAT);
+            self.postprocess_bind_groups = create_temporal_postprocess_bind_groups(
+                device,
+                bindings.postprocess_layout,
+                &self.history,
+                bindings.postprocess_sampler,
+                bindings.postprocess_uniform,
+            );
+        }
+        self.resolve_bind_group = create_temporal_resolve_bind_group(
+            device,
+            &self.resolve_bind_group_layout,
+            bindings.current_hdr_view,
+        );
+    }
+
+    fn history_view(&self, slot: HistorySlot) -> &wgpu::TextureView {
+        self.history.view(slot.index())
+    }
+
+    fn postprocess_bind_group(&self, slot: HistorySlot) -> &wgpu::BindGroup {
+        &self.postprocess_bind_groups[slot.index()]
+    }
+}
+
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
     device_context: DeviceContext,
@@ -946,6 +1059,7 @@ pub struct WgpuRenderer {
     postprocess_sampler: wgpu::Sampler,
     postprocess_uniform_buffer: wgpu::Buffer,
     postprocess_bind_group: wgpu::BindGroup,
+    temporal_gpu: Option<TemporalGpuResources>,
     // G3B: presentation-only manual exposure in EV stops (validated).
     exposure_ev: f32,
     _shadow_sampler: wgpu::Sampler,
@@ -1789,8 +1903,18 @@ impl WgpuRenderer {
                 )
             });
 
-        let depth_target =
-            create_depth_target(&device, surface_width, surface_height, DEPTH_FORMAT);
+        let depth_usage = if initialization_policy.uses_temporal_resources() {
+            DepthTargetUsage::V2Sampleable
+        } else {
+            DepthTargetUsage::V1AttachmentOnly
+        };
+        let depth_target = create_depth_target(
+            &device,
+            surface_width,
+            surface_height,
+            DEPTH_FORMAT,
+            depth_usage,
+        );
 
         // G3B: linear HDR scene target + postprocess pass, created once here
         // (and recreated on resize only). No texture/sampler/bind group/
@@ -1841,6 +1965,17 @@ impl WgpuRenderer {
             });
         let postprocess_pipeline =
             create_postprocess_pipeline(&device, &shader, &postprocess_pipeline_layout, format);
+        let temporal_gpu = initialization_policy.uses_temporal_resources().then(|| {
+            TemporalGpuResources::new(
+                &device,
+                surface_width,
+                surface_height,
+                &hdr_target.view,
+                &postprocess_bind_group_layout,
+                &postprocess_sampler,
+                &postprocess_uniform_buffer,
+            )
+        });
 
         Ok(Self {
             device_context,
@@ -1893,6 +2028,7 @@ impl WgpuRenderer {
             postprocess_sampler,
             postprocess_uniform_buffer,
             postprocess_bind_group,
+            temporal_gpu,
             exposure_ev: DEFAULT_EXPOSURE_EV,
             _shadow_sampler: shadow_sampler,
             camera: camera_config.build(size.width, size.height),
@@ -2037,12 +2173,24 @@ impl WgpuRenderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        let temporal_extent_changed = width != self.device_context.surface_width()
+            || height != self.device_context.surface_height();
         if !self.device_context.resize_surface(width, height) {
             return;
         }
         self.camera.resize(width, height);
-        self.depth_target =
-            create_depth_target(self.device_context.device(), width, height, DEPTH_FORMAT);
+        let depth_usage = if self.temporal_gpu.is_some() {
+            DepthTargetUsage::V2Sampleable
+        } else {
+            DepthTargetUsage::V1AttachmentOnly
+        };
+        self.depth_target = create_depth_target(
+            self.device_context.device(),
+            width,
+            height,
+            DEPTH_FORMAT,
+            depth_usage,
+        );
         // G3B: the linear HDR scene target tracks the surface size; the
         // postprocess bind group is re-created to reference the new view.
         // Pipelines, sampler and uniform buffer are NOT recreated here.
@@ -2056,6 +2204,19 @@ impl WgpuRenderer {
             &self.postprocess_uniform_buffer,
             "G3B postprocess bind group (resized)",
         );
+        if let Some(temporal_gpu) = self.temporal_gpu.as_mut() {
+            temporal_gpu.resize(
+                self.device_context.device(),
+                [width, height],
+                temporal_extent_changed,
+                TemporalResizeBindings {
+                    current_hdr_view: &self.hdr_target.view,
+                    postprocess_layout: &self._postprocess_bind_group_layout,
+                    postprocess_sampler: &self.postprocess_sampler,
+                    postprocess_uniform: &self.postprocess_uniform_buffer,
+                },
+            );
+        }
     }
 
     pub fn reconfigure_surface(&mut self) {
@@ -2098,15 +2259,10 @@ impl WgpuRenderer {
             return Ok(());
         }
 
-        const LEGACY_PASS_ORDER: [PassId; PassId::COUNT] = [
-            PassId::ShadowNear,
-            PassId::ShadowMid,
-            PassId::ShadowFar,
-            PassId::Scene,
-            PassId::Postprocess,
-        ];
-        let pass_order = graph.map_or(LEGACY_PASS_ORDER.as_slice(), CompiledGraph::execution_order);
-        debug_assert_eq!(pass_order.len(), PassId::COUNT);
+        let pass_order = graph.map_or(
+            V1_LEGACY_PASS_ORDER.as_slice(),
+            CompiledGraph::execution_order,
+        );
         if let Some(profiler) = profiler.as_deref_mut() {
             profiler.begin_frame(self.device_context.device());
         }
@@ -2264,11 +2420,11 @@ impl WgpuRenderer {
         // encoded the same three passes before RV2. The graph-driven path
         // resolves those logical IDs to the same persistent array layers.
         // First legacy label: "G3E near cascade shadow depth pass",
-        for pass_id in &pass_order[..SHADOW_CASCADE_COUNT] {
-            let cascade_index = shadow_cascade_index(*pass_id);
+        for pass_id in pass_order.iter().copied().filter(|pass| pass.is_shadow()) {
+            let cascade_index = shadow_cascade_index(pass_id);
             record_profiled_pass(
                 &mut profiler,
-                *pass_id,
+                pass_id,
                 &mut encoder,
                 |encoder, timestamp_writes| {
                     // G3E: one depth-only caster pass per persistent array layer.
@@ -2430,8 +2586,8 @@ impl WgpuRenderer {
             );
         }
         {
-            let pass_id = pass_order[3];
-            debug_assert_eq!(pass_id, PassId::Scene);
+            let pass_id = PassId::Scene;
+            debug_assert!(pass_order.contains(&pass_id));
             record_profiled_pass(
                 &mut profiler,
                 pass_id,
@@ -2649,9 +2805,51 @@ impl WgpuRenderer {
                 },
             );
         }
+        if pass_order.contains(&PassId::TemporalResolve) {
+            let pass_id = PassId::TemporalResolve;
+            let prepared = prepared_temporal
+                .as_ref()
+                .expect("V2 temporal pass requires prepared temporal state");
+            let write_slot = prepared.history_write_slot();
+            debug_assert_ne!(prepared.history_read_slot(), Some(write_slot));
+            let temporal_gpu = self
+                .temporal_gpu
+                .as_ref()
+                .expect("V2 temporal pass requires V2 GPU history resources");
+            record_profiled_pass(
+                &mut profiler,
+                pass_id,
+                &mut encoder,
+                |encoder, timestamp_writes| {
+                    let history_attachment = wgpu::RenderPassColorAttachment {
+                        view: temporal_gpu.history_view(write_slot),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    };
+                    let mut resolve_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(pass_id.label()),
+                        color_attachments: &[Some(history_attachment)],
+                        depth_stencil_attachment: None,
+                        timestamp_writes,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    resolve_pass.set_pipeline(&temporal_gpu.resolve_pipeline);
+                    resolve_pass.set_bind_group(0, &temporal_gpu.resolve_bind_group, &[]);
+                    resolve_pass.draw(0..3, 0..1);
+                },
+            );
+        }
         {
-            let pass_id = pass_order[4];
-            debug_assert_eq!(pass_id, PassId::Postprocess);
+            let pass_id = PassId::Postprocess;
+            debug_assert!(pass_order.contains(&pass_id));
+            let temporal_write_slot = prepared_temporal
+                .as_ref()
+                .map(|prepared| prepared.history_write_slot());
             record_profiled_pass(
                 &mut profiler,
                 pass_id,
@@ -2680,7 +2878,14 @@ impl WgpuRenderer {
                             multiview_mask: None,
                         });
                     postprocess_pass.set_pipeline(&self.postprocess_pipeline);
-                    postprocess_pass.set_bind_group(5, &self.postprocess_bind_group, &[]);
+                    let bind_group =
+                        temporal_write_slot.map_or(&self.postprocess_bind_group, |slot| {
+                            self.temporal_gpu
+                                .as_ref()
+                                .expect("V2 postprocess requires V2 GPU history resources")
+                                .postprocess_bind_group(slot)
+                        });
+                    postprocess_pass.set_bind_group(5, bind_group, &[]);
                     postprocess_pass.draw(0..3, 0..1);
                 },
             );
@@ -2732,7 +2937,7 @@ fn shadow_cascade_index(pass: PassId) -> usize {
         PassId::ShadowNear => 0,
         PassId::ShadowMid => 1,
         PassId::ShadowFar => 2,
-        PassId::Scene | PassId::Postprocess => {
+        PassId::Scene | PassId::TemporalResolve | PassId::Postprocess => {
             unreachable!("non-shadow pass in the shadow schedule")
         }
     }
@@ -4606,8 +4811,103 @@ fn create_postprocess_pipeline(
     })
 }
 
-/// G3B: postprocess bind group layout — HDR scene texture (f32 sampleable),
-/// nearest sampler, and the postprocess uniform (exposure EV).
+/// V2-only current-HDR texture layout for the identity temporal resolve.
+fn temporal_resolve_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("RV2 temporal resolve layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    })
+}
+
+fn create_temporal_resolve_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    current_hdr_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("RV2 temporal resolve current HDR bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(current_hdr_view),
+        }],
+    })
+}
+
+fn create_temporal_postprocess_bind_groups(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    history: &TemporalHistoryTargets,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+) -> [wgpu::BindGroup; 2] {
+    std::array::from_fn(|index| {
+        create_hdr_scene_bind_group(
+            device,
+            layout,
+            history.view(index),
+            sampler,
+            uniform,
+            match index {
+                0 => "RV2 postprocess resolved history A bind group",
+                _ => "RV2 postprocess resolved history B bind group",
+            },
+        )
+    })
+}
+
+fn create_temporal_resolve_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RV2 identity temporal resolve pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_temporal_resolve"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_temporal_resolve"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// G3B: postprocess bind group layout — HDR texture (f32 sampleable), nearest
+/// sampler, and the postprocess uniform (exposure EV).
 fn postprocess_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -5905,7 +6205,13 @@ mod terrain_headless_gpu_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, SIZE, SIZE, DEPTH_FORMAT);
+        let depth_target = create_depth_target(
+            &device,
+            SIZE,
+            SIZE,
+            DEPTH_FORMAT,
+            DepthTargetUsage::V1AttachmentOnly,
+        );
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -6613,7 +6919,13 @@ mod vegetation_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE, DEPTH_FORMAT);
+        let depth_target = create_depth_target(
+            &device,
+            TEST_SIZE,
+            TEST_SIZE,
+            DEPTH_FORMAT,
+            DepthTargetUsage::V1AttachmentOnly,
+        );
 
         // Scene pass draw (mirrors `WgpuRenderer::render` vegetation block).
         let mut encoder =
@@ -7324,7 +7636,13 @@ mod vegetation_tests {
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_target = create_depth_target(&device, TEST_SIZE, TEST_SIZE, DEPTH_FORMAT);
+        let depth_target = create_depth_target(
+            &device,
+            TEST_SIZE,
+            TEST_SIZE,
+            DEPTH_FORMAT,
+            DepthTargetUsage::V1AttachmentOnly,
+        );
 
         // ── Render: vegetation THEN aircraft in the SAME pass ──
         let mut encoder =
@@ -7893,11 +8211,13 @@ mod vegetation_tests {
 mod rv2_5_physical_environment_wiring_tests {
     //! RV2-5 structural guards for the renderer integration: the physical
     //! resources are persistent initialization-time resources, the runtime graph
-    //! keeps exactly five passes, and the V1 environment layout stays free of
+    //! keeps the production pass sequence, and the V1 environment layout stays free of
     //! the physical bindings.
 
+    use super::{HDR_FORMAT, RendererInitializationPolicy, V1_LEGACY_PASS_ORDER};
+
     #[test]
-    fn runtime_graph_keeps_exactly_five_passes() {
+    fn runtime_graph_keeps_six_pass_temporal_sequence() {
         let graph = crate::render_graph::build_v2_render_graph()
             .expect("the static RV2 production graph must compile");
         assert_eq!(
@@ -7907,10 +8227,58 @@ mod rv2_5_physical_environment_wiring_tests {
                 crate::render_graph::PassId::ShadowMid,
                 crate::render_graph::PassId::ShadowFar,
                 crate::render_graph::PassId::Scene,
+                crate::render_graph::PassId::TemporalResolve,
                 crate::render_graph::PassId::Postprocess,
             ]
         );
-        assert_eq!(crate::render_graph::PassId::COUNT, 5);
+        assert_eq!(crate::render_graph::PassId::COUNT, 6);
+    }
+
+    #[test]
+    fn v1_schedule_remains_five_passes_independent_of_v2_count() {
+        assert_eq!(V1_LEGACY_PASS_ORDER.len(), 5);
+        assert_eq!(
+            V1_LEGACY_PASS_ORDER,
+            [
+                crate::render_graph::PassId::ShadowNear,
+                crate::render_graph::PassId::ShadowMid,
+                crate::render_graph::PassId::ShadowFar,
+                crate::render_graph::PassId::Scene,
+                crate::render_graph::PassId::Postprocess,
+            ]
+        );
+        assert_ne!(
+            V1_LEGACY_PASS_ORDER.len(),
+            crate::render_graph::PassId::COUNT
+        );
+        assert!(!RendererInitializationPolicy::V1.uses_temporal_resources());
+        assert!(RendererInitializationPolicy::v2(true).uses_temporal_resources());
+    }
+
+    #[test]
+    fn temporal_history_contract_is_v2_only_resize_bound_and_hdr() {
+        assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
+        let source = include_str!("gpu.rs");
+        let resize = source
+            .split_once("pub fn resize(&mut self, width: u32, height: u32)")
+            .unwrap()
+            .1
+            .split_once("pub fn reconfigure_surface")
+            .unwrap()
+            .0;
+        assert!(resize.contains("temporal_gpu.resize("));
+
+        let frame_path = source
+            .split_once("fn render_scheduled(")
+            .unwrap()
+            .1
+            .split_once("fn check_asynchronous_gpu_error")
+            .unwrap()
+            .0;
+        assert!(!frame_path.contains("TemporalGpuResources::new("));
+        assert!(!frame_path.contains("temporal_gpu.resize("));
+        assert!(frame_path.contains(".postprocess_bind_group(slot)"));
+        assert!(frame_path.contains("prepared.history_write_slot()"));
     }
 
     #[test]

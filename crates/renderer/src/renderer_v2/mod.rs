@@ -87,7 +87,7 @@ impl RendererV2Shell {
         .await?;
         let graph = crate::render_graph::build_v2_render_graph()
             .expect("the static RV2 production graph must compile");
-        debug_assert_eq!(graph.resource_class_counts(), [3, 2, 1]);
+        debug_assert_eq!(graph.resource_class_counts(), [3, 4, 1]);
         let profiler = inner.create_v2_profiler();
         let temporal = TemporalState::new(initial_size.width, initial_size.height);
         Ok(Self {
@@ -121,6 +121,11 @@ impl RendererV2Shell {
         self.inner.reconfigure_surface();
         self.temporal
             .invalidate(InvalidationReason::SurfaceReconfigure);
+    }
+
+    /// Invalidate presentation history after an explicit flight-session reset.
+    pub fn invalidate_temporal_history(&mut self) {
+        self.temporal.invalidate(InvalidationReason::FlightReset);
     }
 
     /// Toggle the presentation-only debug overlays, delegating to V1.

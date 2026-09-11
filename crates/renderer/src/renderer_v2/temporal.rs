@@ -16,6 +16,30 @@ pub(crate) enum InvalidationReason {
     RendererCreated,
     Resize,
     SurfaceReconfigure,
+    FlightReset,
+}
+
+/// Physical history target selected for one render attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistorySlot {
+    A,
+    B,
+}
+
+impl HistorySlot {
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::A => 0,
+            Self::B => 1,
+        }
+    }
+
+    const fn alternate(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
 }
 
 /// One deterministic subpixel sample reserved for a future jittered camera.
@@ -65,6 +89,8 @@ pub(crate) struct PreparedTemporalFrame {
     current: PresentedFrameState,
     previous: PresentedFrameState,
     history_was_valid: bool,
+    history_read_slot: Option<HistorySlot>,
+    history_write_slot: HistorySlot,
     presented_frame_index: u64,
     generation: u64,
 }
@@ -76,6 +102,14 @@ impl PreparedTemporalFrame {
 
     pub(crate) const fn current_camera(&self) -> CameraFrameMatrices {
         self.current.camera
+    }
+
+    pub(crate) const fn history_read_slot(&self) -> Option<HistorySlot> {
+        self.history_read_slot
+    }
+
+    pub(crate) const fn history_write_slot(&self) -> HistorySlot {
+        self.history_write_slot
     }
 
     /// Debug-time validation for the staged CPU temporal contract.
@@ -139,6 +173,7 @@ pub(crate) struct TemporalState {
     history_valid: bool,
     presented_frame_index: u64,
     previous_presented: Option<PresentedFrameState>,
+    presented_history_slot: Option<HistorySlot>,
     extent: Option<[u32; 2]>,
     generation: u64,
     last_invalidation: InvalidationReason,
@@ -150,6 +185,7 @@ impl TemporalState {
             history_valid: false,
             presented_frame_index: 0,
             previous_presented: None,
+            presented_history_slot: None,
             extent: valid_extent(width, height),
             generation: 0,
             last_invalidation: InvalidationReason::RendererCreated,
@@ -163,6 +199,7 @@ impl TemporalState {
         camera: CameraFrameMatrices,
     ) -> PreparedTemporalFrame {
         debug_assert_eq!(self.history_valid, self.previous_presented.is_some());
+        debug_assert_eq!(self.history_valid, self.presented_history_slot.is_some());
         let current = PresentedFrameState {
             aircraft_root,
             camera,
@@ -173,6 +210,10 @@ impl TemporalState {
             current,
             previous,
             history_was_valid: self.history_valid,
+            history_read_slot: self.presented_history_slot,
+            history_write_slot: self
+                .presented_history_slot
+                .map_or(HistorySlot::A, HistorySlot::alternate),
             presented_frame_index: self.presented_frame_index,
             generation: self.generation,
         }
@@ -182,7 +223,9 @@ impl TemporalState {
     pub(crate) fn commit_presented(&mut self, prepared: PreparedTemporalFrame) {
         assert_eq!(prepared.generation, self.generation);
         assert_eq!(prepared.presented_frame_index, self.presented_frame_index);
+        assert_eq!(prepared.history_read_slot, self.presented_history_slot);
         self.previous_presented = Some(prepared.current);
+        self.presented_history_slot = Some(prepared.history_write_slot);
         self.history_valid = true;
         self.presented_frame_index = self.presented_frame_index.wrapping_add(1);
     }
@@ -201,6 +244,7 @@ impl TemporalState {
         self.history_valid = false;
         self.presented_frame_index = 0;
         self.previous_presented = None;
+        self.presented_history_slot = None;
         self.generation = self.generation.wrapping_add(1);
         self.last_invalidation = reason;
     }
@@ -273,6 +317,8 @@ mod tests {
         let mut state = TemporalState::new(1_280, 720);
         let prepared = state.prepare_frame(translation(0.25, 0.0, 0.0), camera());
         assert!(!prepared.history_was_valid);
+        assert_eq!(prepared.history_read_slot(), None);
+        assert_eq!(prepared.history_write_slot(), HistorySlot::A);
         assert_eq!(
             prepared.rigid_instance_motion_uv(Mat4::identity(), [0.0, 0.0, 0.0, 1.0]),
             Some([0.0, -0.0])
@@ -283,11 +329,18 @@ mod tests {
         state.commit_presented(prepared);
         assert_eq!(state.presented_frame_index, 1);
         assert!(state.history_valid);
+        let second = state.prepare_frame(Mat4::identity(), camera());
+        assert_eq!(second.history_read_slot(), Some(HistorySlot::A));
+        assert_eq!(second.history_write_slot(), HistorySlot::B);
+        state.commit_presented(second);
+        let third = state.prepare_frame(Mat4::identity(), camera());
+        assert_eq!(third.history_read_slot(), Some(HistorySlot::B));
+        assert_eq!(third.history_write_slot(), HistorySlot::A);
     }
 
     #[test]
     fn dropping_prepared_frame_does_not_advance_history_or_jitter() {
-        let state = TemporalState::new(800, 600);
+        let mut state = TemporalState::new(800, 600);
         let first_jitter = state
             .prepare_frame(Mat4::identity(), camera())
             .current
@@ -296,6 +349,17 @@ mod tests {
         assert_eq!(retry.current.jitter, first_jitter);
         assert_eq!(retry.presented_frame_index, 0);
         assert!(!retry.history_was_valid);
+
+        let first = state.prepare_frame(Mat4::identity(), camera());
+        state.commit_presented(first);
+        {
+            let abandoned = state.prepare_frame(translation(2.0, 0.0, 0.0), camera());
+            assert_eq!(abandoned.history_read_slot(), Some(HistorySlot::A));
+            assert_eq!(abandoned.history_write_slot(), HistorySlot::B);
+        }
+        let presented_retry = state.prepare_frame(Mat4::identity(), camera());
+        assert_eq!(presented_retry.history_read_slot(), Some(HistorySlot::A));
+        assert_eq!(presented_retry.history_write_slot(), HistorySlot::B);
     }
 
     #[test]
@@ -346,6 +410,8 @@ mod tests {
         state.invalidate(InvalidationReason::SurfaceReconfigure);
         let after = state.prepare_frame(translation(3.0, 0.0, 0.0), camera());
         assert!(!after.history_was_valid);
+        assert_eq!(after.history_read_slot(), None);
+        assert_eq!(after.history_write_slot(), HistorySlot::A);
         assert_eq!(after.presented_frame_index, 0);
         assert_eq!(
             state.last_invalidation,
@@ -374,6 +440,39 @@ mod tests {
         state.resize(0, 0);
         assert_eq!(state.extent, None);
         assert!(!state.history_valid);
+    }
+
+    #[test]
+    fn zero_extent_attempt_does_not_advance_or_swap_history() {
+        let mut state = TemporalState::new(800, 600);
+        let first = state.prepare_frame(Mat4::identity(), camera());
+        state.commit_presented(first);
+        state.resize(0, 0);
+
+        {
+            let abandoned = state.prepare_frame(translation(4.0, 0.0, 0.0), camera());
+            assert_eq!(abandoned.history_read_slot(), None);
+            assert_eq!(abandoned.history_write_slot(), HistorySlot::A);
+        }
+
+        let retry = state.prepare_frame(Mat4::identity(), camera());
+        assert_eq!(retry.presented_frame_index, 0);
+        assert_eq!(retry.history_read_slot(), None);
+        assert_eq!(retry.history_write_slot(), HistorySlot::A);
+    }
+
+    #[test]
+    fn flight_reset_starts_a_fresh_history_generation() {
+        let mut state = TemporalState::new(800, 600);
+        let first = state.prepare_frame(Mat4::identity(), camera());
+        state.commit_presented(first);
+        state.invalidate(InvalidationReason::FlightReset);
+
+        let after = state.prepare_frame(translation(2.0, 0.0, 0.0), camera());
+        assert_eq!(state.last_invalidation, InvalidationReason::FlightReset);
+        assert!(!after.history_was_valid);
+        assert_eq!(after.history_read_slot(), None);
+        assert_eq!(after.history_write_slot(), HistorySlot::A);
     }
 
     #[test]
@@ -464,6 +563,34 @@ mod tests {
             assert!(
                 !frame_path.contains(forbidden),
                 "render path must not create persistent GPU resources: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_resolve_shader_parses_and_contains_no_temporal_filtering() {
+        let source = include_str!("temporal_resolve.wgsl");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("temporal resolve WGSL must parse: {error}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("temporal resolve WGSL must validate: {error}"));
+
+        assert!(source.contains("textureLoad(current_hdr"));
+        for forbidden in [
+            "textureSample",
+            "history_hdr",
+            "velocity",
+            "blend",
+            "sharpen",
+            "jitter",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "IQ0-A identity resolve must not contain `{forbidden}`"
             );
         }
     }

@@ -110,7 +110,7 @@ fn v1_keeps_legacy_fog_while_physical_geometry_uses_rv2_6() {
 }
 
 #[test]
-fn rv2_5_bindings_and_five_pass_graph_remain_stable() {
+fn rv2_5_bindings_and_temporal_graph_remain_stable() {
     let shader = include_str!("../src/shader.wgsl");
     for binding in 12..=20 {
         assert!(
@@ -120,12 +120,13 @@ fn rv2_5_bindings_and_five_pass_graph_remain_stable() {
     }
 
     let graph = include_str!("../src/render_graph.rs").replace("\r\n", "\n");
-    assert!(graph.contains("pub(crate) const COUNT: usize = 5;"));
+    assert!(graph.contains("pub(crate) const COUNT: usize = 6;"));
     for pass in [
         "PassId::ShadowNear",
         "PassId::ShadowMid",
         "PassId::ShadowFar",
         "PassId::Scene",
+        "PassId::TemporalResolve",
         "PassId::Postprocess",
     ] {
         assert!(graph.contains(pass), "graph must retain {pass}");

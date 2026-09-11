@@ -8,8 +8,8 @@
 //!      (HDR format, pass topology, resources outside the frame loop, resize
 //!      recreation, shadow-on-direct-only, terrain debug path);
 //!   4. WGSL parse/validation of the postprocess entry points;
-//!   5. one headless GPU test (`#[ignore]`) proving the real HDR -> exposure
-//!      -> tone map -> sRGB chain on a device (never runs in CI).
+//!   5. headless GPU tests (`#[ignore]`) proving the real HDR -> exposure ->
+//!      tone map chain and the IQ0-A identity resolve on a device.
 //!
 //! Physics/determinism fingerprints are untouched by design: the renderer
 //! crate already forbids dependencies on the simulation-domain crates (see
@@ -648,6 +648,168 @@ fn hdr_scene_to_tone_mapped_surface_offscreen() {
         rgba[0] < 255 && rgba[0] > 240,
         "red highlight must be compressed, not hard-clipped: {rgba:?}"
     );
+}
+
+#[test]
+#[ignore = "requires a GPU; run with -- --ignored"]
+fn temporal_resolve_identity_pass_is_exact_offscreen() {
+    let (device, queue) = headless_device();
+    const SIZE: u32 = 2;
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+    let extent = wgpu::Extent3d {
+        width: SIZE,
+        height: SIZE,
+        depth_or_array_layers: 1,
+    };
+    let input = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("IQ0-A smoke current HDR"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let expected: [u16; 16] = [
+        0x0000, 0x3c00, 0x4000, 0x3c00, 0x4400, 0x3800, 0x3400, 0x3c00, 0x3a00, 0x3b00, 0x3c00,
+        0x3c00, 0x4200, 0x3e00, 0x3000, 0x3c00,
+    ];
+    queue.write_texture(
+        input.as_image_copy(),
+        bytemuck::cast_slice(&expected),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 8),
+            rows_per_image: Some(SIZE),
+        },
+        extent,
+    );
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("IQ0-A smoke resolved history"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+    let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("IQ0-A smoke resolve layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("IQ0-A smoke resolve bind group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&input_view),
+        }],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("IQ0-A smoke resolve shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            include_str!("../src/renderer_v2/temporal_resolve.wgsl").into(),
+        ),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("IQ0-A smoke resolve pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("IQ0-A smoke resolve pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_temporal_resolve"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_temporal_resolve"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let row_bytes = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("IQ0-A smoke resolve readback"),
+        size: u64::from(row_bytes * SIZE),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("IQ0-A smoke resolve pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    encoder.copy_texture_to_buffer(
+        output.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        extent,
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv()
+        .unwrap()
+        .expect("temporal resolve readback must map");
+    let mapped = slice.get_mapped_range().expect("mapped temporal resolve");
+    for row in 0..SIZE as usize {
+        let actual_row: &[u16] =
+            bytemuck::cast_slice(&mapped[row * row_bytes as usize..row * row_bytes as usize + 16]);
+        assert_eq!(actual_row, &expected[row * 8..row * 8 + 8]);
+    }
 }
 
 #[repr(C)]
