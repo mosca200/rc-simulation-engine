@@ -1,0 +1,624 @@
+{
+  "manifest_version": 1,
+  "asset_id": "acro_electric_01",
+  "title": "Acro Electric 01",
+  "classification": "synthetic_test",
+  "purpose": "presentation_only",
+  "consumed_by_simulation": false,
+  "notes": [
+    "This manifest is PRESENTATION ONLY. Nothing here is read by the simulation, physics,",
+    "aerodynamics, propulsion, servo, mixer, contact, scheduler, replay or fingerprint code.",
+    "The runtime articulation authority remains models/acro_electric_01/model.json under",
+    "'presentation.articulated_surfaces', resolved by explicit primitive index and binding id.",
+    "Blender object names exist for the asset pipeline; they never drive runtime inference."
+  ],
+
+  "coordinate_system": {
+    "runtime_frame": "render-body",
+    "handedness": "right",
+    "axes": {
+      "plus_x": "aircraft right",
+      "plus_y": "up",
+      "minus_z": "forward / nose"
+    },
+    "gltf_convention": "+Y up, -Z forward (glTF 2.0 right-handed)",
+    "blender_convention": "+Z up, -Y forward, +X right",
+    "render_body_to_blender": [1, 0, 0, 0, 0, -1, 0, 1, 0],
+    "render_body_to_blender_note": "blender = (x, -z, y) for a render-body point (x, y, z)"
+  },
+
+  "units": {
+    "linear": "metre",
+    "blender_unit_system": "METRIC",
+    "blender_scale_length": 1.0,
+    "blender_length_unit": "METERS",
+    "angle": "radian"
+  },
+
+  "paths": {
+    "source_blend": "models/acro_electric_01/source/acro_electric_01.blend",
+    "source_blend_is_runtime_dependency": false,
+    "legacy_generator": "tools/generate_acro_electric_01_glb.ps1",
+    "reference_glb": "models/acro_electric_01/aircraft.glb",
+    "runtime_model_json": "models/acro_electric_01/model.json",
+    "production_glb": "models/acro_electric_01/aircraft.glb",
+    "production_glb_status": "not_replaced_in_rv2_7a",
+    "scratch_export_dir": "target/asset_pipeline/acro_electric_01"
+  },
+
+  "root_object": {
+    "blender_name": "ACRO_ROOT",
+    "blender_type": "EMPTY",
+    "gltf_node_name": "ACRO_ROOT",
+    "transform": "identity",
+    "role": "single scene root; every semantic component is a direct child"
+  },
+
+  "semantic_naming": {
+    "object_name_pattern": "^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$",
+    "export_node_name_pattern": "^([0-9]{2})_([A-Z][A-Z0-9]*(_[A-Z0-9]+)*)$",
+    "export_order_prefix_note": [
+      "Blender 5.2's glTF exporter emits nodes (and therefore mesh indices) in alphabetical",
+      "object-name order, not in creation or outliner order. Verified empirically on Blender",
+      "5.2.1 LTS / Khronos glTF Blender I/O v5.2.40. Because the runtime maps moving surfaces",
+      "by primitive index, export order must be pinned by construction rather than inherited",
+      "accidentally. blender_export_glb.py therefore renames each object to",
+      "'{primitive_index:02d}_{SEMANTIC_ID}' in a throwaway in-memory session before export.",
+      "The .blend source keeps the clean semantic names; the prefix never lands in the source."
+    ],
+    "families": {
+      "structure": "load-bearing airframe parts",
+      "control_surface": "articulated moving surface, one object per surface, never merged",
+      "propeller": "presentation-only rotating assembly",
+      "gear": "undercarriage structure",
+      "wheel": "rolling contact hardware",
+      "livery": "paint/decal shells that follow the structure",
+      "detail": "small decorative parts"
+    }
+  },
+
+  "components": [
+    {
+      "primitive_index": 0,
+      "semantic_id": "FUSELAGE",
+      "family": "structure",
+      "legacy_node_name": "Fuselage",
+      "export_node_name": "00_FUSELAGE",
+      "material_name": "Airframe Pearl",
+      "moving_surface": null,
+      "production_vertex_count": 626,
+      "production_index_count": 3168,
+      "expected_bounds": { "min": [-0.183, 0.087, -0.46], "max": [0.183, 0.47, 0.91] }
+    },
+    {
+      "primitive_index": 1,
+      "semantic_id": "COWL",
+      "family": "structure",
+      "legacy_node_name": "Cowl",
+      "export_node_name": "01_COWL",
+      "material_name": "Competition Red",
+      "moving_surface": null,
+      "production_vertex_count": 338,
+      "production_index_count": 1440,
+      "expected_bounds": { "min": [-0.176, 0.098, -0.7], "max": [0.176, 0.434, -0.43] }
+    },
+    {
+      "primitive_index": 2,
+      "semantic_id": "SPINNER",
+      "family": "structure",
+      "legacy_node_name": "Spinner",
+      "export_node_name": "02_SPINNER",
+      "material_name": "Painted Spinner",
+      "moving_surface": null,
+      "production_vertex_count": 386,
+      "production_index_count": 1728,
+      "expected_bounds": { "min": [-0.118, 0.143, -0.89], "max": [0.118, 0.379, -0.678] }
+    },
+    {
+      "primitive_index": 3,
+      "semantic_id": "PROP_ASSEMBLY",
+      "family": "propeller",
+      "legacy_node_name": "Propeller",
+      "export_node_name": "03_PROP_ASSEMBLY",
+      "material_name": "Carbon Propeller",
+      "moving_surface": null,
+      "runtime_coupling": "none_in_rv2_7a",
+      "presentation_note": "Static in the runtime. SurfaceId::Propeller and propeller_angle_rad stay reserved; no RPM coupling is wired by this slice.",
+      "production_vertex_count": 48,
+      "production_index_count": 264,
+      "expected_bounds": { "min": [-0.052, -0.115, -0.717], "max": [0.052, 0.625, -0.671] }
+    },
+    {
+      "primitive_index": 4,
+      "semantic_id": "CANOPY",
+      "family": "structure",
+      "legacy_node_name": "Canopy",
+      "export_node_name": "04_CANOPY",
+      "material_name": "Tinted Canopy",
+      "moving_surface": null,
+      "production_vertex_count": 402,
+      "production_index_count": 1920,
+      "expected_bounds": { "min": [-0.137, 0.337, -0.35], "max": [0.137, 0.593, 0.32] }
+    },
+    {
+      "primitive_index": 5,
+      "semantic_id": "WING_MAIN_FIXED",
+      "family": "structure",
+      "legacy_node_name": "MainWingFixed",
+      "export_node_name": "05_WING_MAIN_FIXED",
+      "material_name": "Airframe Pearl",
+      "moving_surface": null,
+      "split_note": "Single full-span object. WING_L / WING_R do not exist as separate geometry in this asset and are deliberately not invented here.",
+      "production_vertex_count": 416,
+      "production_index_count": 1632,
+      "expected_bounds": { "min": [-0.92, 0.25737, -0.3], "max": [0.92, 0.329, 0.26] }
+    },
+    {
+      "primitive_index": 6,
+      "semantic_id": "AILERON_L",
+      "family": "control_surface",
+      "legacy_node_name": "LeftAileron",
+      "export_node_name": "06_AILERON_L",
+      "material_name": "Competition Red",
+      "moving_surface": "left_aileron",
+      "production_vertex_count": 121,
+      "production_index_count": 510,
+      "expected_bounds": { "min": [-0.9, 0.27462, 0.103], "max": [-0.3, 0.3245, 0.242] }
+    },
+    {
+      "primitive_index": 7,
+      "semantic_id": "AILERON_R",
+      "family": "control_surface",
+      "legacy_node_name": "RightAileron",
+      "export_node_name": "07_AILERON_R",
+      "material_name": "Competition Red",
+      "moving_surface": "right_aileron",
+      "production_vertex_count": 121,
+      "production_index_count": 510,
+      "expected_bounds": { "min": [0.3, 0.27462, 0.103], "max": [0.9, 0.3245, 0.242] }
+    },
+    {
+      "primitive_index": 8,
+      "semantic_id": "HTAIL_FIXED",
+      "family": "structure",
+      "legacy_node_name": "HorizontalStabilizer",
+      "export_node_name": "08_HTAIL_FIXED",
+      "material_name": "Airframe Pearl",
+      "moving_surface": null,
+      "split_note": "Single full-span object. HTAIL_L / HTAIL_R do not exist as separate geometry in this asset.",
+      "production_vertex_count": 314,
+      "production_index_count": 1020,
+      "expected_bounds": { "min": [-0.53, 0.3588, 0.535], "max": [0.53, 0.387, 0.895] }
+    },
+    {
+      "primitive_index": 9,
+      "semantic_id": "ELEVATOR",
+      "family": "control_surface",
+      "legacy_node_name": "Elevator",
+      "export_node_name": "09_ELEVATOR",
+      "material_name": "Deep Navy Accent",
+      "moving_surface": "elevator",
+      "production_vertex_count": 121,
+      "production_index_count": 510,
+      "expected_bounds": { "min": [-0.5, 0.36208, 0.735], "max": [0.5, 0.383, 0.9] }
+    },
+    {
+      "primitive_index": 10,
+      "semantic_id": "VTAIL_FIXED",
+      "family": "structure",
+      "legacy_node_name": "VerticalStabilizer",
+      "export_node_name": "10_VTAIL_FIXED",
+      "material_name": "Airframe Pearl",
+      "moving_surface": null,
+      "production_vertex_count": 157,
+      "production_index_count": 510,
+      "expected_bounds": { "min": [-0.00861, 0.36, 0.505], "max": [0.021, 0.795, 0.895] }
+    },
+    {
+      "primitive_index": 11,
+      "semantic_id": "RUDDER",
+      "family": "control_surface",
+      "legacy_node_name": "Rudder",
+      "export_node_name": "11_RUDDER",
+      "material_name": "Competition Red",
+      "moving_surface": "rudder",
+      "production_vertex_count": 87,
+      "production_index_count": 306,
+      "expected_bounds": { "min": [-0.00533, 0.375, 0.735], "max": [0.013, 0.765, 0.9] }
+    },
+    {
+      "primitive_index": 12,
+      "semantic_id": "GEAR_MAIN",
+      "family": "gear",
+      "legacy_node_name": "MainLandingGear",
+      "export_node_name": "12_GEAR_MAIN",
+      "material_name": "Gear Metal",
+      "moving_surface": null,
+      "split_note": "Single object carrying both main legs. GEAR_L / GEAR_R do not exist as separate geometry in this asset.",
+      "production_vertex_count": 232,
+      "production_index_count": 672,
+      "expected_bounds": { "min": [-0.315, -0.048, 0.00320553384], "max": [0.315, 0.216736063, 0.063] }
+    },
+    {
+      "primitive_index": 13,
+      "semantic_id": "GEAR_NOSE",
+      "family": "gear",
+      "legacy_node_name": "NoseLandingGear",
+      "export_node_name": "13_GEAR_NOSE",
+      "material_name": "Gear Metal",
+      "moving_surface": null,
+      "undercarriage_note": "This airframe is a tricycle undercarriage: it has a nose gear, not a tail gear. GEAR_TAIL / WHEEL_TAIL are therefore not present.",
+      "production_vertex_count": 108,
+      "production_index_count": 312,
+      "expected_bounds": { "min": [-0.035, -0.02462392, -0.515], "max": [0.035, 0.182304665, -0.4452692] }
+    },
+    {
+      "primitive_index": 14,
+      "semantic_id": "WHEELS",
+      "family": "wheel",
+      "legacy_node_name": "Wheels",
+      "export_node_name": "14_WHEELS",
+      "material_name": "Tire Rubber",
+      "moving_surface": null,
+      "split_note": "Single object carrying all three tires. WHEEL_L / WHEEL_R / WHEEL_NOSE do not exist as separate geometry in this asset.",
+      "production_vertex_count": 1048,
+      "production_index_count": 6288,
+      "expected_bounds": { "min": [-0.292, -0.099, -0.552], "max": [0.292, 0.042, 0.114] }
+    },
+    {
+      "primitive_index": 15,
+      "semantic_id": "LIVERY_WING_FUSELAGE",
+      "family": "livery",
+      "legacy_node_name": "WingAndFuselageLivery",
+      "export_node_name": "15_LIVERY_WING_FUSELAGE",
+      "material_name": "Deep Navy Accent",
+      "moving_surface": null,
+      "production_vertex_count": 254,
+      "production_index_count": 744,
+      "expected_bounds": { "min": [-0.895, 0.104, -0.415], "max": [0.895, 0.446, 0.095] }
+    },
+    {
+      "primitive_index": 16,
+      "semantic_id": "LIVERY_TOP_RED",
+      "family": "livery",
+      "legacy_node_name": "TopRedLivery",
+      "export_node_name": "16_LIVERY_TOP_RED",
+      "material_name": "Competition Red",
+      "moving_surface": null,
+      "production_vertex_count": 174,
+      "production_index_count": 612,
+      "expected_bounds": { "min": [-0.84, 0.32177, -0.275], "max": [0.84, 0.3355, -0.105] }
+    },
+    {
+      "primitive_index": 17,
+      "semantic_id": "LIVERY_UNDERSIDE_NAVY",
+      "family": "livery",
+      "legacy_node_name": "UndersideNavyLivery",
+      "export_node_name": "17_LIVERY_UNDERSIDE_NAVY",
+      "material_name": "Deep Navy Accent",
+      "moving_surface": null,
+      "production_vertex_count": 208,
+      "production_index_count": 816,
+      "expected_bounds": { "min": [-0.88, 0.26077, -0.26], "max": [0.88, 0.309, 0.085] }
+    },
+    {
+      "primitive_index": 18,
+      "semantic_id": "DETAIL_CANOPY_FRAME",
+      "family": "detail",
+      "legacy_node_name": "CanopyFrame",
+      "export_node_name": "18_DETAIL_CANOPY_FRAME",
+      "material_name": "Deep Navy Accent",
+      "moving_surface": null,
+      "production_vertex_count": 324,
+      "production_index_count": 960,
+      "expected_bounds": { "min": [-0.09, 0.35, -0.315], "max": [0.09, 0.524, 0.228] }
+    },
+    {
+      "primitive_index": 19,
+      "semantic_id": "DETAIL_WHEEL_HUBS",
+      "family": "detail",
+      "legacy_node_name": "WheelHubs",
+      "export_node_name": "19_DETAIL_WHEEL_HUBS",
+      "material_name": "Gear Metal",
+      "moving_surface": null,
+      "production_vertex_count": 278,
+      "production_index_count": 816,
+      "expected_bounds": { "min": [-0.299, -0.055, -0.518], "max": [0.299, 0.008, 0.07] }
+    },
+    {
+      "primitive_index": 20,
+      "semantic_id": "DETAIL_PROP_TIPS",
+      "family": "detail",
+      "legacy_node_name": "PropellerTips",
+      "export_node_name": "20_DETAIL_PROP_TIPS",
+      "material_name": "Competition Red",
+      "moving_surface": null,
+      "production_vertex_count": 48,
+      "production_index_count": 72,
+      "expected_bounds": { "min": [-0.022, -0.117, -0.706], "max": [0.022, 0.627, -0.68] }
+    }
+  ],
+
+  "moving_surfaces": [
+    {
+      "semantic_id": "AILERON_L",
+      "primitive_index": 6,
+      "surface_id": "left_aileron",
+      "control_surface_binding_id": "aileron-left",
+      "hinge_axis_render_body": [1.0, -0.054, 0.0],
+      "hinge_axis_normalized_render_body": [0.998545181, -0.05392144, 0.0],
+      "hinge_origin_render_body_m": [0.0, 0.265, 0.11],
+      "hinge_origin_tolerance_m": 0.002,
+      "visual_gain": 1.0,
+      "blender_pivot": [0.0, -0.11, 0.265],
+      "must_be_separate_object": true
+    },
+    {
+      "semantic_id": "AILERON_R",
+      "primitive_index": 7,
+      "surface_id": "right_aileron",
+      "control_surface_binding_id": "aileron-right",
+      "hinge_axis_render_body": [1.0, 0.054, 0.0],
+      "hinge_axis_normalized_render_body": [0.998545181, 0.05392144, 0.0],
+      "hinge_origin_render_body_m": [0.0, 0.265, 0.11],
+      "hinge_origin_tolerance_m": 0.002,
+      "visual_gain": 1.0,
+      "blender_pivot": [0.0, -0.11, 0.265],
+      "must_be_separate_object": true
+    },
+    {
+      "semantic_id": "ELEVATOR",
+      "primitive_index": 9,
+      "surface_id": "elevator",
+      "control_surface_binding_id": "elevator",
+      "hinge_axis_render_body": [1.0, 0.0, 0.0],
+      "hinge_axis_normalized_render_body": [1.0, 0.0, 0.0],
+      "hinge_origin_render_body_m": [0.0, 0.367, 0.735],
+      "hinge_origin_tolerance_m": 0.002,
+      "visual_gain": 1.0,
+      "blender_pivot": [0.0, -0.735, 0.367],
+      "must_be_separate_object": true
+    },
+    {
+      "semantic_id": "RUDDER",
+      "primitive_index": 11,
+      "surface_id": "rudder",
+      "control_surface_binding_id": "rudder",
+      "hinge_axis_render_body": [0.0, 1.0, 0.0],
+      "hinge_axis_normalized_render_body": [0.0, 1.0, 0.0],
+      "hinge_origin_render_body_m": [0.0, 0.375, 0.735],
+      "hinge_origin_tolerance_m": 0.002,
+      "visual_gain": 1.0,
+      "blender_pivot": [0.0, -0.735, 0.375],
+      "must_be_separate_object": true
+    }
+  ],
+
+  "moving_surface_policy": {
+    "never_merge_with_rigid_geometry": true,
+    "runtime_binding_source": "models/acro_electric_01/model.json -> presentation.articulated_surfaces",
+    "no_name_based_runtime_inference": true,
+    "pivot_purpose": "DCC authoring and preview only; the runtime never reads Blender origins",
+    "hinge_axis_note": [
+      "The aileron hinge axes are deliberately not unit length: [1.0, +/-0.054, 0.0] encodes the",
+      "wing dihedral so the deflected aileron follows the wing plane. renderer::SurfaceHinge::new",
+      "requires only finite components and |axis| > 1e-9 and normalizes internally, so the authored",
+      "vector is preserved verbatim in model.json and mirrored here. hinge_axis_normalized_render_body",
+      "records what the runtime actually rotates about; validate_glb.py checks both."
+    ]
+  },
+
+  "materials": {
+    "shading_model": "glTF 2.0 metallic-roughness, no extensions",
+    "expected_count": 8,
+    "alpha_mode_default": "OPAQUE",
+    "double_sided_default": false,
+    "catalog": [
+      { "name": "Airframe Pearl",   "role": "airframe_dielectric",  "base_color_factor": [0.94, 0.965, 1.0, 1.0],  "metallic_factor": 0.0,  "roughness_factor": 0.26, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Competition Red",  "role": "livery_red",           "base_color_factor": [0.88, 0.018, 0.028, 1.0], "metallic_factor": 0.0,  "roughness_factor": 0.24, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Deep Navy Accent", "role": "livery_navy",          "base_color_factor": [0.012, 0.035, 0.11, 1.0], "metallic_factor": 0.0,  "roughness_factor": 0.30, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Tinted Canopy",    "role": "canopy_opaque_tint",   "base_color_factor": [0.018, 0.095, 0.17, 1.0], "metallic_factor": 0.0,  "roughness_factor": 0.11, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Painted Spinner",  "role": "spinner_paint",        "base_color_factor": [0.92, 0.022, 0.018, 1.0], "metallic_factor": 0.0,  "roughness_factor": 0.19, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Carbon Propeller", "role": "propeller_carbon",     "base_color_factor": [0.014, 0.017, 0.024, 1.0], "metallic_factor": 0.12, "roughness_factor": 0.30, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Gear Metal",       "role": "gear_metal",           "base_color_factor": [0.42, 0.46, 0.52, 1.0],   "metallic_factor": 0.78, "roughness_factor": 0.27, "alpha_mode": "OPAQUE", "double_sided": false },
+      { "name": "Tire Rubber",      "role": "tire_rubber",          "base_color_factor": [0.012, 0.014, 0.018, 1.0], "metallic_factor": 0.0,  "roughness_factor": 0.88, "alpha_mode": "OPAQUE", "double_sided": false }
+    ],
+    "index_order_profiles": {
+      "production": [
+        "Airframe Pearl", "Competition Red", "Deep Navy Accent", "Tinted Canopy",
+        "Painted Spinner", "Carbon Propeller", "Gear Metal", "Tire Rubber"
+      ],
+      "blender_export": [
+        "Airframe Pearl", "Competition Red", "Painted Spinner", "Carbon Propeller",
+        "Tinted Canopy", "Deep Navy Accent", "Gear Metal", "Tire Rubber"
+      ]
+    },
+    "index_order_note": [
+      "The legacy PowerShell generator authored material indices explicitly. Blender's exporter",
+      "instead emits materials in first-use order across the (pinned) object traversal, so a",
+      "Blender export yields the 'blender_export' profile above. Material NAMES and shading",
+      "values are identical in both profiles; only the index order differs.",
+      "crates/renderer/tests/aircraft_asset_g3c.rs asserts positional material indices against the",
+      "committed production GLB. A future production cutover to a Blender-exported GLB must",
+      "therefore either restore the production material order or update those assertions in the",
+      "same slice. RV2-7A does neither: the production GLB is untouched."
+    ]
+  },
+
+  "pbr_readiness": {
+    "target_milestone": "RV2-8",
+    "supported_now": ["baseColorFactor", "metallicFactor", "roughnessFactor", "alphaMode", "doubleSided", "NORMAL", "POSITION"],
+    "not_added_in_rv2_7a": [
+      "baseColorTexture", "normalTexture", "metallicRoughnessTexture", "occlusionTexture",
+      "emissiveTexture", "KHR_materials_* extensions", "tangents"
+    ],
+    "texture_naming_convention": {
+      "base_color": "<asset_id>_<part>_basecolor",
+      "normal": "<asset_id>_<part>_normal",
+      "orm": "<asset_id>_<part>_orm",
+      "orm_channel_packing": "R = occlusion, G = roughness, B = metallic",
+      "note": "Convention only. No texture files are created or referenced by this slice."
+    }
+  },
+
+  "attribute_contract": {
+    "required": ["POSITION", "NORMAL"],
+    "texcoord_0_required": false,
+    "texcoord_0_required_reason": "The current Acro asset is untextured; material segmentation carries the livery. RV2-8 must set this to true before any textured production export.",
+    "tangents_required": false,
+    "indices_required": true,
+    "primitive_mode": 4,
+    "index_component_types_allowed": [5121, 5123, 5125]
+  },
+
+  "counts": {
+    "production": {
+      "byte_size": 252816,
+      "sha256": "55932887da7e5114846bcf20f5bf1219fed303810ac761043c22275becc470d9",
+      "scenes": 1,
+      "nodes": 21,
+      "meshes": 21,
+      "primitives": 21,
+      "materials": 8,
+      "accessors": 63,
+      "buffer_views": 63,
+      "buffers": 1,
+      "images": 0,
+      "textures": 0,
+      "samplers": 0,
+      "vertices": 5811,
+      "indices": 24810,
+      "triangles": 8270
+    },
+    "blender_export": {
+      "byte_size": null,
+      "sha256": null,
+      "scenes": 1,
+      "nodes": 22,
+      "meshes": 21,
+      "primitives": 21,
+      "materials": 8,
+      "accessors": 62,
+      "buffer_views": 62,
+      "buffers": 1,
+      "images": 0,
+      "textures": 0,
+      "samplers": 0,
+      "vertices": 5903,
+      "indices": 24810,
+      "triangles": 8270,
+      "note": "Recorded from the RV2-7A scratch export with the pinned production configuration. Triangle and index counts match the legacy generator exactly; the vertex count is 92 higher because Blender re-splits vertices along normal/material seams. Bounds are identical to the production asset. The 22nd node is the ACRO_ROOT empty: it carries no mesh and therefore consumes no primitive index. byte_size and sha256 are intentionally null so the profile does not break on a Blender patch upgrade; they are recorded under observed_reproducibility instead."
+    }
+  },
+
+  "toolchain": {
+    "recorded_on": {
+      "blender_version": "5.2.1 LTS",
+      "blender_build_hash": "9e2066aef7ef",
+      "gltf_io_version": "Khronos glTF Blender I/O v5.2.40",
+      "python_for_offline_validator": "3.12.10",
+      "platform": "Windows"
+    },
+    "note": "counts.blender_export was recorded with this exact toolchain. Re-record it deliberately when Blender is upgraded; do not silently relax it."
+  },
+
+  "observed_reproducibility": {
+    "glb_export_runs_compared": 3,
+    "distinct_source_blend_generations": 3,
+    "glb_byte_identical_across_all_runs": true,
+    "glb_sha256": "be523ca41dcbe1dbe6243df604076edd6e44f72b7d8294be1b8b715c7d9d388d",
+    "glb_byte_size": 206116,
+    "semantic_fingerprint_identical": true,
+    "glb_generator_string": "Khronos glTF Blender I/O v5.2.40",
+    "source_blend_byte_identical_across_generations": false,
+    "source_blend_sha256_per_generation": [
+      "884e54352c327fdd210c537785ed88d01cf29c735559b2f3ced375f77a02cdbd",
+      "c419f091f0fb000b9cab32a908e73eab271167f9a8bf39af07edd48456b58199",
+      "56e0683854f98e0a8b53aa401597dcf0df417fbe356ebada0adccf91d78a3ce1"
+    ],
+    "committed_source_blend_sha256": "56e0683854f98e0a8b53aa401597dcf0df417fbe356ebada0adccf91d78a3ce1",
+    "note": [
+      "The .blend container is NOT byte-reproducible: three independent runs of",
+      "blender_import_reference.py produced three different files (250924-250930 bytes) because",
+      "Blender embeds its own save metadata. This is reported honestly rather than papered over.",
+      "",
+      "The EXPORTED GLB IS byte-reproducible: all three exports are bit-identical",
+      "(be523ca4..., 206116 bytes), including across independently regenerated sources. The",
+      "semantic fingerprint written by --fingerprint-out is identical too, and is the portable",
+      "artefact for comparing runs on a different Blender version or platform: it covers node",
+      "order, mesh/primitive/accessor counts, per-primitive vertex and index counts, material",
+      "names and factors, bounds and embedded image hashes.",
+      "",
+      "Consequence: reproducibility is asserted on the deliverable (the GLB), not on the",
+      "intermediate DCC container. The .blend is regenerable from the reference GLB at any time."
+    ]
+  },
+
+  "bounds": {
+    "frame": "render-body metres",
+    "global_min": [-0.92, -0.117, -0.89],
+    "global_max": [0.92, 0.795, 0.91],
+    "tolerance_m": 0.002,
+    "absurd_extent_limit_m": 5.0,
+    "visual_datum_offset_y_m": 0.255,
+    "ground_plane_y_m": -0.117
+  },
+
+  "orientation_checks": {
+    "tolerance_m": 0.002,
+    "foremost_component": "SPINNER",
+    "up_reference": { "above": "VTAIL_FIXED", "below": "FUSELAGE" },
+    "forward_reference": { "front": "PROP_ASSEMBLY", "behind": "COWL" },
+    "mirror_pairs_by_suffix": true,
+    "rules": [
+      "foremost_component: the declared component must own the global minimum Z, proving the nose points at -Z",
+      "up_reference: 'above' must reach a higher +Y than 'below', proving +Y is up",
+      "forward_reference: 'front' must reach a smaller Z than 'behind', proving the propeller disc is ahead of the cowl",
+      "mirror_pairs_by_suffix: every SEMANTIC_ID_L must have a SEMANTIC_ID_R sibling, lie entirely on the -X side of it, be mirrored about X=0, and match it on Y and Z"
+    ]
+  },
+
+  "runtime_mapping_authority": {
+    "model_json_presentation": {
+      "left_aileron": 6,
+      "right_aileron": 7,
+      "elevator": 9,
+      "rudder": 11
+    },
+    "renderer_test_expected_parts": "crates/renderer/tests/aircraft_asset_g3c.rs :: EXPECTED_PARTS",
+    "surface_test": "crates/renderer/tests/moving_surfaces_g1e.rs",
+    "visual_closure_doc": "docs/architecture/renderer_g3c_b_aircraft_visual_closure.md",
+    "presentation_doc": "docs/architecture/aircraft_presentation_g1e.md",
+    "scene_node_doc": "docs/architecture/renderer_glb_scene_node_foundation.md",
+    "changed_by_rv2_7a": false
+  },
+
+  "export_profiles": {
+    "production": {
+      "profile": "production",
+      "node_name_field": "legacy_node_name",
+      "material_order_field": "production",
+      "enforce_exact_counts": true,
+      "enforce_sha256": true,
+      "applies_to": "models/acro_electric_01/aircraft.glb (the committed runtime asset)"
+    },
+    "blender_export": {
+      "profile": "blender_export",
+      "node_name_field": "export_node_name",
+      "material_order_field": "blender_export",
+      "enforce_exact_counts": true,
+      "enforce_sha256": false,
+      "applies_to": "scratch exports written under target/asset_pipeline/"
+    }
+  },
+
+  "kadet_reuse": {
+    "asset_id": "sig_kadet_lt40_egv",
+    "target_milestone": "RV2-7B",
+    "status": "not_built_in_rv2_7a",
+    "geometry_reference_doc": "docs/reference_aircraft/sig_kadet_lt40_egv_geometry_reconstruction.md",
+    "geometry_reference_data": "docs/reference_aircraft/data/sig_kadet_lt40_geometry_v0.json",
+    "reference_is_visual_only": true,
+    "physical_data_must_not_change": true
+  }
+}
