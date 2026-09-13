@@ -255,3 +255,19 @@ fn legacy_models_still_load_and_are_not_reference_ready() {
         );
     }
 }
+
+/// Readiness evaluation is metadata only, so the crate that hosts it must stay free of
+/// renderer, windowing and gamepad dependencies. Mirrors the telemetry crate's guard.
+#[test]
+fn model_crate_has_no_renderer_platform_or_gpu_dependency() {
+    let manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(manifest_path).expect("model manifest readable");
+    for forbidden in ["renderer", "wgpu", "winit", "platform", "gilrs"] {
+        assert!(
+            !manifest.lines().any(|line| line
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim() == forbidden)),
+            "forbidden model dependency {forbidden}"
+        );
+    }
+}
