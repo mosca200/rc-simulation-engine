@@ -152,6 +152,24 @@ pub struct PropulsionEvidence {
 }
 
 impl PropulsionEvidence {
+    pub fn manufacturer(&self) -> &str {
+        &self.file.campaign.manufacturer
+    }
+    pub fn family(&self) -> &str {
+        &self.file.campaign.family
+    }
+    pub fn variant(&self) -> &str {
+        &self.file.campaign.variant
+    }
+    pub fn physical_airframe_id(&self) -> Option<&str> {
+        self.file.campaign.physical_airframe_id.as_deref()
+    }
+    pub fn operational_configuration_id(&self) -> Option<&str> {
+        self.file.campaign.operational_configuration_id.as_deref()
+    }
+    pub fn propulsion_configuration_id(&self) -> Option<&str> {
+        self.file.campaign.propulsion_configuration_id.as_deref()
+    }
     pub fn campaign_id(&self) -> &str {
         &self.file.campaign.id
     }

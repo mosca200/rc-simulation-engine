@@ -102,6 +102,8 @@ pub struct AerodynamicDatasetSummary {
     evidence_class: AerodynamicEvidenceClass,
     reynolds: f64,
     mach: f64,
+    alpha_min_rad: f64,
+    alpha_max_rad: f64,
     method_id: String,
     convergence_status: ConvergenceStatus,
     evidence_ready: bool,
@@ -122,6 +124,14 @@ impl AerodynamicDatasetSummary {
 
     pub const fn mach(&self) -> f64 {
         self.mach
+    }
+
+    pub const fn alpha_min_rad(&self) -> f64 {
+        self.alpha_min_rad
+    }
+
+    pub const fn alpha_max_rad(&self) -> f64 {
+        self.alpha_max_rad
     }
 
     pub fn method_id(&self) -> &str {
@@ -196,6 +206,15 @@ pub struct AerodynamicEvidence {
 }
 
 impl AerodynamicEvidence {
+    pub fn manufacturer(&self) -> &str {
+        &self.file.campaign.manufacturer
+    }
+    pub fn family(&self) -> &str {
+        &self.file.campaign.family
+    }
+    pub fn variant(&self) -> &str {
+        &self.file.campaign.variant
+    }
     pub fn campaign_id(&self) -> &str {
         &self.file.campaign.id
     }
@@ -839,6 +858,8 @@ fn evaluate(file: &AerodynamicEvidenceFile) -> AerodynamicEvidenceEvaluation {
                 evidence_class: dataset.evidence_class,
                 reynolds: dataset.flow_conditions.reynolds,
                 mach: canonical_zero(dataset.flow_conditions.mach),
+                alpha_min_rad: dataset.samples.first().map_or(0.0, |s| s.alpha_rad),
+                alpha_max_rad: dataset.samples.last().map_or(0.0, |s| s.alpha_rad),
                 method_id: dataset.method.id.clone(),
                 convergence_status: dataset.method.convergence_status,
                 evidence_ready,

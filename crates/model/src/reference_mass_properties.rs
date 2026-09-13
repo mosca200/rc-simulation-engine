@@ -223,6 +223,21 @@ pub struct MassPropertiesCampaign {
 }
 
 impl MassPropertiesCampaign {
+    pub fn manufacturer(&self) -> &str {
+        &self.file.campaign.identity.manufacturer
+    }
+    pub fn family(&self) -> &str {
+        &self.file.campaign.identity.family
+    }
+    pub fn variant(&self) -> &str {
+        &self.file.campaign.identity.variant
+    }
+    pub fn airframe_id(&self) -> Option<&str> {
+        self.file.campaign.identity.airframe_id.as_deref()
+    }
+    pub fn linked_geometry_campaign_id(&self) -> &str {
+        &self.file.campaign.linked_geometry_campaign_id
+    }
     pub const fn classification(&self) -> SurveyClassification {
         self.file.campaign.classification
     }
