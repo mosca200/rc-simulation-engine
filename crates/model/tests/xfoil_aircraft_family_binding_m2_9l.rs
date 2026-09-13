@@ -163,23 +163,16 @@ fn test_model_json() -> String {
 
 fn load_test_model() -> model::AircraftModel {
     let json = test_model_json();
-    let dir = std::env::temp_dir().join(format!(
-        "rcsim-m2-9l-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("model.json");
+    let dir = tempfile::Builder::new()
+        .prefix("rcsim-m2-9l-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("model.json");
     {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
     }
-    let model = load_aircraft_model(&path).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    model
+    load_aircraft_model(&path).unwrap()
 }
 
 // ── Test 1: valid replacement ────────────────────────────────────────────────
