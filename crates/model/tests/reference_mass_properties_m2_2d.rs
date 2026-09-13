@@ -7,6 +7,56 @@ use model::{
 };
 use serde_json::{Value, json};
 
+#[test]
+fn ra1_a_mass_and_cg_without_inertia_remain_incomplete() {
+    use model::{
+        PhysicalConfigurationIdentity, ReadinessDomain, ReadinessReason, ReferenceReadinessInput,
+        evaluate_reference_aircraft_readiness,
+    };
+
+    let mut fixture = complete_component_campaign();
+    fixture["raw_observations"]["components"][0]["intrinsic_inertia_about_component_cg_frd_kg_m2"] =
+        Value::Null;
+    let campaign = load(&fixture).unwrap();
+    assert!(campaign.evaluation().mass_ready());
+    assert!(campaign.evaluation().cg_ready());
+    assert!(!campaign.evaluation().inertia_ready());
+    let aircraft = load_value(&valid_v2_reference_model_value()).unwrap();
+    let report = evaluate_reference_aircraft_readiness(ReferenceReadinessInput {
+        model: &aircraft,
+        physical_configuration: PhysicalConfigurationIdentity {
+            airframe_id: "synthetic-airframe",
+            operational_configuration_id: "synthetic-config-a",
+            propulsion_configuration_id: None,
+        },
+        survey: None,
+        mass_campaign: Some(&campaign),
+        aerodynamic_evidence: None,
+        propulsion_evidence: None,
+        required_alpha_rad: None,
+    });
+    let mass = report.domain(ReadinessDomain::MassProperties);
+    assert!(
+        mass.findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::InertiaEvidenceMissing)
+    );
+    assert!(
+        !mass
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::MassMeasurementMissing)
+    );
+    assert!(
+        !mass
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::CgMeasurementMissing)
+    );
+    // This is an explicitly synthetic test fixture, so the physical gate remains blocked.
+    assert_eq!(mass.status, model::ReadinessStatus::Blocked);
+}
+
 const EMPTY_CAMPAIGN: &str = include_str!(
     "../../../docs/reference_aircraft/data/sig_kadet_lt40_egv_mass_properties_v0.json"
 );

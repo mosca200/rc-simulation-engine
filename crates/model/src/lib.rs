@@ -6,6 +6,7 @@ mod reference;
 mod reference_aerodynamics;
 mod reference_mass_properties;
 mod reference_propulsion;
+mod reference_readiness;
 mod reference_survey;
 mod reference_xfoil;
 mod reference_xfoil_campaign;
@@ -48,6 +49,11 @@ pub use reference_propulsion::{
     ConfigurationClaimSummary, PropulsionConfigurationEvidenceClass, PropulsionEvidence,
     PropulsionEvidenceEvaluation, PropulsionEvidenceLoader, ReferencePropulsionEvidenceError,
     load_reference_propulsion_evidence,
+};
+pub use reference_readiness::{
+    DomainReadiness, PhysicalConfigurationIdentity, ReadinessDomain, ReadinessEvidence,
+    ReadinessFinding, ReadinessReason, ReadinessStatus, ReferenceAircraftReadiness,
+    ReferenceReadinessInput, evaluate_reference_aircraft_readiness,
 };
 pub use reference_survey::{
     BilateralMeasurementSummary, CrossVariantComparison, CrossVariantStatus, DerivedSurveyValue,

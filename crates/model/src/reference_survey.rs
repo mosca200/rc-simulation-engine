@@ -268,6 +268,15 @@ pub struct PhysicalSurvey {
 }
 
 impl PhysicalSurvey {
+    pub fn manufacturer(&self) -> &str {
+        &self.file.campaign.identity.manufacturer
+    }
+    pub fn family(&self) -> &str {
+        &self.file.campaign.identity.family
+    }
+    pub fn variant(&self) -> &str {
+        &self.file.campaign.identity.variant
+    }
     pub const fn classification(&self) -> SurveyClassification {
         self.file.campaign.classification
     }
