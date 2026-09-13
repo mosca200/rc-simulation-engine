@@ -16,6 +16,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+tempfile = "3"
 
 [[bench]]
 name = "model_s6"
