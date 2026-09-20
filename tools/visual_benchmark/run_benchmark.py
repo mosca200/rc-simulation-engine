@@ -48,14 +48,30 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:  # Imported as part of the tools.visual_benchmark namespace package.
+    from tools.visual_benchmark.validate_capture_evidence import (
+        EVIDENCE_KIND,
+        EVIDENCE_SCHEMA_PATH,
+        EVIDENCE_SCHEMA_VERSION,
+        RUNTIME_SUPPLIED_FIELDS,
+        TOOLING_SUPPLIED_FIELDS,
+        CaptureEvidenceValidator,
+    )
     from tools.visual_benchmark.validate_manifest import ManifestValidator
 except ImportError:  # Direct script execution: script directory is sys.path[0].
+    from validate_capture_evidence import (
+        EVIDENCE_KIND,
+        EVIDENCE_SCHEMA_PATH,
+        EVIDENCE_SCHEMA_VERSION,
+        RUNTIME_SUPPLIED_FIELDS,
+        TOOLING_SUPPLIED_FIELDS,
+        CaptureEvidenceValidator,
+    )
     from validate_manifest import ManifestValidator
 
 
 RUNNER_NAME = "rv2-vis0-benchmark-runner"
-RUNNER_VERSION = "1.0.0"
-PLAN_VERSION = "1.0.0"
+RUNNER_VERSION = "1.1.0"
+PLAN_VERSION = "1.1.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION_FAILED = 1
@@ -101,9 +117,11 @@ KNOWN_RENDER_FLAGS = (
 )
 
 # Flags the runner may actually emit. A subset of KNOWN_RENDER_FLAGS: the
-# runner deliberately never emits --altitude-m/--airspeed-mps (not expressible
-# in the v1 manifest), --debug-overlays, --record-replay,
+# runner deliberately never emits --debug-overlays, --record-replay,
 # --controller-profile, or the developer-only --rv2-6-validation-* gates.
+# --altitude-m/--airspeed-mps became emittable in VIS0-C1B, when the v1
+# manifest gained aircraft.altitude_m/aircraft.airspeed_mps so the airborne
+# initial state no longer depends on the runtime defaults.
 EMITTABLE_FLAGS = (
     "--renderer",
     "--terrain-debug",
@@ -117,6 +135,8 @@ EMITTABLE_FLAGS = (
     "--exposure-ev",
     "--model",
     "--throttle",
+    "--altitude-m",
+    "--airspeed-mps",
     "--start-on-ground",
 )
 
@@ -167,6 +187,38 @@ NO_AUTO_EXIT_REASON = (
     "end in a timeout unless a human closes the window."
 )
 
+# --- Capture evidence contract (VIS0-C1B) ------------------------------------
+
+EVIDENCE_NOT_PRODUCED_REASON = (
+    "capture evidence not produced: no VisualCaptureEvidence artifact with "
+    "capture_success=true can exist until the runtime has a capture backend. "
+    "The runner emits a conforming skeleton in run.json whose every "
+    "runtime-supplied leaf is null, so nothing claims a measurement that was "
+    "never taken."
+)
+
+HARDWARE_METADATA_UNAVAILABLE_NOTE = (
+    "GPU adapter name, graphics backend and driver version are not reported by "
+    "`rcsim-app render`, so they are null rather than guessed. Only the "
+    "tooling-visible OS and architecture are filled in."
+)
+
+EVIDENCE_VISUAL_PASS_NOTE = (
+    "visual_pass stays null: capture evidence records facts and never a visual "
+    "verdict. A visual PASS/FAIL needs human review or an approved metrics "
+    "engine, neither of which exists here."
+)
+
+EVIDENCE_HANDSHAKE_NOTE = (
+    "LINEA 1 handshake: runtime_supplied_fields are the leaves only a real "
+    "capture backend can fill (actual framebuffer extent, actual presentation "
+    "frame index, image path/digest/size, capture success, adapter metadata). "
+    "tooling_supplied_fields are what this runner already owns (manifest "
+    "provenance, git provenance, requested values, process exit code, "
+    "OS/architecture). The tooling must never fabricate a runtime-supplied "
+    "value."
+)
+
 # --- Field policy ------------------------------------------------------------
 
 FIELD_STATUS_CLI = "cli"
@@ -206,6 +258,8 @@ CANONICAL_FIELD_ORDER = (
     "exposure_ev",
     "aircraft.model",
     "aircraft.throttle",
+    "aircraft.altitude_m",
+    "aircraft.airspeed_mps",
     "aircraft.start_on_ground",
     "resolution.width",
     "resolution.height",
@@ -243,6 +297,8 @@ FIELD_POLICY = {
     "exposure_ev": FieldPolicy(FIELD_STATUS_CLI, "--exposure-ev"),
     "aircraft.model": FieldPolicy(FIELD_STATUS_CLI, "--model"),
     "aircraft.throttle": FieldPolicy(FIELD_STATUS_CLI, "--throttle"),
+    "aircraft.altitude_m": FieldPolicy(FIELD_STATUS_CLI, "--altitude-m"),
+    "aircraft.airspeed_mps": FieldPolicy(FIELD_STATUS_CLI, "--airspeed-mps"),
     "aircraft.start_on_ground": FieldPolicy(FIELD_STATUS_CLI, "--start-on-ground"),
     "resolution.width": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=RESOLUTION_UNSUPPORTED_REASON),
     "resolution.height": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=RESOLUTION_UNSUPPORTED_REASON),
@@ -544,7 +600,13 @@ def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any):
     if dotted == "aircraft.model":
         return str(value), True, None
 
-    if dotted in ("camera.vertical_fov_deg", "exposure_ev", "aircraft.throttle"):
+    if dotted in (
+        "camera.vertical_fov_deg",
+        "exposure_ev",
+        "aircraft.throttle",
+        "aircraft.altitude_m",
+        "aircraft.airspeed_mps",
+    ):
         return format_number(value), True, None
 
     raise RunnerError(f"no CLI value resolver for manifest field '{dotted}'")
@@ -669,6 +731,131 @@ def expected_capture_basename(manifest: dict) -> dict:
     }
 
 
+# --- Capture evidence (VIS0-C1B) ---------------------------------------------
+
+
+def build_capture_evidence_contract() -> dict:
+    """Describe the evidence contract and who supplies each leaf.
+
+    This is the LINEA 1 handshake expressed as data: the future runtime capture
+    owns `runtime_supplied_fields`, this tooling owns `tooling_supplied_fields`,
+    and the split is the same one the evidence validator enforces.
+    """
+    return {
+        "kind": EVIDENCE_KIND,
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "schema_path": EVIDENCE_SCHEMA_PATH,
+        "validator": "tools/visual_benchmark/validate_capture_evidence.py",
+        "status": "not-produced",
+        "produced": False,
+        "reason": EVIDENCE_NOT_PRODUCED_REASON,
+        "capture_backend_available": False,
+        "handshake": {
+            "note": EVIDENCE_HANDSHAKE_NOTE,
+            "runtime_supplied_fields": sorted(RUNTIME_SUPPLIED_FIELDS),
+            "tooling_supplied_fields": sorted(TOOLING_SUPPLIED_FIELDS),
+        },
+        "verdict_policy": {
+            "visual_pass_automatic": False,
+            "note": EVIDENCE_VISUAL_PASS_NOTE,
+        },
+    }
+
+
+def build_capture_evidence_skeleton(plan: dict, execution: Optional[dict] = None) -> dict:
+    """Assemble a VisualCaptureEvidence document from facts this runner owns.
+
+    Only tooling-supplied leaves are filled (manifest digest and path, git
+    provenance, requested resolution/frame, OS/architecture). Every
+    runtime-supplied leaf stays null and `execution.capture_success` stays
+    False, because `integration/render-v2` has no capture backend: not one
+    pixel has been measured. The result conforms to
+    `visual_capture_evidence.schema.json` precisely because it claims nothing
+    it does not know.
+    """
+    execution = execution or {}
+    git = plan.get("git") or {}
+    environment = plan.get("environment_metadata") or {}
+    resolution = plan.get("resolution") or {}
+    camera = plan.get("camera") or {}
+
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "scene_id": plan.get("scene_id"),
+        "manifest": {
+            "path": plan.get("manifest_path"),
+            "path_display": plan.get("manifest_path_display"),
+            "sha256": plan.get("manifest_sha256"),
+        },
+        "source": {
+            "commit_sha": git.get("commit_sha"),
+            "commit_sha_short": git.get("commit_sha_short"),
+            "branch": git.get("branch"),
+            "detached_head": git.get("detached_head"),
+            "dirty": git.get("dirty"),
+            "dirty_entry_count": git.get("dirty_entry_count"),
+            "runner_name": RUNNER_NAME,
+            "runner_version": RUNNER_VERSION,
+        },
+        "renderer": {
+            "version": plan.get("renderer"),
+            "exposure_ev": _find_mapping(plan, "exposure_ev"),
+            "camera_mode": camera.get("mode"),
+            "scenery_preset": _find_mapping(plan, "scenery.preset"),
+        },
+        "capture": {
+            "requested": {
+                "width": resolution.get("width"),
+                "height": resolution.get("height"),
+                "frame_index": _find_mapping(plan, "capture.frame"),
+            },
+            # Runtime-supplied: null until a capture backend reports the truth.
+            "actual": {
+                "framebuffer_width": None,
+                "framebuffer_height": None,
+                "presentation_frame_index": None,
+            },
+            "format": _find_mapping(plan, "capture.format"),
+            "image": {"path": None, "sha256": None, "byte_size": None},
+        },
+        "execution": {
+            "capture_success": False,
+            "process_exit_code": execution.get("exit_code"),
+            "failure_reason": CAPTURE_UNAVAILABLE_REASON,
+        },
+        "hardware": {
+            "operating_system": environment.get("operating_system"),
+            "os_release": environment.get("os_release"),
+            "architecture": environment.get("architecture"),
+            # Runtime-supplied: only the renderer knows the real adapter.
+            "gpu_adapter_name": None,
+            "graphics_backend": None,
+            "driver_version": None,
+            "notes": HARDWARE_METADATA_UNAVAILABLE_NOTE,
+        },
+        "verdict": {
+            "visual_pass": None,
+            "visual_pass_reason": EVIDENCE_VISUAL_PASS_NOTE,
+        },
+    }
+
+
+def validate_capture_evidence_skeleton(evidence: dict) -> dict:
+    """Self-check the skeleton against the contract it claims to follow.
+
+    Reported rather than raised: missing git provenance makes valid evidence
+    impossible (a commit SHA is mandatory), and that is a fact worth recording
+    instead of a crash.
+    """
+    validator = CaptureEvidenceValidator(evidence)
+    valid = validator.validate()
+    return {
+        "valid": valid,
+        "error_count": len(validator.errors),
+        "errors": [str(error) for error in validator.errors],
+    }
+
+
 def build_plan(
     manifest: dict,
     manifest_path: Path,
@@ -723,6 +910,7 @@ def build_plan(
         "environment_metadata": build_environment_metadata(),
         "field_mapping": [mapping.to_json() for mapping in mappings],
         "runtime_capabilities": build_runtime_capabilities(manifest),
+        "capture_evidence_contract": build_capture_evidence_contract(),
         "git": git_provenance,
         "execution_policy": {
             "require_clean_git": require_clean_git,
@@ -998,6 +1186,7 @@ def execute_plan(
 
 def build_run_metadata(plan: dict, execution: dict) -> dict:
     """Assemble run.json. `visual_pass` is always null - never auto-approved."""
+    capture_evidence = build_capture_evidence_skeleton(plan, execution)
     return {
         "runner": plan["runner"],
         "plan_version": plan["plan_version"],
@@ -1015,6 +1204,10 @@ def build_run_metadata(plan: dict, execution: dict) -> dict:
         "plan": plan,
         "execution": execution,
         "capabilities": plan["runtime_capabilities"],
+        "capture_evidence": capture_evidence,
+        "capture_evidence_validation": validate_capture_evidence_skeleton(
+            capture_evidence
+        ),
         "artifacts": {
             "run_json": plan["artifact_paths"]["run_json"],
             "stdout": execution.get("stdout_path"),

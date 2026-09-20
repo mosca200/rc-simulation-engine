@@ -59,13 +59,22 @@ class ManifestValidator:
     ALLOWED_CAMERA = {"mode", "vertical_fov_deg", "pilot_position_render_m",
                       "chase_distance_behind_m", "chase_height_above_m"}
     ALLOWED_RESOLUTION = {"width", "height"}
-    ALLOWED_AIRCRAFT = {"model", "throttle", "start_on_ground"}
+    ALLOWED_AIRCRAFT = {"model", "throttle", "altitude_m", "airspeed_mps",
+                        "start_on_ground"}
     ALLOWED_CAPTURE = {"filename", "format", "frame", "quality"}
     ALLOWED_REFERENCE_HARDWARE = {"gpu", "driver_version", "os", "notes"}
 
     # Debug mode values verified from runtime source
     TERRAIN_DEBUG_MODES = {"final", "albedo", "normal", "roughness", "macro", "detail"}
     VEGETATION_DEBUG_MODES = {"final", "lod", "culling"}
+
+    # Upper bounds for the airborne initial state, verified from
+    # crates/app/src/render_app.rs (MAXIMUM_ALTITUDE_M / MAXIMUM_AIRSPEED_MPS).
+    # RenderOptions rejects a value that is non-finite, <= 0.0 or > maximum, so
+    # both ranges are (0, maximum]: zero is NOT an accepted value and the
+    # maximum IS.
+    MAXIMUM_ALTITUDE_M = 10000
+    MAXIMUM_AIRSPEED_MPS = 200
 
     def __init__(self, manifest: dict, base_path: Path):
         self.manifest = manifest
@@ -295,9 +304,56 @@ class ManifestValidator:
         if "throttle" in aircraft:
             self._validate_finite_number("aircraft.throttle", aircraft["throttle"], 0, 1)
 
+        if "altitude_m" in aircraft:
+            self._validate_finite_number(
+                "aircraft.altitude_m", aircraft["altitude_m"],
+                0, self.MAXIMUM_ALTITUDE_M, exclusive_min=True)
+
+        if "airspeed_mps" in aircraft:
+            self._validate_finite_number(
+                "aircraft.airspeed_mps", aircraft["airspeed_mps"],
+                0, self.MAXIMUM_AIRSPEED_MPS, exclusive_min=True)
+
         if "start_on_ground" in aircraft:
             if not isinstance(aircraft["start_on_ground"], bool):
                 self.error("aircraft.start_on_ground", "must be a boolean")
+
+        self._validate_aircraft_initial_state(aircraft)
+
+    def _validate_aircraft_initial_state(self, aircraft: dict):
+        """Keep the airborne initial state explicit and never silently inert.
+
+        `RenderApplication::new` (crates/app/src/render_app.rs) builds the
+        initial rigid-body state from `altitude_m` / `airspeed_mps` only on the
+        non-ground-start branch; with `--start-on-ground` it calls
+        `supported_ground_start(&model)` and never reads either value. So:
+
+        * airborne (start_on_ground absent or false) -> both fields are
+          required, otherwise part of the initial state would still be decided
+          by the runtime defaults (DEFAULT_ALTITUDE_M / DEFAULT_AIRSPEED_MPS)
+          and the manifest would not fully determine the scene;
+        * ground start -> both fields are rejected, because a manifest that
+          declared them would claim to determine state the runtime ignores.
+
+        This mirrors the pattern the camera block already applies to
+        mode-specific fields.
+        """
+        ground_start = aircraft.get("start_on_ground") is True
+        for field in ("altitude_m", "airspeed_mps"):
+            if ground_start:
+                if field in aircraft:
+                    self.error(
+                        f"aircraft.{field}",
+                        "not allowed when start_on_ground=true (the runtime "
+                        "derives a ground start from the model and ignores "
+                        "--altitude-m/--airspeed-mps)")
+            elif field not in aircraft:
+                self.error(
+                    f"aircraft.{field}",
+                    "required when the aircraft starts airborne "
+                    "(start_on_ground absent or false); the manifest must state "
+                    "the initial state explicitly instead of relying on the "
+                    "runtime default")
 
     def _validate_warmup(self):
         warmup = self.manifest.get("warmup")

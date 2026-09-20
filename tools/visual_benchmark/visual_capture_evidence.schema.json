@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mosca200/rc-simulation-engine/schemas/visual_capture_evidence.json",
+  "title": "Visual Capture Evidence",
+  "description": "Machine-readable record of what a visual benchmark capture ACTUALLY produced, as opposed to the GoldenSceneManifest which records what was requested. The evidence artifact is the fact layer: it never states whether an image is good. Enforced by tools/visual_benchmark/validate_capture_evidence.py. IMPORTANT: integration/render-v2 has no capture backend yet, so no artifact with capture_success=true can exist today; the contract ships first so the future runtime capture has a stable shape to fill. Unavailability policy: null is the ONLY marker for 'not available' - never 0, -1 or an empty string, which is why every dimension and byte size has a minimum of 1.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scene_id",
+    "manifest",
+    "source",
+    "renderer",
+    "capture",
+    "execution",
+    "hardware",
+    "verdict"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Semantic version of this evidence contract. The validator accepts major version 1 only."
+    },
+    "scene_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "minLength": 3,
+      "maxLength": 128,
+      "description": "Scene this evidence describes. Must equal the scene_id of the manifest that was run; the validator cross-checks it when --manifest is supplied."
+    },
+    "manifest": {
+      "type": "object",
+      "required": ["sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Manifest path as seen by the producer, when applicable. null when the producer has no meaningful path to report."
+        },
+        "path_display": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Repo-relative display path, matching the runner's display_path convention. null when not applicable."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the exact manifest bytes that were run. Mandatory and never null: without it the evidence cannot be tied to an intent, and the validator rejects a digest that does not match the supplied manifest file."
+        }
+      },
+      "description": "Provenance of the GoldenSceneManifest this evidence was produced from."
+    },
+    "source": {
+      "type": "object",
+      "required": ["commit_sha", "runner_name", "runner_version"],
+      "additionalProperties": false,
+      "properties": {
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "description": "Full git commit SHA the capture was produced from. 40 hex for SHA-1 repositories, 64 for SHA-256 ones."
+        },
+        "commit_sha_short": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Short commit SHA for human reading. null when git is unavailable."
+        },
+        "branch": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Branch name. Legitimately null on a detached HEAD or when git is unavailable."
+        },
+        "detached_head": {
+          "type": ["boolean", "null"],
+          "description": "True when the commit was checked out without a branch. null when git is unavailable."
+        },
+        "dirty": {
+          "type": ["boolean", "null"],
+          "description": "True when the work tree had uncommitted changes, which makes the commit SHA an incomplete description of what ran. null when git is unavailable."
+        },
+        "dirty_entry_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Number of `git status --porcelain` entries. null when git is unavailable."
+        },
+        "runner_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Producer identity, e.g. 'rv2-vis0-benchmark-runner'."
+        },
+        "runner_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "Semantic version of the producer."
+        }
+      },
+      "description": "Where the produced bytes came from. Tooling-supplied."
+    },
+    "renderer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": ["string", "null"],
+          "enum": ["v1", "v2", null],
+          "description": "Renderer backend that produced the frame."
+        },
+        "exposure_ev": {
+          "type": ["number", "null"],
+          "description": "Exposure in EV stops actually in effect."
+        },
+        "camera_mode": {
+          "type": ["string", "null"],
+          "enum": ["pilot", "chase", null],
+          "description": "Camera mode actually in effect."
+        },
+        "scenery_preset": {
+          "type": ["string", "null"],
+          "enum": ["none", "flying-field", null],
+          "description": "Scenery preset actually in effect."
+        }
+      },
+      "description": "Renderer state recorded as fact. Every leaf is nullable so a producer that cannot report a value says so instead of guessing. Tooling-supplied from the manifest until the runtime can confirm it."
+    },
+    "capture": {
+      "type": "object",
+      "required": ["requested", "actual", "format", "image"],
+      "additionalProperties": false,
+      "properties": {
+        "requested": {
+          "type": "object",
+          "required": ["width", "height"],
+          "additionalProperties": false,
+          "properties": {
+            "width": {
+              "type": "integer",
+              "minimum": 320,
+              "maximum": 7680,
+              "description": "Width the manifest asked for."
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 240,
+              "maximum": 4320,
+              "description": "Height the manifest asked for."
+            },
+            "frame_index": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "description": "Presentation frame index the manifest asked to capture. null when the manifest omits capture.frame."
+            }
+          },
+          "description": "Intent, copied from the manifest. Tooling-supplied."
+        },
+        "actual": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "framebuffer_width": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "description": "REAL framebuffer width the runtime presented. null until a capture backend reports it. Minimum 1 so 0 can never pose as 'unavailable'."
+            },
+            "framebuffer_height": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "description": "REAL framebuffer height the runtime presented. null until a capture backend reports it."
+            },
+            "presentation_frame_index": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "description": "REAL presentation frame index the image was taken from. null until a capture backend reports it."
+            }
+          },
+          "description": "What the runtime really produced. Kept in a separate object from `requested` so a divergence - for example the current hardcoded 1280x720 window against a requested 1920x1080 - stays visible instead of being overwritten. Runtime-supplied (LINEA 1 handshake)."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["png", "jpg", "exr"],
+          "description": "Image format the artifact is written in."
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "description": "Where the image was written. null when no image exists."
+            },
+            "sha256": {
+              "type": ["string", "null"],
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "SHA-256 of the image bytes. null when no image exists. Mandatory when execution.capture_success is true."
+            },
+            "byte_size": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "description": "Image size in bytes. null when no image exists; minimum 1 so a placeholder 0 is rejected."
+            }
+          },
+          "description": "The image artifact itself. Runtime-supplied (LINEA 1 handshake). All three leaves are mandatory when capture_success is true and must all be null when it is false."
+        }
+      },
+      "description": "Requested intent versus actual result, kept structurally distinct."
+    },
+    "execution": {
+      "type": "object",
+      "required": ["capture_success"],
+      "additionalProperties": false,
+      "properties": {
+        "capture_success": {
+          "type": "boolean",
+          "description": "FACT: an image artifact was really produced. This is a procedural statement only. It is NOT visual_pass and must never be read as an approval of image quality."
+        },
+        "process_exit_code": {
+          "type": ["integer", "null"],
+          "description": "Exit code of the capture process. null when no process ran. Must be 0 or null when capture_success is true."
+        },
+        "failure_reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Why nothing was captured. Mandatory when capture_success is false, and must be null when it is true."
+        }
+      },
+      "description": "Procedural outcome. Deliberately separate from `verdict`."
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operating_system": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "platform.system(). Tooling-supplied."
+        },
+        "os_release": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "platform.release(). Tooling-supplied."
+        },
+        "architecture": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "platform.machine(). Tooling-supplied."
+        },
+        "gpu_adapter_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "wgpu adapter name, ONLY if the runtime really reports it. null otherwise - never guessed. Runtime-supplied."
+        },
+        "graphics_backend": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Graphics backend (vulkan/dx12/metal/gl), ONLY if really reported. null otherwise. Runtime-supplied."
+        },
+        "driver_version": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Driver or adapter driver version, ONLY if really reported. null otherwise. Runtime-supplied."
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Free text for provenance caveats, e.g. why a field is unavailable."
+        }
+      },
+      "description": "Hardware and driver provenance. An all-null block is valid and honest: it states that nothing was reported, which is different from claiming known hardware."
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "visual_pass": {
+          "type": "null",
+          "description": "MUST be null in v1. Capture evidence records facts and never a visual verdict: no SSIM/PSNR/LPIPS threshold and no automatic PASS/FAIL exists in this repository. The field is present so a future approved reviewer or metrics engine has a reserved, versioned home, and so any producer that fills it today fails validation."
+        },
+        "visual_pass_reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Why visual_pass is null. Keeps the absence explicit rather than silent."
+        }
+      },
+      "description": "Visual verdict. Locked to null in v1 - evidence is not approval."
+    }
+  }
+}

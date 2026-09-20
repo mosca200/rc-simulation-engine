@@ -100,7 +100,72 @@ Una cattura è riproducibile se documenta tutti i parametri runtime-configurabil
 ### Aircraft
 - `aircraft.model`: path al model.json (maps to `--model`)
 - `aircraft.throttle`: 0.0-1.0 (maps to `--throttle`)
+- `aircraft.altitude_m`: altitudine iniziale in metri, range `(0, 10000]` (maps to `--altitude-m`)
+- `aircraft.airspeed_mps`: airspeed iniziale in m/s, range `(0, 200]` (maps to `--airspeed-mps`)
 - `aircraft.start_on_ground`: boolean (maps to `--start-on-ground`)
+
+#### Stato iniziale aircraft completamente esplicito (VIS0-C1B)
+
+Fino a VIS0-B il manifest non poteva esprimere `--altitude-m` / `--airspeed-mps`,
+pur essendo entrambi già implementati dal runtime. Una parte dello stato iniziale
+aircraft dipendeva quindi dai default impliciti `DEFAULT_ALTITUDE_M = 30.0` e
+`DEFAULT_AIRSPEED_MPS = 18.0`, e la scena non era pienamente determinata dal manifest.
+
+VIS0-C1B chiude la lacuna con queste regole, verificate su
+`crates/app/src/render_app.rs`:
+
+| Condizione | `altitude_m` / `airspeed_mps` |
+|---|---|
+| `start_on_ground` assente o `false` (airborne) | **obbligatori entrambi** |
+| `start_on_ground: true` (ground start) | **vietati entrambi** |
+
+Il motivo dell'asimmetria è nel runtime, non nel tooling: `RenderApplication::new`
+costruisce lo stato iniziale da `altitude_m`/`airspeed_mps` **solo** sul ramo
+non-ground, mentre con `--start-on-ground` chiama `supported_ground_start(&model)`
+e non legge nessuno dei due valori. Un manifest che li dichiarasse insieme a
+`start_on_ground: true` affermerebbe di determinare uno stato che il runtime
+ignora: è la stessa ragione per cui il blocco `camera` vieta
+`pilot_position_render_m` quando `mode='chase'`.
+
+I bounds sono `(0, massimo]` — **estremi inferiori esclusivi** — perché
+`RenderOptions` scarta `!v.is_finite() || v <= 0.0 || v > MAXIMUM_*`. Zero non è
+un valore accettato; il massimo sì. Il test
+`test_aircraft_bounds_match_runtime_source` rilegge le costanti
+`MAXIMUM_ALTITUDE_M` / `MAXIMUM_AIRSPEED_MPS` dal sorgente Rust e falla se il
+contratto deriva, così il validator non può allontanarsi dal runtime.
+
+`docs/validation/visual_benchmark/vis0_reference_scene_airborne.json` è la scena
+di riferimento che esercita il ramo airborne con valori espliciti
+(`altitude_m: 100.0`, `airspeed_mps: 18.0`); `vis0_reference_scene.json` resta
+invariata perché è un ground start.
+
+### GoldenSceneManifest vs VisualCaptureEvidence
+
+VIS0 usa **due** artefatti machine-readable, con ruoli opposti e non intercambiabili:
+
+| | `GoldenSceneManifest` | `VisualCaptureEvidence` |
+|---|---|---|
+| Domanda a cui risponde | cosa **VOGLIAMO** renderizzare | cosa **È STATO** realmente renderizzato/catturato |
+| Natura | intento, riproducibile, approvato | fatti osservati, registrati dopo l'esecuzione |
+| Valori | solo *requested* | *requested* **e** *actual*, tenuti distinti |
+| File | `tools/visual_benchmark/golden_scene_manifest.schema.json` | `tools/visual_benchmark/visual_capture_evidence.schema.json` |
+| Validator | `validate_manifest.py` | `validate_capture_evidence.py` |
+| Introdotto da | VIS0-A | VIS0-C1B |
+
+Regole che li separano:
+
+1. **requested e actual restano distinti.** Nel evidence vivono in due oggetti
+   separati (`capture.requested` e `capture.actual`): una divergenza — oggi
+   attesa, perché la finestra è hardcoded a 1280x720 — deve restare leggibile e
+   non può essere sovrascritta dall'intento.
+2. **Il capture evidence NON è una approval.** `execution.capture_success`
+   dichiara solo che un'immagine è stata prodotta; `verdict.visual_pass` resta
+   `null` e il validator lo rifiuta se valorizzato.
+3. **La qualità visiva resta dominio futuro** di human review o di un motore di
+   metriche approvato. Nessuna soglia SSIM/PSNR/LPIPS esiste in questo repository.
+
+Dettagli, campi e handshake nel documento VIS0-C1B:
+`docs/architecture/rv2_vis0_c1b_capture_evidence.md`.
 
 ### Temporizzazione
 - `warmup`: frame di warmup prima del capture
@@ -241,7 +306,7 @@ Non richiedere bitwise equality tra hardware diversi. Invece:
   - Pilot: `pilot_position_render_m` (maps to `--pilot-position` format `x,y,z`)
   - Chase: `chase_distance_behind_m`, `chase_height_above_m` (maps to `--chase-distance-m`, `--chase-height-m`)
 - Exposure EV: `[-8, 8]` (maps to `--exposure-ev`)
-- Aircraft: model, throttle, start_on_ground (maps to `--model`, `--throttle`, `--start-on-ground`)
+- Aircraft: model, throttle, altitude_m, airspeed_mps, start_on_ground (maps to `--model`, `--throttle`, `--altitude-m`, `--airspeed-mps`, `--start-on-ground`)
 - Debug modes:
   - `terrain_debug`: `final`, `albedo`, `normal`, `roughness`, `macro`, `detail` (maps to `--terrain-debug`)
   - `vegetation_debug`: `final`, `lod`, `culling` (maps to `--vegetation-debug`)

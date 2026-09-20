@@ -178,13 +178,52 @@
           "default": 0.55,
           "description": "Engine throttle setting 0.0-1.0. Maps to --throttle CLI flag."
         },
+        "altitude_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "description": "Initial altitude above the render origin in metres (NED: the aircraft starts at position_world_m.z = -altitude_m). Required when the aircraft starts airborne, i.e. when start_on_ground is absent or false; forbidden when start_on_ground is true. Maps to --altitude-m CLI flag. Range (0, 10000] verified from MAXIMUM_ALTITUDE_M and the `<= 0.0 || > MAXIMUM_ALTITUDE_M` rejection in RenderOptions::parse_with_defaults (crates/app/src/render_app.rs). Runtime default when the flag is omitted: DEFAULT_ALTITUDE_M = 30.0 - a manifest must never rely on it."
+        },
+        "airspeed_mps": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 200,
+          "description": "Initial airspeed in metres per second along the body +x axis (linear_velocity_world_mps.x). Required when the aircraft starts airborne, i.e. when start_on_ground is absent or false; forbidden when start_on_ground is true. Maps to --airspeed-mps CLI flag. Range (0, 200] verified from MAXIMUM_AIRSPEED_MPS and the `<= 0.0 || > MAXIMUM_AIRSPEED_MPS` rejection in RenderOptions::parse_with_defaults (crates/app/src/render_app.rs). Runtime default when the flag is omitted: DEFAULT_AIRSPEED_MPS = 18.0 - a manifest must never rely on it."
+        },
         "start_on_ground": {
           "type": "boolean",
           "default": false,
-          "description": "Whether aircraft starts on ground. Maps to --start-on-ground CLI flag."
+          "description": "Whether aircraft starts on ground. Maps to --start-on-ground CLI flag. When true, RenderApplication::new derives the initial state from supported_ground_start(&model) and never reads altitude_m/airspeed_mps."
         }
       },
-      "description": "Aircraft configuration. Only runtime-configurable parameters."
+      "allOf": [
+        {
+          "if": {
+            "properties": {"start_on_ground": {"const": true}},
+            "required": ["start_on_ground"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["altitude_m"]},
+                {"required": ["airspeed_mps"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {"not": {"required": ["start_on_ground"]}},
+          "then": {"required": ["altitude_m", "airspeed_mps"]}
+        },
+        {
+          "if": {
+            "properties": {"start_on_ground": {"const": false}},
+            "required": ["start_on_ground"]
+          },
+          "then": {"required": ["altitude_m", "airspeed_mps"]}
+        }
+      ],
+      "description": "Aircraft configuration. Only runtime-configurable parameters. The airborne initial state is fully explicit: altitude_m and airspeed_mps are required unless start_on_ground is true, in which case the runtime ignores them and they must be absent."
     },
     "warmup": {
       "type": "integer",
