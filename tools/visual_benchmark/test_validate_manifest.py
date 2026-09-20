@@ -12,7 +12,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.visual_benchmark.validate_manifest import ManifestValidator, validate_manifest
+from tools.visual_benchmark.validate_manifest import (
+    SUPPORTED_SCHEMA_VERSION,
+    ManifestValidator,
+    validate_manifest,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,7 +26,7 @@ class TestManifestValidator(unittest.TestCase):
     def setUp(self):
         """Create a valid base manifest aligned with runtime."""
         self.valid_manifest = {
-            "schema_version": "1.0.0",
+            "schema_version": SUPPORTED_SCHEMA_VERSION,
             "scene_id": "test_scene",
             "description": "Test scene for validation",
             "renderer": {
@@ -78,6 +82,7 @@ class TestManifestValidator(unittest.TestCase):
 
     def test_valid_manifest(self):
         """Test that a valid manifest passes validation."""
+        self.assertEqual(SUPPORTED_SCHEMA_VERSION, "1.1.0")
         manifest_path = self._write_manifest(self.valid_manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 0)
@@ -404,13 +409,40 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    def test_invalid_schema_version(self):
-        """Test that invalid schema_version format fails validation."""
+    def test_malformed_schema_version_fails(self):
+        """A non-semver schema_version is malformed, not supported."""
         manifest = self.valid_manifest.copy()
         manifest["schema_version"] = "v1.0"
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
+
+    def test_only_current_schema_version_is_supported(self):
+        """VIS0-C1B must not silently reinterpret older or future contracts."""
+        for version in ("1.0.0", "1.2.0", "2.0.0", "99.0.0"):
+            with self.subTest(version=version):
+                manifest = self.valid_manifest.copy()
+                manifest["schema_version"] = version
+                manifest_path = self._write_manifest(manifest)
+                loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                validator = ManifestValidator(loaded, manifest_path.parent)
+                self.assertFalse(validator.validate())
+                self.assertEqual(
+                    [str(error) for error in validator.errors],
+                    [
+                        "schema_version: unsupported schema version "
+                        f"{version}; supported version is {SUPPORTED_SCHEMA_VERSION}"
+                    ],
+                )
+
+    def test_schema_and_validator_agree_on_current_version(self):
+        schema_path = (REPO_ROOT / "tools" / "visual_benchmark"
+                       / "golden_scene_manifest.schema.json")
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            schema["properties"]["schema_version"]["const"],
+            SUPPORTED_SCHEMA_VERSION,
+        )
 
     def test_duplicate_tags(self):
         """Test that duplicate tags fail validation."""
@@ -652,9 +684,14 @@ class TestManifestValidator(unittest.TestCase):
         if not scene_dir.exists():
             self.skipTest("reference scenes not available")
         manifests = sorted(scene_dir.glob("vis0_reference_scene*.json"))
-        self.assertTrue(manifests, "no reference manifests found")
+        self.assertEqual(
+            [manifest.name for manifest in manifests],
+            ["vis0_reference_scene.json", "vis0_reference_scene_airborne.json"],
+        )
         for manifest_path in manifests:
             with self.subTest(manifest=manifest_path.name):
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(manifest["schema_version"], SUPPORTED_SCHEMA_VERSION)
                 self.assertEqual(validate_manifest(manifest_path), 0)
 
     def test_airborne_reference_manifest_is_explicit(self):

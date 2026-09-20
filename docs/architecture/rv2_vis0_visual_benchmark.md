@@ -119,6 +119,18 @@ VIS0-C1B chiude la lacuna con queste regole, verificate su
 | `start_on_ground` assente o `false` (airborne) | **obbligatori entrambi** |
 | `start_on_ground: true` (ground start) | **vietati entrambi** |
 
+#### Versione del contratto GoldenSceneManifest
+
+Il contratto corrente è **`1.1.0`**. `1.0.0` identifica il contratto VIS0-A
+originale, nel quale lo stato iniziale airborne poteva dipendere dai default del
+runtime. `1.1.0` è la revisione VIS0-C1B: per un aircraft airborne richiede
+esplicitamente entrambi `altitude_m` e `airspeed_mps`.
+
+Il validator e lo JSON Schema accettano esclusivamente `1.1.0`. Non esiste un
+parser multi-versione o una migrazione automatica: nella fase VIS0 iniziale non
+esistono baseline golden approvate da preservare, ma riutilizzare silenziosamente
+la semantica di `1.0.0` nasconderebbe il version drift.
+
 Il motivo dell'asimmetria è nel runtime, non nel tooling: `RenderApplication::new`
 costruisce lo stato iniziale da `altitude_m`/`airspeed_mps` **solo** sul ramo
 non-ground, mentre con `--start-on-ground` chiama `supported_ground_start(&model)`

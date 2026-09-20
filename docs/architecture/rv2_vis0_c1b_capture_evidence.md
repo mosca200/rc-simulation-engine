@@ -47,6 +47,13 @@ Due nuovi campi nel blocco `aircraft`:
 Nessun flag nuovo è stato inventato: il mapping punta ai flag reali già
 implementati. I default del runtime non sono stati modificati.
 
+Questa modifica evolve il **GoldenSceneManifest** da `1.0.0` a `1.1.0`:
+`1.0.0` resta il contratto VIS0-A storico, mentre `1.1.0` richiede lo stato
+iniziale airborne esplicito. Il validator del manifest e il suo JSON Schema
+accettano soltanto `1.1.0`; non è introdotta alcuna migration o compatibilità
+multi-versione. Questa revisione non modifica la versione indipendente del
+contratto `VisualCaptureEvidence`.
+
 ### Bounds verificati sul codice, non assunti
 
 Da `crates/app/src/render_app.rs`:

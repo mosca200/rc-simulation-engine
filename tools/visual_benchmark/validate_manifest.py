@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any
 
 
+SUPPORTED_SCHEMA_VERSION = "1.1.0"
+
+
 def is_real_number(value: Any) -> bool:
     """Check if value is a real number (int or float), excluding bool.
     
@@ -116,6 +119,12 @@ class ManifestValidator:
             return
         if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", version):
             self.error("schema_version", f"must match semantic version format (X.Y.Z), got '{version}'")
+            return
+        if version != SUPPORTED_SCHEMA_VERSION:
+            self.error(
+                "schema_version",
+                f"unsupported schema version {version}; supported version is "
+                f"{SUPPORTED_SCHEMA_VERSION}")
 
     def _validate_scene_id(self):
         scene_id = self.manifest.get("scene_id")

@@ -22,8 +22,8 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "description": "Semantic version of this schema (e.g., '1.0.0'). Used for forward compatibility."
+      "const": "1.1.0",
+      "description": "Current supported GoldenSceneManifest contract version. Version 1.0.0 was the original VIS0-A contract; 1.1.0 is VIS0-C1B and requires explicit airborne altitude_m plus airspeed_mps."
     },
     "scene_id": {
       "type": "string",

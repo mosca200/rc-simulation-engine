@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "scene_id": "aircraft_acro_airborne_cruise",
   "description": "Canonical reference scene for Acro Electric 01 in airborne cruise, chase view. Companion to vis0_reference_scene.json: it exercises the airborne branch of RenderApplication::new, where the initial rigid-body state comes from altitude_m and airspeed_mps rather than from supported_ground_start. Both values are stated explicitly so the scene does not depend on DEFAULT_ALTITUDE_M or DEFAULT_AIRSPEED_MPS. This is a benchmark contract example, not an approved golden image.",
   "renderer": {

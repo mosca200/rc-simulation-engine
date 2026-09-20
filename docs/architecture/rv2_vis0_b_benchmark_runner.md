@@ -106,7 +106,7 @@ There is no interactive prompt of any kind. Every input arrives as a flag.
 | Code | Meaning |
 | --- | --- |
 | `0` | Plan built (dry run), or the app process exited `0` |
-| `1` | Manifest failed VIS0-A validation; **no process was started** |
+| `1` | Manifest failed GoldenSceneManifest validation; **no process was started** |
 | `2` | Usage/input error: missing file, unreadable JSON, bad flag value |
 | `3` | Git policy violation (`--require-clean-git` on a dirty work tree) |
 | `4` | Execution failure: app not found, non-zero exit, timeout |

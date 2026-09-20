@@ -27,6 +27,7 @@ from tools.visual_benchmark.validate_capture_evidence import (
     RUNTIME_SUPPLIED_FIELDS,
     validate_capture_evidence,
 )
+from tools.visual_benchmark.validate_manifest import SUPPORTED_SCHEMA_VERSION
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -56,7 +57,7 @@ FAKE_GIT = {
 def base_manifest() -> dict:
     """A valid manifest aligned with the real runtime CLI."""
     return {
-        "schema_version": "1.0.0",
+        "schema_version": SUPPORTED_SCHEMA_VERSION,
         "scene_id": "test_scene",
         "description": "Test scene for benchmark runner coverage",
         "renderer": {"version": "v2", "terrain_debug": "final", "vegetation_debug": "final"},
@@ -176,8 +177,9 @@ class TestPlanConstruction(RunnerTestCase):
             git_provenance=dict(FAKE_GIT),
         )
         self.assertEqual(plan["scene_id"], "aircraft_acro_static_front")
+        self.assertEqual(plan["schema_version"], SUPPORTED_SCHEMA_VERSION)
         self.assertTrue(plan["expected_output_basename"]["matches_vis0_convention"])
-        self.assertTrue(plan["schema_version_major_supported"])
+        self.assertTrue(plan["schema_version_supported"])
 
     def test_validation_reuses_approved_validator(self):
         manifest = base_manifest()
@@ -185,6 +187,17 @@ class TestPlanConstruction(RunnerTestCase):
         manifest["renderer"]["version"] = "v3"
         errors = rb.validate_manifest_dict(manifest, self.tmp)
         self.assertTrue(any("renderer.version" in error for error in errors))
+
+    def test_runner_rejects_legacy_manifest_version_through_validator(self):
+        manifest = base_manifest()
+        manifest["schema_version"] = "1.0.0"
+        self.assertEqual(
+            rb.validate_manifest_dict(manifest, self.tmp),
+            [
+                "schema_version: unsupported schema version 1.0.0; "
+                f"supported version is {SUPPORTED_SCHEMA_VERSION}"
+            ],
+        )
 
     def test_output_paths_use_scene_id_without_timestamp(self):
         plan = self.build_plan()
@@ -805,7 +818,7 @@ class TestProvenanceMetadata(RunnerTestCase):
     def test_run_json_is_valid_json_with_required_provenance(self):
         run_json, _ = self.run_execution()
         payload = json.loads(run_json.read_text(encoding="utf-8"))
-        self.assertEqual(payload["manifest"]["schema_version"], "1.0.0")
+        self.assertEqual(payload["manifest"]["schema_version"], SUPPORTED_SCHEMA_VERSION)
         self.assertEqual(payload["manifest"]["scene_id"], "test_scene")
         self.assertEqual(len(payload["manifest"]["sha256"]), 64)
         self.assertEqual(len(payload["git"]["commit_sha"]), 40)

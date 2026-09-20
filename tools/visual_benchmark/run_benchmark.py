@@ -9,9 +9,9 @@ VIS0-B verifies EXECUTION REPRODUCIBILITY, not visual image quality.
 It never decides a visual PASS/FAIL, never reads pixels, and never fakes a
 capture that the runtime cannot produce.
 
-The manifest contract owned by VIS0-A stays authoritative: this runner reuses
-`validate_manifest.ManifestValidator` unchanged and only maps manifest fields
-onto CLI flags that really exist in `crates/app/src/render_app.rs`.
+The current GoldenSceneManifest contract stays authoritative: this runner reuses
+`validate_manifest.ManifestValidator` and only maps manifest fields onto CLI
+flags that really exist in `crates/app/src/render_app.rs`.
 
 Usage:
     # Dry run (the default; no application process is started)
@@ -26,7 +26,7 @@ Usage:
 
 Exit codes:
     0 - plan built (dry run), or the app process exited 0
-    1 - manifest failed VIS0-A validation; no process was started
+    1 - manifest failed contract validation; no process was started
     2 - usage/input error (missing file, unreadable JSON, bad flag value)
     3 - git policy violation (--require-clean-git against a dirty work tree)
     4 - execution failure (app not found, non-zero exit, timeout)
@@ -56,7 +56,10 @@ try:  # Imported as part of the tools.visual_benchmark namespace package.
         TOOLING_SUPPLIED_FIELDS,
         CaptureEvidenceValidator,
     )
-    from tools.visual_benchmark.validate_manifest import ManifestValidator
+    from tools.visual_benchmark.validate_manifest import (
+        SUPPORTED_SCHEMA_VERSION,
+        ManifestValidator,
+    )
 except ImportError:  # Direct script execution: script directory is sys.path[0].
     from validate_capture_evidence import (
         EVIDENCE_KIND,
@@ -66,7 +69,7 @@ except ImportError:  # Direct script execution: script directory is sys.path[0].
         TOOLING_SUPPLIED_FIELDS,
         CaptureEvidenceValidator,
     )
-    from validate_manifest import ManifestValidator
+    from validate_manifest import SUPPORTED_SCHEMA_VERSION, ManifestValidator
 
 
 RUNNER_NAME = "rv2-vis0-benchmark-runner"
@@ -875,7 +878,6 @@ def build_plan(
     argv = build_command_argv(app_token, mappings)
 
     schema_version = manifest.get("schema_version") or ""
-    major = schema_version.split(".")[0] if schema_version else ""
 
     return {
         "plan_version": PLAN_VERSION,
@@ -885,7 +887,7 @@ def build_plan(
         "execution_requested": not dry_run,
         "scene_id": scene_id,
         "schema_version": schema_version,
-        "schema_version_major_supported": major == "1",
+        "schema_version_supported": schema_version == SUPPORTED_SCHEMA_VERSION,
         "manifest_path": str(manifest_path),
         "manifest_path_display": display_path(manifest_path, REPO_ROOT),
         "manifest_sha256": sha256_of_file(manifest_path),
@@ -1524,13 +1526,6 @@ def _run(args: argparse.Namespace) -> int:
             f"naming convention '{basename['per_vis0_convention']}'",
             file=sys.stderr,
         )
-    if not plan["schema_version_major_supported"]:
-        print(
-            f"warning: manifest schema_version '{plan['schema_version']}' is not "
-            "major version 1; the runner's field mapping was written for v1",
-            file=sys.stderr,
-        )
-
     if args.plan_json:
         plan_json_path = Path(args.plan_json)
         if not plan_json_path.is_absolute():
