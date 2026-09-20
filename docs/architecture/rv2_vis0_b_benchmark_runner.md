@@ -106,7 +106,7 @@ There is no interactive prompt of any kind. Every input arrives as a flag.
 | Code | Meaning |
 | --- | --- |
 | `0` | Plan built (dry run), or the app process exited `0` |
-| `1` | Manifest failed VIS0-A validation; **no process was started** |
+| `1` | Manifest failed GoldenSceneManifest validation; **no process was started** |
 | `2` | Usage/input error: missing file, unreadable JSON, bad flag value |
 | `3` | Git policy violation (`--require-clean-git` on a dirty work tree) |
 | `4` | Execution failure: app not found, non-zero exit, timeout |
@@ -137,12 +137,24 @@ runtime source to prove every emittable flag is real.
 | `exposure_ev` | `--exposure-ev` | |
 | `aircraft.model` | `--model` | |
 | `aircraft.throttle` | `--throttle` | optional; omitted when absent |
+| `aircraft.altitude_m` | `--altitude-m` | required when airborne, forbidden on a ground start; range `(0, 10000]` |
+| `aircraft.airspeed_mps` | `--airspeed-mps` | required when airborne, forbidden on a ground start; range `(0, 200]` |
 | `aircraft.start_on_ground` | `--start-on-ground` | presence-only flag; emitted only when `true` |
 
 `--camera <mode>` is always emitted explicitly. This matters: without it the
 runtime falls back to a *different* default camera (`Pilot` at `[0, 0.3, 0.85]`,
 FOV 70) than the one `--camera pilot` selects (`[0, 1.8, 20]`, FOV 55). Emitting
 the mode makes the camera fully determined by the manifest.
+
+`aircraft.altitude_m` and `aircraft.airspeed_mps` were added by VIS0-C1B. Until
+then the runner could not emit `--altitude-m` / `--airspeed-mps`, so part of the
+airborne initial state still came from the runtime defaults
+(`DEFAULT_ALTITUDE_M = 30.0`, `DEFAULT_AIRSPEED_MPS = 18.0`) and the manifest did
+not fully determine the scene. The bounds and the ground-start asymmetry are
+verified against `RenderOptions::parse_with_defaults` and
+`RenderApplication::new` in `crates/app/src/render_app.rs`; see
+`docs/architecture/rv2_vis0_visual_benchmark.md` § "Stato iniziale aircraft
+completamente esplicito (VIS0-C1B)".
 
 ### Unsupported execution fields
 
@@ -164,12 +176,17 @@ Recorded for provenance, with no runtime flag by design:
 
 ### Flags deliberately not emitted
 
-`--altitude-m`, `--airspeed-mps`, `--debug-overlays`, `--record-replay`,
-`--controller-profile` and the developer-only `--rv2-6-validation-scene` /
-`--rv2-6-validation-ap` gates exist at runtime but are **not expressible in the
-v1 manifest**, so the runner leaves them at their runtime defaults. The
-`--rv2-6-validation-*` gates are developer-only and would override camera,
-scenery and debug state; emitting them would silently invalidate a golden scene.
+`--debug-overlays`, `--record-replay`, `--controller-profile` and the
+developer-only `--rv2-6-validation-scene` / `--rv2-6-validation-ap` gates exist at
+runtime but are **not expressible in the v1 manifest**, so the runner leaves them
+at their runtime defaults. The `--rv2-6-validation-*` gates are developer-only and
+would override camera, scenery and debug state; emitting them would silently
+invalidate a golden scene.
+
+`--altitude-m` and `--airspeed-mps` used to belong to this list. VIS0-C1B made
+them expressible (`aircraft.altitude_m` / `aircraft.airspeed_mps`) and therefore
+emittable, which removed the last runtime default that silently shaped the
+airborne initial state of a golden scene.
 
 ## Determinism
 
@@ -265,8 +282,13 @@ applied. Nothing in the runner claims otherwise.
 | `plan` | the full execution plan, embedded verbatim |
 | `execution` | `mode`, `app`, `app_resolved`, `command_argv`, `cwd`, `timeout_seconds`, `started_at_utc`, `ended_at_utc`, `duration_seconds`, `exit_code`, `failure_kind`, `failure_message`, `execution_success`, `stdout_path`, `stderr_path`, stream byte counts, `artifacts_written` |
 | `capabilities` | `capture_backend`, `resolution_enforcement`, `warmup_frames`, `process_auto_exit` |
+| `capture_evidence` | a `VisualCaptureEvidence` skeleton: every tooling-supplied leaf filled, every runtime-supplied leaf `null` (VIS0-C1B) |
+| `capture_evidence_validation` | `valid`, `error_count`, `errors` — the skeleton checked against its own contract (VIS0-C1B) |
 | `artifacts` | `run_json`, `stdout`, `stderr`, `capture` (`null`), `capture_reason` |
 | `verdict` | `execution_success`, `visual_pass` (always `null`), `visual_pass_reason` |
+
+The embedded `plan` additionally carries `capture_evidence_contract`, which names
+the evidence schema and validator and lists the LINEA 1 handshake.
 
 ### `execution_success` is not `visual_pass`
 
@@ -279,6 +301,36 @@ These are different statements and are kept structurally separate:
 metric, so it cannot evaluate a visual result and must not pretend to. A visual
 verdict requires a lossless capture backend plus human review or an approved
 metrics engine (VIS0-C or later).
+
+### Capture evidence skeleton (VIS0-C1B)
+
+`run.json` now carries a `VisualCaptureEvidence` document that is valid against
+`tools/visual_benchmark/visual_capture_evidence.schema.json` while claiming no
+capture at all:
+
+- `execution.capture_success` is `false` and `execution.failure_reason` states
+  that no capture backend exists;
+- every `capture.image.*` and `capture.actual.*` leaf is `null`;
+- `hardware.gpu_adapter_name`, `graphics_backend` and `driver_version` are `null`
+  rather than guessed;
+- `verdict.visual_pass` is `null`.
+
+Only leaves this tooling can actually observe are filled: the manifest digest and
+path, git provenance, the requested resolution/frame, renderer settings and
+OS/architecture. Every leaf the contract defines is emitted as an explicit key -
+the unknown ones as `null`, never as an omission, because the evidence contract
+treats a missing key as an incomplete artifact and only an explicit `null` as an
+honest "unavailable" (`test_skeleton_omits_no_contract_leaf` enforces this).
+The runner validates its own skeleton and records the result in
+`capture_evidence_validation`, so a future contract change that the runner does
+not follow shows up as data instead of silently producing a non-conforming
+artifact. When git provenance is unavailable the mandatory `source.commit_sha`
+cannot be filled: that is reported as `valid: false` with the error list, never
+raised and never papered over with a placeholder.
+
+This is deliberately **not** a capture. It is the shape the future runtime
+capture must complete, shipped and validated before the runtime exists. See
+`docs/architecture/rv2_vis0_c1b_capture_evidence.md`.
 
 ### Process failure handling
 

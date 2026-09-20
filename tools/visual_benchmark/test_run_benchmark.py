@@ -22,6 +22,12 @@ import unittest
 from pathlib import Path
 
 from tools.visual_benchmark import run_benchmark as rb
+from tools.visual_benchmark.validate_capture_evidence import (
+    ALL_LEAF_FIELDS,
+    RUNTIME_SUPPLIED_FIELDS,
+    validate_capture_evidence,
+)
+from tools.visual_benchmark.validate_manifest import SUPPORTED_SCHEMA_VERSION
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -51,7 +57,7 @@ FAKE_GIT = {
 def base_manifest() -> dict:
     """A valid manifest aligned with the real runtime CLI."""
     return {
-        "schema_version": "1.0.0",
+        "schema_version": SUPPORTED_SCHEMA_VERSION,
         "scene_id": "test_scene",
         "description": "Test scene for benchmark runner coverage",
         "renderer": {"version": "v2", "terrain_debug": "final", "vegetation_debug": "final"},
@@ -72,6 +78,24 @@ def base_manifest() -> dict:
         "capture": {"filename": "test_scene_1920x1080.png", "format": "png", "frame": 10},
         "tags": ["test"],
     }
+
+
+def airborne_manifest() -> dict:
+    """base_manifest() starts on the ground; this exercises the airborne branch.
+
+    The airborne branch of RenderApplication::new is the one that reads
+    altitude_m/airspeed_mps, and the VIS0-C1B contract requires both.
+    """
+    manifest = base_manifest()
+    manifest["scene_id"] = "test_scene_airborne"
+    manifest["aircraft"] = {
+        "model": "models/acro_electric_01/model.json",
+        "throttle": 0.55,
+        "altitude_m": 100.0,
+        "airspeed_mps": 18.0,
+    }
+    manifest["capture"]["filename"] = "test_scene_airborne_1920x1080.png"
+    return manifest
 
 
 class RunnerTestCase(unittest.TestCase):
@@ -153,8 +177,9 @@ class TestPlanConstruction(RunnerTestCase):
             git_provenance=dict(FAKE_GIT),
         )
         self.assertEqual(plan["scene_id"], "aircraft_acro_static_front")
+        self.assertEqual(plan["schema_version"], SUPPORTED_SCHEMA_VERSION)
         self.assertTrue(plan["expected_output_basename"]["matches_vis0_convention"])
-        self.assertTrue(plan["schema_version_major_supported"])
+        self.assertTrue(plan["schema_version_supported"])
 
     def test_validation_reuses_approved_validator(self):
         manifest = base_manifest()
@@ -162,6 +187,17 @@ class TestPlanConstruction(RunnerTestCase):
         manifest["renderer"]["version"] = "v3"
         errors = rb.validate_manifest_dict(manifest, self.tmp)
         self.assertTrue(any("renderer.version" in error for error in errors))
+
+    def test_runner_rejects_legacy_manifest_version_through_validator(self):
+        manifest = base_manifest()
+        manifest["schema_version"] = "1.0.0"
+        self.assertEqual(
+            rb.validate_manifest_dict(manifest, self.tmp),
+            [
+                "schema_version: unsupported schema version 1.0.0; "
+                f"supported version is {SUPPORTED_SCHEMA_VERSION}"
+            ],
+        )
 
     def test_output_paths_use_scene_id_without_timestamp(self):
         plan = self.build_plan()
@@ -782,7 +818,7 @@ class TestProvenanceMetadata(RunnerTestCase):
     def test_run_json_is_valid_json_with_required_provenance(self):
         run_json, _ = self.run_execution()
         payload = json.loads(run_json.read_text(encoding="utf-8"))
-        self.assertEqual(payload["manifest"]["schema_version"], "1.0.0")
+        self.assertEqual(payload["manifest"]["schema_version"], SUPPORTED_SCHEMA_VERSION)
         self.assertEqual(payload["manifest"]["scene_id"], "test_scene")
         self.assertEqual(len(payload["manifest"]["sha256"]), 64)
         self.assertEqual(len(payload["git"]["commit_sha"]), 40)
@@ -911,6 +947,26 @@ class TestVisualVerdictPolicy(RunnerTestCase):
             "sys", "time", "dataclasses", "datetime", "pathlib", "typing",
             # The approved VIS0-A validator, imported as a sibling module.
             "validate_manifest", "tools",
+            # The VIS0-C1B capture evidence contract, also a sibling module.
+            "validate_capture_evidence",
+        }
+        roots = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+        self.assertTrue(roots)
+        for root in sorted(roots):
+            self.assertIn(root, allowed, f"unexpected dependency: {root}")
+
+    def test_capture_evidence_module_is_also_standard_library_only(self):
+        """Allowlisting a sibling must not open a door to a pip dependency."""
+        source = RUNNER_SOURCE.with_name("validate_capture_evidence.py")
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        allowed = {
+            "argparse", "hashlib", "json", "math", "re", "sys", "pathlib",
+            "typing", "validate_manifest", "tools",
         }
         roots = set()
         for node in ast.walk(tree):
@@ -1119,6 +1175,273 @@ class TestVis0APreservation(RunnerTestCase):
             else:
                 self.assertIsNone(policy.runtime_flag, field_name)
                 self.assertTrue(policy.reason, field_name)
+
+
+class TestAircraftInitialStateMapping(RunnerTestCase):
+    """VIS0-C1B: the airborne initial state reaches the real runtime flags."""
+
+    def test_altitude_maps_to_the_real_flag(self):
+        plan = self.build_plan(airborne_manifest())
+        self.assertEqual(self.argv_value(plan, "--altitude-m"), "100.0")
+
+    def test_airspeed_maps_to_the_real_flag(self):
+        plan = self.build_plan(airborne_manifest())
+        self.assertEqual(self.argv_value(plan, "--airspeed-mps"), "18.0")
+
+    def test_both_fields_carry_a_cli_policy(self):
+        for field, flag in (("aircraft.altitude_m", "--altitude-m"),
+                            ("aircraft.airspeed_mps", "--airspeed-mps")):
+            policy = rb.FIELD_POLICY[field]
+            self.assertEqual(policy.status, rb.FIELD_STATUS_CLI, field)
+            self.assertEqual(policy.runtime_flag, flag, field)
+
+    def test_both_fields_are_in_canonical_order(self):
+        self.assertIn("aircraft.altitude_m", rb.CANONICAL_FIELD_ORDER)
+        self.assertIn("aircraft.airspeed_mps", rb.CANONICAL_FIELD_ORDER)
+
+    def test_new_flags_are_known_and_emittable(self):
+        for flag in ("--altitude-m", "--airspeed-mps"):
+            self.assertIn(flag, rb.KNOWN_RENDER_FLAGS, flag)
+            self.assertIn(flag, rb.EMITTABLE_FLAGS, flag)
+
+    def test_ground_start_emits_neither_flag(self):
+        """On a ground start the runtime ignores both, so the runner omits them."""
+        plan = self.build_plan()
+        self.assertIsNone(self.argv_value(plan, "--altitude-m"))
+        self.assertIsNone(self.argv_value(plan, "--airspeed-mps"))
+        self.assertIn("--start-on-ground", plan["command_argv"])
+
+    def test_integer_values_stay_integral_for_rust_parse(self):
+        manifest = airborne_manifest()
+        manifest["aircraft"]["altitude_m"] = 120
+        manifest["aircraft"]["airspeed_mps"] = 20
+        plan = self.build_plan(manifest)
+        self.assertEqual(self.argv_value(plan, "--altitude-m"), "120")
+        self.assertEqual(self.argv_value(plan, "--airspeed-mps"), "20")
+
+    def test_no_flag_is_invented_for_the_new_fields(self):
+        """The mapping must reuse the existing CLI, not add new surface."""
+        plan = self.build_plan(airborne_manifest())
+        self.assertNotIn("--initial-altitude", plan["command_argv"])
+        self.assertNotIn("--altitude", plan["command_argv"])
+        self.assertNotIn("--airspeed", plan["command_argv"])
+
+    def test_airborne_reference_manifest_emits_both_flags(self):
+        path = (REPO_ROOT / "docs" / "validation" / "visual_benchmark"
+                / "vis0_reference_scene_airborne.json")
+        if not path.exists():
+            self.skipTest("airborne reference manifest not available")
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        plan = self.build_plan(manifest)
+        self.assertEqual(plan["scene_id"], "aircraft_acro_airborne_cruise")
+        self.assertEqual(self.argv_value(plan, "--altitude-m"), "100.0")
+        self.assertEqual(self.argv_value(plan, "--airspeed-mps"), "18.0")
+
+    def test_runtime_source_really_implements_both_flags(self):
+        if not RENDER_APP_SOURCE.exists():
+            self.skipTest("runtime source not available")
+        text = RENDER_APP_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('"--altitude-m" =>', text)
+        self.assertIn('"--airspeed-mps" =>', text)
+
+    def test_airborne_manifest_plans_end_to_end(self):
+        path = self.write_manifest(airborne_manifest(), name="airborne.json")
+        code, _, err = self.run_main(["--manifest", str(path), "--dry-run"])
+        self.assertEqual(code, rb.EXIT_OK, err)
+
+    def test_airborne_manifest_with_implicit_state_is_refused(self):
+        """Omitting altitude_m would leave the state to DEFAULT_ALTITUDE_M."""
+        manifest = airborne_manifest()
+        del manifest["aircraft"]["altitude_m"]
+        path = self.write_manifest(manifest, name="implicit.json")
+        code, _, _ = self.run_main(["--manifest", str(path), "--dry-run"])
+        self.assertEqual(code, rb.EXIT_VALIDATION_FAILED)
+
+    def test_ground_start_with_airborne_state_is_refused(self):
+        """The runtime would silently ignore them, so the contract forbids them."""
+        manifest = base_manifest()
+        manifest["aircraft"]["altitude_m"] = 100.0
+        path = self.write_manifest(manifest, name="contradictory.json")
+        code, _, _ = self.run_main(["--manifest", str(path), "--dry-run"])
+        self.assertEqual(code, rb.EXIT_VALIDATION_FAILED)
+
+
+class TestCaptureEvidenceContract(RunnerTestCase):
+    """VIS0-C1B: the runner knows the evidence contract without claiming capture."""
+
+    def metadata(self, manifest=None, execution=None):
+        plan = self.build_plan(manifest)
+        return plan, rb.build_run_metadata(
+            plan, execution if execution is not None else {"exit_code": 0})
+
+    def test_plan_declares_evidence_not_produced(self):
+        contract = self.build_plan()["capture_evidence_contract"]
+        self.assertEqual(contract["kind"], "visual_capture_evidence")
+        self.assertEqual(contract["status"], "not-produced")
+        self.assertFalse(contract["produced"])
+        self.assertFalse(contract["capture_backend_available"])
+
+    def test_contract_points_at_real_schema_and_validator_files(self):
+        contract = self.build_plan()["capture_evidence_contract"]
+        self.assertTrue((REPO_ROOT / contract["schema_path"]).exists(),
+                        contract["schema_path"])
+        self.assertTrue((REPO_ROOT / contract["validator"]).exists(),
+                        contract["validator"])
+
+    def test_handshake_split_is_disjoint_and_populated(self):
+        handshake = self.build_plan()["capture_evidence_contract"]["handshake"]
+        runtime = set(handshake["runtime_supplied_fields"])
+        tooling = set(handshake["tooling_supplied_fields"])
+        self.assertEqual(set(), runtime & tooling)
+        self.assertTrue(runtime)
+        self.assertTrue(tooling)
+
+    def test_skeleton_validates_against_the_evidence_contract(self):
+        _, metadata = self.metadata()
+        self.assertTrue(metadata["capture_evidence_validation"]["valid"],
+                        metadata["capture_evidence_validation"]["errors"])
+        self.assertEqual(metadata["capture_evidence_validation"]["error_count"], 0)
+
+    def test_skeleton_validates_through_the_standalone_validator(self):
+        _, metadata = self.metadata()
+        path = self.tmp / "capture_evidence.json"
+        path.write_text(json.dumps(metadata["capture_evidence"]), encoding="utf-8")
+        self.assertEqual(validate_capture_evidence(path), 0)
+
+    def test_skeleton_omits_no_contract_leaf(self):
+        """Presence policy: the runner must emit every leaf, nulling not dropping.
+
+        An omitted key would mean "incomplete artifact"; a null means "contract
+        followed, value genuinely unavailable". The skeleton may only say the
+        second, so it has to carry all 39 leaves explicitly.
+        """
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        for dotted in sorted(ALL_LEAF_FIELDS):
+            with self.subTest(field=dotted):
+                parts = dotted.split(".")
+                node = evidence
+                for part in parts[:-1]:
+                    self.assertIsInstance(node, dict, dotted)
+                    self.assertIn(part, node, f"{dotted}: container key omitted")
+                    node = node[part]
+                self.assertIsInstance(node, dict, dotted)
+                self.assertIn(parts[-1], node, f"{dotted} is omitted, not null")
+
+    def test_skeleton_nulls_are_explicit_keys_not_absences(self):
+        """A runtime-supplied leaf must be a present null, never a missing key."""
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        self.assertIn("gpu_adapter_name", evidence["hardware"])
+        self.assertIsNone(evidence["hardware"]["gpu_adapter_name"])
+        self.assertIn("framebuffer_width", evidence["capture"]["actual"])
+        self.assertIsNone(evidence["capture"]["actual"]["framebuffer_width"])
+        self.assertIn("sha256", evidence["capture"]["image"])
+        self.assertIsNone(evidence["capture"]["image"]["sha256"])
+        self.assertIn("visual_pass", evidence["verdict"])
+        self.assertIsNone(evidence["verdict"]["visual_pass"])
+
+    def test_skeleton_claims_no_capture(self):
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        self.assertFalse(evidence["execution"]["capture_success"])
+        for leaf in ("path", "sha256", "byte_size"):
+            self.assertIsNone(evidence["capture"]["image"][leaf], leaf)
+        for leaf in ("framebuffer_width", "framebuffer_height",
+                     "presentation_frame_index"):
+            self.assertIsNone(evidence["capture"]["actual"][leaf], leaf)
+
+    def test_skeleton_leaves_every_runtime_leaf_null(self):
+        """Tooling must not fabricate a value only the runtime can know."""
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+
+        def resolve(dotted):
+            node = evidence
+            for part in dotted.split("."):
+                node = node[part]
+            return node
+
+        for dotted in sorted(RUNTIME_SUPPLIED_FIELDS):
+            with self.subTest(field=dotted):
+                if dotted == "execution.capture_success":
+                    self.assertIs(resolve(dotted), False)
+                else:
+                    self.assertIsNone(resolve(dotted))
+
+    def test_skeleton_keeps_visual_pass_null(self):
+        _, metadata = self.metadata()
+        self.assertIsNone(metadata["capture_evidence"]["verdict"]["visual_pass"])
+        self.assertTrue(metadata["capture_evidence"]["verdict"]["visual_pass_reason"])
+
+    def test_successful_execution_still_produces_no_visual_verdict(self):
+        _, metadata = self.metadata(
+            execution={"execution_success": True, "exit_code": 0})
+        self.assertIsNone(metadata["verdict"]["visual_pass"])
+        self.assertIsNone(metadata["capture_evidence"]["verdict"]["visual_pass"])
+        self.assertFalse(metadata["capture_evidence"]["execution"]["capture_success"])
+
+    def test_skeleton_carries_manifest_and_git_provenance(self):
+        plan, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        self.assertEqual(evidence["scene_id"], plan["scene_id"])
+        self.assertEqual(evidence["manifest"]["sha256"], plan["manifest_sha256"])
+        self.assertEqual(len(evidence["manifest"]["sha256"]), 64)
+        self.assertEqual(evidence["source"]["commit_sha"], plan["git"]["commit_sha"])
+        self.assertEqual(evidence["source"]["runner_name"], rb.RUNNER_NAME)
+        self.assertEqual(evidence["source"]["runner_version"], rb.RUNNER_VERSION)
+
+    def test_skeleton_records_requested_values_from_the_manifest(self):
+        _, metadata = self.metadata(airborne_manifest())
+        evidence = metadata["capture_evidence"]
+        self.assertEqual(evidence["capture"]["requested"]["width"], 1920)
+        self.assertEqual(evidence["capture"]["requested"]["height"], 1080)
+        self.assertEqual(evidence["capture"]["requested"]["frame_index"], 10)
+        self.assertEqual(evidence["capture"]["format"], "png")
+        self.assertEqual(evidence["renderer"]["version"], "v2")
+        self.assertEqual(evidence["renderer"]["camera_mode"], "pilot")
+        self.assertEqual(evidence["renderer"]["scenery_preset"], "flying-field")
+        self.assertEqual(evidence["renderer"]["exposure_ev"], 0)
+
+    def test_skeleton_reports_hardware_it_cannot_know_as_null(self):
+        _, metadata = self.metadata()
+        hardware = metadata["capture_evidence"]["hardware"]
+        self.assertIsNone(hardware["gpu_adapter_name"])
+        self.assertIsNone(hardware["graphics_backend"])
+        self.assertIsNone(hardware["driver_version"])
+        self.assertTrue(hardware["notes"])
+
+    def test_skeleton_survives_json_round_trip(self):
+        _, metadata = self.metadata()
+        self.assertEqual(json.loads(json.dumps(metadata))["capture_evidence"],
+                         metadata["capture_evidence"])
+
+    def test_missing_git_provenance_is_reported_not_raised(self):
+        """Without a commit SHA honest evidence is impossible; say so."""
+        plan = self.build_plan()
+        plan["git"] = dict(FAKE_GIT, commit_sha=None, available=False)
+        validation = rb.validate_capture_evidence_skeleton(
+            rb.build_capture_evidence_skeleton(plan, {}))
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("source.commit_sha" in error
+                            for error in validation["errors"]), validation["errors"])
+
+    def test_capability_gaps_are_still_reported_unchanged(self):
+        """VIS0-C1B adds no capture capability, so nothing may claim one."""
+        _, metadata = self.metadata()
+        capabilities = metadata["capabilities"]
+        self.assertEqual(capabilities["capture_backend"]["status"], "unavailable")
+        self.assertFalse(capabilities["capture_backend"]["produces_image"])
+        self.assertEqual(capabilities["resolution_enforcement"]["status"], "unsupported")
+        self.assertFalse(capabilities["resolution_enforcement"]["enforced"])
+        self.assertEqual(capabilities["warmup_frames"]["status"], "unsupported")
+        self.assertFalse(capabilities["warmup_frames"]["enforced"])
+        self.assertEqual(capabilities["process_auto_exit"]["status"], "unsupported")
+
+    def test_artifacts_still_report_no_capture(self):
+        _, metadata = self.metadata()
+        self.assertIsNone(metadata["artifacts"]["capture"])
+        self.assertTrue(metadata["artifacts"]["capture_reason"])
 
 
 if __name__ == "__main__":

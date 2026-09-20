@@ -7,18 +7,26 @@ Run with:
 """
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
-from tools.visual_benchmark.validate_manifest import validate_manifest
+from tools.visual_benchmark.validate_manifest import (
+    SUPPORTED_SCHEMA_VERSION,
+    ManifestValidator,
+    validate_manifest,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class TestManifestValidator(unittest.TestCase):
     def setUp(self):
         """Create a valid base manifest aligned with runtime."""
         self.valid_manifest = {
-            "schema_version": "1.0.0",
+            "schema_version": SUPPORTED_SCHEMA_VERSION,
             "scene_id": "test_scene",
             "description": "Test scene for validation",
             "renderer": {
@@ -38,7 +46,9 @@ class TestManifestValidator(unittest.TestCase):
             },
             "exposure_ev": 0,
             "aircraft": {
-                "model": "models/acro_electric_01/model.json"
+                "model": "models/acro_electric_01/model.json",
+                "altitude_m": 100.0,
+                "airspeed_mps": 18.0
             },
             "warmup": 10,
             "capture": {
@@ -72,6 +82,7 @@ class TestManifestValidator(unittest.TestCase):
 
     def test_valid_manifest(self):
         """Test that a valid manifest passes validation."""
+        self.assertEqual(SUPPORTED_SCHEMA_VERSION, "1.1.0")
         manifest_path = self._write_manifest(self.valid_manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 0)
@@ -398,13 +409,40 @@ class TestManifestValidator(unittest.TestCase):
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
 
-    def test_invalid_schema_version(self):
-        """Test that invalid schema_version format fails validation."""
+    def test_malformed_schema_version_fails(self):
+        """A non-semver schema_version is malformed, not supported."""
         manifest = self.valid_manifest.copy()
         manifest["schema_version"] = "v1.0"
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
+
+    def test_only_current_schema_version_is_supported(self):
+        """VIS0-C1B must not silently reinterpret older or future contracts."""
+        for version in ("1.0.0", "1.2.0", "2.0.0", "99.0.0"):
+            with self.subTest(version=version):
+                manifest = self.valid_manifest.copy()
+                manifest["schema_version"] = version
+                manifest_path = self._write_manifest(manifest)
+                loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                validator = ManifestValidator(loaded, manifest_path.parent)
+                self.assertFalse(validator.validate())
+                self.assertEqual(
+                    [str(error) for error in validator.errors],
+                    [
+                        "schema_version: unsupported schema version "
+                        f"{version}; supported version is {SUPPORTED_SCHEMA_VERSION}"
+                    ],
+                )
+
+    def test_schema_and_validator_agree_on_current_version(self):
+        schema_path = (REPO_ROOT / "tools" / "visual_benchmark"
+                       / "golden_scene_manifest.schema.json")
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            schema["properties"]["schema_version"]["const"],
+            SUPPORTED_SCHEMA_VERSION,
+        )
 
     def test_duplicate_tags(self):
         """Test that duplicate tags fail validation."""
@@ -477,6 +515,195 @@ class TestManifestValidator(unittest.TestCase):
         manifest_path = self._write_manifest(manifest)
         exit_code = validate_manifest(manifest_path)
         self.assertEqual(exit_code, 1)
+
+    # === Aircraft initial state: altitude_m / airspeed_mps ===
+
+    def _error_paths(self, manifest: dict) -> list:
+        """Return the validator error paths for a manifest."""
+        manifest_path = self._write_manifest(manifest)
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        validator = ManifestValidator(loaded, manifest_path.parent)
+        validator.validate()
+        return [error.path for error in validator.errors]
+
+    def test_airborne_explicit_initial_state_valid(self):
+        """An airborne manifest stating altitude and airspeed is valid."""
+        exit_code = validate_manifest(self._write_manifest(self.valid_manifest))
+        self.assertEqual(exit_code, 0)
+
+    def test_start_on_ground_false_with_explicit_state_valid(self):
+        """start_on_ground=false is airborne, so both fields are required."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["start_on_ground"] = False
+        exit_code = validate_manifest(self._write_manifest(manifest))
+        self.assertEqual(exit_code, 0)
+
+    def test_ground_start_without_airborne_state_valid(self):
+        """A ground start must not carry altitude/airspeed and stays valid."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"] = {
+            "model": "models/acro_electric_01/model.json",
+            "throttle": 0.0,
+            "start_on_ground": True
+        }
+        exit_code = validate_manifest(self._write_manifest(manifest))
+        self.assertEqual(exit_code, 0)
+
+    def test_missing_altitude_when_airborne_fails(self):
+        """Omitting altitude_m would leave the state to the runtime default."""
+        manifest = self.valid_manifest.copy()
+        del manifest["aircraft"]["altitude_m"]
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+        exit_code = validate_manifest(self._write_manifest(manifest))
+        self.assertEqual(exit_code, 1)
+
+    def test_missing_airspeed_when_airborne_fails(self):
+        """Omitting airspeed_mps would leave the state to the runtime default."""
+        manifest = self.valid_manifest.copy()
+        del manifest["aircraft"]["airspeed_mps"]
+        self.assertEqual(self._error_paths(manifest), ["aircraft.airspeed_mps"])
+
+    def test_missing_both_airborne_fields_reports_both(self):
+        manifest = self.valid_manifest.copy()
+        del manifest["aircraft"]["altitude_m"]
+        del manifest["aircraft"]["airspeed_mps"]
+        self.assertEqual(
+            sorted(self._error_paths(manifest)),
+            ["aircraft.airspeed_mps", "aircraft.altitude_m"])
+
+    def test_altitude_with_ground_start_fails(self):
+        """The runtime ignores --altitude-m on a ground start; so must we."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["start_on_ground"] = True
+        self.assertIn("aircraft.altitude_m", self._error_paths(manifest))
+
+    def test_airspeed_with_ground_start_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["start_on_ground"] = True
+        self.assertIn("aircraft.airspeed_mps", self._error_paths(manifest))
+
+    def test_both_airborne_fields_with_ground_start_reports_both(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["start_on_ground"] = True
+        paths = self._error_paths(manifest)
+        self.assertIn("aircraft.altitude_m", paths)
+        self.assertIn("aircraft.airspeed_mps", paths)
+
+    def test_altitude_zero_fails(self):
+        """The runtime rejects `<= 0.0`, so the lower bound is exclusive."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = 0
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+
+    def test_altitude_negative_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = -5.0
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+
+    def test_altitude_at_maximum_valid(self):
+        """MAXIMUM_ALTITUDE_M itself is accepted (`> maximum` is the reject)."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = ManifestValidator.MAXIMUM_ALTITUDE_M
+        exit_code = validate_manifest(self._write_manifest(manifest))
+        self.assertEqual(exit_code, 0)
+
+    def test_altitude_above_maximum_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = ManifestValidator.MAXIMUM_ALTITUDE_M + 0.5
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+
+    def test_airspeed_zero_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["airspeed_mps"] = 0
+        self.assertEqual(self._error_paths(manifest), ["aircraft.airspeed_mps"])
+
+    def test_airspeed_at_maximum_valid(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["airspeed_mps"] = ManifestValidator.MAXIMUM_AIRSPEED_MPS
+        exit_code = validate_manifest(self._write_manifest(manifest))
+        self.assertEqual(exit_code, 0)
+
+    def test_airspeed_above_maximum_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["airspeed_mps"] = ManifestValidator.MAXIMUM_AIRSPEED_MPS + 1
+        self.assertEqual(self._error_paths(manifest), ["aircraft.airspeed_mps"])
+
+    def test_altitude_boolean_fails(self):
+        """bool is an int subclass in Python but is not a number here."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = True
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+
+    def test_airspeed_string_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["airspeed_mps"] = "18.0"
+        self.assertEqual(self._error_paths(manifest), ["aircraft.airspeed_mps"])
+
+    def test_altitude_nan_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = float('nan')
+        self.assertEqual(self._error_paths(manifest), ["aircraft.altitude_m"])
+
+    def test_airspeed_infinity_fails(self):
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["airspeed_mps"] = float('inf')
+        self.assertEqual(self._error_paths(manifest), ["aircraft.airspeed_mps"])
+
+    def test_altitude_null_fails(self):
+        """null is not a number and must not pass as 'unspecified'."""
+        manifest = self.valid_manifest.copy()
+        manifest["aircraft"]["altitude_m"] = None
+        paths = self._error_paths(manifest)
+        self.assertIn("aircraft.altitude_m", paths)
+
+    def test_aircraft_bounds_match_runtime_source(self):
+        """Guard against drifting from MAXIMUM_* in render_app.rs."""
+        source = REPO_ROOT / "crates" / "app" / "src" / "render_app.rs"
+        if not source.exists():
+            self.skipTest("runtime source not available")
+        text = source.read_text(encoding="utf-8")
+
+        altitude = re.search(r"const MAXIMUM_ALTITUDE_M:\s*f64\s*=\s*([\d_]+(?:\.\d+)?)", text)
+        airspeed = re.search(r"const MAXIMUM_AIRSPEED_MPS:\s*f64\s*=\s*([\d_]+(?:\.\d+)?)", text)
+        self.assertIsNotNone(altitude, "MAXIMUM_ALTITUDE_M disappeared from render_app.rs")
+        self.assertIsNotNone(airspeed, "MAXIMUM_AIRSPEED_MPS disappeared from render_app.rs")
+        self.assertEqual(
+            float(altitude.group(1).replace("_", "")),
+            float(ManifestValidator.MAXIMUM_ALTITUDE_M))
+        self.assertEqual(
+            float(airspeed.group(1).replace("_", "")),
+            float(ManifestValidator.MAXIMUM_AIRSPEED_MPS))
+
+        # The lower bound is exclusive because the runtime rejects `<= 0.0`.
+        self.assertIn("options.altitude_m <= 0.0", text)
+        self.assertIn("options.airspeed_mps <= 0.0", text)
+
+    def test_committed_reference_manifests_validate(self):
+        """Both committed reference scenes must satisfy the contract."""
+        scene_dir = REPO_ROOT / "docs" / "validation" / "visual_benchmark"
+        if not scene_dir.exists():
+            self.skipTest("reference scenes not available")
+        manifests = sorted(scene_dir.glob("vis0_reference_scene*.json"))
+        self.assertEqual(
+            [manifest.name for manifest in manifests],
+            ["vis0_reference_scene.json", "vis0_reference_scene_airborne.json"],
+        )
+        for manifest_path in manifests:
+            with self.subTest(manifest=manifest_path.name):
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(manifest["schema_version"], SUPPORTED_SCHEMA_VERSION)
+                self.assertEqual(validate_manifest(manifest_path), 0)
+
+    def test_airborne_reference_manifest_is_explicit(self):
+        """The airborne reference scene must not lean on runtime defaults."""
+        path = (REPO_ROOT / "docs" / "validation" / "visual_benchmark"
+                / "vis0_reference_scene_airborne.json")
+        if not path.exists():
+            self.skipTest("airborne reference manifest not available")
+        aircraft = json.loads(path.read_text(encoding="utf-8"))["aircraft"]
+        self.assertNotIn("start_on_ground", aircraft)
+        self.assertIn("altitude_m", aircraft)
+        self.assertIn("airspeed_mps", aircraft)
 
     # === Robustness tests: crash-path closure ===
 

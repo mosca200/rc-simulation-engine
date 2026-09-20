@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "scene_id": "aircraft_acro_static_front",
   "description": "Canonical reference scene for Acro Electric 01 aircraft in static front view. Tests aircraft rendering, materials, and basic lighting. This is a benchmark contract example, not an approved golden image.",
   "renderer": {
