@@ -23,10 +23,10 @@ use platform::{
 use renderer::{
     AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, DesktopRenderer, ExposureError,
     FixedStepAccumulator, FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan,
-    GlbAsset, GlbLoadError, PresentationAsset, RenderDataError, RenderTerrainMode, RendererError,
-    RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode,
-    aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh, scenery::SceneryPreset,
-    validate_exposure_ev,
+    GlbAsset, GlbLoadError, PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode,
+    RendererError, RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode,
+    VegetationDebugMode, aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh,
+    scenery::SceneryPreset, validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use sim_core::{
@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::warn;
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalSize},
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
@@ -67,6 +67,12 @@ const MAXIMUM_AIRSPEED_MPS: f64 = 200.0;
 const PHYSICS_DT: Duration = Duration::from_millis(2);
 const MAXIMUM_FRAME_DELTA: Duration = Duration::from_millis(250);
 const MAXIMUM_PHYSICS_STEPS_PER_FRAME: u32 = 16;
+const DEFAULT_RENDER_WIDTH_LOGICAL: f64 = 1_280.0;
+const DEFAULT_RENDER_HEIGHT_LOGICAL: f64 = 720.0;
+const MINIMUM_RENDER_WIDTH: u32 = 320;
+const MAXIMUM_RENDER_WIDTH: u32 = 7_680;
+const MINIMUM_RENDER_HEIGHT: u32 = 240;
+const MAXIMUM_RENDER_HEIGHT: u32 = 4_320;
 
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -91,6 +97,193 @@ pub struct RenderOptions {
     renderer: RendererVersion,
     // Developer-only controlled visual gate. None preserves production.
     rv2_6_validation: Option<Rv26ValidationConfig>,
+    // VIS0-C1: physical pixels are opt-in; None preserves the historical
+    // 1280x720 logical-size window and its platform DPI behavior.
+    render_resolution: Option<RenderResolution>,
+    // VIS0-C1: zero-based presentation frame after which the event loop exits.
+    exit_after_frame: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderResolution {
+    width: u32,
+    height: u32,
+}
+
+impl RenderResolution {
+    const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderResolutionState {
+    Disabled,
+    Requested(RenderResolution),
+    Pending(RenderResolution),
+    VerifyCurrent(RenderResolution),
+    Verified(RenderResolution),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderResolutionRequestOutcome {
+    Pending,
+    Verified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderResolutionMismatch {
+    requested: RenderResolution,
+    actual: RenderResolution,
+}
+
+impl RenderResolutionState {
+    const fn new(requested: Option<RenderResolution>) -> Self {
+        match requested {
+            Some(resolution) => Self::Requested(resolution),
+            None => Self::Disabled,
+        }
+    }
+
+    const fn requested(self) -> Option<RenderResolution> {
+        match self {
+            Self::Disabled => None,
+            Self::Requested(resolution)
+            | Self::Pending(resolution)
+            | Self::VerifyCurrent(resolution)
+            | Self::Verified(resolution) => Some(resolution),
+        }
+    }
+
+    const fn is_ready(self) -> bool {
+        matches!(self, Self::Disabled | Self::Verified(_))
+    }
+
+    const fn request_is_needed(self) -> bool {
+        matches!(self, Self::Requested(_))
+    }
+
+    const fn current_extent_verification_is_needed(self) -> bool {
+        matches!(self, Self::VerifyCurrent(_))
+    }
+
+    fn begin_request(&mut self) {
+        if let Some(requested) = self.requested() {
+            *self = Self::Requested(requested);
+        }
+    }
+
+    fn resolve_request(
+        &mut self,
+        actual: Option<RenderResolution>,
+    ) -> Result<RenderResolutionRequestOutcome, RenderResolutionMismatch> {
+        let requested = self
+            .requested()
+            .expect("resolution requests exist only when enforcement is enabled");
+        match actual {
+            Some(actual) if actual == requested => {
+                *self = Self::Verified(requested);
+                Ok(RenderResolutionRequestOutcome::Verified)
+            }
+            Some(actual) => Err(RenderResolutionMismatch { requested, actual }),
+            None => {
+                *self = Self::Pending(requested);
+                Ok(RenderResolutionRequestOutcome::Pending)
+            }
+        }
+    }
+
+    fn await_current_extent_verification(&mut self) {
+        if let Some(requested) = self.requested() {
+            *self = Self::VerifyCurrent(requested);
+        }
+    }
+
+    fn verify_current_extent(
+        &mut self,
+        actual: RenderResolution,
+    ) -> Result<(), RenderResolutionMismatch> {
+        let requested = match *self {
+            Self::VerifyCurrent(requested) => requested,
+            _ => return Ok(()),
+        };
+        if actual != requested {
+            return Err(RenderResolutionMismatch { requested, actual });
+        }
+        *self = Self::Verified(requested);
+        Ok(())
+    }
+
+    fn observe_resize(&mut self, actual: RenderResolution) -> Result<(), RenderResolutionMismatch> {
+        let requested = match *self {
+            Self::Disabled | Self::Requested(_) => return Ok(()),
+            Self::Pending(requested)
+            | Self::VerifyCurrent(requested)
+            | Self::Verified(requested) => requested,
+        };
+        if actual != requested {
+            return Err(RenderResolutionMismatch { requested, actual });
+        }
+        *self = Self::Verified(requested);
+        Ok(())
+    }
+}
+
+/// Presentation-only run control for deterministic frame scheduling.
+///
+/// Frame index zero identifies the first frame that reaches `present()`. A
+/// failed acquisition, an occluded surface, or a zero-extent surface does not
+/// advance the index. The pending plan is intentionally available before the
+/// renderer call so a later capture tranche can select the same frame without
+/// redefining or duplicating this lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderRunControl {
+    resolution: RenderResolutionState,
+    exit_after_frame: Option<u64>,
+    next_presentation_frame: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PresentationFramePlan {
+    index: u64,
+    exit_after_present: bool,
+}
+
+impl RenderRunControl {
+    const fn new(
+        requested_resolution: Option<RenderResolution>,
+        exit_after_frame: Option<u64>,
+    ) -> Self {
+        Self {
+            resolution: RenderResolutionState::new(requested_resolution),
+            exit_after_frame,
+            next_presentation_frame: 0,
+        }
+    }
+
+    const fn requested_resolution(self) -> Option<RenderResolution> {
+        self.resolution.requested()
+    }
+
+    const fn resolution_is_ready(self) -> bool {
+        self.resolution.is_ready()
+    }
+
+    const fn pending_frame(self) -> PresentationFramePlan {
+        PresentationFramePlan {
+            index: self.next_presentation_frame,
+            exit_after_present: matches!(
+                self.exit_after_frame,
+                Some(frame) if frame == self.next_presentation_frame
+            ),
+        }
+    }
+
+    fn commit_presented(&mut self, frame: PresentationFramePlan) -> bool {
+        debug_assert_eq!(frame.index, self.next_presentation_frame);
+        self.next_presentation_frame = self.next_presentation_frame.saturating_add(1);
+        frame.exit_after_present
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +504,8 @@ impl RenderOptions {
             exposure_ev: DEFAULT_EXPOSURE_EV,
             renderer: RendererVersion::V1,
             rv2_6_validation: None,
+            render_resolution: None,
+            exit_after_frame: None,
         }
     }
 
@@ -336,6 +531,10 @@ impl RenderOptions {
         let mut rv2_6_validation_case = None;
         let mut rv2_6_validation_ap_enabled = true;
         let mut rv2_6_validation_ap_explicit = false;
+        let mut render_width = options.render_resolution.map(|resolution| resolution.width);
+        let mut render_height = options
+            .render_resolution
+            .map(|resolution| resolution.height);
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -435,6 +634,40 @@ impl RenderOptions {
                     options.renderer = RendererVersion::from_label(&value)
                         .ok_or_else(|| RenderAppError::InvalidRenderer(value.clone()))?;
                 }
+                "--render-width" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--render-width"))?;
+                    let width = value
+                        .parse::<u32>()
+                        .map_err(|_| RenderAppError::InvalidRenderWidth(value.clone()))?;
+                    if !(MINIMUM_RENDER_WIDTH..=MAXIMUM_RENDER_WIDTH).contains(&width) {
+                        return Err(RenderAppError::InvalidRenderWidth(value));
+                    }
+                    render_width = Some(width);
+                }
+                "--render-height" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--render-height"))?;
+                    let height = value
+                        .parse::<u32>()
+                        .map_err(|_| RenderAppError::InvalidRenderHeight(value.clone()))?;
+                    if !(MINIMUM_RENDER_HEIGHT..=MAXIMUM_RENDER_HEIGHT).contains(&height) {
+                        return Err(RenderAppError::InvalidRenderHeight(value));
+                    }
+                    render_height = Some(height);
+                }
+                "--exit-after-frame" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--exit-after-frame"))?;
+                    options.exit_after_frame = Some(
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| RenderAppError::InvalidExitAfterFrame(value))?,
+                    );
+                }
                 "--rv2-6-validation-scene" => {
                     let value = arguments
                         .next()
@@ -530,6 +763,11 @@ impl RenderOptions {
                 _ => return Err(RenderAppError::UnknownArgument(argument)),
             }
         }
+        options.render_resolution = match (render_width, render_height) {
+            (None, None) => None,
+            (Some(width), Some(height)) => Some(RenderResolution::new(width, height)),
+            _ => return Err(RenderAppError::IncompleteRenderResolution),
+        };
         options.camera = pending_camera.resolve(options.camera)?;
         if let Some(case) = rv2_6_validation_case {
             if options.renderer != RendererVersion::V2 {
@@ -577,6 +815,14 @@ pub enum RenderAppError {
     InvalidExposureEv(String),
     #[error("invalid renderer `{0}`; expected `v1` or `v2`")]
     InvalidRenderer(String),
+    #[error("invalid render width `{0}`; expected an integer inside [320, 7680] physical pixels")]
+    InvalidRenderWidth(String),
+    #[error("invalid render height `{0}`; expected an integer inside [240, 4320] physical pixels")]
+    InvalidRenderHeight(String),
+    #[error("`--render-width` and `--render-height` must be specified together")]
+    IncompleteRenderResolution,
+    #[error("invalid exit frame `{0}`; expected a non-negative integer")]
+    InvalidExitAfterFrame(String),
     #[error(
         "invalid RV2-6 validation scene `{0}`; expected `near`, `100m`, `500m`, `1000m`, `frontlit`, `sidelit`, or `backlit`"
     )]
@@ -652,6 +898,17 @@ pub enum RenderAppError {
 pub enum RenderRuntimeError {
     #[error("failed to create the desktop render window: {0}")]
     WindowCreation(#[source] winit::error::OsError),
+    #[error(
+        "requested render size {requested_width}x{requested_height} physical pixels was not applied; actual window size is {actual_width}x{actual_height}"
+    )]
+    RequestedRenderSizeNotApplied {
+        requested_width: u32,
+        requested_height: u32,
+        actual_width: u32,
+        actual_height: u32,
+    },
+    #[error("failed to preserve the requested physical render size across a DPI change: {0}")]
+    RequestedRenderSizeUpdate(#[source] winit::error::ExternalError),
     #[error("failed to initialize wgpu: {0}")]
     RendererInitialization(#[source] RendererError),
     #[error("invalid exposure EV rejected at renderer startup: {0}")]
@@ -981,12 +1238,15 @@ struct RenderApplication {
     // RV2-1: backend selected on the CLI; the facade dispatches to it.
     renderer_version: RendererVersion,
     rv2_6_validation: Option<Rv26ValidationConfig>,
+    run_control: RenderRunControl,
     runtime_error: Option<RenderRuntimeError>,
 }
 
 impl RenderApplication {
     fn new(options: RenderOptions) -> Result<Self, RenderAppError> {
         let rv2_6_validation = options.rv2_6_validation;
+        let run_control =
+            RenderRunControl::new(options.render_resolution, options.exit_after_frame);
         let altitude_m = options.altitude_m;
         let airspeed_mps = options.airspeed_mps;
         let initial_throttle = options.throttle;
@@ -1080,6 +1340,7 @@ impl RenderApplication {
             renderer: None,
             renderer_version: options.renderer,
             rv2_6_validation,
+            run_control,
             runtime_error: None,
         })
     }
@@ -1118,6 +1379,150 @@ impl RenderApplication {
         self.input_backend = Some(input_backend);
         self.input_mode = Some(input_mode);
         true
+    }
+
+    fn fail_resolution_mismatch(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        mismatch: RenderResolutionMismatch,
+    ) {
+        self.fail(
+            event_loop,
+            RenderRuntimeError::RequestedRenderSizeNotApplied {
+                requested_width: mismatch.requested.width,
+                requested_height: mismatch.requested.height,
+                actual_width: mismatch.actual.width,
+                actual_height: mismatch.actual.height,
+            },
+        );
+    }
+
+    fn request_configured_resolution(&mut self, event_loop: &ActiveEventLoop) {
+        debug_assert!(self.run_control.resolution.request_is_needed());
+        let requested = self
+            .run_control
+            .requested_resolution()
+            .expect("a requested resolution exists while its request is pending submission");
+        let window = Arc::clone(
+            self.window
+                .as_ref()
+                .expect("the window is stored before its resolution is requested"),
+        );
+        let current = window.inner_size();
+        if current == PhysicalSize::new(requested.width, requested.height) {
+            self.run_control
+                .resolution
+                .resolve_request(Some(requested))
+                .expect("the current extent was checked against the requested extent");
+            self.initialize_rendering_after_resolution_verified(event_loop);
+            return;
+        }
+        let immediate = window
+            .request_inner_size(PhysicalSize::new(requested.width, requested.height))
+            .map(|actual| RenderResolution::new(actual.width, actual.height));
+        match self.run_control.resolution.resolve_request(immediate) {
+            Ok(RenderResolutionRequestOutcome::Verified) => {
+                self.initialize_rendering_after_resolution_verified(event_loop);
+            }
+            Ok(RenderResolutionRequestOutcome::Pending) => {}
+            Err(mismatch) => self.fail_resolution_mismatch(event_loop, mismatch),
+        }
+    }
+
+    fn verify_current_resolution(&mut self, event_loop: &ActiveEventLoop) {
+        debug_assert!(
+            self.run_control
+                .resolution
+                .current_extent_verification_is_needed()
+        );
+        let actual = self
+            .window
+            .as_ref()
+            .expect("the window exists while its physical extent is verified")
+            .inner_size();
+        if let Err(mismatch) = self
+            .run_control
+            .resolution
+            .verify_current_extent(RenderResolution::new(actual.width, actual.height))
+        {
+            self.fail_resolution_mismatch(event_loop, mismatch);
+            return;
+        }
+        self.initialize_rendering_after_resolution_verified(event_loop);
+    }
+
+    fn initialize_rendering_after_resolution_verified(&mut self, event_loop: &ActiveEventLoop) {
+        if self.renderer.is_some() {
+            return;
+        }
+        debug_assert!(self.run_control.resolution_is_ready());
+        let window = Arc::clone(
+            self.window
+                .as_ref()
+                .expect("the window is stored before resolution verification"),
+        );
+        // WGI enumeration needs a process-owned, focus-capable window before gilrs is created.
+        window.focus_window();
+        if !self.initialize_input_after_window(event_loop) {
+            return;
+        }
+        let presentation_asset = match &self.presentation {
+            PresentationModel::Glb {
+                asset,
+                articulation,
+            } => PresentationAsset::ArticulatedGlb {
+                asset,
+                articulation,
+            },
+            PresentationModel::Procedural(mesh) if self.rv2_6_validation.is_some() => {
+                PresentationAsset::ValidationTarget(mesh)
+            }
+            PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
+        };
+        let renderer_result = if let Some(validation) = self.rv2_6_validation {
+            pollster::block_on(DesktopRenderer::new_v2_for_rv2_6_validation(
+                Arc::clone(&window),
+                presentation_asset,
+                self.ground_below_render_origin_m,
+                self.terrain_mode,
+                Some(self.scenery_preset),
+                self.camera_config,
+                validation.aerial_perspective_enabled,
+            ))
+        } else {
+            pollster::block_on(DesktopRenderer::new_with_presentation(
+                self.renderer_version,
+                Arc::clone(&window),
+                presentation_asset,
+                self.ground_below_render_origin_m,
+                self.terrain_mode,
+                Some(self.scenery_preset),
+                self.camera_config,
+            ))
+        };
+        let mut renderer = match renderer_result {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.fail(
+                    event_loop,
+                    RenderRuntimeError::RendererInitialization(error),
+                );
+                return;
+            }
+        };
+        renderer.set_show_debug_overlays(self.debug_overlays);
+        renderer.set_terrain_debug_mode(self.terrain_debug);
+        // G3D: presentation-only vegetation debug channel (final = production).
+        renderer.set_vegetation_debug_mode(self.vegetation_debug);
+        // G3B: exposure was already validated at CLI parse time; the setter is
+        // a defensive no-change-on-invalid guard (presentation-only).
+        if let Err(error) = renderer.set_exposure_ev(self.exposure_ev) {
+            self.fail(event_loop, RenderRuntimeError::ExposureValidation(error));
+            return;
+        }
+        self.renderer = Some(renderer);
+        self.last_frame_time = Some(Instant::now());
+        window.request_redraw();
     }
 
     fn finish_and_exit(&mut self, event_loop: &ActiveEventLoop) {
@@ -1185,6 +1590,9 @@ impl RenderApplication {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.run_control.resolution_is_ready() {
+            return;
+        }
         let now = Instant::now();
         let frame_delta = self
             .last_frame_time
@@ -1260,12 +1668,21 @@ impl RenderApplication {
             }
         };
         let frame = snapshot.render_frame(pose);
+        let pending_frame = self.run_control.pending_frame();
         let render_result = self
             .renderer
             .as_mut()
             .map(|renderer| renderer.render(&frame));
         match render_result {
-            Some(Ok(())) | None | Some(Err(SurfaceError::Occluded)) => {}
+            Some(Ok(RenderOutcome::Presented)) => {
+                if self.run_control.commit_presented(pending_frame) {
+                    self.finish_and_exit(event_loop);
+                    return;
+                }
+            }
+            Some(Ok(RenderOutcome::SkippedZeroExtent))
+            | None
+            | Some(Err(SurfaceError::Occluded)) => {}
             Some(Err(SurfaceError::Lost | SurfaceError::Outdated)) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.reconfigure_surface();
@@ -1294,9 +1711,19 @@ impl ApplicationHandler for RenderApplication {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
-            .with_title("RC Simulation Engine — Manual Flight Viewer")
-            .with_inner_size(LogicalSize::new(1_280.0, 720.0));
+        self.run_control.resolution.begin_request();
+        let attributes =
+            Window::default_attributes().with_title("RC Simulation Engine — Manual Flight Viewer");
+        let attributes = if let Some(resolution) = self.run_control.requested_resolution() {
+            attributes
+                .with_inner_size(PhysicalSize::new(resolution.width, resolution.height))
+                .with_resizable(false)
+        } else {
+            attributes.with_inner_size(LogicalSize::new(
+                DEFAULT_RENDER_WIDTH_LOGICAL,
+                DEFAULT_RENDER_HEIGHT_LOGICAL,
+            ))
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -1304,70 +1731,9 @@ impl ApplicationHandler for RenderApplication {
                 return;
             }
         };
-        // WGI enumeration needs a process-owned, focus-capable window before gilrs is created.
-        window.focus_window();
-        if !self.initialize_input_after_window(event_loop) {
-            return;
-        }
-        let presentation_asset = match &self.presentation {
-            PresentationModel::Glb {
-                asset,
-                articulation,
-            } => PresentationAsset::ArticulatedGlb {
-                asset,
-                articulation,
-            },
-            PresentationModel::Procedural(mesh) if self.rv2_6_validation.is_some() => {
-                PresentationAsset::ValidationTarget(mesh)
-            }
-            PresentationModel::Procedural(mesh) => PresentationAsset::Procedural(mesh),
-        };
-        let renderer_result = if let Some(validation) = self.rv2_6_validation {
-            pollster::block_on(DesktopRenderer::new_v2_for_rv2_6_validation(
-                Arc::clone(&window),
-                presentation_asset,
-                self.ground_below_render_origin_m,
-                self.terrain_mode,
-                Some(self.scenery_preset),
-                self.camera_config,
-                validation.aerial_perspective_enabled,
-            ))
-        } else {
-            pollster::block_on(DesktopRenderer::new_with_presentation(
-                self.renderer_version,
-                Arc::clone(&window),
-                presentation_asset,
-                self.ground_below_render_origin_m,
-                self.terrain_mode,
-                Some(self.scenery_preset),
-                self.camera_config,
-            ))
-        };
-        let mut renderer = match renderer_result {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                self.fail(
-                    event_loop,
-                    RenderRuntimeError::RendererInitialization(error),
-                );
-                return;
-            }
-        };
-        renderer.set_show_debug_overlays(self.debug_overlays);
-        renderer.set_terrain_debug_mode(self.terrain_debug);
-        // G3D: presentation-only vegetation debug channel (final = production).
-        renderer.set_vegetation_debug_mode(self.vegetation_debug);
-        // G3B: exposure was already validated at CLI parse time; the setter is
-        // a defensive no-change-on-invalid guard (presentation-only).
-        if let Err(error) = renderer.set_exposure_ev(self.exposure_ev) {
-            self.fail(event_loop, RenderRuntimeError::ExposureValidation(error));
-            return;
-        }
-        self.renderer = Some(renderer);
-        self.window = Some(window);
-        self.last_frame_time = Some(Instant::now());
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+        self.window = Some(Arc::clone(&window));
+        if self.run_control.resolution_is_ready() {
+            self.initialize_rendering_after_resolution_verified(event_loop);
         }
     }
 
@@ -1416,9 +1782,38 @@ impl ApplicationHandler for RenderApplication {
                     input_mode.set_key(key, event.state == ElementState::Pressed);
                 }
             }
+            WindowEvent::ScaleFactorChanged {
+                mut inner_size_writer,
+                ..
+            } => {
+                if let Some(requested) = self.run_control.requested_resolution() {
+                    match inner_size_writer
+                        .request_inner_size(PhysicalSize::new(requested.width, requested.height))
+                    {
+                        Ok(()) => self
+                            .run_control
+                            .resolution
+                            .await_current_extent_verification(),
+                        Err(error) => self.fail(
+                            event_loop,
+                            RenderRuntimeError::RequestedRenderSizeUpdate(error),
+                        ),
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
+                let actual = RenderResolution::new(size.width, size.height);
+                if let Err(mismatch) = self.run_control.resolution.observe_resize(actual) {
+                    self.fail_resolution_mismatch(event_loop, mismatch);
+                    return;
+                }
+                if !self.run_control.resolution_is_ready() {
+                    return;
+                }
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size.width, size.height);
+                } else {
+                    self.initialize_rendering_after_resolution_verified(event_loop);
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -1426,8 +1821,20 @@ impl ApplicationHandler for RenderApplication {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .run_control
+            .resolution
+            .current_extent_verification_is_needed()
+        {
+            self.verify_current_resolution(event_loop);
+        }
+        if self.run_control.resolution.request_is_needed() {
+            self.request_configured_resolution(event_loop);
+        }
+        if self.run_control.resolution_is_ready()
+            && let Some(window) = self.window.as_ref()
+        {
             window.request_redraw();
         }
     }
@@ -1753,6 +2160,267 @@ mod tests {
                 RenderOptions::parse(["--throttle".to_owned(), value.to_owned()].into_iter()),
                 Err(RenderAppError::InvalidThrottle(_))
             ));
+        }
+    }
+
+    #[test]
+    fn render_control_defaults_preserve_historical_interactive_window() {
+        let options = RenderOptions::parse(std::iter::empty()).unwrap();
+        assert_eq!(options.render_resolution, None);
+        assert_eq!(options.exit_after_frame, None);
+        assert_eq!(DEFAULT_RENDER_WIDTH_LOGICAL, 1_280.0);
+        assert_eq!(DEFAULT_RENDER_HEIGHT_LOGICAL, 720.0);
+    }
+
+    #[test]
+    fn explicit_render_resolution_parses_at_contract_bounds_for_v1_and_v2() {
+        for (renderer, width, height) in [
+            ("v1", MINIMUM_RENDER_WIDTH, MINIMUM_RENDER_HEIGHT),
+            ("v2", MAXIMUM_RENDER_WIDTH, MAXIMUM_RENDER_HEIGHT),
+        ] {
+            let options = RenderOptions::parse(
+                [
+                    "--renderer".to_owned(),
+                    renderer.to_owned(),
+                    "--render-width".to_owned(),
+                    width.to_string(),
+                    "--render-height".to_owned(),
+                    height.to_string(),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+            assert_eq!(
+                options.render_resolution,
+                Some(RenderResolution::new(width, height))
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_render_resolution_requires_both_dimensions() {
+        for arguments in [
+            vec!["--render-width", "1920"],
+            vec!["--render-height", "1080"],
+        ] {
+            assert!(matches!(
+                RenderOptions::parse(arguments.into_iter().map(str::to_owned)),
+                Err(RenderAppError::IncompleteRenderResolution)
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_render_resolution_rejects_invalid_values() {
+        for width in ["0", "319", "7681", "-1", "wide"] {
+            assert!(matches!(
+                RenderOptions::parse(
+                    ["--render-width", width, "--render-height", "1080"]
+                        .map(str::to_owned)
+                        .into_iter()
+                ),
+                Err(RenderAppError::InvalidRenderWidth(_))
+            ));
+        }
+        for height in ["0", "239", "4321", "-1", "tall"] {
+            assert!(matches!(
+                RenderOptions::parse(
+                    ["--render-width", "1920", "--render-height", height]
+                        .map(str::to_owned)
+                        .into_iter()
+                ),
+                Err(RenderAppError::InvalidRenderHeight(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn resolution_enforcement_accepts_synchronous_exact_extent() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::new(Some(requested));
+        assert_eq!(state, RenderResolutionState::Requested(requested));
+        assert_eq!(
+            state.resolve_request(Some(requested)),
+            Ok(RenderResolutionRequestOutcome::Verified)
+        );
+        assert_eq!(state, RenderResolutionState::Verified(requested));
+        assert!(state.is_ready());
+    }
+
+    #[test]
+    fn resolution_enforcement_waits_for_asynchronous_resize() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::new(Some(requested));
+        // Window-creation resize events are not treated as the result of a
+        // request that has not been submitted yet.
+        state
+            .observe_resize(RenderResolution::new(1_424, 750))
+            .unwrap();
+        assert_eq!(state, RenderResolutionState::Requested(requested));
+        assert_eq!(
+            state.resolve_request(None),
+            Ok(RenderResolutionRequestOutcome::Pending)
+        );
+        assert_eq!(state, RenderResolutionState::Pending(requested));
+        assert!(!state.is_ready());
+    }
+
+    #[test]
+    fn pending_resolution_becomes_verified_only_on_matching_resized_event() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::new(Some(requested));
+        state.resolve_request(None).unwrap();
+        state.observe_resize(requested).unwrap();
+        assert_eq!(state, RenderResolutionState::Verified(requested));
+        assert!(state.is_ready());
+    }
+
+    #[test]
+    fn scale_factor_update_is_verified_without_a_resized_event() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::Verified(requested);
+        state.await_current_extent_verification();
+        assert_eq!(state, RenderResolutionState::VerifyCurrent(requested));
+        assert!(!state.is_ready());
+        assert!(!state.request_is_needed());
+
+        state.verify_current_extent(requested).unwrap();
+        assert_eq!(state, RenderResolutionState::Verified(requested));
+        assert!(state.is_ready());
+        assert!(!state.request_is_needed());
+    }
+
+    #[test]
+    fn scale_factor_update_can_be_verified_by_a_matching_resized_event() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::Verified(requested);
+        state.await_current_extent_verification();
+        state.observe_resize(requested).unwrap();
+        assert_eq!(state, RenderResolutionState::Verified(requested));
+    }
+
+    #[test]
+    fn resolution_enforcement_rejects_explicit_or_event_extent_mismatch() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let wrong = RenderResolution::new(1_280, 720);
+
+        let mut synchronous = RenderResolutionState::new(Some(requested));
+        assert_eq!(
+            synchronous.resolve_request(Some(wrong)),
+            Err(RenderResolutionMismatch {
+                requested,
+                actual: wrong,
+            })
+        );
+
+        let mut asynchronous = RenderResolutionState::new(Some(requested));
+        asynchronous.resolve_request(None).unwrap();
+        assert_eq!(
+            asynchronous.observe_resize(wrong),
+            Err(RenderResolutionMismatch {
+                requested,
+                actual: wrong,
+            })
+        );
+        assert_eq!(asynchronous, RenderResolutionState::Pending(requested));
+
+        let mut scale_factor = RenderResolutionState::Verified(requested);
+        scale_factor.await_current_extent_verification();
+        assert_eq!(
+            scale_factor.verify_current_extent(wrong),
+            Err(RenderResolutionMismatch {
+                requested,
+                actual: wrong,
+            })
+        );
+        assert_eq!(
+            scale_factor,
+            RenderResolutionState::VerifyCurrent(requested)
+        );
+        assert!(!scale_factor.request_is_needed());
+    }
+
+    #[test]
+    fn resolution_enforcement_is_disabled_for_historical_default() {
+        let mut state = RenderResolutionState::new(None);
+        assert_eq!(state, RenderResolutionState::Disabled);
+        assert!(state.is_ready());
+        state
+            .observe_resize(RenderResolution::new(1_424, 750))
+            .unwrap();
+        assert_eq!(state, RenderResolutionState::Disabled);
+    }
+
+    #[test]
+    fn resolution_state_transitions_do_not_advance_presentation_counter() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut control = RenderRunControl::new(Some(requested), Some(0));
+        let frame_zero = control.pending_frame();
+
+        assert_eq!(
+            control.resolution.resolve_request(None),
+            Ok(RenderResolutionRequestOutcome::Pending)
+        );
+        control.resolution.observe_resize(requested).unwrap();
+        control.resolution.await_current_extent_verification();
+        control.resolution.verify_current_extent(requested).unwrap();
+
+        assert_eq!(control.pending_frame(), frame_zero);
+        assert_eq!(control.next_presentation_frame, 0);
+    }
+
+    #[test]
+    fn exit_after_frame_parser_accepts_zero_and_one_and_rejects_invalid_values() {
+        for frame in ["0", "1"] {
+            let options =
+                RenderOptions::parse(["--exit-after-frame", frame].map(str::to_owned).into_iter())
+                    .unwrap();
+            assert_eq!(options.exit_after_frame, Some(frame.parse().unwrap()));
+        }
+        for frame in ["-1", "1.5", "later"] {
+            assert!(matches!(
+                RenderOptions::parse(["--exit-after-frame", frame].map(str::to_owned).into_iter()),
+                Err(RenderAppError::InvalidExitAfterFrame(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn presentation_frame_index_is_zero_based_and_committed_only_after_present() {
+        let mut control = RenderRunControl::new(None, None);
+        let frame_zero = control.pending_frame();
+        assert_eq!(frame_zero.index, 0);
+        assert!(!frame_zero.exit_after_present);
+
+        // A skipped/failed renderer call does not commit and therefore retries
+        // the same presentation index.
+        assert_eq!(control.pending_frame(), frame_zero);
+        assert!(!control.commit_presented(frame_zero));
+        assert_eq!(control.pending_frame().index, 1);
+    }
+
+    #[test]
+    fn auto_exit_schedule_triggers_after_configured_presented_frame() {
+        let mut exit_after_zero = RenderRunControl::new(None, Some(0));
+        let frame_zero = exit_after_zero.pending_frame();
+        assert!(frame_zero.exit_after_present);
+        assert!(exit_after_zero.commit_presented(frame_zero));
+
+        let mut exit_after_one = RenderRunControl::new(None, Some(1));
+        let frame_zero = exit_after_one.pending_frame();
+        assert!(!exit_after_one.commit_presented(frame_zero));
+        let frame_one = exit_after_one.pending_frame();
+        assert_eq!(frame_one.index, 1);
+        assert!(exit_after_one.commit_presented(frame_one));
+    }
+
+    #[test]
+    fn default_run_control_never_auto_exits() {
+        let mut control = RenderRunControl::new(None, None);
+        for expected_index in 0..3 {
+            let frame = control.pending_frame();
+            assert_eq!(frame.index, expected_index);
+            assert!(!control.commit_presented(frame));
         }
     }
 
