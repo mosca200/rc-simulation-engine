@@ -16,9 +16,14 @@ The flags are a pair: specifying only one is an error. Width is constrained to
 `320..=7680` and height to `240..=4320`, matching the VIS0 manifest contract.
 When present, the window is created with a non-resizable `PhysicalSize`; the
 runtime verifies the actual inner size before initializing wgpu and fails
-closed if the platform does not apply it. DPI and resize events reassert the
-requested physical extent synchronously; if the platform cannot restore it,
-the runtime fails instead of silently weakening resolution enforcement.
+closed if the platform does not apply it. If the creation-time extent is
+already correct, no redundant resize is requested. Otherwise a synchronous
+`request_inner_size` result is checked immediately. An asynchronous result
+enters a pending state and is verified only by the following
+`WindowEvent::Resized`; rendering does not begin while verification is pending.
+DPI changes follow the same pending policy. A mismatched resize fails closed,
+and the resize handler never issues another resize request, avoiding
+request/event loops.
 `DeviceContext` continues to configure the surface from the window's actual
 physical inner size, so the requested value reaches both V1 and V2 surface
 configuration.
