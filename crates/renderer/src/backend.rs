@@ -203,6 +203,14 @@ impl DesktopRenderer {
         }
     }
 
+    /// Notify V2 that the simulation timeline restarted. V1 intentionally has
+    /// no temporal state and therefore keeps this hook as a no-op.
+    pub fn invalidate_temporal_history(&mut self) {
+        if let Backend::V2(inner) = &mut self.backend {
+            inner.invalidate_temporal_history();
+        }
+    }
+
     /// Toggle the presentation-only debug overlays on the selected backend.
     pub fn set_show_debug_overlays(&mut self, show: bool) {
         match &mut self.backend {

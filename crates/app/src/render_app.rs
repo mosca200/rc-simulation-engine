@@ -1178,6 +1178,9 @@ impl RenderApplication {
         ));
         self.fixed_step = reset_fixed_step;
         self.last_frame_time = Some(timing_baseline);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.invalidate_temporal_history();
+        }
         Ok(FlightResetOutcome::Reset)
     }
 
@@ -3247,5 +3250,25 @@ mod tests {
         assert!(status.contains("Matched controller:\nsession_id=7 name=\"TX16S\""));
         assert!(status.contains("Controller status:\nconnected"));
         assert!(status.contains("Pilot input:\ncalibrated"));
+    }
+
+    #[test]
+    fn successful_flight_reset_notifies_renderer_temporal_lifecycle() {
+        let source = include_str!("render_app.rs");
+        let reset_path = source
+            .split_once("fn reset_flight_session(")
+            .unwrap()
+            .1
+            .split_once("fn redraw(")
+            .unwrap()
+            .0;
+        let state_install = reset_path
+            .find("self.simulation = reset_simulation;")
+            .unwrap();
+        let invalidation = reset_path
+            .find("renderer.invalidate_temporal_history();")
+            .unwrap();
+        let success = reset_path.find("Ok(FlightResetOutcome::Reset)").unwrap();
+        assert!(state_install < invalidation && invalidation < success);
     }
 }

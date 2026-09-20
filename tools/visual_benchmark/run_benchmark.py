@@ -14,7 +14,7 @@ The manifest contract owned by VIS0-A stays authoritative: this runner reuses
 onto CLI flags that really exist in `crates/app/src/render_app.rs`.
 
 Usage:
-    # Dry run (the default; no process is started)
+    # Dry run (the default; no application process is started)
     python tools/visual_benchmark/run_benchmark.py \
         --manifest docs/validation/visual_benchmark/vis0_reference_scene.json \
         --dry-run
@@ -1056,7 +1056,11 @@ def _kv(label: str, value: Any, indent: int = 2) -> str:
 
 def format_plan_human(plan: dict) -> str:
     lines = []
-    mode = "DRY-RUN (no process will be started)" if plan["dry_run"] else "EXECUTE"
+    mode = (
+        "DRY-RUN (no application process will be started)"
+        if plan["dry_run"]
+        else "EXECUTE"
+    )
     lines.append(f"{RUNNER_NAME} {RUNNER_VERSION} (plan {plan['plan_version']})")
     lines.append(f"mode: {mode}")
     lines.append("")
@@ -1177,8 +1181,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help=(
-            "build and print the plan without starting a process. This is the "
-            "default; the flag exists so it can override --execute."
+            "build and print the plan without starting the application process. "
+            "This is the default; the flag exists so it can override --execute."
         ),
     )
     parser.add_argument(
@@ -1273,7 +1277,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.execute and args.dry_run:
         print(
             "note: --dry-run and --execute were both given; dry run wins "
-            "(no process started)",
+            "(no application process started)",
             file=sys.stderr,
         )
 
@@ -1347,7 +1351,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if dry_run:
         print(
-            "\ndry run complete: no process started, no artifacts written. "
+            "\ndry run complete: no application process started, no artifacts written. "
             "Re-run with --execute --app <path> to launch rcsim-app."
         )
         return EXIT_OK

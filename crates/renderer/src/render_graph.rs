@@ -13,11 +13,12 @@ pub(crate) enum PassId {
     ShadowMid,
     ShadowFar,
     Scene,
+    TemporalResolve,
     Postprocess,
 }
 
 impl PassId {
-    pub(crate) const COUNT: usize = 5;
+    pub(crate) const COUNT: usize = 6;
 
     pub(crate) const fn index(self) -> usize {
         match self {
@@ -25,7 +26,8 @@ impl PassId {
             Self::ShadowMid => 1,
             Self::ShadowFar => 2,
             Self::Scene => 3,
-            Self::Postprocess => 4,
+            Self::TemporalResolve => 4,
+            Self::Postprocess => 5,
         }
     }
 
@@ -35,8 +37,13 @@ impl PassId {
             Self::ShadowMid => "G3E mid cascade shadow depth pass",
             Self::ShadowFar => "G3E far cascade shadow depth pass",
             Self::Scene => "G1C scene pass",
+            Self::TemporalResolve => "RV2 temporal resolve pass",
             Self::Postprocess => "G3B HDR postprocess pass",
         }
+    }
+
+    pub(crate) const fn is_shadow(self) -> bool {
+        matches!(self, Self::ShadowNear | Self::ShadowMid | Self::ShadowFar)
     }
 }
 
@@ -242,6 +249,12 @@ pub(crate) fn build_v2_render_graph() -> Result<CompiledGraph, GraphError> {
     let shadow_far = builder.add_resource(ResourceClass::Persistent, false);
     let hdr_scene = builder.add_resource(ResourceClass::ResizeDependent, false);
     let depth = builder.add_resource(ResourceClass::ResizeDependent, false);
+    // The read role is imported because it refers to the last successfully
+    // presented history slot. On an invalid first frame the pass-through
+    // resolve deliberately does not sample it, but the graph still reserves
+    // the dependency for future temporal implementations.
+    let history_read = builder.add_resource(ResourceClass::ResizeDependent, true);
+    let history_write = builder.add_resource(ResourceClass::ResizeDependent, false);
     let surface_output = builder.add_resource(ResourceClass::Transient, false);
 
     builder.add_pass(PassId::ShadowNear, &[], &[shadow_near], &[])?;
@@ -254,10 +267,16 @@ pub(crate) fn build_v2_render_graph() -> Result<CompiledGraph, GraphError> {
         &[PassId::ShadowFar],
     )?;
     builder.add_pass(
-        PassId::Postprocess,
-        &[hdr_scene],
-        &[surface_output],
+        PassId::TemporalResolve,
+        &[hdr_scene, history_read],
+        &[history_write],
         &[PassId::Scene],
+    )?;
+    builder.add_pass(
+        PassId::Postprocess,
+        &[history_write],
+        &[surface_output],
+        &[PassId::TemporalResolve],
     )?;
     builder.compile()
 }
@@ -271,6 +290,7 @@ mod tests {
         PassId::ShadowMid,
         PassId::ShadowFar,
         PassId::Scene,
+        PassId::TemporalResolve,
         PassId::Postprocess,
     ];
 
@@ -278,6 +298,7 @@ mod tests {
     fn production_graph_has_exact_execution_order() {
         let graph = build_v2_render_graph().unwrap();
         assert_eq!(graph.execution_order(), EXPECTED_ORDER);
+        assert_eq!(graph.resource_class_counts(), [3, 4, 1]);
     }
 
     #[test]

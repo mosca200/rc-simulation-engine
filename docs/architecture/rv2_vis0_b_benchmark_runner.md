@@ -41,7 +41,7 @@ The VIS0-A contract files stay authoritative and byte-identical:
 All commands run from the repository root. Python standard library only — no
 pip dependency.
 
-### Dry run (the default; starts no process)
+### Dry run (the default; starts no application process)
 
 ```
 python tools/visual_benchmark/run_benchmark.py \
@@ -87,7 +87,7 @@ python tools/visual_benchmark/run_benchmark.py \
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--manifest PATH` | *(required)* | GoldenSceneManifest JSON to load and validate |
-| `--dry-run` | on by default | Build and print the plan; start no process, write no run artifacts |
+| `--dry-run` | on by default | Build and print the plan; start no application process, write no run artifacts |
 | `--execute` | off | Opt in to really launching the app process |
 | `--app PATH_OR_COMMAND` | none | `rcsim-app` executable. Required with `--execute` |
 | `--output-dir PATH` | `tmp/visual_benchmark_runs` | Root for run artifacts (gitignored) |
@@ -97,7 +97,7 @@ python tools/visual_benchmark/run_benchmark.py \
 | `--require-clean-git` | off | Fail with exit 3 unless `git status --porcelain` is empty |
 
 `--dry-run` wins if both `--dry-run` and `--execute` are given; a note is printed
-to stderr and no process starts.
+to stderr and no application process starts.
 
 There is no interactive prompt of any kind. Every input arrives as a flag.
 

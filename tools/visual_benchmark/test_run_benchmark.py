@@ -1009,7 +1009,7 @@ class TestCliSurface(RunnerTestCase):
         )
         self.assertEqual(code, rb.EXIT_OK)
         self.assertIn("DRY-RUN", out)
-        self.assertIn("no process started", out)
+        self.assertIn("no application process started", out)
 
     def test_dry_run_overrides_execute(self):
         path = self.write_manifest()

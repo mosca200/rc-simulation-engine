@@ -271,8 +271,8 @@ mod tests {
 
     #[test]
     fn production_query_count_is_two_per_real_pass() {
-        assert_eq!(PassId::COUNT, 5);
-        assert_eq!(GPU_QUERY_COUNT, 10);
+        assert_eq!(PassId::COUNT, 6);
+        assert_eq!(GPU_QUERY_COUNT, 12);
     }
 
     #[test]
