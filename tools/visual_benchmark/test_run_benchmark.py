@@ -23,6 +23,7 @@ from pathlib import Path
 
 from tools.visual_benchmark import run_benchmark as rb
 from tools.visual_benchmark.validate_capture_evidence import (
+    ALL_LEAF_FIELDS,
     RUNTIME_SUPPLIED_FIELDS,
     validate_capture_evidence,
 )
@@ -1293,6 +1294,39 @@ class TestCaptureEvidenceContract(RunnerTestCase):
         path = self.tmp / "capture_evidence.json"
         path.write_text(json.dumps(metadata["capture_evidence"]), encoding="utf-8")
         self.assertEqual(validate_capture_evidence(path), 0)
+
+    def test_skeleton_omits_no_contract_leaf(self):
+        """Presence policy: the runner must emit every leaf, nulling not dropping.
+
+        An omitted key would mean "incomplete artifact"; a null means "contract
+        followed, value genuinely unavailable". The skeleton may only say the
+        second, so it has to carry all 39 leaves explicitly.
+        """
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        for dotted in sorted(ALL_LEAF_FIELDS):
+            with self.subTest(field=dotted):
+                parts = dotted.split(".")
+                node = evidence
+                for part in parts[:-1]:
+                    self.assertIsInstance(node, dict, dotted)
+                    self.assertIn(part, node, f"{dotted}: container key omitted")
+                    node = node[part]
+                self.assertIsInstance(node, dict, dotted)
+                self.assertIn(parts[-1], node, f"{dotted} is omitted, not null")
+
+    def test_skeleton_nulls_are_explicit_keys_not_absences(self):
+        """A runtime-supplied leaf must be a present null, never a missing key."""
+        _, metadata = self.metadata()
+        evidence = metadata["capture_evidence"]
+        self.assertIn("gpu_adapter_name", evidence["hardware"])
+        self.assertIsNone(evidence["hardware"]["gpu_adapter_name"])
+        self.assertIn("framebuffer_width", evidence["capture"]["actual"])
+        self.assertIsNone(evidence["capture"]["actual"]["framebuffer_width"])
+        self.assertIn("sha256", evidence["capture"]["image"])
+        self.assertIsNone(evidence["capture"]["image"]["sha256"])
+        self.assertIn("visual_pass", evidence["verdict"])
+        self.assertIsNone(evidence["verdict"]["visual_pass"])
 
     def test_skeleton_claims_no_capture(self):
         _, metadata = self.metadata()

@@ -317,7 +317,11 @@ capture at all:
 
 Only leaves this tooling can actually observe are filled: the manifest digest and
 path, git provenance, the requested resolution/frame, renderer settings and
-OS/architecture. The runner validates its own skeleton and records the result in
+OS/architecture. Every leaf the contract defines is emitted as an explicit key -
+the unknown ones as `null`, never as an omission, because the evidence contract
+treats a missing key as an incomplete artifact and only an explicit `null` as an
+honest "unavailable" (`test_skeleton_omits_no_contract_leaf` enforces this).
+The runner validates its own skeleton and records the result in
 `capture_evidence_validation`, so a future contract change that the runner does
 not follow shows up as data instead of silently producing a non-conforming
 artifact. When git provenance is unavailable the mandatory `source.commit_sha`

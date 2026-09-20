@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/mosca200/rc-simulation-engine/schemas/visual_capture_evidence.json",
   "title": "Visual Capture Evidence",
-  "description": "Machine-readable record of what a visual benchmark capture ACTUALLY produced, as opposed to the GoldenSceneManifest which records what was requested. The evidence artifact is the fact layer: it never states whether an image is good. Enforced by tools/visual_benchmark/validate_capture_evidence.py. IMPORTANT: integration/render-v2 has no capture backend yet, so no artifact with capture_success=true can exist today; the contract ships first so the future runtime capture has a stable shape to fill. Unavailability policy: null is the ONLY marker for 'not available' - never 0, -1 or an empty string, which is why every dimension and byte size has a minimum of 1.",
+  "description": "Machine-readable record of what a visual benchmark capture ACTUALLY produced, as opposed to the GoldenSceneManifest which records what was requested. The evidence artifact is the fact layer: it never states whether an image is good. Enforced by tools/visual_benchmark/validate_capture_evidence.py. IMPORTANT: integration/render-v2 has no capture backend yet, so no artifact with capture_success=true can exist today; the contract ships first so the future runtime capture has a stable shape to fill. Unavailability policy: null is the ONLY marker for 'not available' - never 0, -1 or an empty string, which is why every dimension and byte size has a minimum of 1. Presence policy: every property of every object is listed in that object's `required` array, so a leaf must always be PRESENT - either with a real value or with an explicit null. An omitted key is an incomplete, non-conforming artifact and is never equivalent to null, because null is the producer stating it followed the contract while absence means it did not.",
   "type": "object",
   "required": [
     "schema_version",
@@ -31,7 +31,7 @@
     },
     "manifest": {
       "type": "object",
-      "required": ["sha256"],
+      "required": ["path", "path_display", "sha256"],
       "additionalProperties": false,
       "properties": {
         "path": {
@@ -54,7 +54,16 @@
     },
     "source": {
       "type": "object",
-      "required": ["commit_sha", "runner_name", "runner_version"],
+      "required": [
+        "commit_sha",
+        "commit_sha_short",
+        "branch",
+        "detached_head",
+        "dirty",
+        "dirty_entry_count",
+        "runner_name",
+        "runner_version"
+      ],
       "additionalProperties": false,
       "properties": {
         "commit_sha": {
@@ -100,6 +109,7 @@
     },
     "renderer": {
       "type": "object",
+      "required": ["version", "exposure_ev", "camera_mode", "scenery_preset"],
       "additionalProperties": false,
       "properties": {
         "version": {
@@ -131,7 +141,7 @@
       "properties": {
         "requested": {
           "type": "object",
-          "required": ["width", "height"],
+          "required": ["width", "height", "frame_index"],
           "additionalProperties": false,
           "properties": {
             "width": {
@@ -156,6 +166,11 @@
         },
         "actual": {
           "type": "object",
+          "required": [
+            "framebuffer_width",
+            "framebuffer_height",
+            "presentation_frame_index"
+          ],
           "additionalProperties": false,
           "properties": {
             "framebuffer_width": {
@@ -183,6 +198,7 @@
         },
         "image": {
           "type": "object",
+          "required": ["path", "sha256", "byte_size"],
           "additionalProperties": false,
           "properties": {
             "path": {
@@ -208,7 +224,7 @@
     },
     "execution": {
       "type": "object",
-      "required": ["capture_success"],
+      "required": ["capture_success", "process_exit_code", "failure_reason"],
       "additionalProperties": false,
       "properties": {
         "capture_success": {
@@ -229,6 +245,15 @@
     },
     "hardware": {
       "type": "object",
+      "required": [
+        "operating_system",
+        "os_release",
+        "architecture",
+        "gpu_adapter_name",
+        "graphics_backend",
+        "driver_version",
+        "notes"
+      ],
       "additionalProperties": false,
       "properties": {
         "operating_system": {
@@ -271,11 +296,12 @@
     },
     "verdict": {
       "type": "object",
+      "required": ["visual_pass", "visual_pass_reason"],
       "additionalProperties": false,
       "properties": {
         "visual_pass": {
           "type": "null",
-          "description": "MUST be null in v1. Capture evidence records facts and never a visual verdict: no SSIM/PSNR/LPIPS threshold and no automatic PASS/FAIL exists in this repository. The field is present so a future approved reviewer or metrics engine has a reserved, versioned home, and so any producer that fills it today fails validation."
+          "description": "MUST be present and MUST be null in v1. Capture evidence records facts and never a visual verdict: no SSIM/PSNR/LPIPS threshold and no automatic PASS/FAIL exists in this repository. Omitting the key is rejected - leaving the verdict open is not the same as declaring it null. The field is present so a future approved reviewer or metrics engine has a reserved, versioned home, and so any producer that fills it today fails validation."
         },
         "visual_pass_reason": {
           "type": ["string", "null"],

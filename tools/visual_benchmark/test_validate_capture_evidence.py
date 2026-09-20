@@ -32,6 +32,40 @@ REFERENCE_MANIFEST = (
     REPO_ROOT / "docs" / "validation" / "visual_benchmark" / "vis0_reference_scene.json"
 )
 
+# Object-valued paths of the v1 shape. Each must be present as an object.
+CONTAINER_PATHS = (
+    "manifest",
+    "source",
+    "renderer",
+    "capture",
+    "capture.requested",
+    "capture.actual",
+    "capture.image",
+    "execution",
+    "hardware",
+    "verdict",
+)
+
+
+def walk_schema(node, prefix=""):
+    """Yield `(dotted_path, subschema)` for every node below the schema root."""
+    properties = node.get("properties") if isinstance(node, dict) else None
+    if not isinstance(properties, dict):
+        return
+    for key, sub in properties.items():
+        dotted = f"{prefix}{key}"
+        yield dotted, sub
+        yield from walk_schema(sub, f"{dotted}.")
+
+
+def is_container(node) -> bool:
+    return isinstance(node.get("properties"), dict)
+
+
+def admits_null(node) -> bool:
+    declared = node.get("type")
+    return isinstance(declared, list) and "null" in declared
+
 
 def honest_failure_evidence() -> dict:
     """The only artifact today's runtime can truthfully produce.
@@ -158,6 +192,20 @@ class EvidenceTestCase(unittest.TestCase):
         node[keys[-1]] = value
         return evidence
 
+    def omit(self, path: str):
+        """Return a deep copy of the fixture with a dotted path REMOVED.
+
+        Omission is a different statement than null, and the contract must be
+        able to tell them apart.
+        """
+        evidence = honest_failure_evidence()
+        keys = path.split(".")
+        node = evidence
+        for key in keys[:-1]:
+            node = node[key]
+        node.pop(keys[-1], None)
+        return evidence
+
 
 class TestValidEvidence(EvidenceTestCase):
     def test_honest_failure_evidence_is_valid(self):
@@ -199,10 +247,16 @@ class TestValidEvidence(EvidenceTestCase):
         evidence = self.mutate("capture.requested.frame_index", None)
         self.assertValid(evidence)
 
-    def test_visual_pass_may_be_absent(self):
+    def test_visual_pass_missing_is_rejected(self):
+        """Omitting the verdict is not a way of leaving it open."""
         evidence = honest_failure_evidence()
         del evidence["verdict"]["visual_pass"]
-        self.assertValid(evidence)
+        self.assertInvalid(evidence, "verdict.visual_pass")
+
+    def test_visual_pass_reason_missing_is_rejected(self):
+        evidence = honest_failure_evidence()
+        del evidence["verdict"]["visual_pass_reason"]
+        self.assertInvalid(evidence, "verdict.visual_pass_reason")
 
     def test_validation_never_fills_visual_pass(self):
         """The validator reads facts; it must not write a verdict."""
@@ -576,6 +630,177 @@ class TestUnknownFieldPolicy(EvidenceTestCase):
                     walk(node[key], f"{path}[]")
 
         walk(schema, "")
+
+
+class TestFieldPresencePolicy(EvidenceTestCase):
+    """PRESENT + real value, or PRESENT + null. Never MISSING.
+
+    `null` states that the producer followed the contract and the datum was
+    genuinely unavailable; an omitted key states only that the artifact is
+    incomplete. Collapsing the two would weaken provenance, so both the schema
+    and the validator must reject absence everywhere.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = json.loads(EVIDENCE_SCHEMA.read_text(encoding="utf-8"))
+
+    # --- schema and validator must apply the SAME presence rule -------------
+
+    def test_schema_requires_every_property_of_every_object(self):
+        for path, node in walk_schema(self.schema):
+            if not is_container(node):
+                continue
+            with self.subTest(object=path):
+                self.assertEqual(
+                    sorted(node.get("required", [])), sorted(node["properties"]),
+                    f"{path}: `required` must list every property, otherwise an "
+                    "omitted key would pass the schema but fail the validator")
+
+    def test_schema_root_requires_every_property(self):
+        self.assertEqual(sorted(self.schema["required"]),
+                         sorted(self.schema["properties"]))
+
+    def test_every_container_is_covered_by_the_presence_tests(self):
+        """Guard the guard: CONTAINER_PATHS must match the schema's objects."""
+        declared = {path for path, node in walk_schema(self.schema) if is_container(node)}
+        self.assertEqual(declared, set(CONTAINER_PATHS))
+
+    def test_validator_rejects_exactly_the_leaves_the_schema_requires(self):
+        """No leaf may be optional in one layer and mandatory in the other."""
+        schema_leaves = {path for path, node in walk_schema(self.schema)
+                         if not is_container(node)}
+        self.assertEqual(schema_leaves, set(ALL_LEAF_FIELDS))
+        for dotted in sorted(schema_leaves):
+            with self.subTest(field=dotted):
+                self.assertIn(dotted, self.error_paths(self.omit(dotted)),
+                              f"validator accepts an omitted {dotted}")
+
+    # --- every block: at least one missing-leaf case ------------------------
+
+    def test_every_container_is_rejected_when_missing(self):
+        for dotted in CONTAINER_PATHS:
+            with self.subTest(block=dotted):
+                self.assertIn(dotted, self.error_paths(self.omit(dotted)))
+
+    def test_missing_leaf_error_names_the_presence_policy(self):
+        validator = CaptureEvidenceValidator(self.omit("hardware.gpu_adapter_name"))
+        validator.validate()
+        messages = {error.path: error.message for error in validator.errors}
+        message = messages["hardware.gpu_adapter_name"]
+        self.assertIn("missing", message)
+        self.assertIn("null", message)
+
+    # --- the specific MISSING-vs-null pairs required by the contract --------
+
+    def test_hardware_gpu_adapter_name_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("hardware.gpu_adapter_name"),
+                           "hardware.gpu_adapter_name")
+        self.assertValid(self.mutate("hardware.gpu_adapter_name", None))
+
+    def test_hardware_driver_version_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("hardware.driver_version"),
+                           "hardware.driver_version")
+        self.assertValid(self.mutate("hardware.driver_version", None))
+
+    def test_actual_presentation_frame_index_missing_fails_but_null_passes(self):
+        """null is conforming here because the capture honestly failed."""
+        self.assertInvalid(self.omit("capture.actual.presentation_frame_index"),
+                           "capture.actual.presentation_frame_index")
+        evidence = self.mutate("capture.actual.presentation_frame_index", None)
+        self.assertFalse(evidence["execution"]["capture_success"])
+        self.assertValid(evidence)
+
+    def test_actual_framebuffer_extent_missing_fails_but_null_passes(self):
+        for dotted in ("capture.actual.framebuffer_width",
+                       "capture.actual.framebuffer_height"):
+            with self.subTest(field=dotted):
+                self.assertInvalid(self.omit(dotted), dotted)
+                self.assertValid(self.mutate(dotted, None))
+
+    def test_image_sha256_missing_fails_but_null_passes_on_failure(self):
+        self.assertInvalid(self.omit("capture.image.sha256"), "capture.image.sha256")
+        evidence = self.mutate("capture.image.sha256", None)
+        self.assertFalse(evidence["execution"]["capture_success"])
+        self.assertValid(evidence)
+
+    def test_image_path_and_byte_size_missing_fail_but_null_passes(self):
+        for dotted in ("capture.image.path", "capture.image.byte_size"):
+            with self.subTest(field=dotted):
+                self.assertInvalid(self.omit(dotted), dotted)
+                self.assertValid(self.mutate(dotted, None))
+
+    def test_visual_pass_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("verdict.visual_pass"), "verdict.visual_pass")
+        self.assertValid(self.mutate("verdict.visual_pass", None))
+
+    def test_branch_missing_fails_but_null_passes_on_detached_head(self):
+        self.assertInvalid(self.omit("source.branch"), "source.branch")
+        evidence = self.mutate("source.branch", None)
+        evidence["source"]["detached_head"] = True
+        self.assertValid(evidence)
+
+    def test_manifest_path_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("manifest.path"), "manifest.path")
+        self.assertValid(self.mutate("manifest.path", None))
+
+    def test_requested_frame_index_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("capture.requested.frame_index"),
+                           "capture.requested.frame_index")
+        self.assertValid(self.mutate("capture.requested.frame_index", None))
+
+    def test_process_exit_code_missing_fails_but_null_passes(self):
+        self.assertInvalid(self.omit("execution.process_exit_code"),
+                           "execution.process_exit_code")
+        self.assertValid(self.mutate("execution.process_exit_code", None))
+
+    def test_renderer_leaves_missing_fail_but_null_pass(self):
+        for dotted in ("renderer.version", "renderer.exposure_ev",
+                       "renderer.camera_mode", "renderer.scenery_preset"):
+            with self.subTest(field=dotted):
+                self.assertInvalid(self.omit(dotted), dotted)
+                self.assertValid(self.mutate(dotted, None))
+
+    def test_mandatory_leaves_reject_null_too(self):
+        """Presence alone is not enough where a real value is required."""
+        for dotted in ("schema_version", "scene_id", "manifest.sha256",
+                       "source.commit_sha", "source.runner_name",
+                       "source.runner_version", "capture.format",
+                       "capture.requested.width", "capture.requested.height"):
+            with self.subTest(field=dotted):
+                self.assertInvalid(self.omit(dotted), dotted)
+                self.assertInvalid(self.mutate(dotted, None), dotted)
+
+    def test_null_is_conforming_everywhere_the_schema_admits_null(self):
+        conditionally_mandatory = {
+            # Mandatory non-null when capture_success is false, which is the
+            # state of the fixture: the reason must be stated, not omitted.
+            "execution.failure_reason",
+        }
+        nullable = {path for path, node in walk_schema(self.schema)
+                    if admits_null(node) and not is_container(node)}
+        self.assertTrue(nullable)
+        for dotted in sorted(nullable):
+            with self.subTest(field=dotted):
+                self.assertIn(dotted, self.error_paths(self.omit(dotted)),
+                              f"validator accepts an omitted {dotted}")
+                if dotted in conditionally_mandatory:
+                    continue
+                self.assertNotIn(dotted, self.error_paths(self.mutate(dotted, None)),
+                                 f"{dotted}=null must be conforming")
+
+    def test_fixture_is_structurally_complete(self):
+        """The fixtures must themselves obey the presence policy."""
+        for fixture in (honest_failure_evidence(), successful_capture_evidence()):
+            evidence = fixture
+            for dotted in sorted(ALL_LEAF_FIELDS):
+                with self.subTest(field=dotted):
+                    node = evidence
+                    parts = dotted.split(".")
+                    for part in parts[:-1]:
+                        self.assertIn(part, node, dotted)
+                        node = node[part]
+                    self.assertIn(parts[-1], node, f"{dotted} is omitted")
 
 
 class TestRootAndFileHandling(EvidenceTestCase):

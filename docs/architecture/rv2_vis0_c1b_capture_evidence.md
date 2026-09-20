@@ -200,6 +200,41 @@ Il validator rende la regola strutturale, non solo documentale: dimensioni e byt
 size hanno `minimum: 1`, gli indici di frame `minimum: 0` con `null` consentito,
 le stringhe vuote o di soli spazi sono rifiutate. Un placeholder non passa.
 
+### Policy di presenza
+
+**Ogni leaf della shape v1 deve essere PRESENTE.** Gli unici due stati conformi sono:
+
+```
+PRESENTE + valore reale
+PRESENTE + null
+```
+
+**Mai `MISSING`.** Le due condizioni non sono equivalenti e il contratto le
+distingue strutturalmente:
+
+| Stato | Significato |
+| --- | --- |
+| `"gpu_adapter_name": null` | il producer **ha seguito il contratto** e dichiara esplicitamente che il dato non era disponibile |
+| chiave `gpu_adapter_name` assente | artefatto **incompleto / non conforme**, oppure scritto da un producer che non implementa questa versione del contratto |
+
+Collassarle indebolirebbe la provenance: un artefatto incompleto risulterebbe
+indistinguibile da uno onesto. Omettere un campo non è un modo per dire
+"non disponibile", e omettere `verdict.visual_pass` non è un modo per lasciare il
+verdetto aperto.
+
+L'implementazione usa un sentinel `ABSENT` distinto da `None`: `dict.get(key)`
+appiattisce le due condizioni in `None`, quindi i call site passano
+`block.get(field, ABSENT)` e ciascun helper `_require_*` rifiuta il sentinel con
+un messaggio dedicato. Una sola guardia per helper, non decine di controlli
+manuali duplicati.
+
+Lo **schema JSON applica la stessa regola** elencando ogni property nel
+`required` dell'oggetto che la contiene, a tutti i livelli. Non è quindi
+possibile che lo schema accetti ciò che il validator rifiuta, né il contrario:
+`test_schema_requires_every_property_of_every_object` e
+`test_validator_rejects_exactly_the_leaves_the_schema_requires` verificano
+l'accordo su tutti i 39 leaf.
+
 ### Struttura del contratto (v1.0.0)
 
 ```
@@ -220,7 +255,8 @@ hardware  { operating_system, os_release, architecture,
 verdict   { visual_pass, visual_pass_reason }
 ```
 
-39 leaf, tutti `additionalProperties: false`.
+39 leaf, tutti `additionalProperties: false` e **tutti obbligatoriamente presenti**
+(ogni oggetto elenca nel proprio `required` l'intera lista di `properties`).
 
 ### Regole di validazione
 
@@ -228,33 +264,38 @@ Strutturali:
 
 1. `schema_version` semver e major supportato (`1`);
 2. `scene_id` con la grammatica del manifest, 3–128 caratteri;
-3. `manifest.sha256` obbligatorio e non nullo, 64 hex minuscoli;
-4. `source.commit_sha` obbligatorio, 40 hex (repo SHA-1) o 64 hex (repo SHA-256);
-5. `source.runner_version` semver;
-6. enum chiuse per `renderer.version`, `camera_mode`, `scenery_preset`,
+3. **ogni leaf e ogni contenitore della shape v1 deve essere presente**: un campo
+   omesso è errore, distinto dal campo presente con `null` (vedi § "Policy di
+   presenza");
+4. `manifest.sha256` obbligatorio e non nullo, 64 hex minuscoli;
+5. `source.commit_sha` obbligatorio, 40 hex (repo SHA-1) o 64 hex (repo SHA-256);
+6. `source.runner_version` semver;
+7. enum chiuse per `renderer.version`, `camera_mode`, `scenery_preset`,
    `capture.format`;
-7. campi sconosciuti **rifiutati** a ogni livello (vedi § "Unknown fields");
-8. root non-oggetto, JSON malformato o file assente → exit code distinti.
+8. campi sconosciuti **rifiutati** a ogni livello (vedi § "Unknown fields");
+9. root non-oggetto, JSON malformato o file assente → exit code distinti.
 
 Semantiche (cross-field):
 
-9. `capture_success == true` ⇒ `image.path`, `image.sha256`, `image.byte_size`
-   **e** i tre `actual.*` tutti non nulli: un capture dichiarato deve essere
-   verificabile;
-10. `capture_success == true` ⇒ `process_exit_code` nullo o `0`, e
+10. `capture_success == true` ⇒ `image.path`, `image.sha256`, `image.byte_size`
+    **e** i tre `actual.*` tutti non nulli: un capture dichiarato deve essere
+    verificabile;
+11. `capture_success == true` ⇒ `process_exit_code` nullo o `0`, e
     `failure_reason` nullo;
-11. `capture_success == false` ⇒ tutti i leaf `image.*` **nulli**: un capture
-    fallito non deve pubblicizzare un'immagine mai scritta;
-12. `capture_success == false` ⇒ `failure_reason` obbligatorio: dire perché, non
-    lasciarlo implicito;
-13. `verdict.visual_pass` deve essere `null` (o assente). **Qualsiasi** altro
-    valore — `true`, `false`, una stringa — è errore.
+12. `capture_success == false` ⇒ tutti i leaf `image.*` **presenti e nulli**: un
+    capture fallito non deve pubblicizzare un'immagine mai scritta, ma deve
+    comunque dichiarare esplicitamente di non averla;
+13. `capture_success == false` ⇒ `failure_reason` presente e non nullo: dire
+    perché, non lasciarlo implicito;
+14. `verdict.visual_pass` deve essere **presente** e deve essere `null`.
+    **Qualsiasi** altro valore — `true`, `false`, una stringa — è errore, e anche
+    l'omissione è errore.
 
 Cross-check opzionale con `--manifest <path>`:
 
-14. `manifest.sha256` deve coincidere con lo SHA-256 reale dei byte del manifest;
-15. `scene_id` deve coincidere con quello del manifest;
-16. ogni valore *requested* (width, height, frame_index, format) e ogni impostazione
+15. `manifest.sha256` deve coincidere con lo SHA-256 reale dei byte del manifest;
+16. `scene_id` deve coincidere con quello del manifest;
+17. ogni valore *requested* (width, height, frame_index, format) e ogni impostazione
     renderer (version, camera_mode, scenery_preset, exposure_ev) deve coincidere
     con il manifest fornito.
 
@@ -278,10 +319,12 @@ Il contratto separa strutturalmente i fatti dal giudizio:
   davvero prodotta;
 - `verdict.visual_pass` — **giudizio visivo**: resta `null`.
 
-`verdict.visual_pass` è dichiarato `"type": "null"` nello schema, e il validator
-lo rifiuta se valorizzato. Il campo esiste comunque, riservato e versionato,
-perché un futuro reviewer umano o un motore di metriche **approvato** abbia già
-una casa contrattuale invece di doverne inventare una.
+`verdict.visual_pass` è dichiarato `"type": "null"` nello schema, è elencato nel
+`required` del blocco `verdict`, e il validator lo rifiuta sia se valorizzato sia
+se **omesso**. Omettere il verdetto non è un modo di lasciarlo aperto: sarebbe
+indistinguibile da un artefatto incompleto. Il campo esiste comunque, riservato e
+versionato, perché un futuro reviewer umano o un motore di metriche **approvato**
+abbia già una casa contrattuale invece di doverne inventare una.
 
 Nessuna soglia SSIM/PSNR/LPIPS, nessuno scoring percettivo, nessuna approvazione
 automatica di baseline. Il test `test_no_metric_threshold_constants_exist`
@@ -416,8 +459,8 @@ un modulo sibling non apre la porta a una dipendenza pip.
 | Suite | Test | Note |
 | --- | --- | --- |
 | `test_validate_manifest.py` | 84 | era 60; +24 su stato iniziale aircraft |
-| `test_run_benchmark.py` | 131 | era 101; +30 su mapping e contratto evidence |
-| `test_validate_capture_evidence.py` | 78 | nuova |
+| `test_run_benchmark.py` | 133 | era 101; +30 su mapping e contratto evidence, +2 sulla completezza strutturale dello skeleton |
+| `test_validate_capture_evidence.py` | 100 | nuova; +22 sulla policy di presenza (MISSING ≠ null) |
 
 Copertura richiesta e dove è verificata:
 
@@ -436,6 +479,11 @@ Copertura richiesta e dove è verificata:
 | `visual_pass` non auto-impostato | `TestEvidenceIsNotAVerdict` (6 test) |
 | hardware metadata unavailable accettabile | `test_all_null_hardware_is_acceptable` |
 | unknown fields policy coerente e documentata | `TestUnknownFieldPolicy` (5 test) |
+| **MISSING ≠ null: ogni leaf obbligatorio** | `TestFieldPresencePolicy` (21 test): parametrizzato su tutti i 39 leaf e i 10 contenitori |
+| **schema e validator d'accordo sulla presenza** | `test_schema_requires_every_property_of_every_object`, `test_validator_rejects_exactly_the_leaves_the_schema_requires` |
+| **coppie esplicite missing→FAIL / null→PASS** | `hardware.gpu_adapter_name`, `hardware.driver_version`, `capture.actual.presentation_frame_index`, `capture.actual.framebuffer_*`, `capture.image.sha256`, `capture.image.path`/`byte_size`, `verdict.visual_pass`, `source.branch` (detached HEAD), `manifest.path`, `capture.requested.frame_index`, `execution.process_exit_code`, `renderer.*` |
+| **campi non-nullable rifiutano anche null** | `test_mandatory_leaves_reject_null_too` |
+| **skeleton del runner strutturalmente completo** | `test_skeleton_omits_no_contract_leaf`, `test_skeleton_nulls_are_explicit_keys_not_absences` |
 | bounds allineati al runtime | `test_aircraft_bounds_match_runtime_source` |
 | handshake completo e disgiunto | `TestLineOneHandshake` (4 test) |
 | capability invariate | `test_capability_gaps_are_still_reported_unchanged` |

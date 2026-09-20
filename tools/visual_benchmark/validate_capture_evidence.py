@@ -26,6 +26,19 @@ those read as real values - and a real value must never be invented to fill a
 field the runtime cannot supply. Dimensions and byte sizes are therefore
 validated as >= 1, which makes the placeholder trick impossible.
 
+Presence policy
+---------------
+Every leaf of the v1 shape must be PRESENT. The only two conforming states are
+"present with a real value" and "present with null"; MISSING is never accepted.
+That distinction is what makes the artifact auditable: `null` means the producer
+followed the contract and explicitly declared the datum unavailable, whereas an
+omitted key means the artifact is incomplete - or was written by a producer that
+does not implement this contract version. Omitting a field must not be a way to
+say "unavailable", and omitting `verdict.visual_pass` must not be a way to leave
+the verdict open. The JSON Schema enforces the same rule by listing every
+property in its enclosing object's `required` array, so schema and validator
+cannot disagree about presence.
+
 Usage:
     python tools/visual_benchmark/validate_capture_evidence.py <evidence.json>
     python tools/visual_benchmark/validate_capture_evidence.py <evidence.json> \
@@ -67,6 +80,31 @@ UNAVAILABLE_POLICY = (
     "null is the only marker for 'not available'; 0, -1 and empty strings are "
     "rejected because they read as real measurements"
 )
+
+PRESENCE_POLICY = (
+    "every leaf of the v1 shape must be PRESENT. A missing field is an "
+    "incomplete, non-conforming artifact; an explicit null is the producer "
+    "stating that it followed the contract and the value was genuinely "
+    "unavailable. The two are never equivalent: write the key with null, do "
+    "not omit it."
+)
+
+
+class _Absent:
+    """Sentinel telling 'key missing' apart from 'key present with null'.
+
+    `dict.get(key)` collapses the two into None, which would let an incomplete
+    artifact pass as an honest 'unavailable'. Call sites pass this as the
+    default instead, and the `_require_*` helpers reject it explicitly.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+ABSENT = _Absent()
 
 VISUAL_PASS_LOCKED_REASON = (
     "verdict.visual_pass must stay null in VisualCaptureEvidence v1: capture "
@@ -220,6 +258,9 @@ class CaptureEvidenceValidator:
                     "from a newer contract cannot be silently misread.")
 
     def _require_object(self, path: str, value: Any) -> Optional[dict]:
+        if value is ABSENT:
+            self.error(path, f"required object is missing. {PRESENCE_POLICY}")
+            return None
         if not isinstance(value, dict):
             got = type(value).__name__ if value is not None else "null"
             self.error(path, f"must be an object, got {got}")
@@ -229,6 +270,9 @@ class CaptureEvidenceValidator:
     def _require_string(self, path: str, value: Any, allow_null: bool = False,
                         pattern: Optional[str] = None, label: str = "a string"):
         """Validate a string leaf. Empty/whitespace-only strings are rejected."""
+        if value is ABSENT:
+            self.error(path, f"required field is missing. {PRESENCE_POLICY}")
+            return False
         if value is None:
             if allow_null:
                 return True
@@ -246,6 +290,9 @@ class CaptureEvidenceValidator:
         return True
 
     def _require_enum(self, path: str, value: Any, allowed: set, allow_null: bool = False):
+        if value is ABSENT:
+            self.error(path, f"required field is missing. {PRESENCE_POLICY}")
+            return False
         if value is None:
             if allow_null:
                 return True
@@ -260,6 +307,9 @@ class CaptureEvidenceValidator:
         return True
 
     def _require_bool(self, path: str, value: Any, allow_null: bool = False):
+        if value is ABSENT:
+            self.error(path, f"required field is missing. {PRESENCE_POLICY}")
+            return False
         if value is None:
             if allow_null:
                 return True
@@ -270,13 +320,17 @@ class CaptureEvidenceValidator:
             return False
         return True
 
-    def _require_int(self, path: str, value: Any, minimum: int,
+    def _require_int(self, path: str, value: Any, minimum: Optional[int],
                      maximum: Optional[int] = None, allow_null: bool = False):
         """Validate an integer leaf with an inclusive lower bound.
 
         `minimum` is what makes a placeholder impossible: dimensions and byte
-        sizes start at 1, so 0 cannot be smuggled in as "unavailable".
+        sizes start at 1, so 0 cannot be smuggled in as "unavailable". Pass
+        None for no lower bound (an exit code may legitimately be negative).
         """
+        if value is ABSENT:
+            self.error(path, f"required field is missing. {PRESENCE_POLICY}")
+            return False
         if value is None:
             if allow_null:
                 return True
@@ -285,7 +339,7 @@ class CaptureEvidenceValidator:
         if not is_real_integer(value):
             self.error(path, f"must be an integer, got {type(value).__name__}")
             return False
-        if value < minimum:
+        if minimum is not None and value < minimum:
             self.error(path, f"must be >= {minimum}, got {value} ({UNAVAILABLE_POLICY})")
             return False
         if maximum is not None and value > maximum:
@@ -294,6 +348,9 @@ class CaptureEvidenceValidator:
         return True
 
     def _require_number(self, path: str, value: Any, allow_null: bool = False):
+        if value is ABSENT:
+            self.error(path, f"required field is missing. {PRESENCE_POLICY}")
+            return False
         if value is None:
             if allow_null:
                 return True
@@ -313,7 +370,7 @@ class CaptureEvidenceValidator:
     # --- leaf blocks --------------------------------------------------------
 
     def _validate_schema_version(self):
-        version = self.evidence.get("schema_version")
+        version = self.evidence.get("schema_version", ABSENT)
         if not self._require_string("schema_version", version,
                                     pattern=SEMVER_PATTERN,
                                     label="a semantic version (X.Y.Z)"):
@@ -326,7 +383,7 @@ class CaptureEvidenceValidator:
                 f"(supports major {SUPPORTED_SCHEMA_MAJOR})")
 
     def _validate_scene_id(self):
-        scene_id = self.evidence.get("scene_id")
+        scene_id = self.evidence.get("scene_id", ABSENT)
         if not self._require_string("scene_id", scene_id, pattern=SCENE_ID_PATTERN,
                                     label="a scene id"):
             return
@@ -336,137 +393,150 @@ class CaptureEvidenceValidator:
             self.error("scene_id", f"must be at most 128 characters, got {len(scene_id)}")
 
     def _validate_manifest_block(self):
-        block = self._require_object("manifest", self.evidence.get("manifest"))
+        block = self._require_object("manifest", self.evidence.get("manifest", ABSENT))
         if block is None:
             return
         self._validate_unknown("manifest.", block, self.ALLOWED_MANIFEST)
         # Provenance is the point of the artifact, so the digest is mandatory.
-        self._require_string("manifest.sha256", block.get("sha256"),
+        self._require_string("manifest.sha256", block.get("sha256", ABSENT),
                              pattern=SHA256_PATTERN,
                              label="a lowercase hex SHA-256 of the manifest")
-        self._require_string("manifest.path", block.get("path"), allow_null=True)
-        self._require_string("manifest.path_display", block.get("path_display"),
+        self._require_string("manifest.path", block.get("path", ABSENT), allow_null=True)
+        self._require_string("manifest.path_display", block.get("path_display", ABSENT),
                              allow_null=True)
 
     def _validate_source_block(self):
-        block = self._require_object("source", self.evidence.get("source"))
+        block = self._require_object("source", self.evidence.get("source", ABSENT))
         if block is None:
             return
         self._validate_unknown("source.", block, self.ALLOWED_SOURCE)
-        self._require_string("source.commit_sha", block.get("commit_sha"),
+        self._require_string("source.commit_sha", block.get("commit_sha", ABSENT),
                              pattern=COMMIT_SHA_PATTERN,
                              label="a lowercase hex git commit SHA")
-        self._require_string("source.commit_sha_short", block.get("commit_sha_short"),
-                             allow_null=True)
-        # branch is legitimately null on a detached HEAD.
-        self._require_string("source.branch", block.get("branch"), allow_null=True)
-        self._require_bool("source.detached_head", block.get("detached_head"),
+        self._require_string("source.commit_sha_short",
+                             block.get("commit_sha_short", ABSENT), allow_null=True)
+        # branch is legitimately null on a detached HEAD, but the key must exist.
+        self._require_string("source.branch", block.get("branch", ABSENT), allow_null=True)
+        self._require_bool("source.detached_head", block.get("detached_head", ABSENT),
                            allow_null=True)
-        self._require_bool("source.dirty", block.get("dirty"), allow_null=True)
-        self._require_int("source.dirty_entry_count", block.get("dirty_entry_count"),
+        self._require_bool("source.dirty", block.get("dirty", ABSENT), allow_null=True)
+        self._require_int("source.dirty_entry_count",
+                          block.get("dirty_entry_count", ABSENT),
                           minimum=0, allow_null=True)
-        self._require_string("source.runner_name", block.get("runner_name"))
-        self._require_string("source.runner_version", block.get("runner_version"),
+        self._require_string("source.runner_name", block.get("runner_name", ABSENT))
+        self._require_string("source.runner_version", block.get("runner_version", ABSENT),
                              pattern=SEMVER_PATTERN,
                              label="a semantic version (X.Y.Z)")
 
     def _validate_renderer_block(self):
-        block = self._require_object("renderer", self.evidence.get("renderer"))
+        block = self._require_object("renderer", self.evidence.get("renderer", ABSENT))
         if block is None:
             return
         self._validate_unknown("renderer.", block, self.ALLOWED_RENDERER)
-        self._require_enum("renderer.version", block.get("version"),
+        self._require_enum("renderer.version", block.get("version", ABSENT),
                            self.RENDERER_VERSIONS, allow_null=True)
-        self._require_number("renderer.exposure_ev", block.get("exposure_ev"),
+        self._require_number("renderer.exposure_ev", block.get("exposure_ev", ABSENT),
                              allow_null=True)
-        self._require_enum("renderer.camera_mode", block.get("camera_mode"),
+        self._require_enum("renderer.camera_mode", block.get("camera_mode", ABSENT),
                            self.CAMERA_MODES, allow_null=True)
-        self._require_enum("renderer.scenery_preset", block.get("scenery_preset"),
+        self._require_enum("renderer.scenery_preset", block.get("scenery_preset", ABSENT),
                            self.SCENERY_PRESETS, allow_null=True)
 
     def _validate_capture_block(self):
-        block = self._require_object("capture", self.evidence.get("capture"))
+        block = self._require_object("capture", self.evidence.get("capture", ABSENT))
         if block is None:
             return
         self._validate_unknown("capture.", block, self.ALLOWED_CAPTURE)
 
-        requested = self._require_object("capture.requested", block.get("requested"))
+        requested = self._require_object("capture.requested", block.get("requested", ABSENT))
         if requested is not None:
             self._validate_unknown("capture.requested.", requested,
                                    self.ALLOWED_CAPTURE_REQUESTED)
             # Requested values come from the manifest, so they are mandatory.
-            self._require_int("capture.requested.width", requested.get("width"),
+            self._require_int("capture.requested.width",
+                              requested.get("width", ABSENT),
                               minimum=self.MINIMUM_WIDTH, maximum=self.MAXIMUM_WIDTH)
-            self._require_int("capture.requested.height", requested.get("height"),
+            self._require_int("capture.requested.height",
+                              requested.get("height", ABSENT),
                               minimum=self.MINIMUM_HEIGHT, maximum=self.MAXIMUM_HEIGHT)
             self._require_int("capture.requested.frame_index",
-                              requested.get("frame_index"), minimum=0, allow_null=True)
+                              requested.get("frame_index", ABSENT),
+                              minimum=0, allow_null=True)
 
         # Actual values are runtime-supplied and stay null until a capture
         # backend exists. They are kept in a separate object from `requested`
         # so a divergence can never be overwritten or confused with intent.
-        actual = self._require_object("capture.actual", block.get("actual"))
+        actual = self._require_object("capture.actual", block.get("actual", ABSENT))
         if actual is not None:
             self._validate_unknown("capture.actual.", actual,
                                    self.ALLOWED_CAPTURE_ACTUAL)
             self._require_int("capture.actual.framebuffer_width",
-                              actual.get("framebuffer_width"), minimum=1,
+                              actual.get("framebuffer_width", ABSENT), minimum=1,
                               allow_null=True)
             self._require_int("capture.actual.framebuffer_height",
-                              actual.get("framebuffer_height"), minimum=1,
+                              actual.get("framebuffer_height", ABSENT), minimum=1,
                               allow_null=True)
             self._require_int("capture.actual.presentation_frame_index",
-                              actual.get("presentation_frame_index"), minimum=0,
+                              actual.get("presentation_frame_index", ABSENT), minimum=0,
                               allow_null=True)
 
-        self._require_enum("capture.format", block.get("format"), self.IMAGE_FORMATS)
+        self._require_enum("capture.format", block.get("format", ABSENT),
+                           self.IMAGE_FORMATS)
 
-        image = self._require_object("capture.image", block.get("image"))
+        image = self._require_object("capture.image", block.get("image", ABSENT))
         if image is not None:
             self._validate_unknown("capture.image.", image, self.ALLOWED_CAPTURE_IMAGE)
-            self._require_string("capture.image.path", image.get("path"), allow_null=True)
-            self._require_string("capture.image.sha256", image.get("sha256"),
+            self._require_string("capture.image.path", image.get("path", ABSENT),
+                                 allow_null=True)
+            self._require_string("capture.image.sha256", image.get("sha256", ABSENT),
                                  allow_null=True, pattern=SHA256_PATTERN,
                                  label="a lowercase hex SHA-256 of the image")
-            self._require_int("capture.image.byte_size", image.get("byte_size"),
+            self._require_int("capture.image.byte_size", image.get("byte_size", ABSENT),
                               minimum=1, allow_null=True)
 
     def _validate_execution_block(self):
-        block = self._require_object("execution", self.evidence.get("execution"))
+        block = self._require_object("execution", self.evidence.get("execution", ABSENT))
         if block is None:
             return
         self._validate_unknown("execution.", block, self.ALLOWED_EXECUTION)
-        self._require_bool("execution.capture_success", block.get("capture_success"))
-        # exit code is null when no process ran at all.
-        if block.get("process_exit_code") is not None:
-            if not is_real_integer(block["process_exit_code"]):
-                self.error(
-                    "execution.process_exit_code",
-                    f"must be an integer, got {type(block['process_exit_code']).__name__}")
-        self._require_string("execution.failure_reason", block.get("failure_reason"),
-                             allow_null=True)
+        self._require_bool("execution.capture_success",
+                           block.get("capture_success", ABSENT))
+        # Null when no process ran at all; the key must still be present. An
+        # exit code may legitimately be negative, so there is no lower bound.
+        self._require_int("execution.process_exit_code",
+                          block.get("process_exit_code", ABSENT),
+                          minimum=None, allow_null=True)
+        self._require_string("execution.failure_reason",
+                             block.get("failure_reason", ABSENT), allow_null=True)
 
     def _validate_hardware_block(self):
-        block = self._require_object("hardware", self.evidence.get("hardware"))
+        block = self._require_object("hardware", self.evidence.get("hardware", ABSENT))
         if block is None:
             return
         self._validate_unknown("hardware.", block, self.ALLOWED_HARDWARE)
-        # Every hardware leaf may be null: an unavailable adapter, backend or
-        # driver must be reported as absent, never guessed.
+        # Every hardware leaf may be null - an unavailable adapter, backend or
+        # driver must be reported as null, never guessed and never omitted.
         for field in ("operating_system", "os_release", "architecture",
                       "gpu_adapter_name", "graphics_backend", "driver_version",
                       "notes"):
-            self._require_string(f"hardware.{field}", block.get(field), allow_null=True)
+            self._require_string(f"hardware.{field}", block.get(field, ABSENT),
+                                 allow_null=True)
 
     def _validate_verdict_block(self):
-        block = self._require_object("verdict", self.evidence.get("verdict"))
+        block = self._require_object("verdict", self.evidence.get("verdict", ABSENT))
         if block is None:
             return
         self._validate_unknown("verdict.", block, self.ALLOWED_VERDICT)
-        if "visual_pass" in block and block["visual_pass"] is not None:
+        visual_pass = block.get("visual_pass", ABSENT)
+        if visual_pass is ABSENT:
+            self.error("verdict.visual_pass",
+                       f"required field is missing. {PRESENCE_POLICY} "
+                       "Omitting the verdict is not a way to leave it open: "
+                       "the key must be present with the value null.")
+        elif visual_pass is not None:
             self.error("verdict.visual_pass", VISUAL_PASS_LOCKED_REASON)
         self._require_string("verdict.visual_pass_reason",
-                             block.get("visual_pass_reason"), allow_null=True)
+                             block.get("visual_pass_reason", ABSENT), allow_null=True)
 
     # --- cross-field invariants ---------------------------------------------
 
