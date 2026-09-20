@@ -211,6 +211,15 @@ pub enum SurfaceError {
     Validation,
 }
 
+/// Whether one successful renderer call actually reached surface presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOutcome {
+    /// The final postprocess result was submitted and the surface was presented.
+    Presented,
+    /// Rendering was skipped because the presentation surface had zero extent.
+    SkippedZeroExtent,
+}
+
 /// GPU camera uniform matching the WGSL `CameraUniform` struct.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -2225,7 +2234,7 @@ impl WgpuRenderer {
 
     /// Render through the frozen V1 schedule. This path does not construct or
     /// consult the V2 graph and retains the legacy empty-feature device policy.
-    pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
+    pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
         self.render_scheduled(frame, None, None, None)
     }
 
@@ -2243,7 +2252,7 @@ impl WgpuRenderer {
         graph: &CompiledGraph,
         profiler: &mut Profiler,
         temporal: &mut TemporalState,
-    ) -> Result<(), SurfaceError> {
+    ) -> Result<RenderOutcome, SurfaceError> {
         self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal))
     }
 
@@ -2253,10 +2262,10 @@ impl WgpuRenderer {
         graph: Option<&CompiledGraph>,
         mut profiler: Option<&mut Profiler>,
         mut temporal: Option<&mut TemporalState>,
-    ) -> Result<(), SurfaceError> {
+    ) -> Result<RenderOutcome, SurfaceError> {
         self.check_asynchronous_gpu_error()?;
         if !self.device_context.is_surface_configured() {
-            return Ok(());
+            return Ok(RenderOutcome::SkippedZeroExtent);
         }
 
         let pass_order = graph.map_or(
@@ -2920,7 +2929,8 @@ impl WgpuRenderer {
         if let Some(profiler) = profiler {
             profiler.finish_frame();
         }
-        self.check_asynchronous_gpu_error()
+        self.check_asynchronous_gpu_error()?;
+        Ok(RenderOutcome::Presented)
     }
 
     fn check_asynchronous_gpu_error(&self) -> Result<(), SurfaceError> {

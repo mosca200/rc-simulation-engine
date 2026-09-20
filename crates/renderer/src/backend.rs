@@ -23,8 +23,8 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderTerrainMode, RendererError,
-    SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer,
+    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderOutcome, RenderTerrainMode,
+    RendererError, SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer,
     renderer_v2::RendererV2Shell, scenery::SceneryPreset,
 };
 
@@ -180,7 +180,7 @@ impl DesktopRenderer {
     ///
     /// Propagates the backend's [`SurfaceError`] unchanged so the application's
     /// existing surface-event policy applies identically to V1 and V2.
-    pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
+    pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
         match &mut self.backend {
             Backend::V1(inner) => inner.render(frame),
             Backend::V2(inner) => inner.render(frame),

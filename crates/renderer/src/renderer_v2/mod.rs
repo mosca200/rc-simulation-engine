@@ -20,8 +20,9 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderTerrainMode, RendererError,
-    SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
+    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderOutcome, RenderTerrainMode,
+    RendererError, SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer,
+    scenery::SceneryPreset,
 };
 use crate::{profiling::Profiler, render_graph::CompiledGraph};
 use temporal::{InvalidationReason, TemporalState};
@@ -105,7 +106,7 @@ impl RendererV2Shell {
     /// Propagates the V1 [`SurfaceError`] unchanged so the application's
     /// surface-event policy (lost / outdated / timeout / out-of-memory /
     /// validation) behaves identically for V1 and V2.
-    pub fn render(&mut self, frame: &RenderFrame) -> Result<(), SurfaceError> {
+    pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
         self.inner
             .render_v2(frame, &self.graph, &mut self.profiler, &mut self.temporal)
     }
