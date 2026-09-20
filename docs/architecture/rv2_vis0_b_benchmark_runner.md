@@ -163,9 +163,9 @@ Recorded in `run.json` with `status: "unsupported"`, `runtime_flag: null`,
 
 | Manifest field | Status | Evidence |
 | --- | --- | --- |
-| `resolution.width`, `resolution.height` | **unsupported** | No CLI flag sets the client framebuffer size. The window is created with a hardcoded `with_inner_size(LogicalSize::new(1_280.0, 720.0))` in `RenderApplication::resumed`. |
-| `warmup` | **unsupported** | No CLI flag controls warmup frames; the render loop has no frame counter exposed. |
-| `capture.frame` | **unsupported** | No CLI flag selects a capture frame; no image is written at all. |
+| `resolution.width`, `resolution.height` | **cli** | Mapped to `--render-width` / `--render-height` (VIS0-C1 runtime control). The runtime verifies the physical framebuffer extent fail-closed. |
+| `warmup` | **unsupported** | No CLI flag controls warmup frames; while `--exit-after-frame` bounds the process, warmup/capture scheduling end-to-end is incomplete. |
+| `capture.frame` | **cli** | Mapped to `--exit-after-frame` as process lifecycle control (frame-bounded exit), NOT as capture enforcement. No image is captured. |
 | `capture.quality` | **unsupported** | JPEG quality only matters to an encoder that does not exist yet. |
 
 ### Metadata-only fields
@@ -258,19 +258,19 @@ image or metric symbol is referenced.
 
 ## Resolution enforcement status
 
-**Unsupported — recorded, not enforced.**
+**Supported — enforced after VIS0-C1 runtime control convergence.**
 
 ```json
 "resolution_enforcement": {
-  "status": "unsupported",
-  "enforced": false,
+  "status": "supported",
+  "enforced": true,
   "requested": {"width": 1920, "height": 1080},
-  "reason": "resolution enforcement: unsupported. `rcsim-app` has no CLI flag ..."
+  "reason": "resolution enforcement: supported via --render-width/--render-height CLI ..."
 }
 ```
 
-Any consumer reading `run.json` can see that the requested resolution was *not*
-applied. Nothing in the runner claims otherwise.
+Manifest resolution is now mapped to `--render-width` and `--render-height`,
+emitted by the runner, and enforced by the runtime fail-closed.
 
 ## Provenance (`run.json`)
 
@@ -421,24 +421,21 @@ resolution/capture.
 ## Blockers for VIS0-C
 
 Recorded, not implemented. Each one needs a runtime or contract change that is
-out of VIS0-B scope.
+out of VIS0-C1 scope.
 
 1. **No capture backend.** `rcsim-app` cannot write a lossless framebuffer. VIS0-C
    needs a real capture CLI (for example `--capture-out PATH --capture-format
    png`) before any golden image can exist.
-2. **No headless mode / auto-exit.** The render loop is an interactive winit
-   window with `ControlFlow::Poll` and no frame limit. Unattended capture needs a
-   headless or exit-after-N-frames mode.
-3. **No resolution control.** The window inner size is hardcoded to
-   `1280x720` logical. A golden at `1920x1080` is impossible until the framebuffer
-   size is CLI-controllable.
-4. **No warmup / frame selection.** `warmup` and `capture.frame` cannot be
-   honoured, so capture timing is not yet reproducible.
-5. **Contract gap: aircraft state is not fully manifest-controlled.**
-   `--altitude-m` and `--airspeed-mps` materially change the simulated aircraft
-   state but have no manifest field, so the runner leaves them at runtime
-   defaults (`30.0` m and `18.0` m/s). Two runs of the same manifest are
-   reproducible only because those defaults are stable. Adding them to the v1
-   manifest is a VIS0-A schema decision, not a runner one.
+2. ~~**No headless mode / auto-exit.**~~ *Resolved by VIS0-C1:* `--exit-after-frame`
+   provides deterministic frame-bounded exit.
+3. ~~**No resolution control.**~~ *Resolved by VIS0-C1:* `--render-width` and
+   `--render-height` set the logical window inner size.
+4. **No warmup / frame selection for capture.** `warmup` cannot be honoured as a
+   capture scheduling concept, and `capture.frame` is mapped only as lifecycle
+   control (`--exit-after-frame`), not as a frame to capture. Capture timing is
+   not yet reproducible.
+5. ~~**Contract gap: aircraft state is not fully manifest-controlled.**~~
+   *Resolved by VIS0-C1B:* `aircraft.altitude_m` and `aircraft.airspeed_mps` are
+   now manifest fields mapped to `--altitude-m` / `--airspeed-mps`.
 6. **No approved visual metric.** Thresholds are undefined in VIS0-A, so no
    automated PASS/FAIL can exist yet.

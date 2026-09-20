@@ -117,6 +117,9 @@ KNOWN_RENDER_FLAGS = (
     "--chase-distance-m",
     "--chase-height-m",
     "--pilot-position",
+    "--render-width",
+    "--render-height",
+    "--exit-after-frame",
 )
 
 # Flags the runner may actually emit. A subset of KNOWN_RENDER_FLAGS: the
@@ -141,6 +144,9 @@ EMITTABLE_FLAGS = (
     "--altitude-m",
     "--airspeed-mps",
     "--start-on-ground",
+    "--render-width",
+    "--render-height",
+    "--exit-after-frame",
 )
 
 # --- Runtime capability gaps (verified against the runtime source) -----------
@@ -157,24 +163,26 @@ CAPTURE_UNAVAILABLE_REASON = (
 )
 
 RESOLUTION_UNSUPPORTED_REASON = (
-    "resolution enforcement: unsupported. `rcsim-app` has no CLI flag for the "
-    "client framebuffer size; the window is created with a hardcoded "
-    "`with_inner_size(LogicalSize::new(1_280.0, 720.0))` in "
-    "RenderApplication::resumed (crates/app/src/render_app.rs). Manifest "
-    "resolution is therefore recorded as metadata only and is NOT enforced; "
-    "enforcement needs a future capture backend (VIS0-C or later)."
+    "resolution enforcement: supported via --render-width/--render-height CLI "
+    "(VIS0-C1 runtime control). These flags set the logical window inner size; "
+    "the runtime verifies the physical framebuffer extent fail-closed before "
+    "initialising the renderer. The runner maps resolution.width → "
+    "--render-width and resolution.height → --render-height."
 )
 
 WARMUP_UNSUPPORTED_REASON = (
     "warmup frame count: unsupported. `rcsim-app` has no CLI flag for warmup "
-    "frames or for capture frame selection, and the render loop has no frame "
-    "limit or auto-exit. Both depend on a future capture backend."
+    "frames and no capture backend; while --exit-after-frame can bound the "
+    "process, warmup/capture scheduling end-to-end is incomplete without a "
+    "real capture backend (VIS0-C or later)."
 )
 
 CAPTURE_FRAME_UNSUPPORTED_REASON = (
-    "capture frame selection: unsupported. No `rcsim-app` CLI flag selects a "
-    "frame, and no image is written at all. Depends on a future capture "
-    "backend."
+    "capture frame selection: unsupported for image capture. No `rcsim-app` "
+    "CLI flag selects a frame for framebuffer readback; no image is written. "
+    "capture.frame is mapped to --exit-after-frame as process lifecycle "
+    "control only (deterministic frame-bounded exit), NOT as capture "
+    "enforcement."
 )
 
 CAPTURE_METADATA_ONLY_REASON = (
@@ -184,10 +192,11 @@ CAPTURE_METADATA_ONLY_REASON = (
 )
 
 NO_AUTO_EXIT_REASON = (
-    "`rcsim-app render` runs an interactive winit event loop "
-    "(ControlFlow::Poll) that exits only on Escape or window close. There is "
-    "no headless mode and no frame limit, so a real execution is expected to "
-    "end in a timeout unless a human closes the window."
+    "process auto-exit: supported via --exit-after-frame CLI (VIS0-C1 runtime "
+    "control). The render loop terminates cleanly after presentation frame N "
+    "(zero-based) has been presented. When capture.frame is present in the "
+    "manifest, the runner maps it to --exit-after-frame for deterministic "
+    "frame-bounded execution."
 )
 
 # --- Capture evidence contract (VIS0-C1B) ------------------------------------
@@ -303,8 +312,8 @@ FIELD_POLICY = {
     "aircraft.altitude_m": FieldPolicy(FIELD_STATUS_CLI, "--altitude-m"),
     "aircraft.airspeed_mps": FieldPolicy(FIELD_STATUS_CLI, "--airspeed-mps"),
     "aircraft.start_on_ground": FieldPolicy(FIELD_STATUS_CLI, "--start-on-ground"),
-    "resolution.width": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=RESOLUTION_UNSUPPORTED_REASON),
-    "resolution.height": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=RESOLUTION_UNSUPPORTED_REASON),
+    "resolution.width": FieldPolicy(FIELD_STATUS_CLI, "--render-width"),
+    "resolution.height": FieldPolicy(FIELD_STATUS_CLI, "--render-height"),
     "warmup": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=WARMUP_UNSUPPORTED_REASON),
     "capture.filename": FieldPolicy(
         FIELD_STATUS_METADATA_ONLY, reason=CAPTURE_METADATA_ONLY_REASON
@@ -313,10 +322,17 @@ FIELD_POLICY = {
         FIELD_STATUS_METADATA_ONLY, reason=CAPTURE_METADATA_ONLY_REASON
     ),
     "capture.frame": FieldPolicy(
-        FIELD_STATUS_UNSUPPORTED, reason=CAPTURE_FRAME_UNSUPPORTED_REASON
+        FIELD_STATUS_CLI, "--exit-after-frame",
+        reason=(
+            "capture.frame → --exit-after-frame: process lifecycle control "
+            "(frame-bounded exit), not capture enforcement. The runtime can "
+            "terminate after presenting frame N, but no image is captured."
+        ),
     ),
     "capture.quality": FieldPolicy(
-        FIELD_STATUS_UNSUPPORTED, reason=CAPTURE_FRAME_UNSUPPORTED_REASON
+        FIELD_STATUS_UNSUPPORTED,
+        reason="capture quality: unsupported. JPEG quality only matters to an "
+        "encoder that does not exist yet.",
     ),
     "tags": FieldPolicy(
         FIELD_STATUS_METADATA_ONLY, reason="categorisation; recorded in run.json only"
@@ -609,6 +625,9 @@ def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any):
         "aircraft.throttle",
         "aircraft.altitude_m",
         "aircraft.airspeed_mps",
+        "resolution.width",
+        "resolution.height",
+        "capture.frame",
     ):
         return format_number(value), True, None
 
@@ -671,11 +690,11 @@ def build_environment_metadata() -> dict:
 
 
 def build_runtime_capabilities(manifest: dict) -> dict:
-    """Declare what the runtime can and cannot do for VIS0 today.
+    """Declare what the runtime can and cannot do for post-VIS0-C1 convergence.
 
-    These states are verified against the runtime source at the VIS0-B base
-    commit and are surfaced verbatim in plan.json and run.json so no consumer
-    can mistake an unenforced value for an enforced one.
+    Updated after VIS0-C1 runtime control (--render-width, --render-height,
+    --exit-after-frame) was integrated. Resolution and process auto-exit are
+    now supported; warmup and capture remain unsupported.
     """
     resolution = manifest.get("resolution") or {}
     capture = manifest.get("capture") or {}
@@ -688,8 +707,8 @@ def build_runtime_capabilities(manifest: dict) -> dict:
             "expected_format": capture.get("format"),
         },
         "resolution_enforcement": {
-            "status": "unsupported",
-            "enforced": False,
+            "status": "supported",
+            "enforced": True,
             "requested": {
                 "width": resolution.get("width"),
                 "height": resolution.get("height"),
@@ -703,7 +722,7 @@ def build_runtime_capabilities(manifest: dict) -> dict:
             "reason": WARMUP_UNSUPPORTED_REASON,
         },
         "process_auto_exit": {
-            "status": "unsupported",
+            "status": "supported",
             "reason": NO_AUTO_EXIT_REASON,
         },
     }

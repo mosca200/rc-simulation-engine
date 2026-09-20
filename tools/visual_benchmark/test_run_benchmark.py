@@ -422,11 +422,13 @@ class TestNoInventedFlags(RunnerTestCase):
             self.build_plan(manifest)
         self.assertIn("renderer.msaa_samples", caught.exception.message)
 
-    def test_no_resolution_or_capture_flag_is_ever_emitted(self):
+    def test_no_capture_or_warmup_flag_is_ever_emitted(self):
         plan = self.build_plan()
         argv = " ".join(plan["command_argv"])
-        for forbidden in ("--width", "--height", "--resolution", "--capture",
-                          "--warmup", "--frame", "--screenshot", "--output"):
+        # Resolution is now emitted via --render-width/--render-height (VIS0-C1).
+        # --exit-after-frame is emitted for process lifecycle control.
+        # Capture and warmup-specific flags still must not appear.
+        for forbidden in ("--capture", "--warmup", "--screenshot", "--output"):
             self.assertNotIn(forbidden, argv)
 
     def _chase_manifest(self):
@@ -992,7 +994,7 @@ class TestVisualVerdictPolicy(RunnerTestCase):
 
 
 class TestRuntimeCapabilities(RunnerTestCase):
-    """Q. unsupported resolution/capture are explicitly represented."""
+    """Q. post-convergence capabilities reflect VIS0-C1 runtime control."""
 
     def test_capture_backend_is_declared_unavailable(self):
         capture = self.build_plan()["runtime_capabilities"]["capture_backend"]
@@ -1000,31 +1002,44 @@ class TestRuntimeCapabilities(RunnerTestCase):
         self.assertFalse(capture["produces_image"])
         self.assertIn("CAPTURE BACKEND NOT YET AVAILABLE", capture["reason"])
 
-    def test_resolution_enforcement_is_declared_unsupported(self):
+    def test_resolution_enforcement_is_declared_supported(self):
         capability = self.build_plan()["runtime_capabilities"]["resolution_enforcement"]
-        self.assertEqual(capability["status"], "unsupported")
-        self.assertFalse(capability["enforced"])
+        self.assertEqual(capability["status"], "supported")
+        self.assertTrue(capability["enforced"])
         self.assertEqual(capability["requested"], {"width": 1920, "height": 1080})
-        self.assertIn("unsupported", capability["reason"])
+        self.assertIn("--render-width", capability["reason"])
 
     def test_warmup_is_declared_unsupported(self):
         capability = self.build_plan()["runtime_capabilities"]["warmup_frames"]
         self.assertEqual(capability["status"], "unsupported")
         self.assertEqual(capability["requested"], 10)
+        self.assertIn("incomplete", capability["reason"])
 
-    def test_no_auto_exit_is_declared(self):
+    def test_process_auto_exit_is_declared_supported(self):
         capability = self.build_plan()["runtime_capabilities"]["process_auto_exit"]
-        self.assertEqual(capability["status"], "unsupported")
-        self.assertIn("interactive winit event loop", capability["reason"])
+        self.assertEqual(capability["status"], "supported")
+        self.assertIn("--exit-after-frame", capability["reason"])
 
-    def test_unsupported_fields_are_labelled_in_field_mapping(self):
+    def test_resolution_fields_are_mapped_as_cli(self):
         mapping = {m["manifest_field"]: m for m in self.build_plan()["field_mapping"]}
-        for field_name in ("resolution.width", "resolution.height", "warmup",
-                           "capture.frame"):
-            self.assertEqual(mapping[field_name]["status"], "unsupported", field_name)
-            self.assertIsNone(mapping[field_name]["runtime_flag"], field_name)
-            self.assertFalse(mapping[field_name]["emitted"], field_name)
-            self.assertTrue(mapping[field_name]["reason"], field_name)
+        for field_name in ("resolution.width", "resolution.height"):
+            self.assertEqual(mapping[field_name]["status"], "cli", field_name)
+            self.assertIsNotNone(mapping[field_name]["runtime_flag"], field_name)
+            self.assertTrue(mapping[field_name]["emitted"], field_name)
+
+    def test_capture_frame_is_mapped_to_exit_after_frame(self):
+        mapping = {m["manifest_field"]: m for m in self.build_plan()["field_mapping"]}
+        field = mapping["capture.frame"]
+        self.assertEqual(field["status"], "cli")
+        self.assertEqual(field["runtime_flag"], "--exit-after-frame")
+        self.assertTrue(field["emitted"])
+        self.assertIn("lifecycle", field["reason"])
+
+    def test_warmup_stays_unsupported(self):
+        mapping = {m["manifest_field"]: m for m in self.build_plan()["field_mapping"]}
+        field = mapping["warmup"]
+        self.assertEqual(field["status"], "unsupported")
+        self.assertFalse(field["emitted"])
 
     def test_metadata_only_fields_are_labelled(self):
         mapping = {m["manifest_field"]: m for m in self.build_plan()["field_mapping"]}
@@ -1051,7 +1066,7 @@ class TestRuntimeCapabilities(RunnerTestCase):
                      "stderr_path": None, "artifacts_written": []}
         capabilities = rb.build_run_metadata(plan, execution)["capabilities"]
         self.assertEqual(capabilities["capture_backend"]["status"], "unavailable")
-        self.assertEqual(capabilities["resolution_enforcement"]["status"], "unsupported")
+        self.assertEqual(capabilities["resolution_enforcement"]["status"], "supported")
 
 
 class TestCliSurface(RunnerTestCase):
@@ -1096,7 +1111,7 @@ class TestCliSurface(RunnerTestCase):
             ["--manifest", str(path), "--dry-run", "--output-dir", str(self.tmp / "out")]
         )
         for fragment in ("field mapping", "--pilot-position", "CAPTURE BACKEND NOT YET AVAILABLE",
-                         "UNSUPPORTED", "visual_pass"):
+                         "SUPPORTED", "visual_pass"):
             self.assertIn(fragment, out)
 
     def test_manifest_is_required(self):
@@ -1432,16 +1447,133 @@ class TestCaptureEvidenceContract(RunnerTestCase):
         capabilities = metadata["capabilities"]
         self.assertEqual(capabilities["capture_backend"]["status"], "unavailable")
         self.assertFalse(capabilities["capture_backend"]["produces_image"])
-        self.assertEqual(capabilities["resolution_enforcement"]["status"], "unsupported")
-        self.assertFalse(capabilities["resolution_enforcement"]["enforced"])
+        self.assertEqual(capabilities["resolution_enforcement"]["status"], "supported")
+        self.assertTrue(capabilities["resolution_enforcement"]["enforced"])
         self.assertEqual(capabilities["warmup_frames"]["status"], "unsupported")
         self.assertFalse(capabilities["warmup_frames"]["enforced"])
-        self.assertEqual(capabilities["process_auto_exit"]["status"], "unsupported")
+        self.assertEqual(capabilities["process_auto_exit"]["status"], "supported")
 
     def test_artifacts_still_report_no_capture(self):
         _, metadata = self.metadata()
         self.assertIsNone(metadata["artifacts"]["capture"])
         self.assertTrue(metadata["artifacts"]["capture_reason"])
+
+
+class TestConvergenceBehavior(RunnerTestCase):
+    """Task 4: combined Line-1 + Line-2 convergence behavior."""
+
+    def test_resolution_produces_correct_argv_flags(self):
+        plan = self.build_plan()
+        argv = plan["command_argv"]
+        self.assertIn("--render-width", argv)
+        self.assertIn("--render-height", argv)
+        width_idx = argv.index("--render-width")
+        height_idx = argv.index("--render-height")
+        self.assertEqual(argv[width_idx + 1], "1920")
+        self.assertEqual(argv[height_idx + 1], "1080")
+
+    def test_resolution_flags_are_adjacent_and_emitted_together(self):
+        plan = self.build_plan()
+        argv = plan["command_argv"]
+        width_idx = argv.index("--render-width")
+        height_idx = argv.index("--render-height")
+        # Both must be present; order is determined by CANONICAL_FIELD_ORDER.
+        self.assertIsNotNone(width_idx)
+        self.assertIsNotNone(height_idx)
+        self.assertEqual(argv[width_idx + 1], "1920")
+        self.assertEqual(argv[height_idx + 1], "1080")
+
+    def test_capture_frame_produces_exit_after_frame(self):
+        plan = self.build_plan()
+        argv = plan["command_argv"]
+        self.assertIn("--exit-after-frame", argv)
+        idx = argv.index("--exit-after-frame")
+        self.assertEqual(argv[idx + 1], "10")
+
+    def test_process_auto_exit_is_supported(self):
+        capabilities = self.build_plan()["runtime_capabilities"]
+        self.assertEqual(capabilities["process_auto_exit"]["status"], "supported")
+
+    def test_resolution_enforcement_is_supported(self):
+        capabilities = self.build_plan()["runtime_capabilities"]
+        self.assertEqual(capabilities["resolution_enforcement"]["status"], "supported")
+        self.assertTrue(capabilities["resolution_enforcement"]["enforced"])
+
+    def test_capture_backend_stays_unavailable(self):
+        capabilities = self.build_plan()["runtime_capabilities"]
+        self.assertEqual(capabilities["capture_backend"]["status"], "unavailable")
+        self.assertFalse(capabilities["capture_backend"]["produces_image"])
+
+    def test_capture_success_is_false(self):
+        plan = self.build_plan()
+        evidence = rb.build_capture_evidence_skeleton(plan, {})
+        self.assertFalse(evidence["execution"]["capture_success"])
+
+    def test_actual_framebuffer_dimensions_are_null(self):
+        plan = self.build_plan()
+        evidence = rb.build_capture_evidence_skeleton(plan, {})
+        self.assertIsNone(evidence["capture"]["actual"]["framebuffer_width"])
+        self.assertIsNone(evidence["capture"]["actual"]["framebuffer_height"])
+
+    def test_actual_presentation_frame_index_is_null(self):
+        plan = self.build_plan()
+        evidence = rb.build_capture_evidence_skeleton(plan, {})
+        self.assertIsNone(evidence["capture"]["actual"]["presentation_frame_index"])
+
+    def test_visual_pass_is_null(self):
+        plan = self.build_plan()
+        evidence = rb.build_capture_evidence_skeleton(plan, {})
+        self.assertIsNone(evidence["verdict"]["visual_pass"])
+
+    def test_warmup_is_not_declared_end_to_end_supported(self):
+        capabilities = self.build_plan()["runtime_capabilities"]
+        self.assertEqual(capabilities["warmup_frames"]["status"], "unsupported")
+        self.assertIn("incomplete", capabilities["warmup_frames"]["reason"])
+
+    def test_manifest_1_1_0_validates(self):
+        validator = rb.ManifestValidator(base_manifest(), rb.REPO_ROOT)
+        validator.validate()
+        self.assertEqual(len(validator.errors), 0)
+
+    def test_manifest_1_0_0_is_rejected(self):
+        manifest = base_manifest()
+        manifest["schema_version"] = "1.0.0"
+        validator = rb.ManifestValidator(manifest, rb.REPO_ROOT)
+        validator.validate()
+        self.assertGreater(len(validator.errors), 0)
+        self.assertTrue(any("1.0.0" in str(e) for e in validator.errors))
+
+    def test_airborne_manifest_emits_altitude_and_airspeed(self):
+        manifest = airborne_manifest()
+        plan = self.build_plan(manifest)
+        argv = " ".join(plan["command_argv"])
+        self.assertIn("--altitude-m", argv)
+        self.assertIn("--airspeed-mps", argv)
+
+    def test_ground_manifest_does_not_emit_altitude_or_airspeed(self):
+        manifest = base_manifest()
+        plan = self.build_plan(manifest)
+        argv = " ".join(plan["command_argv"])
+        self.assertNotIn("--altitude-m", argv)
+        self.assertNotIn("--airspeed-mps", argv)
+
+    def test_no_invented_capability(self):
+        capabilities = self.build_plan()["runtime_capabilities"]
+        known_keys = {"capture_backend", "resolution_enforcement", "warmup_frames", "process_auto_exit"}
+        self.assertEqual(set(capabilities.keys()), known_keys)
+
+    def test_capture_image_fields_are_null(self):
+        plan = self.build_plan()
+        evidence = rb.build_capture_evidence_skeleton(plan, {})
+        self.assertIsNone(evidence["capture"]["image"]["path"])
+        self.assertIsNone(evidence["capture"]["image"]["sha256"])
+        self.assertIsNone(evidence["capture"]["image"]["byte_size"])
+
+    def test_capture_evidence_contract_stays_not_produced(self):
+        plan = self.build_plan()
+        contract = plan["capture_evidence_contract"]
+        self.assertEqual(contract["status"], "not-produced")
+        self.assertFalse(contract["produced"])
 
 
 if __name__ == "__main__":

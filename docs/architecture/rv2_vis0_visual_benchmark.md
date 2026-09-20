@@ -168,7 +168,8 @@ Regole che li separano:
 
 1. **requested e actual restano distinti.** Nel evidence vivono in due oggetti
    separati (`capture.requested` e `capture.actual`): una divergenza — oggi
-   attesa, perché la finestra è hardcoded a 1280x720 — deve restare leggibile e
+   attesa, perché il capture backend non esiste ancora e il runtime non
+   restituisce l'estensione reale del framebuffer — deve restare leggibile e
    non può essere sovrascritta dall'intento.
 2. **Il capture evidence NON è una approval.** `execution.capture_success`
    dichiara solo che un'immagine è stata prodotta; `verdict.visual_pass` resta

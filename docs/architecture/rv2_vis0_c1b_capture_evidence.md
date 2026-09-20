@@ -418,9 +418,9 @@ Il runner **non** dichiara che il capture sia disponibile. Le capability
 continuano a riportare, invariate:
 
 - `capture_backend` = `unavailable`, `produces_image: false`;
-- `resolution_enforcement` = `unsupported`, `enforced: false`;
+- `resolution_enforcement` = `supported`, `enforced: true` (VIS0-C1 convergence);
 - `warmup_frames` = `unsupported`, `enforced: false`;
-- `process_auto_exit` = `unsupported`.
+- `process_auto_exit` = `supported` (VIS0-C1 convergence).
 
 `artifacts.capture` resta `null` con la propria `capture_reason`, e
 `verdict.visual_pass` resta `null`. Lo skeleton non è un artefatto scritto su
