@@ -21,9 +21,12 @@ already correct, no redundant resize is requested. Otherwise a synchronous
 `request_inner_size` result is checked immediately. An asynchronous result
 enters a pending state and is verified only by the following
 `WindowEvent::Resized`; rendering does not begin while verification is pending.
-DPI changes follow the same pending policy. A mismatched resize fails closed,
-and the resize handler never issues another resize request, avoiding
-request/event loops.
+`ScaleFactorChanged` is different: its `InnerSizeWriter` applies the requested
+size synchronously inside that event. After a successful writer call, the
+runtime verifies the window's current physical extent at `about_to_wait`; a
+matching `Resized` may complete that verification earlier, but is not required.
+A mismatch fails closed, and neither verification path issues another resize
+request, avoiding request/event loops and permanent pending states.
 `DeviceContext` continues to configure the surface from the window's actual
 physical inner size, so the requested value reaches both V1 and V2 surface
 configuration.

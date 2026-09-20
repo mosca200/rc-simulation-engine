@@ -121,6 +121,7 @@ enum RenderResolutionState {
     Disabled,
     Requested(RenderResolution),
     Pending(RenderResolution),
+    VerifyCurrent(RenderResolution),
     Verified(RenderResolution),
 }
 
@@ -149,6 +150,7 @@ impl RenderResolutionState {
             Self::Disabled => None,
             Self::Requested(resolution)
             | Self::Pending(resolution)
+            | Self::VerifyCurrent(resolution)
             | Self::Verified(resolution) => Some(resolution),
         }
     }
@@ -159,6 +161,10 @@ impl RenderResolutionState {
 
     const fn request_is_needed(self) -> bool {
         matches!(self, Self::Requested(_))
+    }
+
+    const fn current_extent_verification_is_needed(self) -> bool {
+        matches!(self, Self::VerifyCurrent(_))
     }
 
     fn begin_request(&mut self) {
@@ -187,16 +193,33 @@ impl RenderResolutionState {
         }
     }
 
-    fn await_resize(&mut self) {
+    fn await_current_extent_verification(&mut self) {
         if let Some(requested) = self.requested() {
-            *self = Self::Pending(requested);
+            *self = Self::VerifyCurrent(requested);
         }
+    }
+
+    fn verify_current_extent(
+        &mut self,
+        actual: RenderResolution,
+    ) -> Result<(), RenderResolutionMismatch> {
+        let requested = match *self {
+            Self::VerifyCurrent(requested) => requested,
+            _ => return Ok(()),
+        };
+        if actual != requested {
+            return Err(RenderResolutionMismatch { requested, actual });
+        }
+        *self = Self::Verified(requested);
+        Ok(())
     }
 
     fn observe_resize(&mut self, actual: RenderResolution) -> Result<(), RenderResolutionMismatch> {
         let requested = match *self {
             Self::Disabled | Self::Requested(_) => return Ok(()),
-            Self::Pending(requested) | Self::Verified(requested) => requested,
+            Self::Pending(requested)
+            | Self::VerifyCurrent(requested)
+            | Self::Verified(requested) => requested,
         };
         if actual != requested {
             return Err(RenderResolutionMismatch { requested, actual });
@@ -1406,6 +1429,28 @@ impl RenderApplication {
         }
     }
 
+    fn verify_current_resolution(&mut self, event_loop: &ActiveEventLoop) {
+        debug_assert!(
+            self.run_control
+                .resolution
+                .current_extent_verification_is_needed()
+        );
+        let actual = self
+            .window
+            .as_ref()
+            .expect("the window exists while its physical extent is verified")
+            .inner_size();
+        if let Err(mismatch) = self
+            .run_control
+            .resolution
+            .verify_current_extent(RenderResolution::new(actual.width, actual.height))
+        {
+            self.fail_resolution_mismatch(event_loop, mismatch);
+            return;
+        }
+        self.initialize_rendering_after_resolution_verified(event_loop);
+    }
+
     fn initialize_rendering_after_resolution_verified(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;
@@ -1745,7 +1790,10 @@ impl ApplicationHandler for RenderApplication {
                     match inner_size_writer
                         .request_inner_size(PhysicalSize::new(requested.width, requested.height))
                     {
-                        Ok(()) => self.run_control.resolution.await_resize(),
+                        Ok(()) => self
+                            .run_control
+                            .resolution
+                            .await_current_extent_verification(),
                         Err(error) => self.fail(
                             event_loop,
                             RenderRuntimeError::RequestedRenderSizeUpdate(error),
@@ -1774,6 +1822,13 @@ impl ApplicationHandler for RenderApplication {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .run_control
+            .resolution
+            .current_extent_verification_is_needed()
+        {
+            self.verify_current_resolution(event_loop);
+        }
         if self.run_control.resolution.request_is_needed() {
             self.request_configured_resolution(event_loop);
         }
@@ -2218,10 +2273,30 @@ mod tests {
         state.observe_resize(requested).unwrap();
         assert_eq!(state, RenderResolutionState::Verified(requested));
         assert!(state.is_ready());
+    }
 
-        state.await_resize();
-        assert_eq!(state, RenderResolutionState::Pending(requested));
+    #[test]
+    fn scale_factor_update_is_verified_without_a_resized_event() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::Verified(requested);
+        state.await_current_extent_verification();
+        assert_eq!(state, RenderResolutionState::VerifyCurrent(requested));
         assert!(!state.is_ready());
+        assert!(!state.request_is_needed());
+
+        state.verify_current_extent(requested).unwrap();
+        assert_eq!(state, RenderResolutionState::Verified(requested));
+        assert!(state.is_ready());
+        assert!(!state.request_is_needed());
+    }
+
+    #[test]
+    fn scale_factor_update_can_be_verified_by_a_matching_resized_event() {
+        let requested = RenderResolution::new(1_920, 1_080);
+        let mut state = RenderResolutionState::Verified(requested);
+        state.await_current_extent_verification();
+        state.observe_resize(requested).unwrap();
+        assert_eq!(state, RenderResolutionState::Verified(requested));
     }
 
     #[test]
@@ -2248,6 +2323,21 @@ mod tests {
             })
         );
         assert_eq!(asynchronous, RenderResolutionState::Pending(requested));
+
+        let mut scale_factor = RenderResolutionState::Verified(requested);
+        scale_factor.await_current_extent_verification();
+        assert_eq!(
+            scale_factor.verify_current_extent(wrong),
+            Err(RenderResolutionMismatch {
+                requested,
+                actual: wrong,
+            })
+        );
+        assert_eq!(
+            scale_factor,
+            RenderResolutionState::VerifyCurrent(requested)
+        );
+        assert!(!scale_factor.request_is_needed());
     }
 
     #[test]
@@ -2272,6 +2362,8 @@ mod tests {
             Ok(RenderResolutionRequestOutcome::Pending)
         );
         control.resolution.observe_resize(requested).unwrap();
+        control.resolution.await_current_extent_verification();
+        control.resolution.verify_current_extent(requested).unwrap();
 
         assert_eq!(control.pending_frame(), frame_zero);
         assert_eq!(control.next_presentation_frame, 0);
