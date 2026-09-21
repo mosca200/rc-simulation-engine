@@ -14,6 +14,7 @@
 mod accumulator;
 mod backend;
 mod camera;
+mod capture;
 mod device;
 mod glb;
 mod gpu;
@@ -39,6 +40,7 @@ pub use camera::{
     CameraConfig, CameraMode, ChaseCamera, ChaseCameraConfig, PilotCamera, RENDER_WORLD_UP,
     exponential_fog_factor, sun_alignment, view_elevation,
 };
+pub use capture::{CaptureRenderOutcome, CapturedFrame, FrameCaptureError};
 pub use glb::{
     GlbAsset, GlbLoadError, GlbMesh, GlbSceneInstance, PrimitiveMaterial, RenderPrimitive,
     load_glb_asset, load_glb_mesh,

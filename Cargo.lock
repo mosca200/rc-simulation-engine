@@ -2112,6 +2112,7 @@ name = "rcsim-app"
 version = "0.1.0"
 dependencies = [
  "aircraft",
+ "image",
  "model",
  "platform",
  "pollster",

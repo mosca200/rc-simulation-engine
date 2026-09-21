@@ -20,9 +20,9 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderOutcome, RenderTerrainMode,
-    RendererError, SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer,
-    scenery::SceneryPreset,
+    CameraConfig, CaptureRenderOutcome, ExposureError, FrameCaptureError, PresentationAsset,
+    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, SurfaceError, TerrainDebugMode,
+    VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
 };
 use crate::{profiling::Profiler, render_graph::CompiledGraph};
 use temporal::{InvalidationReason, TemporalState};
@@ -109,6 +109,14 @@ impl RendererV2Shell {
     pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
         self.inner
             .render_v2(frame, &self.graph, &mut self.profiler, &mut self.temporal)
+    }
+
+    pub fn render_and_capture(
+        &mut self,
+        frame: &RenderFrame,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        self.inner
+            .render_v2_and_capture(frame, &self.graph, &mut self.profiler, &mut self.temporal)
     }
 
     /// Resize the presentation surface, delegating to the V1 backend.

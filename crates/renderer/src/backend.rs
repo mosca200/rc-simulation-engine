@@ -23,9 +23,9 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    CameraConfig, ExposureError, PresentationAsset, RenderFrame, RenderOutcome, RenderTerrainMode,
-    RendererError, SurfaceError, TerrainDebugMode, VegetationDebugMode, WgpuRenderer,
-    renderer_v2::RendererV2Shell, scenery::SceneryPreset,
+    CameraConfig, CaptureRenderOutcome, ExposureError, FrameCaptureError, PresentationAsset,
+    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, SurfaceError, TerrainDebugMode,
+    VegetationDebugMode, WgpuRenderer, renderer_v2::RendererV2Shell, scenery::SceneryPreset,
 };
 
 /// Which rendering backend the application selected.
@@ -184,6 +184,24 @@ impl DesktopRenderer {
         match &mut self.backend {
             Backend::V1(inner) => inner.render(frame),
             Backend::V2(inner) => inner.render(frame),
+        }
+    }
+
+    /// Render, capture the final display-referred target, and present it.
+    ///
+    /// This one-shot path allocates capture resources only for this call. No
+    /// wgpu resource crosses the public renderer boundary.
+    ///
+    /// # Errors
+    ///
+    /// Propagates typed surface and GPU readback failures.
+    pub fn render_and_capture(
+        &mut self,
+        frame: &RenderFrame,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        match &mut self.backend {
+            Backend::V1(inner) => inner.render_and_capture(frame),
+            Backend::V2(inner) => inner.render_and_capture(frame),
         }
     }
 

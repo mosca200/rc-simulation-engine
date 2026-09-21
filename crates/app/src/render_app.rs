@@ -12,6 +12,7 @@ use crate::{
 use aircraft::{
     AircraftSimulation, AircraftSimulationConfig, AircraftSimulationError, AircraftSnapshot,
 };
+use image::{ImageEncoder, codecs::png::PngEncoder};
 use model::{
     AircraftModel, AircraftModelFingerprint, ModelLoadError, PresentationMetadata,
     PresentationSurface, load_aircraft_model,
@@ -21,14 +22,17 @@ use platform::{
     InputState, KeyboardInputState, KeyboardKey, RawControllerState,
 };
 use renderer::{
-    AircraftMesh, CameraConfig, DEFAULT_EXPOSURE_EV, DesktopRenderer, ExposureError,
-    FixedStepAccumulator, FixedStepAccumulatorError, GlbArticulationError, GlbArticulationPlan,
-    GlbAsset, GlbLoadError, PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode,
-    RendererError, RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode,
-    VegetationDebugMode, aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh,
-    scenery::SceneryPreset, validate_exposure_ev,
+    AircraftMesh, CameraConfig, CaptureRenderOutcome, CapturedFrame, DEFAULT_EXPOSURE_EV,
+    DesktopRenderer, ExposureError, FixedStepAccumulator, FixedStepAccumulatorError,
+    FrameCaptureError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
+    PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode, RendererError,
+    RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode,
+    aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh, scenery::SceneryPreset,
+    validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sim_core::{
     AeroEnvironment, AeroEnvironmentError, DEFAULT_GRAVITY_MPS2, DEFAULT_PHYSICS_HZ,
     FlatGroundPlane, GroundCommand, GroundEvaluation, GroundSurface, PilotInput, RigidBodyState,
@@ -36,7 +40,7 @@ use sim_core::{
 };
 use sim_math::{Orientation, Vec3};
 use std::{
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -102,6 +106,41 @@ pub struct RenderOptions {
     render_resolution: Option<RenderResolution>,
     // VIS0-C1: zero-based presentation frame after which the event loop exits.
     exit_after_frame: Option<u64>,
+    // VIS0-C2A: complete one-shot display-frame capture configuration.
+    capture: Option<CaptureConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureFormat {
+    Png,
+}
+
+impl CaptureFormat {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureConfig {
+    presentation_frame_index: u64,
+    image_path: PathBuf,
+    format: CaptureFormat,
+    receipt_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RuntimeCaptureReceipt {
+    schema_version: &'static str,
+    presentation_frame_index: u64,
+    framebuffer_width: u32,
+    framebuffer_height: u32,
+    format: &'static str,
+    image_path: String,
+    image_sha256: String,
+    image_byte_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +279,7 @@ impl RenderResolutionState {
 struct RenderRunControl {
     resolution: RenderResolutionState,
     exit_after_frame: Option<u64>,
+    capture_frame: Option<u64>,
     next_presentation_frame: u64,
 }
 
@@ -247,16 +287,19 @@ struct RenderRunControl {
 struct PresentationFramePlan {
     index: u64,
     exit_after_present: bool,
+    capture_requested: bool,
 }
 
 impl RenderRunControl {
     const fn new(
         requested_resolution: Option<RenderResolution>,
         exit_after_frame: Option<u64>,
+        capture_frame: Option<u64>,
     ) -> Self {
         Self {
             resolution: RenderResolutionState::new(requested_resolution),
             exit_after_frame,
+            capture_frame,
             next_presentation_frame: 0,
         }
     }
@@ -274,6 +317,10 @@ impl RenderRunControl {
             index: self.next_presentation_frame,
             exit_after_present: matches!(
                 self.exit_after_frame,
+                Some(frame) if frame == self.next_presentation_frame
+            ),
+            capture_requested: matches!(
+                self.capture_frame,
                 Some(frame) if frame == self.next_presentation_frame
             ),
         }
@@ -506,6 +553,7 @@ impl RenderOptions {
             rv2_6_validation: None,
             render_resolution: None,
             exit_after_frame: None,
+            capture: None,
         }
     }
 
@@ -535,6 +583,10 @@ impl RenderOptions {
         let mut render_height = options
             .render_resolution
             .map(|resolution| resolution.height);
+        let mut capture_frame = None;
+        let mut capture_out = None;
+        let mut capture_format = None;
+        let mut capture_receipt_out = None;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -668,6 +720,36 @@ impl RenderOptions {
                             .map_err(|_| RenderAppError::InvalidExitAfterFrame(value))?,
                     );
                 }
+                "--capture-frame" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--capture-frame"))?;
+                    capture_frame = Some(
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| RenderAppError::InvalidCaptureFrame(value))?,
+                    );
+                }
+                "--capture-out" => {
+                    capture_out =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            RenderAppError::MissingArgumentValue("--capture-out"),
+                        )?));
+                }
+                "--capture-format" => {
+                    let value = arguments
+                        .next()
+                        .ok_or(RenderAppError::MissingArgumentValue("--capture-format"))?;
+                    capture_format = Some(match value.as_str() {
+                        "png" => CaptureFormat::Png,
+                        _ => return Err(RenderAppError::UnsupportedCaptureFormat(value)),
+                    });
+                }
+                "--capture-receipt-out" => {
+                    capture_receipt_out = Some(PathBuf::from(arguments.next().ok_or(
+                        RenderAppError::MissingArgumentValue("--capture-receipt-out"),
+                    )?));
+                }
                 "--rv2-6-validation-scene" => {
                     let value = arguments
                         .next()
@@ -768,6 +850,47 @@ impl RenderOptions {
             (Some(width), Some(height)) => Some(RenderResolution::new(width, height)),
             _ => return Err(RenderAppError::IncompleteRenderResolution),
         };
+        let capture_requested = capture_frame.is_some()
+            || capture_out.is_some()
+            || capture_format.is_some()
+            || capture_receipt_out.is_some();
+        options.capture = if capture_requested {
+            let presentation_frame_index =
+                capture_frame.ok_or(RenderAppError::IncompleteCaptureOptions("--capture-frame"))?;
+            let image_path =
+                capture_out.ok_or(RenderAppError::IncompleteCaptureOptions("--capture-out"))?;
+            let format = capture_format
+                .ok_or(RenderAppError::IncompleteCaptureOptions("--capture-format"))?;
+            Some(CaptureConfig {
+                presentation_frame_index,
+                image_path,
+                format,
+                receipt_path: capture_receipt_out,
+            })
+        } else {
+            None
+        };
+        if let Some(capture) = options.capture.as_ref()
+            && let Some(receipt_path) = capture.receipt_path.as_ref()
+        {
+            let image_temporary = temporary_output_path(&capture.image_path).ok();
+            let receipt_temporary = temporary_output_path(receipt_path).ok();
+            if receipt_path == &capture.image_path
+                || image_temporary.as_ref() == Some(receipt_path)
+                || receipt_temporary.as_ref() == Some(&capture.image_path)
+                || image_temporary == receipt_temporary
+            {
+                return Err(RenderAppError::ConflictingCaptureOutputs);
+            }
+        }
+        if let (Some(exit_frame), Some(capture)) = (options.exit_after_frame, &options.capture)
+            && exit_frame < capture.presentation_frame_index
+        {
+            return Err(RenderAppError::ExitBeforeCaptureFrame {
+                exit_frame,
+                capture_frame: capture.presentation_frame_index,
+            });
+        }
         options.camera = pending_camera.resolve(options.camera)?;
         if let Some(case) = rv2_6_validation_case {
             if options.renderer != RendererVersion::V2 {
@@ -823,6 +946,24 @@ pub enum RenderAppError {
     IncompleteRenderResolution,
     #[error("invalid exit frame `{0}`; expected a non-negative integer")]
     InvalidExitAfterFrame(String),
+    #[error("invalid capture frame `{0}`; expected a non-negative integer")]
+    InvalidCaptureFrame(String),
+    #[error("incomplete capture options; missing required {0}")]
+    IncompleteCaptureOptions(&'static str),
+    #[error("unsupported capture format `{0}`; only `png` is supported")]
+    UnsupportedCaptureFormat(String),
+    #[error("capture image, receipt, and their temporary paths must be distinct")]
+    ConflictingCaptureOutputs,
+    #[error(
+        "exit frame {exit_frame} is before capture frame {capture_frame}; exit must be at or after capture"
+    )]
+    ExitBeforeCaptureFrame { exit_frame: u64, capture_frame: u64 },
+    #[error("failed to remove stale capture output {path}: {source}")]
+    StaleCaptureOutput {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "invalid RV2-6 validation scene `{0}`; expected `near`, `100m`, `500m`, `1000m`, `frontlit`, `sidelit`, or `backlit`"
     )]
@@ -941,9 +1082,32 @@ pub enum RenderRuntimeError {
     OutOfMemory,
     #[error("unexpected GPU validation or internal error")]
     GpuValidation,
+    #[error("deterministic frame capture failed: {0}")]
+    FrameCapture(#[source] FrameCaptureError),
+    #[error("the application exited before the requested presentation frame was captured")]
+    CaptureNotCompleted,
+    #[error("captured RGBA8 dimensions do not match the returned pixel byte count")]
+    InvalidCapturedFrame,
+    #[error("failed to encode captured frame as lossless PNG: {0}")]
+    PngEncode(#[source] image::ImageError),
+    #[error("failed to write captured image to {path}: {source}")]
+    CaptureImageWrite {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to serialize runtime capture receipt: {0}")]
+    CaptureReceiptSerialization(#[source] serde_json::Error),
+    #[error("failed to write runtime capture receipt to {path}: {source}")]
+    CaptureReceiptWrite {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
+    prepare_capture_outputs(options.capture.as_ref())?;
     let mut application = RenderApplication::new(options)?;
     let event_loop = EventLoop::new().map_err(RenderAppError::EventLoopCreation)?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -955,6 +1119,159 @@ pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
     }
     application.save_recording()?;
     Ok(())
+}
+
+fn temporary_output_path(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "output has no file name"))?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(".tmp");
+    Ok(path.with_file_name(temporary_name))
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn prepare_capture_outputs(capture: Option<&CaptureConfig>) -> Result<(), RenderAppError> {
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    let mut paths = vec![capture.image_path.clone()];
+    if let Some(receipt_path) = capture.receipt_path.as_ref() {
+        paths.push(receipt_path.clone());
+    }
+    let temporary_paths = paths
+        .iter()
+        .map(|path| temporary_output_path(path))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| RenderAppError::StaleCaptureOutput {
+            path: capture.image_path.clone(),
+            source,
+        })?;
+    paths.extend(temporary_paths);
+    for path in paths {
+        remove_file_if_present(&path).map_err(|source| RenderAppError::StaleCaptureOutput {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn write_capture_file(path: &Path, bytes: &[u8]) -> Result<(), RenderRuntimeError> {
+    let temporary =
+        temporary_output_path(path).map_err(|source| RenderRuntimeError::CaptureImageWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if let Err(source) = fs::write(&temporary, bytes) {
+        let _ = remove_file_if_present(&temporary);
+        return Err(RenderRuntimeError::CaptureImageWrite {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    if let Err(source) = fs::rename(&temporary, path) {
+        let _ = remove_file_if_present(&temporary);
+        return Err(RenderRuntimeError::CaptureImageWrite {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+fn write_receipt_file(path: &Path, bytes: &[u8]) -> Result<(), RenderRuntimeError> {
+    let temporary =
+        temporary_output_path(path).map_err(|source| RenderRuntimeError::CaptureReceiptWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if let Err(source) = fs::write(&temporary, bytes) {
+        let _ = remove_file_if_present(&temporary);
+        return Err(RenderRuntimeError::CaptureReceiptWrite {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    if let Err(source) = fs::rename(&temporary, path) {
+        let _ = remove_file_if_present(&temporary);
+        return Err(RenderRuntimeError::CaptureReceiptWrite {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn persist_capture_artifacts(
+    capture: &CaptureConfig,
+    presentation_frame_index: u64,
+    frame: &CapturedFrame,
+) -> Result<RuntimeCaptureReceipt, RenderRuntimeError> {
+    let expected_len = u64::from(frame.width)
+        .checked_mul(u64::from(frame.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(RenderRuntimeError::InvalidCapturedFrame)?;
+    if frame.rgba8.len() != expected_len {
+        return Err(RenderRuntimeError::InvalidCapturedFrame);
+    }
+    let mut png_bytes = Vec::new();
+    PngEncoder::new(&mut png_bytes)
+        .write_image(
+            &frame.rgba8,
+            frame.width,
+            frame.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(RenderRuntimeError::PngEncode)?;
+    let image_byte_size =
+        u64::try_from(png_bytes.len()).map_err(|_| RenderRuntimeError::InvalidCapturedFrame)?;
+    let receipt = RuntimeCaptureReceipt {
+        schema_version: "1.0.0",
+        presentation_frame_index,
+        framebuffer_width: frame.width,
+        framebuffer_height: frame.height,
+        format: capture.format.label(),
+        image_path: capture.image_path.to_string_lossy().into_owned(),
+        image_sha256: sha256_hex(&png_bytes),
+        image_byte_size,
+    };
+    let receipt_bytes = if capture.receipt_path.is_some() {
+        let mut bytes = serde_json::to_vec_pretty(&receipt)
+            .map_err(RenderRuntimeError::CaptureReceiptSerialization)?;
+        bytes.push(b'\n');
+        Some(bytes)
+    } else {
+        None
+    };
+
+    write_capture_file(&capture.image_path, &png_bytes)?;
+    if let (Some(receipt_path), Some(receipt_bytes)) =
+        (capture.receipt_path.as_ref(), receipt_bytes.as_deref())
+        && let Err(error) = write_receipt_file(receipt_path, receipt_bytes)
+    {
+        let _ = remove_file_if_present(&capture.image_path);
+        return Err(error);
+    }
+    Ok(receipt)
 }
 
 enum PresentationModel {
@@ -1239,14 +1556,23 @@ struct RenderApplication {
     renderer_version: RendererVersion,
     rv2_6_validation: Option<Rv26ValidationConfig>,
     run_control: RenderRunControl,
+    capture: Option<CaptureConfig>,
+    capture_completed: bool,
     runtime_error: Option<RenderRuntimeError>,
 }
 
 impl RenderApplication {
     fn new(options: RenderOptions) -> Result<Self, RenderAppError> {
         let rv2_6_validation = options.rv2_6_validation;
-        let run_control =
-            RenderRunControl::new(options.render_resolution, options.exit_after_frame);
+        let capture = options.capture;
+        let capture_frame = capture
+            .as_ref()
+            .map(|capture| capture.presentation_frame_index);
+        let run_control = RenderRunControl::new(
+            options.render_resolution,
+            options.exit_after_frame,
+            capture_frame,
+        );
         let altitude_m = options.altitude_m;
         let airspeed_mps = options.airspeed_mps;
         let initial_throttle = options.throttle;
@@ -1341,6 +1667,8 @@ impl RenderApplication {
             renderer_version: options.renderer,
             rv2_6_validation,
             run_control,
+            capture,
+            capture_completed: false,
             runtime_error: None,
         })
     }
@@ -1526,6 +1854,11 @@ impl RenderApplication {
     }
 
     fn finish_and_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.capture.is_some() && !self.capture_completed {
+            self.runtime_error = Some(RenderRuntimeError::CaptureNotCompleted);
+            event_loop.exit();
+            return;
+        }
         if let Err(error) = self.save_recording() {
             self.runtime_error = Some(error);
         }
@@ -1669,6 +2002,62 @@ impl RenderApplication {
         };
         let frame = snapshot.render_frame(pose);
         let pending_frame = self.run_control.pending_frame();
+        if pending_frame.capture_requested {
+            let capture_result = self
+                .renderer
+                .as_mut()
+                .map(|renderer| renderer.render_and_capture(&frame));
+            match capture_result {
+                Some(Ok(CaptureRenderOutcome::CapturedAndPresented(captured))) => {
+                    let exit_after_present = self.run_control.commit_presented(pending_frame);
+                    let artifact_result = self.capture.as_ref().map_or_else(
+                        || Err(RenderRuntimeError::InvalidCapturedFrame),
+                        |capture| {
+                            persist_capture_artifacts(capture, pending_frame.index, &captured)
+                                .map(|_| ())
+                        },
+                    );
+                    if let Err(error) = artifact_result {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    self.capture_completed = true;
+                    if exit_after_present {
+                        self.finish_and_exit(event_loop);
+                        return;
+                    }
+                }
+                Some(Ok(CaptureRenderOutcome::SkippedZeroExtent))
+                | None
+                | Some(Err(FrameCaptureError::Surface(SurfaceError::Occluded))) => {}
+                Some(Err(FrameCaptureError::Surface(
+                    SurfaceError::Lost | SurfaceError::Outdated,
+                ))) => {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.reconfigure_surface();
+                    }
+                }
+                Some(Err(FrameCaptureError::Surface(SurfaceError::Timeout))) => {
+                    warn!("surface acquisition timed out; capture frame remains pending");
+                }
+                Some(Err(FrameCaptureError::Surface(SurfaceError::OutOfMemory))) => {
+                    self.fail(event_loop, RenderRuntimeError::OutOfMemory);
+                    return;
+                }
+                Some(Err(FrameCaptureError::Surface(SurfaceError::Validation))) => {
+                    self.fail(event_loop, RenderRuntimeError::GpuValidation);
+                    return;
+                }
+                Some(Err(error)) => {
+                    self.fail(event_loop, RenderRuntimeError::FrameCapture(error));
+                    return;
+                }
+            }
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+            return;
+        }
         let render_result = self
             .renderer
             .as_mut()
@@ -2168,8 +2557,152 @@ mod tests {
         let options = RenderOptions::parse(std::iter::empty()).unwrap();
         assert_eq!(options.render_resolution, None);
         assert_eq!(options.exit_after_frame, None);
+        assert_eq!(options.capture, None);
         assert_eq!(DEFAULT_RENDER_WIDTH_LOGICAL, 1_280.0);
         assert_eq!(DEFAULT_RENDER_HEIGHT_LOGICAL, 720.0);
+    }
+
+    #[test]
+    fn complete_png_capture_cli_group_parses() {
+        let options = RenderOptions::parse(
+            [
+                "--capture-frame",
+                "10",
+                "--capture-out",
+                "capture.png",
+                "--capture-format",
+                "png",
+                "--capture-receipt-out",
+                "receipt.json",
+                "--exit-after-frame",
+                "10",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            options.capture,
+            Some(CaptureConfig {
+                presentation_frame_index: 10,
+                image_path: PathBuf::from("capture.png"),
+                format: CaptureFormat::Png,
+                receipt_path: Some(PathBuf::from("receipt.json")),
+            })
+        );
+    }
+
+    #[test]
+    fn capture_cli_rejects_each_missing_required_member() {
+        for (arguments, missing) in [
+            (
+                vec!["--capture-out", "capture.png", "--capture-format", "png"],
+                "--capture-frame",
+            ),
+            (
+                vec!["--capture-frame", "0", "--capture-format", "png"],
+                "--capture-out",
+            ),
+            (
+                vec!["--capture-frame", "0", "--capture-out", "capture.png"],
+                "--capture-format",
+            ),
+        ] {
+            assert!(matches!(
+                RenderOptions::parse(arguments.into_iter().map(str::to_owned)),
+                Err(RenderAppError::IncompleteCaptureOptions(actual)) if actual == missing
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_cli_rejects_unsupported_formats() {
+        for format in ["jpg", "jpeg", "exr"] {
+            assert!(matches!(
+                RenderOptions::parse(
+                    [
+                        "--capture-frame",
+                        "0",
+                        "--capture-out",
+                        "capture.bin",
+                        "--capture-format",
+                        format,
+                    ]
+                    .map(str::to_owned)
+                    .into_iter()
+                ),
+                Err(RenderAppError::UnsupportedCaptureFormat(actual)) if actual == format
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_cli_rejects_colliding_image_receipt_and_temporary_paths() {
+        for (image, receipt) in [
+            ("capture.png", "capture.png"),
+            ("capture.png", "capture.png.tmp"),
+        ] {
+            assert!(matches!(
+                RenderOptions::parse(
+                    [
+                        "--capture-frame",
+                        "0",
+                        "--capture-out",
+                        image,
+                        "--capture-format",
+                        "png",
+                        "--capture-receipt-out",
+                        receipt,
+                    ]
+                    .map(str::to_owned)
+                    .into_iter()
+                ),
+                Err(RenderAppError::ConflictingCaptureOutputs)
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_exit_order_accepts_equal_or_later_and_rejects_earlier() {
+        for exit_frame in [10_u64, 11] {
+            assert!(
+                RenderOptions::parse(
+                    [
+                        "--capture-frame",
+                        "10",
+                        "--capture-out",
+                        "capture.png",
+                        "--capture-format",
+                        "png",
+                        "--exit-after-frame",
+                        &exit_frame.to_string(),
+                    ]
+                    .map(str::to_owned)
+                    .into_iter()
+                )
+                .is_ok()
+            );
+        }
+        assert!(matches!(
+            RenderOptions::parse(
+                [
+                    "--capture-frame",
+                    "10",
+                    "--capture-out",
+                    "capture.png",
+                    "--capture-format",
+                    "png",
+                    "--exit-after-frame",
+                    "9",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            ),
+            Err(RenderAppError::ExitBeforeCaptureFrame {
+                exit_frame: 9,
+                capture_frame: 10
+            })
+        ));
     }
 
     #[test]
@@ -2354,7 +2887,7 @@ mod tests {
     #[test]
     fn resolution_state_transitions_do_not_advance_presentation_counter() {
         let requested = RenderResolution::new(1_920, 1_080);
-        let mut control = RenderRunControl::new(Some(requested), Some(0));
+        let mut control = RenderRunControl::new(Some(requested), Some(0), None);
         let frame_zero = control.pending_frame();
 
         assert_eq!(
@@ -2387,7 +2920,7 @@ mod tests {
 
     #[test]
     fn presentation_frame_index_is_zero_based_and_committed_only_after_present() {
-        let mut control = RenderRunControl::new(None, None);
+        let mut control = RenderRunControl::new(None, None, None);
         let frame_zero = control.pending_frame();
         assert_eq!(frame_zero.index, 0);
         assert!(!frame_zero.exit_after_present);
@@ -2401,12 +2934,12 @@ mod tests {
 
     #[test]
     fn auto_exit_schedule_triggers_after_configured_presented_frame() {
-        let mut exit_after_zero = RenderRunControl::new(None, Some(0));
+        let mut exit_after_zero = RenderRunControl::new(None, Some(0), None);
         let frame_zero = exit_after_zero.pending_frame();
         assert!(frame_zero.exit_after_present);
         assert!(exit_after_zero.commit_presented(frame_zero));
 
-        let mut exit_after_one = RenderRunControl::new(None, Some(1));
+        let mut exit_after_one = RenderRunControl::new(None, Some(1), None);
         let frame_zero = exit_after_one.pending_frame();
         assert!(!exit_after_one.commit_presented(frame_zero));
         let frame_one = exit_after_one.pending_frame();
@@ -2415,8 +2948,161 @@ mod tests {
     }
 
     #[test]
+    fn capture_schedule_matches_exact_presentation_frame_only_once() {
+        let mut control = RenderRunControl::new(None, None, Some(1));
+        let before = control.pending_frame();
+        assert_eq!(before.index, 0);
+        assert!(!before.capture_requested);
+        assert!(!control.commit_presented(before));
+
+        let capture = control.pending_frame();
+        assert_eq!(capture.index, 1);
+        assert!(capture.capture_requested);
+        assert_eq!(control.pending_frame(), capture);
+        assert!(!control.commit_presented(capture));
+
+        let after = control.pending_frame();
+        assert_eq!(after.index, 2);
+        assert!(!after.capture_requested);
+    }
+
+    fn capture_test_directory(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rcsim-vis0-c2a-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn capture_startup_removes_stale_targets_and_temporary_files() {
+        let directory = capture_test_directory("stale");
+        fs::create_dir(&directory).unwrap();
+        let image_path = directory.join("capture.png");
+        let receipt_path = directory.join("receipt.json");
+        let capture = CaptureConfig {
+            presentation_frame_index: 0,
+            image_path: image_path.clone(),
+            format: CaptureFormat::Png,
+            receipt_path: Some(receipt_path.clone()),
+        };
+        for path in [
+            image_path.clone(),
+            receipt_path.clone(),
+            temporary_output_path(&image_path).unwrap(),
+            temporary_output_path(&receipt_path).unwrap(),
+        ] {
+            fs::write(path, b"stale").unwrap();
+        }
+
+        prepare_capture_outputs(Some(&capture)).unwrap();
+
+        assert!(!image_path.exists());
+        assert!(!receipt_path.exists());
+        assert!(!temporary_output_path(&image_path).unwrap().exists());
+        assert!(!temporary_output_path(&receipt_path).unwrap().exists());
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_receipt_serializes_schema_v1() {
+        let receipt = RuntimeCaptureReceipt {
+            schema_version: "1.0.0",
+            presentation_frame_index: 3,
+            framebuffer_width: 2,
+            framebuffer_height: 1,
+            format: "png",
+            image_path: "capture.png".to_owned(),
+            image_sha256: "00".repeat(32),
+            image_byte_size: 123,
+        };
+        let value = serde_json::to_value(receipt).unwrap();
+        assert_eq!(value["schema_version"], "1.0.0");
+        assert_eq!(value["presentation_frame_index"], 3);
+        assert_eq!(value["framebuffer_width"], 2);
+        assert_eq!(value["framebuffer_height"], 1);
+        assert_eq!(value["format"], "png");
+    }
+
+    #[test]
+    fn capture_receipt_uses_actual_frame_facts_and_png_bytes() {
+        let directory = capture_test_directory("receipt");
+        fs::create_dir(&directory).unwrap();
+        let image_path = directory.join("capture.png");
+        let receipt_path = directory.join("receipt.json");
+        let capture = CaptureConfig {
+            presentation_frame_index: 99,
+            image_path: image_path.clone(),
+            format: CaptureFormat::Png,
+            receipt_path: Some(receipt_path.clone()),
+        };
+        let frame = CapturedFrame {
+            width: 2,
+            height: 1,
+            rgba8: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        };
+        prepare_capture_outputs(Some(&capture)).unwrap();
+        let receipt = persist_capture_artifacts(&capture, 7, &frame).unwrap();
+        let image_bytes = fs::read(&image_path).unwrap();
+        let receipt_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+
+        assert_eq!(receipt.presentation_frame_index, 7);
+        assert_eq!(receipt.framebuffer_width, 2);
+        assert_eq!(receipt.framebuffer_height, 1);
+        assert_eq!(receipt.image_sha256, sha256_hex(&image_bytes));
+        assert_eq!(receipt.image_byte_size, image_bytes.len() as u64);
+        assert_eq!(receipt_value["presentation_frame_index"], 7);
+        assert_eq!(receipt_value["framebuffer_width"], 2);
+        assert_eq!(receipt_value["framebuffer_height"], 1);
+        assert_eq!(receipt_value["image_sha256"], sha256_hex(&image_bytes));
+        assert_eq!(receipt_value["image_byte_size"], image_bytes.len() as u64);
+        let decoded = image::load_from_memory_with_format(&image_bytes, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &frame.rgba8);
+
+        fs::remove_file(image_path).unwrap();
+        fs::remove_file(receipt_path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn receipt_is_not_produced_when_captured_pixels_are_invalid() {
+        let directory = capture_test_directory("failed");
+        fs::create_dir(&directory).unwrap();
+        let image_path = directory.join("capture.png");
+        let receipt_path = directory.join("receipt.json");
+        let capture = CaptureConfig {
+            presentation_frame_index: 0,
+            image_path: image_path.clone(),
+            format: CaptureFormat::Png,
+            receipt_path: Some(receipt_path.clone()),
+        };
+        let frame = CapturedFrame {
+            width: 2,
+            height: 2,
+            rgba8: vec![0; 3],
+        };
+        fs::write(&receipt_path, b"stale receipt").unwrap();
+        prepare_capture_outputs(Some(&capture)).unwrap();
+
+        assert!(matches!(
+            persist_capture_artifacts(&capture, 0, &frame),
+            Err(RenderRuntimeError::InvalidCapturedFrame)
+        ));
+        assert!(!image_path.exists());
+        assert!(!receipt_path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn default_run_control_never_auto_exits() {
-        let mut control = RenderRunControl::new(None, None);
+        let mut control = RenderRunControl::new(None, None, None);
         for expected_index in 0..3 {
             let frame = control.pending_frame();
             assert_eq!(frame.index, expected_index);

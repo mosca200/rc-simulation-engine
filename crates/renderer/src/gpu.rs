@@ -31,6 +31,10 @@
 //! `queue.present(surface_texture)` to schedule the acquired surface texture
 //! for presentation.
 
+use crate::capture::{
+    CAPTURE_FORMAT, CAPTURE_USAGES, CaptureRenderOutcome, CaptureRowLayout, CapturedFrame,
+    FrameCaptureError, capture_row_layout, unpad_capture_rows,
+};
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
@@ -73,7 +77,11 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use std::f32::consts::PI;
-use std::{mem::size_of, sync::Arc};
+use std::{
+    mem::size_of,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -90,6 +98,7 @@ const V1_LEGACY_PASS_ORDER: [PassId; 5] = [
 // lighting write scene-referred linear values here; the postprocess pass
 // resolves exposure + tone mapping to the sRGB surface.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const CAPTURE_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
 const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
@@ -217,6 +226,11 @@ pub enum RenderOutcome {
     /// The final postprocess result was submitted and the surface was presented.
     Presented,
     /// Rendering was skipped because the presentation surface had zero extent.
+    SkippedZeroExtent,
+}
+
+enum ScheduledRenderOutcome {
+    Presented(Option<CapturedFrame>),
     SkippedZeroExtent,
 }
 
@@ -2235,7 +2249,41 @@ impl WgpuRenderer {
     /// Render through the frozen V1 schedule. This path does not construct or
     /// consult the V2 graph and retains the legacy empty-feature device policy.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
-        self.render_scheduled(frame, None, None, None)
+        match self.render_scheduled(frame, None, None, None, false) {
+            Ok(ScheduledRenderOutcome::Presented(None)) => Ok(RenderOutcome::Presented),
+            Ok(ScheduledRenderOutcome::SkippedZeroExtent) => Ok(RenderOutcome::SkippedZeroExtent),
+            Ok(ScheduledRenderOutcome::Presented(Some(_))) => {
+                debug_assert!(false, "normal render unexpectedly produced a capture");
+                Err(SurfaceError::Validation)
+            }
+            Err(FrameCaptureError::Surface(error)) => Err(error),
+            Err(_) => {
+                debug_assert!(false, "normal render entered the capture-only error path");
+                Err(SurfaceError::Validation)
+            }
+        }
+    }
+
+    /// Render the final display-referred frame, read it back as RGBA8, and
+    /// present the exact same intermediate through a nearest fullscreen blit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed surface, target-validation, GPU-poll, or map error. A
+    /// failed call never returns a partial image.
+    pub fn render_and_capture(
+        &mut self,
+        frame: &RenderFrame,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        match self.render_scheduled(frame, None, None, None, true)? {
+            ScheduledRenderOutcome::Presented(Some(captured)) => {
+                Ok(CaptureRenderOutcome::CapturedAndPresented(captured))
+            }
+            ScheduledRenderOutcome::SkippedZeroExtent => {
+                Ok(CaptureRenderOutcome::SkippedZeroExtent)
+            }
+            ScheduledRenderOutcome::Presented(None) => Err(FrameCaptureError::CaptureNotProduced),
+        }
     }
 
     pub(crate) fn create_v2_profiler(&self) -> Profiler {
@@ -2253,7 +2301,31 @@ impl WgpuRenderer {
         profiler: &mut Profiler,
         temporal: &mut TemporalState,
     ) -> Result<RenderOutcome, SurfaceError> {
-        self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal))
+        match self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal), false) {
+            Ok(ScheduledRenderOutcome::Presented(None)) => Ok(RenderOutcome::Presented),
+            Ok(ScheduledRenderOutcome::SkippedZeroExtent) => Ok(RenderOutcome::SkippedZeroExtent),
+            Ok(ScheduledRenderOutcome::Presented(Some(_))) => Err(SurfaceError::Validation),
+            Err(FrameCaptureError::Surface(error)) => Err(error),
+            Err(_) => Err(SurfaceError::Validation),
+        }
+    }
+
+    pub(crate) fn render_v2_and_capture(
+        &mut self,
+        frame: &RenderFrame,
+        graph: &CompiledGraph,
+        profiler: &mut Profiler,
+        temporal: &mut TemporalState,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        match self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal), true)? {
+            ScheduledRenderOutcome::Presented(Some(captured)) => {
+                Ok(CaptureRenderOutcome::CapturedAndPresented(captured))
+            }
+            ScheduledRenderOutcome::SkippedZeroExtent => {
+                Ok(CaptureRenderOutcome::SkippedZeroExtent)
+            }
+            ScheduledRenderOutcome::Presented(None) => Err(FrameCaptureError::CaptureNotProduced),
+        }
     }
 
     fn render_scheduled(
@@ -2262,10 +2334,12 @@ impl WgpuRenderer {
         graph: Option<&CompiledGraph>,
         mut profiler: Option<&mut Profiler>,
         mut temporal: Option<&mut TemporalState>,
-    ) -> Result<RenderOutcome, SurfaceError> {
-        self.check_asynchronous_gpu_error()?;
+        capture_requested: bool,
+    ) -> Result<ScheduledRenderOutcome, FrameCaptureError> {
+        self.check_asynchronous_gpu_error()
+            .map_err(FrameCaptureError::Surface)?;
         if !self.device_context.is_surface_configured() {
-            return Ok(RenderOutcome::SkippedZeroExtent);
+            return Ok(ScheduledRenderOutcome::SkippedZeroExtent);
         }
 
         let pass_order = graph.map_or(
@@ -2419,6 +2493,17 @@ impl WgpuRenderer {
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let capture_resources = capture_requested
+            .then(|| {
+                create_capture_frame_resources(
+                    self.device_context.device(),
+                    self.device_context.surface_format(),
+                    self.device_context.surface_width(),
+                    self.device_context.surface_height(),
+                    &self._postprocess_bind_group_layout,
+                )
+            })
+            .transpose()?;
         let mut encoder =
             self.device_context
                 .device()
@@ -2868,8 +2953,11 @@ impl WgpuRenderer {
                     // target, applies the manual exposure and the Khronos PBR Neutral
                     // tone mapper, and writes display values to the sRGB surface. The
                     // surface sRGB format performs the final linear->sRGB encode.
+                    let display_view = capture_resources
+                        .as_ref()
+                        .map_or(&surface_view, |capture| &capture.target_view);
                     let display_attachment = wgpu::RenderPassColorAttachment {
-                        view: &surface_view,
+                        view: display_view,
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
@@ -2886,7 +2974,12 @@ impl WgpuRenderer {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
-                    postprocess_pass.set_pipeline(&self.postprocess_pipeline);
+                    let pipeline = capture_resources
+                        .as_ref()
+                        .map_or(&self.postprocess_pipeline, |capture| {
+                            &capture.postprocess_pipeline
+                        });
+                    postprocess_pass.set_pipeline(pipeline);
                     let bind_group =
                         temporal_write_slot.map_or(&self.postprocess_bind_group, |slot| {
                             self.temporal_gpu
@@ -2900,16 +2993,73 @@ impl WgpuRenderer {
             );
         }
 
+        if let Some(capture) = capture_resources.as_ref() {
+            let display_attachment = wgpu::RenderPassColorAttachment {
+                view: &surface_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            };
+            let mut blit_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("VIS0-C2A final LDR capture present blit"),
+                color_attachments: &[Some(display_attachment)],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            blit_pass.set_pipeline(&capture.blit_pipeline);
+            blit_pass.set_bind_group(0, &capture.blit_bind_group, &[]);
+            blit_pass.draw(0..3, 0..1);
+            drop(blit_pass);
+
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &capture.target_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &capture.readback_buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(capture.row_layout.padded_bytes_per_row),
+                        rows_per_image: Some(capture.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: capture.width,
+                    height: capture.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         if let Some(profiler) = profiler.as_ref() {
             profiler.finish_encoding(&mut encoder);
         }
-        let _submit_index = self
+        let submit_index = self
             .device_context
             .queue()
             .submit(std::iter::once(encoder.finish()));
         if let Some(profiler) = profiler.as_deref_mut() {
             profiler.after_submit();
         }
+        let captured_frame = if let Some(capture) = capture_resources.as_ref() {
+            Some(read_capture_frame(
+                self.device_context.device(),
+                submit_index,
+                capture,
+            )?)
+        } else {
+            None
+        };
+        self.check_asynchronous_gpu_error()
+            .map_err(FrameCaptureError::Surface)?;
         self.device_context.present(surface_texture);
         if let (Some(temporal), Some(prepared)) = (temporal.as_deref_mut(), prepared_temporal) {
             // This is the sole previous-presented commit point. In particular,
@@ -2929,13 +3079,249 @@ impl WgpuRenderer {
         if let Some(profiler) = profiler {
             profiler.finish_frame();
         }
-        self.check_asynchronous_gpu_error()?;
-        Ok(RenderOutcome::Presented)
+        self.check_asynchronous_gpu_error()
+            .map_err(FrameCaptureError::Surface)?;
+        Ok(ScheduledRenderOutcome::Presented(captured_frame))
     }
 
     fn check_asynchronous_gpu_error(&self) -> Result<(), SurfaceError> {
         self.device_context.check_asynchronous_gpu_error()
     }
+}
+
+struct CaptureFrameResources {
+    target_texture: wgpu::Texture,
+    target_view: wgpu::TextureView,
+    postprocess_pipeline: wgpu::RenderPipeline,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bind_group: wgpu::BindGroup,
+    readback_buffer: wgpu::Buffer,
+    row_layout: CaptureRowLayout,
+    width: u32,
+    height: u32,
+}
+
+const CAPTURE_BLIT_SHADER: &str = r#"
+struct FullscreenOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0)
+var capture_texture: texture_2d<f32>;
+@group(0) @binding(1)
+var capture_sampler: sampler;
+
+@vertex
+fn vs_capture_blit(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutput {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let position = positions[vertex_index];
+    var output: FullscreenOutput;
+    output.position = vec4<f32>(position, 0.0, 1.0);
+    output.uv = vec2<f32>(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5);
+    return output;
+}
+
+@fragment
+fn fs_capture_blit(input: FullscreenOutput) -> @location(0) vec4<f32> {
+    return textureSample(capture_texture, capture_sampler, input.uv);
+}
+"#;
+
+fn create_capture_frame_resources(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    postprocess_bind_group_layout: &wgpu::BindGroupLayout,
+) -> Result<CaptureFrameResources, FrameCaptureError> {
+    if !surface_format.is_srgb() {
+        return Err(FrameCaptureError::UnsupportedSurfaceColorEncoding);
+    }
+    let format_features = CAPTURE_FORMAT.guaranteed_format_features(device.features());
+    if !format_features.allowed_usages.contains(CAPTURE_USAGES) {
+        return Err(FrameCaptureError::UnsupportedCaptureTarget);
+    }
+    let row_layout = capture_row_layout(width, height)?;
+    let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("VIS0-C2A final display-referred capture target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: CAPTURE_FORMAT,
+        usage: CAPTURE_USAGES,
+        view_formats: &[],
+    });
+    let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("VIS0-C2A padded RGBA8 readback"),
+        size: row_layout.staging_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let postprocess_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("VIS0-C2A capture postprocess shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+    });
+    let postprocess_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("VIS0-C2A capture postprocess pipeline layout"),
+            bind_group_layouts: &[
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(postprocess_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+    let postprocess_pipeline = create_postprocess_pipeline(
+        device,
+        &postprocess_shader,
+        &postprocess_pipeline_layout,
+        CAPTURE_FORMAT,
+    );
+
+    let blit_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("VIS0-C2A capture present blit layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+    let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("VIS0-C2A capture present nearest sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("VIS0-C2A capture present blit bind group"),
+        layout: &blit_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&target_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&blit_sampler),
+            },
+        ],
+    });
+    let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("VIS0-C2A capture present blit shader"),
+        source: wgpu::ShaderSource::Wgsl(CAPTURE_BLIT_SHADER.into()),
+    });
+    let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("VIS0-C2A capture present blit pipeline layout"),
+        bind_group_layouts: &[Some(&blit_bind_group_layout)],
+        immediate_size: 0,
+    });
+    let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("VIS0-C2A capture present blit pipeline"),
+        layout: Some(&blit_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &blit_shader,
+            entry_point: Some("vs_capture_blit"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &blit_shader,
+            entry_point: Some("fs_capture_blit"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    Ok(CaptureFrameResources {
+        target_texture,
+        target_view,
+        postprocess_pipeline,
+        blit_pipeline,
+        blit_bind_group,
+        readback_buffer,
+        row_layout,
+        width,
+        height,
+    })
+}
+
+fn read_capture_frame(
+    device: &wgpu::Device,
+    submission_index: wgpu::SubmissionIndex,
+    resources: &CaptureFrameResources,
+) -> Result<CapturedFrame, FrameCaptureError> {
+    let slice = resources.readback_buffer.slice(..);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    match device.poll(wgpu::PollType::Wait {
+        submission_index: Some(submission_index),
+        timeout: Some(CAPTURE_READBACK_TIMEOUT),
+    }) {
+        Ok(_) => {}
+        Err(wgpu::PollError::Timeout) => return Err(FrameCaptureError::DevicePollTimeout),
+        Err(wgpu::PollError::WrongSubmissionIndex(_, _)) => {
+            return Err(FrameCaptureError::DevicePollFailed);
+        }
+    }
+    receiver
+        .try_recv()
+        .map_err(|_| FrameCaptureError::MapCallbackMissing)?
+        .map_err(|_| FrameCaptureError::MapFailed)?;
+    let mapped = slice
+        .get_mapped_range()
+        .map_err(|_| FrameCaptureError::MappedRangeUnavailable)?;
+    let rgba8 = unpad_capture_rows(&mapped, resources.height, resources.row_layout);
+    drop(mapped);
+    resources.readback_buffer.unmap();
+    Ok(CapturedFrame {
+        width: resources.width,
+        height: resources.height,
+        rgba8: rgba8?,
+    })
 }
 
 // ---------------------------------------------------------------------------
