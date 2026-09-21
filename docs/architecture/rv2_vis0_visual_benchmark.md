@@ -164,24 +164,41 @@ VIS0 usa **due** artefatti machine-readable, con ruoli opposti e non intercambia
 | Validator | `validate_manifest.py` | `validate_capture_evidence.py` |
 | Introdotto da | VIS0-A | VIS0-C1B |
 
+A questi si aggiunge, dal VIS0-C2A, un **terzo** contratto con un proprietario
+diverso: il `RuntimeCaptureReceipt` `1.0.0`, scritto da `rcsim-app` e non dal
+tooling. È una dichiarazione runtime stretta (8 campi: `schema_version`,
+`presentation_frame_index`, `framebuffer_width`, `framebuffer_height`, `format`,
+`image_path`, `image_sha256`, `image_byte_size`) ed è l'**unica** autorità per
+`capture.actual.*` e `capture.image.*`. Il `VisualCaptureEvidence` aggiunge ciò
+che il runtime non può sapere: provenance del manifest e di git, stato
+*requested*, fatti di esecuzione, fatti hardware visibili al tooling e un
+verdetto visuale nullo. Le tre versioni sono indipendenti e non vanno confuse.
+
 Regole che li separano:
 
 1. **requested e actual restano distinti.** Nel evidence vivono in due oggetti
-   separati (`capture.requested` e `capture.actual`): una divergenza — oggi
-   attesa, perché il capture backend non esiste ancora e il runtime non
-   restituisce l'estensione reale del framebuffer — deve restare leggibile e
-   non può essere sovrascritta dall'intento.
+   separati (`capture.requested` e `capture.actual`): una divergenza deve
+   restare leggibile e non può essere sovrascritta dall'intento. Dal VIS0-C2B
+   `capture.actual.*` arriva dal receipt runtime verificato, quindi una
+   divergenza è un fatto rappresentabile a tutti gli effetti — per esempio una
+   richiesta 1920x1080 con un framebuffer realmente presentato a 1280x720 — e il
+   tooling non la "ripara" copiando requested dentro actual.
 2. **Il capture evidence NON è una approval.** `execution.capture_success`
-   dichiara solo che un'immagine è stata prodotta; `verdict.visual_pass` resta
-   `null` e il validator lo rifiuta se valorizzato.
+   dichiara solo che un'immagine è stata prodotta e verificata; `verdict.visual_pass`
+   resta `null` e il validator lo rifiuta se valorizzato.
 3. **La qualità visiva resta dominio futuro** di human review o di un motore di
    metriche approvato. Nessuna soglia SSIM/PSNR/LPIPS esiste in questo repository.
 
 Dettagli, campi e handshake nel documento VIS0-C1B:
-`docs/architecture/rv2_vis0_c1b_capture_evidence.md`.
+`docs/architecture/rv2_vis0_c1b_capture_evidence.md`. Integrazione runtime →
+tooling nel documento VIS0-C2B:
+`docs/architecture/rv2_vis0_c2b_capture_evidence_integration.md`.
 
 ### Temporizzazione
-- `warmup`: frame di warmup prima del capture
+- `warmup`: frame di warmup prima del capture. Non esiste un flag `--warmup`:
+  il warmup è **derivato** dalla relazione `warmup == capture.frame`, perché
+  `--capture-frame N` presenta i frame `0..N-1` prima di catturare `N`. Il runner
+  esegue realmente solo le scene in cui i due valori coincidono.
 
 ### Metadata aggiuntivi
 - `tags`: lista di tag per categorizzazione
@@ -240,12 +257,17 @@ Creare manifest JSON con tutti i parametri richiesti, allineati al runtime reale
 ### 2. Validation
 Eseguire `validate_manifest.py` per verificare correttezza sintattica e semantica.
 
-### 3. Capture (futuro)
-Il capture runner (non implementato in VIS0) leggerà il manifest e catturerà l'immagine.
+### 3. Capture
+Implementata dal VIS0-C2B: `run_benchmark.py --execute` legge il manifest, avvia
+`rcsim-app render` con il gruppo capture reale, ottiene un PNG lossless e un
+`RuntimeCaptureReceipt`, li verifica in modo indipendente e scrive
+`capture_evidence.json` + `run.json`. Non esiste ancora alcun confronto con una
+baseline: la capture è un fatto, non un giudizio.
 
 ### 4. Review
-- Automated metrics (SSIM, PSNR) con tolerance
-- Human review per qualità
+- Automated metrics (SSIM, PSNR) con tolerance — **non implementato**, e nessun
+  PASS/FAIL automatico esiste in VIS0
+- Human review per qualità — **non implementato** in questa tranche
 
 ### 5. Approval
 Se l'immagine è approvata, diventa baseline per quel reference hardware.
@@ -325,12 +347,31 @@ Non richiedere bitwise equality tra hardware diversi. Invece:
   - `vegetation_debug`: `final`, `lod`, `culling` (maps to `--vegetation-debug`)
 - Resolution: width, height (maps to `--render-width` / `--render-height` as an
   explicit physical window/client framebuffer extent)
-- Frame-bounded auto-exit: `capture.frame` maps to `--exit-after-frame` as
-  lifecycle control, not as capture enforcement
+- Capture (VIS0-C2A runtime + VIS0-C2B tooling):
+  - `capture.filename` maps to `--capture-out` (percorso assoluto dentro
+    `<output-dir>/<scene-id>/`)
+  - `capture.format` maps to `--capture-format`; solo `png` è eseguibile
+  - `capture.frame` maps to `--capture-frame`, il presentation frame zero-based
+    che il runtime legge, presenta e scrive come PNG RGBA8 lossless
+  - il runner deriva `--capture-receipt-out` (handshake evidence) e
+    `--exit-after-frame` (lifecycle, uguale al frame catturato)
+- `warmup`: **derived**, non un flag. Non esiste `--warmup` in `rcsim-app`; il
+  warmup è realizzato dalla relazione `warmup == capture.frame`, perché
+  `--capture-frame N` presenta prima i frame `0..N-1`. Combinazioni arbitrarie
+  restano non supportate e il runner fallisce chiuso.
 
-**Non supportato:** `warmup` resta nel manifest, ma il runtime non implementa
-ancora warmup/capture scheduling end-to-end. Il capture backend e la produzione
-di evidence `capture.actual.*` restano ugualmente indisponibili.
+**Ancora non supportato:** `capture.quality` (ammesso dal contratto solo con
+`format: "jpg"`, e il backend scrive soltanto PNG lossless, che non ha parametro
+di qualità); i formati `jpg`/`exr`, che il manifest può esprimere ma il runtime
+rifiuta; e i metadata GPU/backend/driver, perché il `RuntimeCaptureReceipt`
+`1.0.0` non contiene ancora quei campi — le corrispondenti leaf di
+`VisualCaptureEvidence` restano `null` invece di essere indovinate.
+
+**Distinzione importante:** *manifest valido* non significa *runtime eseguibile*.
+Il `GoldenSceneManifest` `1.1.0` non è stato ristretto: accetta ancora
+`capture.frame` assente e `jpg`/`exr`. È il runner a distinguere i due stati e a
+rifiutare l'esecuzione, con un motivo esplicito, quando il runtime non può
+onorare la richiesta.
 
 ### Future capability (non nel v1 manifest)
 - Weather conditions (clear, cloudy, fog)

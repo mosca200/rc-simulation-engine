@@ -1,5 +1,17 @@
 # RV2-VIS0-B — Golden Visual Benchmark Runner
 
+> **Stato attuale (VIS0-C2B).** Questo documento descrive il runner nato con
+> VIS0-B ed è stato aggiornato dove le sue affermazioni erano diventate false.
+> Dal VIS0-C2B il runner **esegue davvero una capture**: emette il gruppo di
+> flag `--capture-frame/--capture-out/--capture-format`, aggiunge i flag derivati
+> `--capture-receipt-out`/`--exit-after-frame`, verifica in modo indipendente il
+> `RuntimeCaptureReceipt` e il PNG, e pubblica un `VisualCaptureEvidence`
+> validato. `RUNNER_VERSION`/`PLAN_VERSION` sono `1.2.0`. Il documento
+> normativo per quella integrazione è
+> [`rv2_vis0_c2b_capture_evidence_integration.md`](rv2_vis0_c2b_capture_evidence_integration.md);
+> il contratto runtime della capture resta
+> [`rv2_vis0_c2a_frame_capture.md`](rv2_vis0_c2a_frame_capture.md).
+
 ## Purpose
 
 VIS0-B turns the VIS0-A manifest contract into tooling that actually runs.
@@ -11,12 +23,16 @@ validated manifest and produces:
 1. a **deterministic execution plan**,
 2. the **exact `rcsim-app` command** that plan implies,
 3. optional **real process execution** with captured stdout/stderr/exit code,
-4. **run provenance** (`run.json`) sufficient to reproduce or audit the run.
+4. **run provenance** (`run.json`) sufficient to reproduce or audit the run,
+5. since VIS0-C2B, a **verified capture** plus a standalone
+   `capture_evidence.json`.
 
-**VIS0-B verifies execution reproducibility, NOT visual image quality.**
+**VIS0 verifies execution and capture reproducibility, NOT visual image quality.**
 
-It never decides a visual PASS/FAIL, never reads pixels, and never produces an
-image. `visual_pass` is written as `null` in every artifact this runner emits.
+It never decides a visual PASS/FAIL and never reads a pixel value.
+`visual_pass` is written as `null` in every artifact this runner emits. A
+byte-verified capture states that an image exists and matches its receipt; it
+says nothing about whether the image is good.
 
 ## Scope boundary
 
@@ -28,8 +44,8 @@ VIS0-B is deliberately independent of the renderer runtime. It touches only:
 
 No `crates/**`, `Cargo.toml`, `Cargo.lock`, `.github/**`, `main` or
 `integration/render-v2` change. Where the runtime cannot support a manifest
-field, this runner **records the gap** instead of modifying the runtime or
-faking the capability.
+field, this runner **records the gap and refuses to execute** instead of
+modifying the runtime or faking the capability.
 
 The VIS0-A contract files stay authoritative and byte-identical:
 `golden_scene_manifest.schema.json`, `validate_manifest.py`,
@@ -68,11 +84,11 @@ cargo build --release -p rcsim-app
 ```
 
 > `rcsim-app render` still opens a visible winit window; VIS0-C1 did not add a
-> headless renderer. Auto-exit is a separate capability and is supported:
-> the runner maps `capture.frame` to `--exit-after-frame`, so an unattended run
-> has a deterministic frame-bounded lifecycle. No image is produced because the
-> capture backend remains unavailable. See
-> [Capability status after VIS0-C1 convergence](#capability-status-after-vis0-c1-convergence).
+> headless renderer. Auto-exit is supported and the runner derives
+> `--exit-after-frame` from the captured presentation frame, so an unattended run
+> has a deterministic frame-bounded lifecycle. Since VIS0-C2A the same frame is
+> really written to a lossless PNG plus a `RuntimeCaptureReceipt`; see
+> [Capture capability status](#capture-capability-status).
 
 ### Persisting the plan
 
@@ -105,12 +121,18 @@ There is no interactive prompt of any kind. Every input arrives as a flag.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Plan built (dry run), or the app process exited `0` |
-| `1` | Manifest failed GoldenSceneManifest validation; **no process was started** |
+| `0` | Plan built (dry run), or a **fully verified** end-to-end capture |
+| `1` | Manifest failed GoldenSceneManifest validation, **or** is formally valid but not runtime-executable under the C2B policy; **no process was started** |
 | `2` | Usage/input error: missing file, unreadable JSON, bad flag value |
 | `3` | Git policy violation (`--require-clean-git` on a dirty work tree) |
-| `4` | Execution failure: app not found, non-zero exit, timeout |
+| `4` | Execution failure: app not found, non-zero exit, timeout, untrusted receipt, unverified PNG, or evidence that failed its own validator |
 | `5` | Interrupted (Ctrl-C) |
+
+Since VIS0-C2B **`process exit 0` is no longer sufficient for exit `0`**. A run
+returns `0` only when all four hold: process exit `0`, trusted
+`RuntimeCaptureReceipt`, independently verified PNG, and a
+`VisualCaptureEvidence` accepted by `CaptureEvidenceValidator`. Anything else is
+exit `4`, even when `rcsim-app` itself succeeded.
 
 Predictable user errors print one `error: ...` line. They never print a
 Python traceback.
@@ -140,6 +162,11 @@ runtime source to prove every emittable flag is real.
 | `aircraft.altitude_m` | `--altitude-m` | required when airborne, forbidden on a ground start; range `(0, 10000]` |
 | `aircraft.airspeed_mps` | `--airspeed-mps` | required when airborne, forbidden on a ground start; range `(0, 200]` |
 | `aircraft.start_on_ground` | `--start-on-ground` | presence-only flag; emitted only when `true` |
+| `resolution.width` | `--render-width` | VIS0-C1 runtime control; enforced fail-closed by the runtime |
+| `resolution.height` | `--render-height` | VIS0-C1 runtime control; enforced fail-closed by the runtime |
+| `capture.filename` | `--capture-out` | VIS0-C2B; resolved against `<output-dir>/<scene-id>/` and passed as an **absolute** path |
+| `capture.format` | `--capture-format` | VIS0-C2B; only `png` is runtime-executable |
+| `capture.frame` | `--capture-frame` | VIS0-C2B; zero-based **presentation** frame the runtime reads back |
 
 `--camera <mode>` is always emitted explicitly. This matters: without it the
 runtime falls back to a *different* default camera (`Pilot` at `[0, 0.3, 0.85]`,
@@ -156,23 +183,55 @@ verified against `RenderOptions::parse_with_defaults` and
 `docs/architecture/rv2_vis0_visual_benchmark.md` § "Stato iniziale aircraft
 completamente esplicito (VIS0-C1B)".
 
-### Unsupported execution fields
+### Runner-derived flags
 
-Recorded in `run.json` with `status: "unsupported"`, `runtime_flag: null`,
-`emitted: false` and an explicit reason. Never silently dropped, never faked.
+Two emitted flags do **not** come from a manifest field, and the plan says so
+explicitly (`capture_plan.derived_arguments`, `provenance: "runner-derived"`):
+
+| Flag | Value | Derived from |
+| --- | --- | --- |
+| `--capture-receipt-out` | `<scene-dir>/runtime_capture_receipt.json` | a tooling decision: the runner picks the receipt location so it can parse, trust and cross-check it. No GoldenSceneManifest key names a receipt path. |
+| `--exit-after-frame` | equal to `capture.frame` | process lifecycle control. `rcsim-app` rejects `--exit-after-frame < --capture-frame` (`ExitBeforeCaptureFrame`), and the equal-frame case captures, presents, writes the PNG and the receipt, then exits. |
+
+Manifest-driven flags are emitted first, derived flags last, so the argv itself
+shows the provenance split. Attributing a derived flag to a manifest field that
+does not exist would falsify the plan's provenance.
+
+### Unsupported and derived execution fields
+
+Recorded in `run.json` with an explicit status, `runtime_flag` and reason. Never
+silently dropped, never faked.
 
 | Manifest field | Status | Evidence |
 | --- | --- | --- |
-| `resolution.width`, `resolution.height` | **cli** | Mapped to `--render-width` / `--render-height` (VIS0-C1 runtime control). The runtime verifies the physical framebuffer extent fail-closed. |
-| `warmup` | **unsupported** | No CLI flag controls warmup frames; while `--exit-after-frame` bounds the process, warmup/capture scheduling end-to-end is incomplete. |
-| `capture.frame` | **cli** | Mapped to `--exit-after-frame` as process lifecycle control (frame-bounded exit), NOT as capture enforcement. No image is captured. |
-| `capture.quality` | **unsupported** | JPEG quality only matters to an encoder that does not exist yet. |
+| `warmup` | **derived** | There is no `--warmup` flag and none is invented. Warmup is realised by the presentation-frame capture relation `warmup == capture.frame`: `--capture-frame N` presents frames `0..N-1` first, which is exactly `N` warmup presentations. It is **not** supported for arbitrary `warmup`/`capture.frame` combinations, which is why the C2B executable path requires them to be equal. |
+| `capture.quality` | **unsupported** | Only allowed by the VIS0-A contract alongside `format: "jpg"`, and the VIS0-C2A backend writes lossless PNG, which has no quality parameter. Its presence makes the scene non-executable rather than being ignored. |
+
+### C2B executability gate (manifest valid ≠ runtime executable)
+
+`GoldenSceneManifest` `1.1.0` is **not** narrowed by this tranche. It still
+accepts an absent `capture.frame` and still accepts `jpg`/`exr`, while the
+VIS0-C2A runtime implements neither. The runner therefore distinguishes two
+states and records both in `capture_plan`:
+
+- `executable: true` — the manifest can be honoured by the real runtime;
+- `executable: false` plus `blocking_reasons` — formally valid, not runnable.
+
+Blocking conditions: `capture.frame` absent, `capture.frame != warmup`,
+`capture.format != png`, `capture.quality` present, `capture.filename` absent.
+On `--execute` a blocked scene fails closed with exit `1` **before** any process
+starts; a dry run still succeeds and prints the reasons, so the block stays
+inspectable. A blocked scene emits **no** capture flag at all, because printing a
+command the runtime is known to reject would make the plan a lie.
 
 ### Metadata-only fields
 
 Recorded for provenance, with no runtime flag by design:
-`schema_version`, `scene_id`, `description`, `tags`, `reference_hardware`,
-`capture.filename`, `capture.format`.
+`schema_version`, `scene_id`, `description`, `tags`, `reference_hardware`.
+
+`capture.filename` and `capture.format` used to be in this list. Since VIS0-C2B
+they really drive `rcsim-app`, so labelling them metadata-only would have been
+false.
 
 ### Flags deliberately not emitted
 
@@ -210,52 +269,85 @@ never re-interpreted.
 ```
 <output-dir>/
     <scene-id>/
-        run.json      # full provenance + the plan
-        stdout.txt    # captured app stdout
-        stderr.txt    # captured app stderr
+        <capture.filename>              # real lossless RGBA8 PNG (VIS0-C2A runtime)
+        runtime_capture_receipt.json    # RuntimeCaptureReceipt 1.0.0, written by rcsim-app
+        capture_evidence.json           # VisualCaptureEvidence 1.0.0 — authoritative artifact
+        run.json                        # full provenance + the plan + an embedded evidence copy
+        stdout.txt                      # captured app stdout
+        stderr.txt                      # captured app stderr
 ```
 
-A dry run creates **nothing** — no directory, no file — unless `--plan-json` is
-given. The default `--output-dir` is `tmp/visual_benchmark_runs`, and `tmp/` is
-already gitignored, so run artifacts can never be committed by accident.
+A dry run creates **nothing** — no directory, no file, no image, no receipt —
+unless `--plan-json` is given. The default `--output-dir` is
+`tmp/visual_benchmark_runs`, and `tmp/` is already gitignored, so run artifacts
+can never be committed by accident.
 
-No capture image is written, because the runtime cannot produce one.
+`--capture-out` and `--capture-receipt-out` are passed as **absolute** paths, so
+the `image_path` the runtime echoes into the receipt is interpretable without
+knowing the subprocess working directory. Human-readable metadata may still use
+repo-relative display paths.
+
+### Stale artifact safety
+
+Before a real execution the runner removes a pre-existing capture image,
+`runtime_capture_receipt.json`, `capture_evidence.json` and their `.tmp`
+siblings, and **fails closed** (exit `4`) if any removal is refused. The runtime
+has its own stale-output policy, but it cannot help when the process never
+starts or dies before its cleanup runs; without this step an image from a
+previous run would sit at the expected path and be readable as this run's
+result. Only paths inside `<output-dir>/<scene-id>/` are ever touched, so
+approved baselines elsewhere are never deleted.
 
 ## Capture capability status
 
-**CAPTURE BACKEND NOT YET AVAILABLE.**
-
-`rcsim-app render` has no framebuffer/GPU readback, image output path, or
-PNG/JPEG/EXR capture writer. The render subcommand presents to a winit window
-but never writes an image artifact, so there is no end-to-end capture backend.
-The `image` crate appears in the workspace only for texture decoding
-(`crates/renderer/src/texture.rs`) and the offline terrain texture generator
-(`crates/renderer/src/bin/generate_terrain_textures.rs`); the PNG/JPEG encoders
-in `crates/renderer/src/glb.rs` are test-only.
-
-VIS0-B therefore stops at execution and provenance, and records the capability
-as unavailable in both `plan.json` and `run.json`:
+**Supported — the VIS0-C2A capture backend really writes an image.**
 
 ```json
 "capture_backend": {
-  "status": "unavailable",
-  "produces_image": false,
-  "reason": "CAPTURE BACKEND NOT YET AVAILABLE: ...",
-  "expected_filename": "aircraft_acro_static_front_1920x1080.png",
-  "expected_format": "png"
+  "status": "supported",
+  "produces_image": true,
+  "final_display_referred_capture": true,
+  "frame_selection":            {"available": true, "mechanism": "--capture-frame N (zero-based presentation frame)"},
+  "runtime_receipt":            {"available": true, "kind": "runtime_capture_receipt", "schema_version": "1.0.0"},
+  "process_auto_exit":          {"available": true, "mechanism": "--exit-after-frame N (runner-derived)"},
+  "explicit_resolution_enforcement": {"available": true, "mechanism": "--render-width/--render-height"},
+  "supported_formats": ["png"],
+  "requested_format": "png",
+  "requested_format_executable": true,
+  "executable_for_this_manifest": true,
+  "capture_produced": null
 }
 ```
+
+`capture_produced` stays `null` in the plan: a capability describes the runtime,
+while whether *this* run produced an image is a per-run fact reported only after
+execution. A dry run therefore correctly declares
+`capture backend = supported` **and** `capture produced = false`.
+
+The captured pixels are the final display-referred output of postprocess
+(`Rgba8UnormSrgb`, post exposure and Khronos PBR Neutral), encoded as lossless
+RGBA8 PNG. See
+[`rv2_vis0_c2a_frame_capture.md`](rv2_vis0_c2a_frame_capture.md) for the runtime
+contract and
+[`rv2_vis0_c2b_capture_evidence_integration.md`](rv2_vis0_c2b_capture_evidence_integration.md)
+for the tooling integration.
 
 `expected_output_basename` still resolves the VIS0 golden name and reports
 whether the manifest's `capture.filename` matches the
 `<scene_id>_<width>x<height>.<format>` convention. A mismatch prints a warning;
-it does not fail the run, because VIS0-A owns that rule.
+it does not fail the run, because VIS0-A owns that rule. Its pre-C2A
+`produced: false` / "backend unavailable" wording was removed: it became
+semantically false once the runtime started writing PNGs. The block now reports
+`planned_path`, `expected_filename`, `format`, `executable`, and a `verified`
+field that stays `null` until a real execute confirms the artifact.
 
 The following are explicitly **out of scope** and are not implemented anywhere in
 this runner: desktop screenshot automation, Win32 screen scraping,
-`PIL`/`ImageGrab`, pixel comparison, SSIM/PSNR, OpenCV, LPIPS, perceptual diff.
-A unit test asserts the runner's imports are standard-library only and that no
-image or metric symbol is referenced.
+`PIL`/`ImageGrab`, pixel comparison, SSIM/PSNR, OpenCV, LPIPS, perceptual diff,
+baseline comparison and golden promotion. Reading a PNG header (33 fixed bytes)
+is not pixel analysis and needs no image library. A unit test asserts the
+runner's imports are standard-library only and that no image or metric symbol is
+referenced.
 
 ## Resolution enforcement status
 
@@ -281,59 +373,70 @@ emitted by the runner, and enforced by the runtime fail-closed.
 | `environment` | `operating_system`, `os_release`, `os_version`, `architecture`, `platform`, `python_version`, `python_implementation`, `python_executable`, `runner_name`, `runner_version` |
 | `git` | `commit_sha`, `commit_sha_short`, `branch`, `detached_head`, `upstream`, `remote_origin_url`, `dirty`, `dirty_entry_count`, `dirty_tracked_entry_count`, `dirty_entries`, `errors` |
 | `plan` | the full execution plan, embedded verbatim |
-| `execution` | `mode`, `app`, `app_resolved`, `command_argv`, `cwd`, `timeout_seconds`, `started_at_utc`, `ended_at_utc`, `duration_seconds`, `exit_code`, `failure_kind`, `failure_message`, `execution_success`, `stdout_path`, `stderr_path`, stream byte counts, `artifacts_written` |
+| `execution` | `mode`, `app`, `app_resolved`, `command_argv`, `cwd`, `timeout_seconds`, `started_at_utc`, `ended_at_utc`, `duration_seconds`, `exit_code`, `failure_kind`, `failure_message`, `execution_success`, `stdout_path`, `stderr_path`, stream byte counts, `stale_artifacts_removed`, the planned capture/receipt/evidence paths, `artifacts_written` |
 | `capabilities` | `capture_backend`, `resolution_enforcement`, `warmup_frames`, `process_auto_exit` |
-| `capture_evidence` | a `VisualCaptureEvidence` skeleton: every tooling-supplied leaf filled, every runtime-supplied leaf `null` (VIS0-C1B) |
-| `capture_evidence_validation` | `valid`, `error_count`, `errors` — the skeleton checked against its own contract (VIS0-C1B) |
-| `artifacts` | `run_json`, `stdout`, `stderr`, `capture` (`null`), `capture_reason` |
-| `verdict` | `execution_success`, `visual_pass` (always `null`), `visual_pass_reason` |
+| `capture_verification` | the independent verification result: `attempted`, `trusted`, `process_ok`, the parsed `receipt`, `receipt_errors`, `expectation_errors`, the verified `image`, `image_errors`, the ordered `checks` list and `failure_reason` (VIS0-C2B) |
+| `capture_evidence` | a `VisualCaptureEvidence` document: tooling-supplied leaves always filled, runtime-supplied leaves filled **only** from a trusted receipt and `null` otherwise |
+| `capture_evidence_validation` | `valid`, `error_count`, `errors` — the evidence checked against its own contract |
+| `capture_evidence_artifact` | `path`, `path_display`, `written`, `note` — whether the standalone authoritative artifact was published |
+| `artifacts` | `run_json`, `stdout`, `stderr`, `capture` (verified image path or `null`), `capture_verified`, `capture_reason`, `runtime_capture_receipt`, `capture_evidence` |
+| `verdict` | `execution_success`, `capture_success`, `runner_success`, `visual_pass` (always `null`), `visual_pass_reason` |
 
-The embedded `plan` additionally carries `capture_evidence_contract`, which names
-the evidence schema and validator and lists the LINEA 1 handshake.
+The embedded `plan` additionally carries `capture_plan` (paths, executability,
+blocking reasons, manifest-driven vs runner-derived arguments) and
+`capture_evidence_contract`, which names the evidence schema and validator and
+lists the producer handshake.
 
-### `execution_success` is not `visual_pass`
+### `execution_success` is not `capture_success` is not `visual_pass`
 
-These are different statements and are kept structurally separate:
+Three different statements, kept structurally separate:
 
 - `execution_success` — *procedural*: the process was launched and exited `0`.
+- `capture_success` — *procedural*: an image artifact was really produced, and
+  its receipt and PNG were independently verified.
 - `visual_pass` — *visual*: the rendered image meets an approved quality bar.
 
-`visual_pass` is **always `null`**. VIS0-B has no capture backend and no approved
-metric, so it cannot evaluate a visual result and must not pretend to. A visual
-verdict requires a lossless capture backend plus human review or an approved
-metrics engine (VIS0-C or later).
+`visual_pass` is **always `null`**. VIS0 has no approved metric, so it cannot
+evaluate a visual result and must not pretend to. `capture_success: true` means
+"these bytes exist and match their receipt", never "this image is correct".
 
-### Capture evidence skeleton (VIS0-C1B)
+### Capture evidence (VIS0-C1B contract, VIS0-C2B producer)
 
-`run.json` now carries a `VisualCaptureEvidence` document that is valid against
-`tools/visual_benchmark/visual_capture_evidence.schema.json` while claiming no
-capture at all:
+`run.json` carries a `VisualCaptureEvidence` document that is valid against
+`tools/visual_benchmark/visual_capture_evidence.schema.json`, and since VIS0-C2B
+the same document is also written standalone to `capture_evidence.json` — which
+is the **authoritative** artifact, `run.json` merely embedding a convenience
+copy.
 
-- `execution.capture_success` is `false` and `execution.failure_reason` states
-  that no capture backend exists;
-- every `capture.image.*` and `capture.actual.*` leaf is `null`;
-- `hardware.gpu_adapter_name`, `graphics_backend` and `driver_version` are `null`
-  rather than guessed;
+- On a verified capture: `execution.capture_success` is `true`,
+  `execution.failure_reason` is `null`, `capture.actual.*` comes from the
+  receipt, and `capture.image.*` comes from the independently measured file.
+- On any failure: `capture_success` is `false`, `failure_reason` states
+  concretely what happened, and every `capture.image.*` **and**
+  `capture.actual.*` leaf is `null` — a failed run never advertises an image.
+- `hardware.gpu_adapter_name`, `graphics_backend` and `driver_version` stay
+  `null`: `RuntimeCaptureReceipt` `1.0.0` carries no adapter, backend or driver
+  field, log text is not parsed as an authority, and the host GPU is never
+  guessed. `operating_system`, `os_release` and `architecture` are
+  tooling-visible and filled.
 - `verdict.visual_pass` is `null`.
 
-Only leaves this tooling can actually observe are filled: the manifest digest and
-path, git provenance, the requested resolution/frame, renderer settings and
-OS/architecture. Every leaf the contract defines is emitted as an explicit key -
-the unknown ones as `null`, never as an omission, because the evidence contract
-treats a missing key as an incomplete artifact and only an explicit `null` as an
-honest "unavailable" (`test_skeleton_omits_no_contract_leaf` enforces this).
-The runner validates its own skeleton and records the result in
-`capture_evidence_validation`, so a future contract change that the runner does
-not follow shows up as data instead of silently producing a non-conforming
-artifact. When git provenance is unavailable the mandatory `source.commit_sha`
-cannot be filled: that is reported as `valid: false` with the error list, never
-raised and never papered over with a placeholder.
+Every leaf the contract defines is emitted as an explicit key — the unknown ones
+as `null`, never as an omission, because the evidence contract treats a missing
+key as an incomplete artifact and only an explicit `null` as an honest
+"unavailable" (`test_unexecuted_evidence_omits_no_contract_leaf` enforces this).
+The runner validates its own document and records the result in
+`capture_evidence_validation`. **If the validator rejects it, the run fails with
+exit `4` and no standalone artifact is published**; the rejected document and
+its errors stay in `run.json` so the failure is auditable. When git provenance is
+unavailable the mandatory `source.commit_sha` cannot be filled: that is reported
+as `valid: false`, never raised and never papered over with a placeholder.
 
-This is deliberately **not** a capture. It is the shape the future runtime
-capture must complete, shipped and validated before the runtime exists. See
-`docs/architecture/rv2_vis0_c1b_capture_evidence.md`.
+See `docs/architecture/rv2_vis0_c1b_capture_evidence.md` for the contract and
+`docs/architecture/rv2_vis0_c2b_capture_evidence_integration.md` for the
+producer.
 
-### Process failure handling
+### Process and capture failure handling
 
 `subprocess.run` is used with `shell=False` and an argv list. Handled without a
 traceback, each producing a coherent runner exit code:
@@ -345,10 +448,15 @@ traceback, each producing a coherent runner exit code:
 | Other OS error | `os_error` | `4` |
 | Exceeded `--timeout-seconds` | `timeout` (process killed) | `4` |
 | Non-zero exit | `null`, `exit_code` preserved | `4` |
+| Scene not runtime-executable (C2B policy) | — (no process started) | `1` |
+| Stale artifact could not be removed | — | `4` |
+| Exit `0` but receipt missing/invalid/mismatched | `null` | `4` |
+| Exit `0` but PNG unverified (size, SHA, header, RGBA8) | `null` | `4` |
+| Evidence rejected by its own validator | `null` | `4` |
 | Ctrl-C | — | `5` |
 
 Partial stdout/stderr captured before a timeout is still written, and `run.json`
-is written even when the app failed, so failed runs remain auditable.
+is written even when the run failed, so failed runs remain auditable.
 
 ## Git provenance and `--require-clean-git`
 
@@ -398,48 +506,66 @@ ignoring the field.
 python tools/visual_benchmark/validate_manifest.py \
   docs/validation/visual_benchmark/vis0_reference_scene.json
 
-python -m unittest tools/visual_benchmark/test_validate_manifest.py -v
-python -m unittest tools/visual_benchmark/test_run_benchmark.py -v
+python -X utf8 -m unittest tools/visual_benchmark/test_validate_manifest.py -v
+python -X utf8 -m unittest tools/visual_benchmark/test_validate_capture_evidence.py -v
+python -X utf8 -m unittest tools/visual_benchmark/test_run_benchmark.py -v
 ```
 
-Regression guards (unchanged by VIS0-B):
+Regression guards (the tooling must never perturb the workspace):
 
 ```
 cargo fmt --all -- --check
 cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The runner suite needs **no graphical process and no GPU**. Real subprocess
-coverage uses the Python interpreter itself as a harmless stand-in executable, so
-the execution, non-zero-exit and timeout paths are exercised for real. Coverage
-includes: plan success, invalid-manifest gating, determinism, pilot/chase/
-exposure/debug mapping, no-invented-flags (verified against the runtime source),
-argv safety with spaces and metacharacters, missing executable, non-zero exit,
-timeout, provenance validity, git SHA parsing, the strict clean-git policy,
-`visual_pass` never auto-approved, supported resolution enforcement, and
-explicit representation of unavailable capture.
+The runner suite needs **no graphical process, no window and no GPU**. Real
+subprocess coverage uses the Python interpreter as a harmless stand-in
+executable, so the execution, non-zero-exit and timeout paths are exercised for
+real. The end-to-end capture path is exercised against a test double that
+reproduces the VIS0-C2A **artifact contract** — it writes a real RGBA8 PNG
+(stdlib `zlib` + `struct`, no image library) to `--capture-out` and a
+byte-accurate `RuntimeCaptureReceipt` to `--capture-receipt-out`, with knobs for
+a missing receipt, a malformed digest, a wrong frame, a wrong image path, a
+corrupt signature and a non-zero exit. Nothing in it renders.
 
-## Capability status after VIS0-C1 convergence
+Coverage includes: plan success, invalid-manifest gating, determinism,
+pilot/chase/exposure/debug mapping, no-invented-flags (verified against the
+runtime source), argv safety with spaces and metacharacters, missing executable,
+non-zero exit, timeout, provenance validity, git SHA parsing, the strict
+clean-git policy, `visual_pass` never auto-approved, the real capture flag
+mapping, runner-derived vs manifest-driven argument provenance, the C2B
+executability gate (warmup/frame relation, PNG-only, quality), dry-run side-effect
+freedom, stale artifact removal, strict receipt parsing and expectation
+checking, independent PNG verification, requested-vs-actual ownership, and
+evidence validation gating the runner exit code.
 
-This list distinguishes remaining capture gaps from capabilities resolved by
-VIS0-C1. A headless renderer is not required to consider auto-exit resolved.
+## Capability status after VIS0-C2B
 
-1. **No capture backend.** `rcsim-app` cannot write a lossless framebuffer. VIS0-C
-   needs a real capture CLI (for example `--capture-out PATH --capture-format
-   png`) before any golden image can exist.
+1. ~~**No capture backend.**~~ *Resolved by VIS0-C2A, consumed by VIS0-C2B:*
+   `--capture-frame N --capture-out PATH --capture-format png
+   [--capture-receipt-out PATH]` writes a lossless RGBA8 PNG of the final
+   display-referred frame plus a `RuntimeCaptureReceipt` `1.0.0`.
 2. **Auto-exit is resolved; headless rendering is separate.** VIS0-C1's
-   `--exit-after-frame` provides deterministic frame-bounded exit. Rendering is
-   still windowed; VIS0-C1 did not implement a headless renderer, and this does
-   not make auto-exit unsupported or create a capture blocker by itself.
+   `--exit-after-frame` provides deterministic frame-bounded exit, and the
+   runner derives it from the captured presentation frame. Rendering is still
+   windowed; VIS0-C1 did not implement a headless renderer, and that is not a
+   capture blocker.
 3. ~~**No resolution control.**~~ *Resolved by VIS0-C1:* `--render-width` and
    `--render-height` request an explicit physical window/client framebuffer
-   extent, verified fail-closed before renderer initialization.
-4. **No warmup / frame selection for capture.** `warmup` cannot be honoured as a
-   capture scheduling concept, and `capture.frame` is mapped only as lifecycle
-   control (`--exit-after-frame`), not as a frame to capture. Capture timing is
-   not yet reproducible.
+   extent, verified fail-closed before renderer initialization. The authoritative
+   `capture.actual` extent still comes from the receipt, never from the request.
+4. ~~**No warmup / frame selection for capture.**~~ *Resolved by VIS0-C2A +
+   VIS0-C2B:* `--capture-frame` selects a zero-based presentation frame, and
+   warmup is derived from the relation `warmup == capture.frame`. There is still
+   no `--warmup` flag, and arbitrary warmup/frame combinations remain
+   unsupported by design — the runner fails closed on them.
 5. ~~**Contract gap: aircraft state is not fully manifest-controlled.**~~
    *Resolved by VIS0-C1B:* `aircraft.altitude_m` and `aircraft.airspeed_mps` are
    now manifest fields mapped to `--altitude-m` / `--airspeed-mps`.
 6. **No approved visual metric.** Thresholds are undefined in VIS0-A, so no
-   automated PASS/FAIL can exist yet.
+   automated PASS/FAIL can exist yet. This is the remaining VIS0-C gap and is
+   deliberately untouched here.
+7. **No machine-readable GPU/backend/driver handshake.** `RuntimeCaptureReceipt`
+   `1.0.0` has no adapter field, so `hardware.gpu_adapter_name`,
+   `graphics_backend` and `driver_version` stay `null`.

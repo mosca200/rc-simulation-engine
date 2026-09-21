@@ -4,6 +4,21 @@
 **Branch:** `work/line-2/rv2-vis0-c1b-tooling-contract`
 **Base:** `origin/integration/render-v2` @ `b64eb79b3d50f12433375651c90c1cf83f6b0d4a`
 
+> **Aggiornamento VIS0-C2B (2026-09-21).** Questo documento resta la descrizione
+> normativa del contratto `VisualCaptureEvidence` **1.0.0**, che non è cambiato.
+> È però cambiato lo stato del mondo: il backend di capture esiste (VIS0-C2A) e
+> il runner ora produce evidence reale e verificata (VIS0-C2B). Le sezioni 5 e 6
+> riportano entrambe le letture — lo stato al momento di C1B e lo stato attuale —
+> perché le affermazioni al presente di allora sono ormai false. Il documento
+> normativo dell'integrazione è
+> [`rv2_vis0_c2b_capture_evidence_integration.md`](rv2_vis0_c2b_capture_evidence_integration.md).
+> In sintesi: `capture_backend` è ora `supported` con `produces_image: true`,
+> `warmup_frames` è `derived` (non `unsupported`), i leaf runtime vengono
+> riempiti da un `RuntimeCaptureReceipt` **verificato**, e `capture_evidence.json`
+> è scritto come artefatto standalone autorevole. `RUNNER_VERSION`/`PLAN_VERSION`
+> sono `1.2.0`. Restano invariati: `verdict.visual_pass` sempre `null`, i tre
+> leaf hardware ancora `null`, e nessuna metrica visuale.
+
 ## 1. Obiettivo
 
 Chiudere due lacune **indipendenti** del benchmark VIS0, restando interamente nel
@@ -410,9 +425,26 @@ contatore di presentation frame.
 Nessuna dipendenza da funzioni, struct o nomi del branch LINEA 1: l'handshake è
 puramente concettuale e espresso come nomi di campo JSON.
 
-## 6. Integrazione nel runner (deliberatamente limitata)
+#### Stato dopo VIS0-C2A + VIS0-C2B (attuale)
 
-`run_benchmark.py` è stato esteso **solo** per:
+Dei cinque requisiti sopra, quattro sono chiusi:
+
+| # | Requisito | Stato attuale |
+| --- | --- | --- |
+| 1 | backend di capture | **chiuso** (VIS0-C2A): `--capture-frame N --capture-out PATH --capture-format png [--capture-receipt-out PATH]` scrive un PNG RGBA8 lossless del frame display-referred finale |
+| 2 | extent reale del framebuffer | **chiuso**: `framebuffer_width`/`framebuffer_height` arrivano dal `RuntimeCaptureReceipt` e sono riverificati contro l'IHDR del PNG |
+| 3 | indice reale del presentation frame | **chiuso**: `presentation_frame_index` arriva dal receipt ed è confrontato con il frame richiesto |
+| 4 | auto-exit deterministico | **chiuso** (VIS0-C1), ora derivato dal runner sullo stesso frame della capture |
+| 5 | metadata adapter/backend/driver | **ancora aperto**: il receipt `1.0.0` non ha questi campi, quindi i tre leaf hardware restano `null` |
+
+Il punto 5 è l'unico residuo: non esiste ancora un handshake machine-readable per
+GPU/backend/driver, e il logging testuale **non** viene parsato come autorità.
+
+## 6. Integrazione nel runner
+
+### Stato al momento di C1B (deliberatamente limitato)
+
+`run_benchmark.py` era stato esteso **solo** per:
 
 - **A.** mappare `aircraft.altitude_m` / `aircraft.airspeed_mps` sui flag reali;
 - **B.** conoscere il contratto evidence: `plan.capture_evidence_contract`
@@ -421,22 +453,32 @@ puramente concettuale e espresso come nomi di campo JSON.
   runtime a `null`, e `run.json.capture_evidence_validation` riporta l'esito
   dell'auto-verifica.
 
-Il runner **non** dichiara che il capture sia disponibile. Dopo la convergenza
-VIS0-C1 le capability riportano:
+Allora il runner **non** dichiarava che il capture fosse disponibile, e le
+capability riportavano `capture_backend` = `unavailable`,
+`warmup_frames` = `unsupported`. `RUNNER_VERSION`/`PLAN_VERSION` erano `1.1.0`.
 
-- `capture_backend` = `unavailable`, `produces_image: false`;
-- `resolution_enforcement` = `supported`, `enforced: true` (VIS0-C1 convergence);
-- `warmup_frames` = `unsupported`, `enforced: false`;
-- `process_auto_exit` = `supported` (VIS0-C1 convergence).
+### Stato attuale (VIS0-C2B)
 
-`artifacts.capture` resta `null` con la propria `capture_reason`, e
-`verdict.visual_pass` resta `null`. Lo skeleton non è un artefatto scritto su
-disco: vive dentro `run.json`, così non può essere scambiato per il referto di un
-capture avvenuto.
+Quelle affermazioni non sono più vere. Oggi il runner:
 
-`RUNNER_VERSION` e `PLAN_VERSION` passano a `1.1.0` perché la forma del plan è
-cresciuta (nuova chiave `capture_evidence_contract`) e il runner ha nuova
-capacità di emissione.
+- emette il gruppo capture reale guidato dal manifest (`capture.filename` →
+  `--capture-out` come percorso **assoluto**, `capture.format` →
+  `--capture-format`, `capture.frame` → `--capture-frame`) e due flag derivati
+  (`--capture-receipt-out`, `--exit-after-frame`), tenendo distinta la provenance;
+- applica un gate di eseguibilità (frame esplicito, `warmup == capture.frame`,
+  solo PNG, `capture.quality` non ignorato) che fallisce chiuso **prima** di
+  avviare il processo;
+- rimuove gli artefatti stale dentro `scene_output_dir` prima di eseguire;
+- verifica in modo indipendente receipt e PNG;
+- riporta `capture_backend` = `supported` con `produces_image: true` e
+  `warmup_frames` = `derived`;
+- scrive `capture_evidence.json` come artefatto standalone autorevole, solo se il
+  validator lo accetta, e incorpora lo stesso documento in `run.json`.
+
+`RUNNER_VERSION` e `PLAN_VERSION` sono `1.2.0`. Il contratto evidence resta
+`1.0.0` e il `GoldenSceneManifest` resta `1.1.0`: nessuna delle due versioni è
+stata toccata. Dettagli in
+[`rv2_vis0_c2b_capture_evidence_integration.md`](rv2_vis0_c2b_capture_evidence_integration.md).
 
 ## 7. Scope rispettato
 
