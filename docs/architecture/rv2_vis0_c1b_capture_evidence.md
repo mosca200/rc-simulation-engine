@@ -186,12 +186,14 @@ capture.requested.height             capture.actual.framebuffer_height
 capture.requested.frame_index        capture.actual.presentation_frame_index
 ```
 
-La divergenza è **rappresentabile e lecita**, ed è anzi il caso atteso oggi: la
-finestra è creata con `LogicalSize::new(1_280.0, 720.0)` hardcoded, quindi una
-richiesta 1920x1080 produce realmente 1280x720. Un contratto che costringesse i
-due valori a coincidere nasconderebbe la lacuna invece di esporla; uno che
-permettesse all'*actual* di sovrascrivere il *requested* renderebbe
-l'intento illeggibile a posteriori.
+La divergenza resta **rappresentabile e lecita**. Oggi VIS0-C1 applica la
+risoluzione richiesta come extent fisico esplicito della finestra/client
+framebuffer e la verifica fail-closed, ma non esiste ancora un capture backend
+con evidence channel che riporti l'extent del framebuffer effettivamente
+catturato: `capture.actual.framebuffer_width` e `framebuffer_height` restano
+quindi `null`. Un contratto che deducesse l'*actual* dal *requested* nasconderebbe
+la mancanza di evidence invece di esporla; uno che permettesse all'*actual* di
+sovrascrivere il *requested* renderebbe l'intento illeggibile a posteriori.
 
 ### Policy di indisponibilità
 
@@ -378,27 +380,32 @@ manifest, tutti i valori *requested*, `capture.format`,
 `execution.process_exit_code` (osservato direttamente dal subprocess),
 `execution.failure_reason`, OS/architecture e il blocco `verdict`.
 
-### Requisiti che oggi il runtime NON può soddisfare
+### Requisiti del capture path e stato dopo VIS0-C1
 
-Da verificare sul codice, non ipotizzati. Perché l'handshake sia completabile,
-LINEA 1 (o una tranche successiva) dovrà fornire:
+Stato verificato sul codice, non ipotizzato. Perché l'handshake sia completabile,
+una tranche successiva dovrà fornire ciò che resta mancante:
 
 1. **un backend di capture** — oggi `rcsim-app render` non scrive alcuna
    immagine; la crate `image` è usata solo per decodifica texture e per il
    generatore offline di texture terreno;
-2. **l'extent reale del framebuffer** — oggi la finestra è
-   `LogicalSize::new(1_280.0, 720.0)` hardcoded in `RenderApplication::resumed`
-   e non esiste alcun flag di risoluzione;
-3. **l'indice reale del presentation frame** — oggi il render loop non espone un
-   frame counter e non esiste selezione di frame;
-4. **auto-exit deterministico** — oggi il loop winit è `ControlFlow::Poll` ed
-   esce solo su Escape o chiusura finestra, quindi un run non presidiato termina
-   in timeout;
+2. **l'extent reale del framebuffer catturato nell'evidence** — VIS0-C1 applica
+   `--render-width` / `--render-height` come extent fisico della finestra/client
+   framebuffer e lo verifica fail-closed, ma non lo consegna ancora come
+   `capture.actual.*` tramite un capture backend/evidence channel;
+3. **l'indice reale del presentation frame catturato** — VIS0-C1 espone un
+   contatore di presentation frame e usa `capture.frame` come
+   `--exit-after-frame`, ma senza image capture non esiste ancora un frame
+   catturato da registrare nell'evidence;
+4. **auto-exit deterministico: risolto** — `--exit-after-frame` fornisce il
+   lifecycle frame-bounded. Il renderer resta windowed: headless non è stato
+   implementato, ma è una capacità distinta e non è necessaria per dichiarare
+   risolto auto-exit;
 5. **metadata adapter/backend/driver** — oggi non esposti dal CLI.
 
-Il tooling **non** è stato modificato per ottenere questi dati e il runtime
-**non** è stato toccato: sono requisiti documentati, e nel frattempo ogni leaf
-corrispondente resta `null`.
+La tranche C1B originale non modificò il runtime per ottenere questi dati. Dopo
+la convergenza VIS0-C1, i leaf che richiedono il capture backend/evidence channel
+restano comunque `null`: non vengono dedotti dalla resolution enforcement o dal
+contatore di presentation frame.
 
 Nessuna dipendenza da funzioni, struct o nomi del branch LINEA 1: l'handshake è
 puramente concettuale e espresso come nomi di campo JSON.
@@ -414,8 +421,8 @@ puramente concettuale e espresso come nomi di campo JSON.
   runtime a `null`, e `run.json.capture_evidence_validation` riporta l'esito
   dell'auto-verifica.
 
-Il runner **non** dichiara che il capture sia disponibile. Le capability
-continuano a riportare, invariate:
+Il runner **non** dichiara che il capture sia disponibile. Dopo la convergenza
+VIS0-C1 le capability riportano:
 
 - `capture_backend` = `unavailable`, `produces_image: false`;
 - `resolution_enforcement` = `supported`, `enforced: true` (VIS0-C1 convergence);

@@ -152,22 +152,21 @@ EMITTABLE_FLAGS = (
 # --- Runtime capability gaps (verified against the runtime source) -----------
 
 CAPTURE_UNAVAILABLE_REASON = (
-    "CAPTURE BACKEND NOT YET AVAILABLE: `rcsim-app render` exposes no lossless "
-    "framebuffer save CLI. The render subcommand creates a winit window and "
-    "runs an interactive event loop; it never writes an image artifact. The "
-    "`image` crate is used only for texture decoding "
-    "(crates/renderer/src/texture.rs) and the offline terrain texture "
-    "generator (crates/renderer/src/bin/generate_terrain_textures.rs). "
-    "VIS0-B must not modify renderer/app, so no capture is produced and none "
-    "is faked."
+    "CAPTURE BACKEND NOT YET AVAILABLE: `rcsim-app render` has no framebuffer "
+    "or GPU readback, no image output path, and no PNG/JPEG/EXR capture writer. "
+    "The render subcommand presents to a winit window but never writes an image "
+    "artifact, so there is no end-to-end capture backend. No capture is faked."
 )
 
-RESOLUTION_UNSUPPORTED_REASON = (
+RESOLUTION_SUPPORTED_REASON = (
     "resolution enforcement: supported via --render-width/--render-height CLI "
-    "(VIS0-C1 runtime control). These flags set the logical window inner size; "
-    "the runtime verifies the physical framebuffer extent fail-closed before "
-    "initialising the renderer. The runner maps resolution.width → "
-    "--render-width and resolution.height → --render-height."
+    "(VIS0-C1 runtime control). These flags request an explicit physical "
+    "window/client framebuffer extent; the runtime verifies the physical inner "
+    "extent fail-closed before initialising the renderer. The runner maps "
+    "resolution.width → --render-width and resolution.height → "
+    "--render-height. This runtime enforcement does not report capture.actual "
+    "framebuffer dimensions; those remain null until a capture backend/evidence "
+    "channel exists."
 )
 
 WARMUP_UNSUPPORTED_REASON = (
@@ -191,7 +190,7 @@ CAPTURE_METADATA_ONLY_REASON = (
     "produce. Nothing is written by this runner."
 )
 
-NO_AUTO_EXIT_REASON = (
+AUTO_EXIT_SUPPORTED_REASON = (
     "process auto-exit: supported via --exit-after-frame CLI (VIS0-C1 runtime "
     "control). The render loop terminates cleanly after presentation frame N "
     "(zero-based) has been presented. When capture.frame is present in the "
@@ -694,7 +693,7 @@ def build_runtime_capabilities(manifest: dict) -> dict:
 
     Updated after VIS0-C1 runtime control (--render-width, --render-height,
     --exit-after-frame) was integrated. Resolution and process auto-exit are
-    now supported; warmup and capture remain unsupported.
+    now supported; warmup remains unsupported and capture remains unavailable.
     """
     resolution = manifest.get("resolution") or {}
     capture = manifest.get("capture") or {}
@@ -713,7 +712,7 @@ def build_runtime_capabilities(manifest: dict) -> dict:
                 "width": resolution.get("width"),
                 "height": resolution.get("height"),
             },
-            "reason": RESOLUTION_UNSUPPORTED_REASON,
+            "reason": RESOLUTION_SUPPORTED_REASON,
         },
         "warmup_frames": {
             "status": "unsupported",
@@ -723,7 +722,7 @@ def build_runtime_capabilities(manifest: dict) -> dict:
         },
         "process_auto_exit": {
             "status": "supported",
-            "reason": NO_AUTO_EXIT_REASON,
+            "reason": AUTO_EXIT_SUPPORTED_REASON,
         },
     }
 

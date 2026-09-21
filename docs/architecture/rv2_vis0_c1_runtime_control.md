@@ -2,7 +2,9 @@
 
 RV2-VIS0-C1 adds only the presentation-runtime foundations needed by a future
 golden capture. It does not read pixels, encode images, compare images, or
-change the VIS0-B runner capability declarations.
+implement capture. After convergence, the VIS0-B runner capability declarations
+report resolution enforcement and process auto-exit as supported; that reporting
+update does not add further runtime behavior.
 
 ## Explicit render resolution
 
@@ -86,8 +88,10 @@ capture for pending presentation index 10, and use `--exit-after-frame 10` so
 the captured frame is presented before clean exit.
 
 Until GPU readback exists, VIS0-B must continue to report framebuffer capture,
-warmup enforcement, capture-frame enforcement, and complete process auto-exit
-capture orchestration as unavailable or unsupported.
+warmup enforcement, and capture-frame enforcement as unavailable or
+unsupported. Process auto-exit itself is supported by `--exit-after-frame`;
+what remains unavailable is the end-to-end capture orchestration and its
+evidence channel.
 
 ## Post-tone-map capture audit
 

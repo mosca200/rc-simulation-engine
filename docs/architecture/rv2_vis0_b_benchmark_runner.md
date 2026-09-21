@@ -67,12 +67,12 @@ Build the app first:
 cargo build --release -p rcsim-app
 ```
 
-> **Expect a timeout today.** `rcsim-app render` opens an interactive winit
-> window and runs until Escape or window close. It has no headless mode and no
-> frame limit, so an unattended run ends in `--timeout-seconds`. This is a
-> runtime gap recorded in `run.json` under
-> `capabilities.process_auto_exit`, not a runner bug. See
-> [Blockers for VIS0-C](#blockers-for-vis0-c).
+> `rcsim-app render` still opens a visible winit window; VIS0-C1 did not add a
+> headless renderer. Auto-exit is a separate capability and is supported:
+> the runner maps `capture.frame` to `--exit-after-frame`, so an unattended run
+> has a deterministic frame-bounded lifecycle. No image is produced because the
+> capture backend remains unavailable. See
+> [Capability status after VIS0-C1 convergence](#capability-status-after-vis0-c1-convergence).
 
 ### Persisting the plan
 
@@ -225,12 +225,13 @@ No capture image is written, because the runtime cannot produce one.
 
 **CAPTURE BACKEND NOT YET AVAILABLE.**
 
-`rcsim-app render` exposes no lossless framebuffer save. The render subcommand
-creates a winit window and runs an interactive event loop; it never writes an
-image artifact. The `image` crate appears in the workspace only for texture
-decoding (`crates/renderer/src/texture.rs`) and the offline terrain texture
-generator (`crates/renderer/src/bin/generate_terrain_textures.rs`); the
-PNG/JPEG encoders in `crates/renderer/src/glb.rs` are test-only.
+`rcsim-app render` has no framebuffer/GPU readback, image output path, or
+PNG/JPEG/EXR capture writer. The render subcommand presents to a winit window
+but never writes an image artifact, so there is no end-to-end capture backend.
+The `image` crate appears in the workspace only for texture decoding
+(`crates/renderer/src/texture.rs`) and the offline terrain texture generator
+(`crates/renderer/src/bin/generate_terrain_textures.rs`); the PNG/JPEG encoders
+in `crates/renderer/src/glb.rs` are test-only.
 
 VIS0-B therefore stops at execution and provenance, and records the capability
 as unavailable in both `plan.json` and `run.json`:
@@ -415,21 +416,24 @@ includes: plan success, invalid-manifest gating, determinism, pilot/chase/
 exposure/debug mapping, no-invented-flags (verified against the runtime source),
 argv safety with spaces and metacharacters, missing executable, non-zero exit,
 timeout, provenance validity, git SHA parsing, the strict clean-git policy,
-`visual_pass` never auto-approved, and explicit representation of unsupported
-resolution/capture.
+`visual_pass` never auto-approved, supported resolution enforcement, and
+explicit representation of unavailable capture.
 
-## Blockers for VIS0-C
+## Capability status after VIS0-C1 convergence
 
-Recorded, not implemented. Each one needs a runtime or contract change that is
-out of VIS0-C1 scope.
+This list distinguishes remaining capture gaps from capabilities resolved by
+VIS0-C1. A headless renderer is not required to consider auto-exit resolved.
 
 1. **No capture backend.** `rcsim-app` cannot write a lossless framebuffer. VIS0-C
    needs a real capture CLI (for example `--capture-out PATH --capture-format
    png`) before any golden image can exist.
-2. ~~**No headless mode / auto-exit.**~~ *Resolved by VIS0-C1:* `--exit-after-frame`
-   provides deterministic frame-bounded exit.
+2. **Auto-exit is resolved; headless rendering is separate.** VIS0-C1's
+   `--exit-after-frame` provides deterministic frame-bounded exit. Rendering is
+   still windowed; VIS0-C1 did not implement a headless renderer, and this does
+   not make auto-exit unsupported or create a capture blocker by itself.
 3. ~~**No resolution control.**~~ *Resolved by VIS0-C1:* `--render-width` and
-   `--render-height` set the logical window inner size.
+   `--render-height` request an explicit physical window/client framebuffer
+   extent, verified fail-closed before renderer initialization.
 4. **No warmup / frame selection for capture.** `warmup` cannot be honoured as a
    capture scheduling concept, and `capture.frame` is mapped only as lifecycle
    control (`--exit-after-frame`), not as a frame to capture. Capture timing is

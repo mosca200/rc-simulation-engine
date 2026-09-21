@@ -323,8 +323,14 @@ Non richiedere bitwise equality tra hardware diversi. Invece:
 - Debug modes:
   - `terrain_debug`: `final`, `albedo`, `normal`, `roughness`, `macro`, `detail` (maps to `--terrain-debug`)
   - `vegetation_debug`: `final`, `lod`, `culling` (maps to `--vegetation-debug`)
-- Resolution: width, height
-- Warmup frames
+- Resolution: width, height (maps to `--render-width` / `--render-height` as an
+  explicit physical window/client framebuffer extent)
+- Frame-bounded auto-exit: `capture.frame` maps to `--exit-after-frame` as
+  lifecycle control, not as capture enforcement
+
+**Non supportato:** `warmup` resta nel manifest, ma il runtime non implementa
+ancora warmup/capture scheduling end-to-end. Il capture backend e la produzione
+di evidence `capture.actual.*` restano ugualmente indisponibili.
 
 ### Future capability (non nel v1 manifest)
 - Weather conditions (clear, cloudy, fog)
