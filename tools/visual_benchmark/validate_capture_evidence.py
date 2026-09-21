@@ -13,10 +13,13 @@ The evidence contract records FACTS ONLY. It never decides whether an image is
 good: `verdict.visual_pass` must stay null until a human review or an approved
 metrics engine exists (see docs/architecture/rv2_vis0_c1b_capture_evidence.md).
 
-NO CAPTURE BACKEND EXISTS YET. Nothing in `integration/render-v2` writes an
-image, so no conforming evidence artifact can be produced today except one that
-honestly reports `capture_success: false`. This validator exists first so the
-future runtime capture (LINEA 1) has a stable contract to hand data to.
+Since VIS0-C2A the runtime really writes a capture, and since VIS0-C2B the
+benchmark runner produces conforming evidence with `capture_success: true` from
+a verified `RuntimeCaptureReceipt`. The contract itself is unchanged at 1.0.0:
+this validator still accepts an honest `capture_success: false` document, and
+still rejects any producer that fills a runtime-supplied leaf it cannot know.
+Note that `RuntimeCaptureReceipt` 1.0.0 is a SEPARATE runtime contract with its
+own version; the two are never conflated.
 
 Unavailability policy
 ---------------------

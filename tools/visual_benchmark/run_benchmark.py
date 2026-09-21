@@ -1,15 +1,42 @@
 #!/usr/bin/env python3
 """
-RV2-VIS0-B Golden Visual Benchmark Runner
+RV2-VIS0-B/C2B Golden Visual Benchmark Runner
 
 Turns an approved VIS0-A GoldenSceneManifest into a deterministic, reproducible
-`rcsim-app render` invocation plus run provenance metadata.
+`rcsim-app render` invocation, really runs the VIS0-C2A capture backend, and
+records run provenance plus a verified VisualCaptureEvidence artifact.
 
-VIS0-B verifies EXECUTION REPRODUCIBILITY, not visual image quality.
-It never decides a visual PASS/FAIL, never reads pixels, and never fakes a
-capture that the runtime cannot produce.
+VIS0 verifies EXECUTION AND CAPTURE REPRODUCIBILITY, not visual image quality.
+It never decides a visual PASS/FAIL and never reads pixel values: `visual_pass`
+is null in every artifact this runner writes.
 
-The current GoldenSceneManifest contract stays authoritative: this runner reuses
+Since VIS0-C2B the manifest really drives the capture:
+
+    GoldenSceneManifest
+      -> deterministic runner plan
+      -> rcsim-app render --capture-frame/--capture-out/--capture-format
+      -> real lossless PNG
+      -> real RuntimeCaptureReceipt 1.0.0
+      -> independent tooling verification (receipt + PNG bytes + PNG header)
+      -> VisualCaptureEvidence 1.0.0
+      -> capture_evidence.json (authoritative) and run.json (convenience copy)
+
+Three separate contracts are in play and are never conflated:
+
+    GoldenSceneManifest    1.1.0  intent      (requested values)
+    RuntimeCaptureReceipt  1.0.0  runtime claim (written by rcsim-app)
+    VisualCaptureEvidence  1.0.0  facts       (written by this runner)
+
+The runtime receipt is the ONLY authority for `capture.actual.*` and
+`capture.image.*`. Those values are never derived from the manifest, and a
+receipt is never trusted merely because it exists: it is re-checked against the
+request plan and the PNG is re-measured on disk.
+
+`process exit 0` is no longer enough for a successful run. An execute is
+successful only when the process exited 0 AND the receipt is trusted AND the PNG
+verified independently AND the evidence document passed its own validator.
+
+The GoldenSceneManifest contract stays authoritative: this runner reuses
 `validate_manifest.ManifestValidator` and only maps manifest fields onto CLI
 flags that really exist in `crates/app/src/render_app.rs`.
 
@@ -25,11 +52,13 @@ Usage:
         --app target/release/rcsim-app --execute
 
 Exit codes:
-    0 - plan built (dry run), or the app process exited 0
-    1 - manifest failed contract validation; no process was started
+    0 - plan built (dry run), or a fully verified end-to-end capture
+    1 - manifest failed contract validation, or is formally valid but not
+        runtime-executable under the C2B policy; no process was started
     2 - usage/input error (missing file, unreadable JSON, bad flag value)
     3 - git policy violation (--require-clean-git against a dirty work tree)
-    4 - execution failure (app not found, non-zero exit, timeout)
+    4 - execution failure (app not found, non-zero exit, timeout, untrusted
+        receipt, unverified PNG, or evidence that failed its own validator)
     5 - interrupted (Ctrl-C)
 """
 
@@ -48,6 +77,15 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:  # Imported as part of the tools.visual_benchmark namespace package.
+    from tools.visual_benchmark.runtime_capture_receipt import (
+        RECEIPT_KIND,
+        RECEIPT_SCHEMA_VERSION,
+        RECEIPT_SUPPORTED_FORMAT,
+        canonical_image_path,
+        check_receipt_expectations,
+        load_receipt,
+        verify_captured_png,
+    )
     from tools.visual_benchmark.validate_capture_evidence import (
         EVIDENCE_KIND,
         EVIDENCE_SCHEMA_PATH,
@@ -61,6 +99,15 @@ try:  # Imported as part of the tools.visual_benchmark namespace package.
         ManifestValidator,
     )
 except ImportError:  # Direct script execution: script directory is sys.path[0].
+    from runtime_capture_receipt import (
+        RECEIPT_KIND,
+        RECEIPT_SCHEMA_VERSION,
+        RECEIPT_SUPPORTED_FORMAT,
+        canonical_image_path,
+        check_receipt_expectations,
+        load_receipt,
+        verify_captured_png,
+    )
     from validate_capture_evidence import (
         EVIDENCE_KIND,
         EVIDENCE_SCHEMA_PATH,
@@ -73,8 +120,8 @@ except ImportError:  # Direct script execution: script directory is sys.path[0].
 
 
 RUNNER_NAME = "rv2-vis0-benchmark-runner"
-RUNNER_VERSION = "1.1.0"
-PLAN_VERSION = "1.1.0"
+RUNNER_VERSION = "1.2.0"
+PLAN_VERSION = "1.2.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION_FAILED = 1
@@ -93,9 +140,23 @@ DEFAULT_OUTPUT_DIR_RELATIVE = Path("tmp") / "visual_benchmark_runs"
 # Repository root, derived from this file's location: tools/visual_benchmark/.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Artifact names inside <output_dir>/<scene_id>/. The capture image name comes
+# from the manifest (capture.filename); these three are tooling-owned.
+RUNTIME_RECEIPT_FILENAME = "runtime_capture_receipt.json"
+CAPTURE_EVIDENCE_FILENAME = "capture_evidence.json"
+RUN_METADATA_FILENAME = "run.json"
+STDOUT_FILENAME = "stdout.txt"
+STDERR_FILENAME = "stderr.txt"
+
+# The runtime writes each capture output to a sibling `<name>.tmp` and renames
+# it only once complete (crates/app/src/render_app.rs::temporary_output_path).
+# A crash between write and rename can leave that sibling behind, so the runner
+# removes it too rather than letting it look like a partial result.
+TEMPORARY_SUFFIX = ".tmp"
+
 # The rcsim-app render CLI surface this runner is allowed to emit. Every entry
 # was read from RenderOptions::parse_with_defaults and the usage string in
-# crates/app/src/main.rs at the VIS0-B base commit. Nothing here is invented.
+# crates/app/src/main.rs at the VIS0-C2B base commit. Nothing here is invented.
 KNOWN_RENDER_FLAGS = (
     "--model",
     "--throttle",
@@ -119,6 +180,10 @@ KNOWN_RENDER_FLAGS = (
     "--pilot-position",
     "--render-width",
     "--render-height",
+    "--capture-frame",
+    "--capture-out",
+    "--capture-format",
+    "--capture-receipt-out",
     "--exit-after-frame",
 )
 
@@ -128,6 +193,13 @@ KNOWN_RENDER_FLAGS = (
 # --altitude-m/--airspeed-mps became emittable in VIS0-C1B, when the v1
 # manifest gained aircraft.altitude_m/aircraft.airspeed_mps so the airborne
 # initial state no longer depends on the runtime defaults.
+#
+# The VIS0-C2A capture group (--capture-frame/--capture-out/--capture-format)
+# became emittable in VIS0-C2B, when the manifest started driving a real
+# capture. --capture-receipt-out and --exit-after-frame are kept separate from
+# that group on purpose: they are RUNNER-DERIVED controls, not manifest fields.
+# No GoldenSceneManifest key names a receipt path, so pretending one does would
+# falsify the plan's provenance.
 EMITTABLE_FLAGS = (
     "--renderer",
     "--terrain-debug",
@@ -146,16 +218,52 @@ EMITTABLE_FLAGS = (
     "--start-on-ground",
     "--render-width",
     "--render-height",
+    "--capture-frame",
+    "--capture-out",
+    "--capture-format",
+    "--capture-receipt-out",
     "--exit-after-frame",
 )
 
-# --- Runtime capability gaps (verified against the runtime source) -----------
+# Manifest-driven capture flags, in emission order.
+MANIFEST_CAPTURE_FLAGS = ("--capture-out", "--capture-format", "--capture-frame")
 
-CAPTURE_UNAVAILABLE_REASON = (
-    "CAPTURE BACKEND NOT YET AVAILABLE: `rcsim-app render` has no framebuffer "
-    "or GPU readback, no image output path, and no PNG/JPEG/EXR capture writer. "
-    "The render subcommand presents to a winit window but never writes an image "
-    "artifact, so there is no end-to-end capture backend. No capture is faked."
+# Runner-derived flags, in emission order. Always emitted after the
+# manifest-driven ones so the argv split between "the manifest asked for this"
+# and "the runner decided this" is visible in the command itself.
+DERIVED_CAPTURE_FLAGS = ("--capture-receipt-out", "--exit-after-frame")
+
+# --- Runtime capabilities (verified against the runtime source) --------------
+
+CAPTURE_SUPPORTED_REASON = (
+    "capture backend: supported via the VIS0-C2A capture group "
+    "--capture-frame N --capture-out PATH --capture-format png "
+    "[--capture-receipt-out PATH]. On the requested presentation frame the "
+    "runtime redirects postprocess to an Rgba8UnormSrgb target, blits it 1:1 to "
+    "the surface, reads the framebuffer back through a COPY_DST|MAP_READ staging "
+    "buffer, unpads the 256-byte row alignment, presents the frame, and writes a "
+    "lossless RGBA8 PNG plus an optional RuntimeCaptureReceipt. The captured "
+    "pixels are the final display-referred image (post exposure and tone map), "
+    "not an intermediate HDR buffer. produces_image=true."
+)
+
+CAPTURE_FRAME_SELECTION_REASON = (
+    "frame selection: supported via --capture-frame N. N is a zero-based "
+    "PRESENTATION frame index counted by RenderRunControl, so frames 0..N-1 are "
+    "presented before frame N is captured. Zero-extent frames, occlusion and "
+    "surface-acquisition failures leave the same frame pending and never advance "
+    "the counter; a successfully presented frame commits exactly once."
+)
+
+CAPTURE_RECEIPT_REASON = (
+    "runtime receipt: supported via --capture-receipt-out PATH. The runtime "
+    "writes RuntimeCaptureReceipt 1.0.0 with schema_version, "
+    "presentation_frame_index, framebuffer_width, framebuffer_height, format, "
+    "image_path, image_sha256 and image_byte_size, computed over the PNG bytes "
+    "it actually wrote. The receipt is written after the image, and a "
+    "receipt-write failure removes the image, so a failed run cannot leave a "
+    "seemingly complete pair behind. This receipt is the only runtime authority "
+    "for capture.actual.* and capture.image.*."
 )
 
 RESOLUTION_SUPPORTED_REASON = (
@@ -163,71 +271,106 @@ RESOLUTION_SUPPORTED_REASON = (
     "(VIS0-C1 runtime control). These flags request an explicit physical "
     "window/client framebuffer extent; the runtime verifies the physical inner "
     "extent fail-closed before initialising the renderer. The runner maps "
-    "resolution.width → --render-width and resolution.height → "
-    "--render-height. This runtime enforcement does not report capture.actual "
-    "framebuffer dimensions; those remain null until a capture backend/evidence "
-    "channel exists."
+    "resolution.width -> --render-width and resolution.height -> "
+    "--render-height. Enforcement is a request-side guarantee only: the "
+    "authoritative capture.actual framebuffer extent comes from the runtime "
+    "receipt and is verified against the PNG IHDR, never assumed to equal the "
+    "requested resolution."
 )
 
-WARMUP_UNSUPPORTED_REASON = (
-    "warmup frame count: unsupported. `rcsim-app` has no CLI flag for warmup "
-    "frames and no capture backend; while --exit-after-frame can bound the "
-    "process, warmup/capture scheduling end-to-end is incomplete without a "
-    "real capture backend (VIS0-C or later)."
-)
-
-CAPTURE_FRAME_UNSUPPORTED_REASON = (
-    "capture frame selection: unsupported for image capture. No `rcsim-app` "
-    "CLI flag selects a frame for framebuffer readback; no image is written. "
-    "capture.frame is mapped to --exit-after-frame as process lifecycle "
-    "control only (deterministic frame-bounded exit), NOT as capture "
-    "enforcement."
-)
-
-CAPTURE_METADATA_ONLY_REASON = (
-    "capture backend unavailable; the value is recorded as provenance metadata "
-    "only and names the artifact a future capture backend is expected to "
-    "produce. Nothing is written by this runner."
+WARMUP_DERIVED_REASON = (
+    "warmup frame count: derived, not a runtime flag. There is no --warmup "
+    "option in rcsim-app and none is invented here. Warmup is realised by the "
+    "presentation-frame capture relation warmup == capture.frame: asking for "
+    "--capture-frame N means frames 0..N-1 are presented first, which is exactly "
+    "N warmup presentations, and frame N is the one captured. This is why the "
+    "C2B executable path requires the two manifest values to be equal; warmup is "
+    "NOT supported for arbitrary warmup/capture.frame combinations."
 )
 
 AUTO_EXIT_SUPPORTED_REASON = (
     "process auto-exit: supported via --exit-after-frame CLI (VIS0-C1 runtime "
     "control). The render loop terminates cleanly after presentation frame N "
-    "(zero-based) has been presented. When capture.frame is present in the "
-    "manifest, the runner maps it to --exit-after-frame for deterministic "
-    "frame-bounded execution."
-)
-
-# --- Capture evidence contract (VIS0-C1B) ------------------------------------
-
-EVIDENCE_NOT_PRODUCED_REASON = (
-    "capture evidence not produced: no VisualCaptureEvidence artifact with "
-    "capture_success=true can exist until the runtime has a capture backend. "
-    "The runner emits a conforming skeleton in run.json whose every "
-    "runtime-supplied leaf is null, so nothing claims a measurement that was "
-    "never taken."
+    "(zero-based) has been presented. rcsim-app rejects an exit frame earlier "
+    "than the capture frame (RenderAppError::ExitBeforeCaptureFrame), so the "
+    "runner derives --exit-after-frame from the same presentation frame it asks "
+    "to capture: the frame is read back, presented, written to PNG and receipted, "
+    "and only then does the process exit."
 )
 
 HARDWARE_METADATA_UNAVAILABLE_NOTE = (
-    "GPU adapter name, graphics backend and driver version are not reported by "
-    "`rcsim-app render`, so they are null rather than guessed. Only the "
-    "tooling-visible OS and architecture are filled in."
+    "operating_system, os_release and architecture are tooling-visible and "
+    "reported from platform.*. gpu_adapter_name, graphics_backend and "
+    "driver_version stay null: RuntimeCaptureReceipt 1.0.0 carries no adapter, "
+    "backend or driver field, so there is no machine-readable handshake for "
+    "them yet. Textual runtime logging is not parsed as an authority and the "
+    "host GPU is never guessed, because a guessed adapter would misattribute "
+    "the capture."
+)
+
+# --- C2B executability policy -------------------------------------------------
+
+CAPTURE_FRAME_REQUIRED_REASON = (
+    "C2B requires explicit capture.frame matching warmup. The manifest omits "
+    "capture.frame, which GoldenSceneManifest 1.1.0 still allows, so there is no "
+    "presentation frame to ask the runtime to capture; the runner will not "
+    "invent one."
+)
+
+CAPTURE_FORMAT_UNSUPPORTED_TEMPLATE = (
+    "C2B supports png only. capture.format is '{format}', which the VIS0-C2A "
+    "runtime capture backend rejects rather than silently converts "
+    "(RenderAppError::UnsupportedCaptureFormat). The manifest stays formally "
+    "valid - the contract may express formats the runtime does not implement "
+    "yet - but this scene is not runtime-executable today."
+)
+
+CAPTURE_QUALITY_UNSUPPORTED_TEMPLATE = (
+    "capture.quality={quality} is unsupported and is not silently dropped. The "
+    "VIS0-C2A backend writes lossless PNG only, which has no quality parameter, "
+    "so the request cannot be honoured and the scene is not runtime-executable."
+)
+
+
+def warmup_mismatch_reason(warmup: Any, frame: Any) -> str:
+    return (
+        f"C2B requires explicit capture.frame matching warmup. The manifest asks "
+        f"for warmup={warmup} but capture.frame={frame}. Because --capture-frame "
+        "N presents frames 0..N-1 before capturing N, warmup is only realised by "
+        "the capture frame itself; a different pair would silently change how "
+        "many frames are presented before the capture, so the runner fails "
+        "closed instead of guessing."
+    )
+
+
+# --- Capture evidence contract (VIS0-C1B, filled by VIS0-C2B) -----------------
+
+EVIDENCE_NOT_EXECUTED_REASON = (
+    "no capture was executed: this plan was built without running rcsim-app, so "
+    "there is no runtime receipt and no image. Every runtime-supplied leaf stays "
+    "null rather than being inferred from the manifest."
 )
 
 EVIDENCE_VISUAL_PASS_NOTE = (
     "visual_pass stays null: capture evidence records facts and never a visual "
-    "verdict. A visual PASS/FAIL needs human review or an approved metrics "
-    "engine, neither of which exists here."
+    "verdict. A successful, byte-verified capture says an image exists and "
+    "matches its receipt; it says nothing about whether the image is good. A "
+    "visual PASS/FAIL needs human review or an approved metrics engine, neither "
+    "of which exists here."
 )
 
 EVIDENCE_HANDSHAKE_NOTE = (
-    "LINEA 1 handshake: runtime_supplied_fields are the leaves only a real "
-    "capture backend can fill (actual framebuffer extent, actual presentation "
-    "frame index, image path/digest/size, capture success, adapter metadata). "
-    "tooling_supplied_fields are what this runner already owns (manifest "
-    "provenance, git provenance, requested values, process exit code, "
-    "OS/architecture). The tooling must never fabricate a runtime-supplied "
-    "value."
+    "Producer handshake, now closed by VIS0-C2B: runtime_supplied_fields are the "
+    "leaves only the runtime can state (actual framebuffer extent, actual "
+    "presentation frame index, image path/digest/size, capture success, adapter "
+    "metadata). They are filled from a RuntimeCaptureReceipt that this tooling "
+    "parsed, matched against the request plan and re-verified against the PNG on "
+    "disk - never copied from the manifest and never fabricated. "
+    "tooling_supplied_fields are what this runner owns (manifest provenance, git "
+    "provenance, requested values, process exit code, OS/architecture). "
+    "hardware.gpu_adapter_name, hardware.graphics_backend and "
+    "hardware.driver_version remain runtime-supplied leaves with no runtime "
+    "source yet, so they stay null."
 )
 
 # --- Field policy ------------------------------------------------------------
@@ -235,6 +378,11 @@ EVIDENCE_HANDSHAKE_NOTE = (
 FIELD_STATUS_CLI = "cli"
 FIELD_STATUS_METADATA_ONLY = "metadata-only"
 FIELD_STATUS_UNSUPPORTED = "unsupported"
+# A field the runner turns into runtime behaviour without a flag of its own:
+# it is enforced through another mechanism (the presentation-frame capture
+# relation) or it constrains how a derived flag is computed. Neither "cli" nor
+# "metadata-only" describes that honestly - it really controls the run.
+FIELD_STATUS_DERIVED = "derived"
 
 # Manifest blocks whose leaves (not the block itself) carry a field policy.
 CONTAINER_FIELDS = frozenset(
@@ -313,25 +461,45 @@ FIELD_POLICY = {
     "aircraft.start_on_ground": FieldPolicy(FIELD_STATUS_CLI, "--start-on-ground"),
     "resolution.width": FieldPolicy(FIELD_STATUS_CLI, "--render-width"),
     "resolution.height": FieldPolicy(FIELD_STATUS_CLI, "--render-height"),
-    "warmup": FieldPolicy(FIELD_STATUS_UNSUPPORTED, reason=WARMUP_UNSUPPORTED_REASON),
+    "warmup": FieldPolicy(FIELD_STATUS_DERIVED, reason=WARMUP_DERIVED_REASON),
     "capture.filename": FieldPolicy(
-        FIELD_STATUS_METADATA_ONLY, reason=CAPTURE_METADATA_ONLY_REASON
+        FIELD_STATUS_CLI, "--capture-out",
+        reason=(
+            "capture.filename -> --capture-out: the runner resolves the filename "
+            "against <output_dir>/<scene_id>/ and passes an ABSOLUTE path, so the "
+            "RuntimeCaptureReceipt it gets back does not depend on the subprocess "
+            "working directory to be interpreted."
+        ),
     ),
     "capture.format": FieldPolicy(
-        FIELD_STATUS_METADATA_ONLY, reason=CAPTURE_METADATA_ONLY_REASON
+        FIELD_STATUS_CLI, "--capture-format",
+        reason=(
+            "capture.format -> --capture-format. The VIS0-C2A backend implements "
+            "png only; any other value makes the scene formally valid but not "
+            "runtime-executable, and the runner fails closed before starting the "
+            "process rather than letting rcsim-app reject it mid-run."
+        ),
     ),
     "capture.frame": FieldPolicy(
-        FIELD_STATUS_CLI, "--exit-after-frame",
+        FIELD_STATUS_CLI, "--capture-frame",
         reason=(
-            "capture.frame → --exit-after-frame: process lifecycle control "
-            "(frame-bounded exit), not capture enforcement. The runtime can "
-            "terminate after presenting frame N, but no image is captured."
+            "capture.frame -> --capture-frame: the zero-based presentation frame "
+            "the runtime reads back, presents and writes to PNG. The runner "
+            "additionally DERIVES --exit-after-frame from this same value (see "
+            "capture_plan.derived_arguments); that derived flag is process "
+            "lifecycle control, not a second manifest field."
         ),
     ),
     "capture.quality": FieldPolicy(
         FIELD_STATUS_UNSUPPORTED,
-        reason="capture quality: unsupported. JPEG quality only matters to an "
-        "encoder that does not exist yet.",
+        reason=(
+            "capture quality: unsupported. The GoldenSceneManifest contract only "
+            "allows capture.quality alongside format='jpg' (VIS0-A JPEG quality "
+            "constraint), and the VIS0-C2A backend writes lossless PNG, which has "
+            "no quality parameter. The value is never silently ignored: its "
+            "presence makes the scene not runtime-executable and the runner says "
+            "so in the plan and on stderr."
+        ),
     ),
     "tags": FieldPolicy(
         FIELD_STATUS_METADATA_ONLY, reason="categorisation; recorded in run.json only"
@@ -538,7 +706,177 @@ def _reject_unmapped_fields(manifest: dict) -> None:
         )
 
 
-def build_field_mappings(manifest: dict) -> list:
+# --- Capture plan (VIS0-C2B) --------------------------------------------------
+
+
+def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
+    """Turn manifest capture intent into concrete paths, derived args and a gate.
+
+    Two provenance classes are kept visibly apart:
+
+    * `manifest_arguments` come from a real GoldenSceneManifest leaf
+      (capture.filename/format/frame).
+    * `derived_arguments` are computed by this runner. No manifest key names a
+      receipt path, and none asks for a process lifecycle bound, so
+      --capture-receipt-out and --exit-after-frame are declared as derived
+      rather than being attributed to a field that does not exist.
+
+    `executable` is deliberately distinct from "manifest valid". GoldenSceneManifest
+    1.1.0 accepts an absent capture.frame and accepts jpg/exr, while the VIS0-C2A
+    runtime implements neither. The schema is not narrowed here; the runner simply
+    refuses to start a process it knows cannot honour the request.
+    """
+    capture = manifest.get("capture") or {}
+    filename = capture.get("filename")
+    image_format = capture.get("format")
+    frame = capture.get("frame")
+    quality = capture.get("quality")
+    warmup = manifest.get("warmup")
+
+    image_path = scene_output_dir / filename if filename else None
+    receipt_path = scene_output_dir / RUNTIME_RECEIPT_FILENAME
+    evidence_path = scene_output_dir / CAPTURE_EVIDENCE_FILENAME
+
+    blocking_reasons = []
+    if not isinstance(frame, int) or isinstance(frame, bool):
+        blocking_reasons.append(CAPTURE_FRAME_REQUIRED_REASON)
+    elif frame != warmup:
+        blocking_reasons.append(warmup_mismatch_reason(warmup, frame))
+
+    if image_format != RECEIPT_SUPPORTED_FORMAT:
+        blocking_reasons.append(
+            CAPTURE_FORMAT_UNSUPPORTED_TEMPLATE.format(format=image_format)
+        )
+    if quality is not None:
+        blocking_reasons.append(
+            CAPTURE_QUALITY_UNSUPPORTED_TEMPLATE.format(quality=quality)
+        )
+    if image_path is None:
+        blocking_reasons.append(
+            "capture.filename is absent, so there is no image path to request"
+        )
+
+    executable = not blocking_reasons
+    frame_text = format_number(frame) if executable else None
+
+    manifest_arguments = []
+    if executable:
+        manifest_arguments = [
+            {
+                "flag": "--capture-out",
+                "value": str(image_path),
+                "manifest_field": "capture.filename",
+                "provenance": "manifest",
+            },
+            {
+                "flag": "--capture-format",
+                "value": str(image_format),
+                "manifest_field": "capture.format",
+                "provenance": "manifest",
+            },
+            {
+                "flag": "--capture-frame",
+                "value": frame_text,
+                "manifest_field": "capture.frame",
+                "provenance": "manifest",
+            },
+        ]
+
+    derived_arguments = []
+    if executable:
+        derived_arguments = [
+            {
+                "flag": "--capture-receipt-out",
+                "value": str(receipt_path),
+                "manifest_field": None,
+                "provenance": "runner-derived",
+                "derived_from": (
+                    "tooling evidence handshake: the runner chooses the receipt "
+                    "location so it can parse, trust and cross-check it. No "
+                    "GoldenSceneManifest field names a receipt path."
+                ),
+            },
+            {
+                "flag": "--exit-after-frame",
+                "value": frame_text,
+                "manifest_field": "capture.frame",
+                "provenance": "runner-derived",
+                "derived_from": (
+                    "capture.frame: process lifecycle control equal to the "
+                    "captured presentation frame. rcsim-app requires "
+                    "--exit-after-frame >= --capture-frame, and the equal-frame "
+                    "case captures, presents, writes the PNG and the receipt, "
+                    "then exits."
+                ),
+            },
+        ]
+
+    return {
+        "executable": executable,
+        "blocking_reasons": blocking_reasons,
+        "blocking_reason": blocking_reasons[0] if blocking_reasons else None,
+        "format": image_format,
+        "frame": frame,
+        "warmup": warmup,
+        "quality": quality,
+        "warmup_matches_capture_frame": (
+            None if not isinstance(frame, int) or isinstance(frame, bool)
+            else frame == warmup
+        ),
+        "warmup_mechanism": (
+            "derived from the presentation-frame capture relation "
+            "warmup == capture.frame; there is no --warmup runtime flag"
+        ),
+        "scene_output_dir": str(scene_output_dir),
+        "scene_output_dir_display": display_path(scene_output_dir, REPO_ROOT),
+        "expected_filename": filename,
+        "image_path": str(image_path) if image_path else None,
+        "image_path_display": (
+            display_path(image_path, REPO_ROOT) if image_path else None
+        ),
+        "receipt_path": str(receipt_path),
+        "receipt_path_display": display_path(receipt_path, REPO_ROOT),
+        "evidence_path": str(evidence_path),
+        "evidence_path_display": display_path(evidence_path, REPO_ROOT),
+        "receipt_kind": RECEIPT_KIND,
+        "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+        "manifest_arguments": manifest_arguments,
+        "derived_arguments": derived_arguments,
+        # Absolute paths are handed to the app so the receipt's image_path echo
+        # is interpretable without knowing the subprocess working directory.
+        "paths_are_absolute": (
+            image_path is not None and Path(str(image_path)).is_absolute()
+        ),
+        "stale_artifact_policy": (
+            "before a real execution the runner removes a pre-existing capture "
+            "image, runtime_capture_receipt.json, capture_evidence.json and their "
+            "'.tmp' siblings, failing closed if any removal is refused. This "
+            "covers the cases the runtime's own stale-output policy cannot: the "
+            "process never starting, or crashing before its cleanup ran. Nothing "
+            "outside <output_dir>/<scene_id>/ is touched, so approved baselines "
+            "are never deleted."
+        ),
+    }
+
+
+def enforce_capture_executability(capture_plan: dict) -> None:
+    """Refuse to start a process for a scene the runtime cannot honour.
+
+    Called only on the execute path. A dry run reports the same facts in the plan
+    instead of raising, so it can still show why the scene is not runnable.
+    """
+    if capture_plan.get("executable"):
+        return
+    reasons = capture_plan.get("blocking_reasons") or []
+    detail = "\n".join(f"    - {reason}" for reason in reasons)
+    raise RunnerError(
+        "manifest is formally valid but NOT runtime-executable under the "
+        f"VIS0-C2B capture policy; no process was started:\n{detail}",
+        EXIT_VALIDATION_FAILED,
+    )
+
+
+def build_field_mappings(manifest: dict, capture_plan: dict) -> list:
     """Resolve every present manifest field into a FieldMapping.
 
     Order follows CANONICAL_FIELD_ORDER, which makes both the mapping list and
@@ -558,9 +896,20 @@ def build_field_mappings(manifest: dict) -> list:
         emitted = False
 
         if policy.status == FIELD_STATUS_CLI:
-            argv_value, emitted, extra_reason = _resolve_cli_value(dotted, value, camera_mode)
+            argv_value, emitted, extra_reason = _resolve_cli_value(
+                dotted, value, camera_mode, capture_plan
+            )
             if extra_reason:
                 reason = extra_reason
+        elif policy.status == FIELD_STATUS_DERIVED and dotted == "warmup":
+            if capture_plan.get("warmup_matches_capture_frame") is True:
+                reason = policy.reason + " Enforced for this manifest."
+            else:
+                reason = (
+                    policy.reason
+                    + " NOT enforceable for this manifest: "
+                    + (capture_plan.get("blocking_reason") or "")
+                )
 
         mappings.append(
             FieldMapping(
@@ -576,7 +925,7 @@ def build_field_mappings(manifest: dict) -> list:
     return mappings
 
 
-def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any):
+def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any, capture_plan: dict):
     """Return (argv_value, emitted, reason) for one CLI-mapped field."""
     if dotted == "camera.pilot_position_render_m":
         if camera_mode != "pilot":
@@ -618,6 +967,9 @@ def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any):
     if dotted == "aircraft.model":
         return str(value), True, None
 
+    if dotted in ("capture.filename", "capture.format", "capture.frame"):
+        return _resolve_capture_cli_value(dotted, value, capture_plan)
+
     if dotted in (
         "camera.vertical_fov_deg",
         "exposure_ev",
@@ -626,18 +978,44 @@ def _resolve_cli_value(dotted: str, value: Any, camera_mode: Any):
         "aircraft.airspeed_mps",
         "resolution.width",
         "resolution.height",
-        "capture.frame",
     ):
         return format_number(value), True, None
 
     raise RunnerError(f"no CLI value resolver for manifest field '{dotted}'")
 
 
-def build_command_argv(app: str, mappings: list) -> list:
+def _resolve_capture_cli_value(dotted: str, value: Any, capture_plan: dict):
+    """Resolve one capture leaf, or refuse to emit it for a non-executable scene.
+
+    The capture group is all-or-nothing: rcsim-app treats --capture-frame,
+    --capture-out and --capture-format as one required group and rejects a
+    partial one (RenderAppError::IncompleteCaptureOptions), and it rejects a
+    format it cannot write. Emitting a command the runtime is known to refuse
+    would make the printed plan a lie, so a blocked scene emits no capture flag
+    at all and states why.
+    """
+    flag = FIELD_POLICY[dotted].runtime_flag
+    if not capture_plan.get("executable"):
+        return (
+            None,
+            False,
+            f"{dotted} -> {flag} not emitted: "
+            + (capture_plan.get("blocking_reason") or "capture is not executable"),
+        )
+    if dotted == "capture.filename":
+        return capture_plan["image_path"], True, None
+    if dotted == "capture.format":
+        return str(value), True, None
+    return format_number(value), True, None
+
+
+def build_command_argv(app: str, mappings: list, capture_plan: dict) -> list:
     """Build the full argv list from the resolved field mappings.
 
-    Returned as a list, never a shell string, so paths with spaces stay safe
-    and no shell is involved.
+    Manifest-driven flags come first in CANONICAL_FIELD_ORDER, then the
+    runner-derived capture controls, so the command itself shows the provenance
+    split. Returned as a list, never a shell string, so paths with spaces stay
+    safe and no shell is involved.
     """
     argv = [app, RENDER_SUBCOMMAND]
     for mapping in mappings:
@@ -650,6 +1028,13 @@ def build_command_argv(app: str, mappings: list) -> list:
         argv.append(mapping.runtime_flag)
         if mapping.argv_value:
             argv.append(mapping.argv_value)
+    for argument in capture_plan.get("derived_arguments") or []:
+        flag = argument["flag"]
+        if flag not in EMITTABLE_FLAGS:
+            raise RunnerError(f"internal error: {flag} is not an emittable flag")
+        argv.append(flag)
+        if argument.get("value"):
+            argv.append(str(argument["value"]))
     _assert_no_invented_flags(argv)
     return argv
 
@@ -688,22 +1073,58 @@ def build_environment_metadata() -> dict:
     }
 
 
-def build_runtime_capabilities(manifest: dict) -> dict:
-    """Declare what the runtime can and cannot do for post-VIS0-C1 convergence.
+def build_runtime_capabilities(manifest: dict, capture_plan: dict) -> dict:
+    """Declare what the runtime can and cannot do for this specific manifest.
 
-    Updated after VIS0-C1 runtime control (--render-width, --render-height,
-    --exit-after-frame) was integrated. Resolution and process auto-exit are
-    now supported; warmup remains unsupported and capture remains unavailable.
+    Updated for VIS0-C2B: the VIS0-C2A capture backend really writes a PNG and a
+    RuntimeCaptureReceipt, so `capture_backend` is supported and produces_image
+    is true. Warmup is reported as DERIVED rather than supported: there is no
+    --warmup flag, and the presentation-frame relation only realises warmup when
+    warmup == capture.frame, which is a property of this manifest and not a
+    general runtime capability.
     """
     resolution = manifest.get("resolution") or {}
-    capture = manifest.get("capture") or {}
+    executable = bool(capture_plan.get("executable"))
+    requested_format = capture_plan.get("format")
+    format_is_png = requested_format == RECEIPT_SUPPORTED_FORMAT
     return {
         "capture_backend": {
-            "status": "unavailable",
-            "produces_image": False,
-            "reason": CAPTURE_UNAVAILABLE_REASON,
-            "expected_filename": capture.get("filename"),
-            "expected_format": capture.get("format"),
+            "status": "supported",
+            "produces_image": True,
+            "reason": CAPTURE_SUPPORTED_REASON,
+            "final_display_referred_capture": True,
+            "frame_selection": {
+                "available": True,
+                "mechanism": "--capture-frame N (zero-based presentation frame)",
+                "reason": CAPTURE_FRAME_SELECTION_REASON,
+            },
+            "runtime_receipt": {
+                "available": True,
+                "kind": RECEIPT_KIND,
+                "schema_version": RECEIPT_SCHEMA_VERSION,
+                "mechanism": "--capture-receipt-out PATH (runner-derived)",
+                "reason": CAPTURE_RECEIPT_REASON,
+            },
+            "process_auto_exit": {
+                "available": True,
+                "mechanism": "--exit-after-frame N (runner-derived)",
+                "reason": AUTO_EXIT_SUPPORTED_REASON,
+            },
+            "explicit_resolution_enforcement": {
+                "available": True,
+                "mechanism": "--render-width/--render-height",
+                "reason": RESOLUTION_SUPPORTED_REASON,
+            },
+            "supported_formats": [RECEIPT_SUPPORTED_FORMAT],
+            "requested_format": requested_format,
+            "requested_format_executable": format_is_png,
+            "executable_for_this_manifest": executable,
+            "expected_filename": capture_plan.get("expected_filename"),
+            "expected_format": requested_format,
+            # A capability is a statement about the runtime; whether this run
+            # produced anything is a separate fact, reported only after execute.
+            "capture_produced": None,
+            "blocking_reasons": capture_plan.get("blocking_reasons") or [],
         },
         "resolution_enforcement": {
             "status": "supported",
@@ -715,10 +1136,13 @@ def build_runtime_capabilities(manifest: dict) -> dict:
             "reason": RESOLUTION_SUPPORTED_REASON,
         },
         "warmup_frames": {
-            "status": "unsupported",
-            "enforced": False,
-            "requested": manifest.get("warmup"),
-            "reason": WARMUP_UNSUPPORTED_REASON,
+            "status": "derived",
+            "enforced": bool(capture_plan.get("warmup_matches_capture_frame")),
+            "requested": capture_plan.get("warmup"),
+            "capture_frame": capture_plan.get("frame"),
+            "mechanism": capture_plan.get("warmup_mechanism"),
+            "runtime_flag": None,
+            "reason": WARMUP_DERIVED_REASON,
         },
         "process_auto_exit": {
             "status": "supported",
@@ -727,50 +1151,90 @@ def build_runtime_capabilities(manifest: dict) -> dict:
     }
 
 
-def expected_capture_basename(manifest: dict) -> dict:
-    """Resolve the VIS0 golden naming convention without producing a file."""
+def build_expected_capture_metadata(manifest: dict, capture_plan: dict) -> dict:
+    """Resolve the VIS0 golden naming convention into planned paths.
+
+    Replaces the pre-C2A `expected_capture_basename`, whose `produced: false`
+    and "backend unavailable" wording became semantically false once the runtime
+    really started writing PNGs. This reports what the plan intends; whether an
+    artifact was verified is stated separately, after execution, in
+    `capture_verification` and in the evidence document.
+    """
     scene_id = manifest.get("scene_id")
     resolution = manifest.get("resolution") or {}
-    capture = manifest.get("capture") or {}
     width = resolution.get("width")
     height = resolution.get("height")
-    fmt = capture.get("format")
-    filename = capture.get("filename")
+    image_format = capture_plan.get("format")
 
     convention = None
-    if scene_id and isinstance(width, int) and isinstance(height, int) and fmt:
-        convention = f"{scene_id}_{width}x{height}.{fmt}"
+    if scene_id and isinstance(width, int) and isinstance(height, int) and image_format:
+        convention = f"{scene_id}_{width}x{height}.{image_format}"
+    expected_filename = capture_plan.get("expected_filename")
 
     return {
-        "from_manifest": filename,
+        "from_manifest": expected_filename,
         "per_vis0_convention": convention,
         "matches_vis0_convention": (
-            None if convention is None or filename is None else filename == convention
+            None if convention is None or expected_filename is None
+            else expected_filename == convention
         ),
-        "produced": False,
-        "reason": CAPTURE_UNAVAILABLE_REASON,
+        "format": image_format,
+        "planned_path": capture_plan.get("image_path"),
+        "planned_path_display": capture_plan.get("image_path_display"),
+        "executable": capture_plan.get("executable"),
+        "blocking_reason": capture_plan.get("blocking_reason"),
+        # Filled only by a real, independently verified execute. A dry run leaves
+        # it null rather than claiming false.
+        "verified": None,
+        "verified_path": None,
     }
 
 
 # --- Capture evidence (VIS0-C1B) ---------------------------------------------
 
 
-def build_capture_evidence_contract() -> dict:
-    """Describe the evidence contract and who supplies each leaf.
+def build_capture_evidence_contract(capture_plan: dict) -> dict:
+    """Describe the evidence contract, who supplies each leaf, and where it lands.
 
-    This is the LINEA 1 handshake expressed as data: the future runtime capture
-    owns `runtime_supplied_fields`, this tooling owns `tooling_supplied_fields`,
-    and the split is the same one the evidence validator enforces.
+    The producer handshake is expressed as data: the runtime owns
+    `runtime_supplied_fields` through the RuntimeCaptureReceipt, this tooling
+    owns `tooling_supplied_fields`, and the split is the same one the evidence
+    validator enforces.
     """
     return {
         "kind": EVIDENCE_KIND,
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "schema_path": EVIDENCE_SCHEMA_PATH,
         "validator": "tools/visual_benchmark/validate_capture_evidence.py",
-        "status": "not-produced",
+        "artifact_path": capture_plan.get("evidence_path"),
+        "artifact_path_display": capture_plan.get("evidence_path_display"),
+        "authoritative_artifact": (
+            "capture_evidence.json is the authoritative standalone artifact; "
+            "run.json embeds the same document as a convenience copy."
+        ),
+        "status": "planned" if capture_plan.get("executable") else "blocked",
         "produced": False,
-        "reason": EVIDENCE_NOT_PRODUCED_REASON,
-        "capture_backend_available": False,
+        "produced_note": (
+            "the plan itself never writes an evidence artifact. --execute writes "
+            "capture_evidence.json and embeds the same document in run.json; a "
+            "dry run writes nothing and claims nothing."
+        ),
+        "capture_backend_available": True,
+        "runtime_receipt_contract": {
+            "kind": RECEIPT_KIND,
+            "schema_version": RECEIPT_SCHEMA_VERSION,
+            "distinct_from_evidence": (
+                "RuntimeCaptureReceipt is a narrow runtime declaration written by "
+                "rcsim-app; VisualCaptureEvidence is the tooling fact layer "
+                "written by this runner. They are different contracts with "
+                "different owners and their versions are never conflated."
+            ),
+            "authority": (
+                "the receipt is the only runtime authority for capture.actual.* "
+                "and capture.image.*; the runner never derives those leaves from "
+                "the manifest."
+            ),
+        },
         "handshake": {
             "note": EVIDENCE_HANDSHAKE_NOTE,
             "runtime_supplied_fields": sorted(RUNTIME_SUPPLIED_FIELDS),
@@ -783,22 +1247,55 @@ def build_capture_evidence_contract() -> dict:
     }
 
 
-def build_capture_evidence_skeleton(plan: dict, execution: Optional[dict] = None) -> dict:
-    """Assemble a VisualCaptureEvidence document from facts this runner owns.
+def build_capture_evidence(
+    plan: dict,
+    execution: Optional[dict] = None,
+    verification: Optional[dict] = None,
+) -> dict:
+    """Assemble a VisualCaptureEvidence 1.0.0 document.
 
-    Only tooling-supplied leaves are filled (manifest digest and path, git
-    provenance, requested resolution/frame, OS/architecture). Every
-    runtime-supplied leaf stays null and `execution.capture_success` stays
-    False, because `integration/render-v2` has no capture backend: not one
-    pixel has been measured. The result conforms to
-    `visual_capture_evidence.schema.json` precisely because it claims nothing
-    it does not know.
+    Requested and actual stay strictly separate. `capture.requested.*` comes
+    from the manifest; `capture.actual.*` and `capture.image.*` come ONLY from a
+    RuntimeCaptureReceipt that was parsed, matched against the request plan and
+    re-verified against the PNG bytes and header on disk. Without such a trusted
+    receipt every runtime-supplied leaf is null - a value is never copied from
+    the request to make a failed run look complete, and a divergence between
+    requested and actual is preserved as two facts rather than reconciled.
     """
     execution = execution or {}
+    verification = verification or {}
     git = plan.get("git") or {}
     environment = plan.get("environment_metadata") or {}
     resolution = plan.get("resolution") or {}
     camera = plan.get("camera") or {}
+
+    trusted = bool(verification.get("trusted"))
+    receipt = verification.get("receipt") or {}
+    image = verification.get("image") or {}
+
+    if trusted:
+        actual = {
+            "framebuffer_width": receipt.get("framebuffer_width"),
+            "framebuffer_height": receipt.get("framebuffer_height"),
+            "presentation_frame_index": receipt.get("presentation_frame_index"),
+        }
+        image_block = {
+            "path": image.get("path"),
+            "sha256": image.get("sha256"),
+            "byte_size": image.get("byte_size"),
+        }
+        capture_success = True
+        failure_reason = None
+    else:
+        # Fail closed: no completely trusted receipt means no runtime fact at all.
+        actual = {
+            "framebuffer_width": None,
+            "framebuffer_height": None,
+            "presentation_frame_index": None,
+        }
+        image_block = {"path": None, "sha256": None, "byte_size": None}
+        capture_success = False
+        failure_reason = compose_capture_failure_reason(execution, verification)
 
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -830,25 +1327,21 @@ def build_capture_evidence_skeleton(plan: dict, execution: Optional[dict] = None
                 "height": resolution.get("height"),
                 "frame_index": _find_mapping(plan, "capture.frame"),
             },
-            # Runtime-supplied: null until a capture backend reports the truth.
-            "actual": {
-                "framebuffer_width": None,
-                "framebuffer_height": None,
-                "presentation_frame_index": None,
-            },
+            "actual": actual,
             "format": _find_mapping(plan, "capture.format"),
-            "image": {"path": None, "sha256": None, "byte_size": None},
+            "image": image_block,
         },
         "execution": {
-            "capture_success": False,
+            "capture_success": capture_success,
             "process_exit_code": execution.get("exit_code"),
-            "failure_reason": CAPTURE_UNAVAILABLE_REASON,
+            "failure_reason": failure_reason,
         },
         "hardware": {
             "operating_system": environment.get("operating_system"),
             "os_release": environment.get("os_release"),
             "architecture": environment.get("architecture"),
-            # Runtime-supplied: only the renderer knows the real adapter.
+            # Runtime-supplied, and RuntimeCaptureReceipt 1.0.0 has no such
+            # field yet: null rather than parsed out of log text or guessed.
             "gpu_adapter_name": None,
             "graphics_backend": None,
             "driver_version": None,
@@ -861,12 +1354,55 @@ def build_capture_evidence_skeleton(plan: dict, execution: Optional[dict] = None
     }
 
 
-def validate_capture_evidence_skeleton(evidence: dict) -> dict:
-    """Self-check the skeleton against the contract it claims to follow.
+def compose_capture_failure_reason(execution: dict, verification: dict) -> str:
+    """Build one concrete, non-empty explanation of why nothing was captured.
 
-    Reported rather than raised: missing git provenance makes valid evidence
-    impossible (a commit SHA is mandatory), and that is a fact worth recording
-    instead of a crash.
+    The evidence contract requires `execution.failure_reason` whenever
+    `capture_success` is false, and it must say what actually happened rather
+    than restating a capability gap.
+    """
+    if not execution:
+        return EVIDENCE_NOT_EXECUTED_REASON
+    if not verification or not verification.get("attempted"):
+        return (
+            "capture was not verified: no end-to-end receipt/PNG verification was "
+            f"performed for this run (process exit code {execution.get('exit_code')})"
+        )
+
+    reasons = []
+    failure_kind = execution.get("failure_kind")
+    if failure_kind is not None:
+        reasons.append(
+            f"process {failure_kind}: {execution.get('failure_message') or 'no detail'}"
+        )
+    exit_code = execution.get("exit_code")
+    if exit_code is None and failure_kind is None:
+        reasons.append("no process exit code was observed")
+    elif exit_code not in (0, None):
+        reasons.append(f"rcsim-app exited with code {exit_code}")
+
+    receipt_errors = verification.get("receipt_errors") or []
+    expectation_errors = verification.get("expectation_errors") or []
+    image_errors = verification.get("image_errors") or []
+    reasons.extend(receipt_errors)
+    reasons.extend(expectation_errors)
+    reasons.extend(image_errors)
+
+    if not reasons:
+        reasons.append(
+            "capture was not verified end-to-end and no specific runtime error "
+            "was recorded"
+        )
+    return "; ".join(reasons)
+
+
+def validate_evidence_document(evidence: dict) -> dict:
+    """Self-check an evidence document against the contract it claims to follow.
+
+    Reported rather than raised here so the failure is recorded in run.json; the
+    caller turns an invalid document into a failed run. Missing git provenance
+    makes valid evidence impossible (a commit SHA is mandatory), and that is a
+    fact worth recording instead of a crash.
     """
     validator = CaptureEvidenceValidator(evidence)
     valid = validator.validate()
@@ -889,11 +1425,17 @@ def build_plan(
     git_provenance: dict,
 ) -> dict:
     """Build the deterministic execution plan for one manifest."""
-    mappings = build_field_mappings(manifest)
+    output_dir = Path(output_dir)
+    if not output_dir.is_absolute():
+        # Capture paths are handed to rcsim-app as absolute paths so the receipt
+        # it echoes back is interpretable without knowing the subprocess cwd.
+        output_dir = Path.cwd() / output_dir
     scene_id = manifest.get("scene_id")
     scene_output_dir = output_dir / scene_id
+    capture_plan = build_capture_plan(manifest, scene_output_dir)
+    mappings = build_field_mappings(manifest, capture_plan)
     app_token = app if app is not None else "<--app not provided>"
-    argv = build_command_argv(app_token, mappings)
+    argv = build_command_argv(app_token, mappings, capture_plan)
 
     schema_version = manifest.get("schema_version") or ""
 
@@ -912,13 +1454,17 @@ def build_plan(
         "renderer": get_field(manifest, "renderer.version"),
         "resolution": manifest.get("resolution"),
         "camera": manifest.get("camera"),
-        "expected_output_basename": expected_capture_basename(manifest),
+        "capture_plan": capture_plan,
+        "expected_output_basename": build_expected_capture_metadata(manifest, capture_plan),
         "output_dir": str(output_dir),
         "scene_output_dir": str(scene_output_dir),
         "artifact_paths": {
-            "run_json": str(scene_output_dir / "run.json"),
-            "stdout": str(scene_output_dir / "stdout.txt"),
-            "stderr": str(scene_output_dir / "stderr.txt"),
+            "run_json": str(scene_output_dir / RUN_METADATA_FILENAME),
+            "stdout": str(scene_output_dir / STDOUT_FILENAME),
+            "stderr": str(scene_output_dir / STDERR_FILENAME),
+            "capture_image": capture_plan["image_path"],
+            "runtime_capture_receipt": capture_plan["receipt_path"],
+            "capture_evidence": capture_plan["evidence_path"],
         },
         "command_argv": argv,
         "command_display": shlex.join(argv),
@@ -929,20 +1475,29 @@ def build_plan(
         "timeout_seconds": None if dry_run else timeout_seconds,
         "environment_metadata": build_environment_metadata(),
         "field_mapping": [mapping.to_json() for mapping in mappings],
-        "runtime_capabilities": build_runtime_capabilities(manifest),
-        "capture_evidence_contract": build_capture_evidence_contract(),
+        "runtime_capabilities": build_runtime_capabilities(manifest, capture_plan),
+        "capture_evidence_contract": build_capture_evidence_contract(capture_plan),
         "git": git_provenance,
         "execution_policy": {
             "require_clean_git": require_clean_git,
             "shell": False,
             "default_is_dry_run": True,
             "visual_verdict_automatic": False,
+            "capture_executable": bool(capture_plan["executable"]),
+            "success_requires": [
+                "process exit code 0",
+                f"trusted {RECEIPT_KIND} {RECEIPT_SCHEMA_VERSION}",
+                "PNG independently verified (bytes, SHA-256, IHDR, RGBA8)",
+                f"{EVIDENCE_KIND} {EVIDENCE_SCHEMA_VERSION} accepted by its validator",
+            ],
+            "process_exit_zero_is_sufficient": False,
         },
         "visual_pass": None,
         "visual_pass_note": (
-            "VIS0-B never sets visual_pass. Execution success is a procedural "
-            "statement only; a visual verdict requires a future capture backend "
-            "plus human review or an approved metrics engine."
+            "VIS0 never sets visual_pass. A verified capture is a procedural "
+            "statement only; a visual verdict requires human review or an "
+            "approved metrics engine, and no metric of any kind is computed "
+            "here."
         ),
     }
 
@@ -1156,6 +1711,68 @@ def resolve_app(app: str) -> str:
 # --- Execution ---------------------------------------------------------------
 
 
+def stale_artifact_paths(plan: dict) -> list:
+    """Every artifact a previous run could leave inside the scene directory.
+
+    Includes the runtime's own `<name>.tmp` siblings, which exist when a capture
+    crashed between write and rename. Only paths under scene_output_dir are
+    ever returned, so an approved baseline elsewhere cannot be deleted.
+    """
+    capture_plan = plan.get("capture_plan") or {}
+    scene_output_dir = Path(plan["scene_output_dir"])
+    candidates = []
+    for key in ("image_path", "receipt_path", "evidence_path"):
+        raw = capture_plan.get(key)
+        if not raw:
+            continue
+        path = Path(raw)
+        candidates.append(path)
+        candidates.append(path.with_name(path.name + TEMPORARY_SUFFIX))
+    # A manifest that changed capture.filename between runs must not leave the
+    # previous image behind either, so any stray temporary sibling is included.
+    if scene_output_dir.is_dir():
+        for path in sorted(scene_output_dir.glob("*" + TEMPORARY_SUFFIX)):
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def remove_stale_capture_artifacts(plan: dict) -> list:
+    """Delete stale capture artifacts before a real execution, failing closed.
+
+    The runtime removes its own stale image and receipt at capture startup, but
+    that cleanup never runs if the process does not start or dies first. Without
+    this step an image from a previous run would sit at the expected path and be
+    interpretable as the result of this one. A removal that is refused (locked
+    file, permission denied) stops the run instead of proceeding on a dirty
+    directory.
+    """
+    removed = []
+    scene_root = Path(plan["scene_output_dir"]).resolve()
+    for path in stale_artifact_paths(plan):
+        if not path.exists():
+            continue
+        # Never follow a path outside the scene directory, whatever the manifest
+        # or a leftover artifact claims.
+        if scene_root not in path.resolve().parents:
+            raise RunnerError(
+                f"refusing to remove '{path}': it is not inside the scene output "
+                f"directory '{scene_root}'",
+                EXIT_EXECUTION_FAILED,
+            )
+        try:
+            path.unlink()
+        except OSError as error:
+            raise RunnerError(
+                f"could not remove stale capture artifact '{path}': {error}. "
+                "Refusing to execute over a directory that may still hold a "
+                "previous run's image.",
+                EXIT_EXECUTION_FAILED,
+            )
+        removed.append(str(path))
+    return removed
+
+
 def execute_plan(
     plan: dict,
     app_resolved: str,
@@ -1168,11 +1785,16 @@ def execute_plan(
     scene_output_dir = Path(plan["scene_output_dir"])
     scene_output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stale artifacts go first: if the process never starts, the expected image
+    # path must be empty rather than holding a previous run's picture.
+    stale_removed = remove_stale_capture_artifacts(plan)
+
+    capture_plan = plan.get("capture_plan") or {}
     argv = list(plan["command_argv"])
     argv[0] = app_resolved
 
-    stdout_path = scene_output_dir / "stdout.txt"
-    stderr_path = scene_output_dir / "stderr.txt"
+    stdout_path = scene_output_dir / STDOUT_FILENAME
+    stderr_path = scene_output_dir / STDERR_FILENAME
 
     outcome = invoke(argv, cwd=REPO_ROOT, timeout_seconds=timeout_seconds)
 
@@ -1197,6 +1819,10 @@ def execute_plan(
         "stderr_path": str(stderr_path),
         "stdout_bytes": len(outcome.stdout.encode("utf-8", errors="replace")),
         "stderr_bytes": len(outcome.stderr.encode("utf-8", errors="replace")),
+        "stale_artifacts_removed": stale_removed,
+        "capture_image_path": capture_plan.get("image_path"),
+        "runtime_receipt_path": capture_plan.get("receipt_path"),
+        "capture_evidence_path": capture_plan.get("evidence_path"),
         "artifacts_written": [
             str(stdout_path),
             str(stderr_path),
@@ -1204,9 +1830,138 @@ def execute_plan(
     }
 
 
-def build_run_metadata(plan: dict, execution: dict) -> dict:
+# --- Independent capture verification (VIS0-C2B) ------------------------------
+
+
+def verify_capture(plan: dict, execution: dict) -> dict:
+    """Verify a capture end-to-end without trusting the runtime's own claims.
+
+    Order matters: the receipt is only read after the process exited 0, it is
+    only trusted after it parses as strict RuntimeCaptureReceipt 1.0.0 AND
+    matches the request plan, and the PNG is only accepted after its real byte
+    size, real SHA-256 and real IHDR have been re-measured against that receipt.
+    The framebuffer extent is never taken from the manifest - a requested/actual
+    divergence is recorded as two facts, not repaired.
+    """
+    capture_plan = plan.get("capture_plan") or {}
+    receipt_path = Path(capture_plan["receipt_path"]) if capture_plan.get("receipt_path") else None
+    image_path = Path(capture_plan["image_path"]) if capture_plan.get("image_path") else None
+    checks = []
+
+    def record(name: str, passed: bool, detail: str = "") -> bool:
+        checks.append({"check": name, "passed": bool(passed), "detail": detail})
+        return bool(passed)
+
+    exit_code = execution.get("exit_code")
+    process_ok = record(
+        "process_exit_code_is_zero",
+        execution.get("failure_kind") is None and exit_code == 0,
+        f"exit code {exit_code}"
+        + (f", failure kind {execution['failure_kind']}"
+           if execution.get("failure_kind") else ""),
+    )
+
+    verification = {
+        "attempted": True,
+        "trusted": False,
+        "process_ok": process_ok,
+        "receipt": None,
+        "receipt_path": str(receipt_path) if receipt_path else None,
+        "receipt_errors": [],
+        "expectation_errors": [],
+        "image": None,
+        "image_path": str(image_path) if image_path else None,
+        "image_errors": [],
+        "checks": checks,
+        "failure_reason": None,
+    }
+
+    if not process_ok:
+        verification["failure_reason"] = compose_capture_failure_reason(execution, verification)
+        return verification
+
+    receipt, receipt_errors = load_receipt(receipt_path)
+    verification["receipt_errors"] = receipt_errors
+    receipt_ok = record(
+        "runtime_receipt_parses_as_1_0_0",
+        receipt is not None,
+        "; ".join(receipt_errors) if receipt_errors else f"{receipt_path} parsed",
+    )
+    if receipt is not None:
+        verification["receipt"] = receipt.to_json()
+
+    expectation_errors = []
+    if receipt is not None:
+        expectation_errors = check_receipt_expectations(
+            receipt,
+            expected_frame_index=capture_plan.get("frame"),
+            expected_format=capture_plan.get("format"),
+            expected_image_path=capture_plan.get("image_path"),
+            base=REPO_ROOT,
+        )
+    verification["expectation_errors"] = expectation_errors
+    expectations_ok = record(
+        "receipt_matches_request_plan",
+        receipt is not None and not expectation_errors,
+        "; ".join(expectation_errors) if expectation_errors
+        else "presentation_frame_index, format and image_path all agree",
+    )
+
+    image = None
+    image_errors = []
+    if receipt is not None:
+        image, image_errors = verify_captured_png(image_path, receipt)
+    else:
+        image_errors = [
+            "capture image was not verified because no valid runtime receipt "
+            "exists to check it against"
+        ]
+    verification["image_errors"] = image_errors
+    image_ok = record(
+        "png_independently_verified",
+        image is not None,
+        "; ".join(image_errors) if image_errors else (
+            f"byte size {image.byte_size}, sha256 {image.sha256[:16]}..., "
+            f"IHDR {image.width}x{image.height} bit depth {image.bit_depth} "
+            f"colour type {image.color_type}"
+        ),
+    )
+    if image is not None:
+        verification["image"] = image.to_json()
+
+    verification["trusted"] = bool(receipt_ok and expectations_ok and image_ok)
+    if not verification["trusted"]:
+        verification["failure_reason"] = compose_capture_failure_reason(
+            execution, verification
+        )
+    return verification
+
+
+def build_run_metadata(
+    plan: dict,
+    execution: dict,
+    verification: Optional[dict] = None,
+    capture_evidence: Optional[dict] = None,
+    evidence_validation: Optional[dict] = None,
+) -> dict:
     """Assemble run.json. `visual_pass` is always null - never auto-approved."""
-    capture_evidence = build_capture_evidence_skeleton(plan, execution)
+    if capture_evidence is None:
+        capture_evidence = build_capture_evidence(plan, execution, verification)
+    if evidence_validation is None:
+        evidence_validation = validate_evidence_document(capture_evidence)
+    capture_plan = plan.get("capture_plan") or {}
+    capture_success = bool(
+        capture_evidence.get("execution", {}).get("capture_success")
+    )
+    image_block = capture_evidence.get("capture", {}).get("image", {})
+    # Task 21: the pre-execution plan states intent only. After an execute the
+    # same metadata is restated with what was really verified, so no field reads
+    # as semantically false once a capture exists.
+    expected_capture = dict(plan.get("expected_output_basename") or {})
+    expected_capture["verified"] = capture_success
+    expected_capture["verified_path"] = (
+        image_block.get("path") if capture_success else None
+    )
     return {
         "runner": plan["runner"],
         "plan_version": plan["plan_version"],
@@ -1224,25 +1979,57 @@ def build_run_metadata(plan: dict, execution: dict) -> dict:
         "plan": plan,
         "execution": execution,
         "capabilities": plan["runtime_capabilities"],
+        "expected_capture": expected_capture,
+        "capture_verification": verification,
         "capture_evidence": capture_evidence,
-        "capture_evidence_validation": validate_capture_evidence_skeleton(
-            capture_evidence
-        ),
+        "capture_evidence_validation": evidence_validation,
+        "capture_evidence_artifact": {
+            "path": capture_plan.get("evidence_path"),
+            "path_display": capture_plan.get("evidence_path_display"),
+            "written": evidence_validation.get("valid", False),
+            "note": (
+                "capture_evidence.json is the authoritative standalone artifact "
+                "and is only written when CaptureEvidenceValidator accepts it. "
+                "The copy embedded above is for convenience."
+                if evidence_validation.get("valid")
+                else "the evidence document failed its own validator, so no "
+                "standalone artifact was published; the rejected document and "
+                "its errors are recorded here instead."
+            ),
+        },
         "artifacts": {
             "run_json": plan["artifact_paths"]["run_json"],
             "stdout": execution.get("stdout_path"),
             "stderr": execution.get("stderr_path"),
-            "capture": None,
-            "capture_reason": CAPTURE_UNAVAILABLE_REASON,
+            "capture": image_block.get("path") if capture_success else None,
+            "capture_verified": capture_success,
+            "capture_reason": (
+                None if capture_success
+                else capture_evidence.get("execution", {}).get("failure_reason")
+            ),
+            "runtime_capture_receipt": (
+                capture_plan.get("receipt_path")
+                if (verification or {}).get("receipt") else None
+            ),
+            "capture_evidence": (
+                capture_plan.get("evidence_path")
+                if evidence_validation.get("valid") else None
+            ),
         },
         "verdict": {
             "execution_success": execution.get("execution_success"),
+            "capture_success": capture_success,
+            "runner_success": bool(
+                execution.get("execution_success")
+                and capture_success
+                and evidence_validation.get("valid")
+            ),
             "visual_pass": None,
             "visual_pass_reason": (
-                "VIS0-B never evaluates visual quality and never sets "
-                "visual_pass. A visual verdict requires a lossless capture "
-                "backend plus human review or an approved metrics engine "
-                "(VIS0-C or later)."
+                "VIS0 never evaluates visual quality and never sets visual_pass. "
+                "A verified capture proves an image exists and matches its "
+                "receipt; judging it requires human review or an approved "
+                "metrics engine, and no metric is computed here."
             ),
         },
     }
@@ -1314,16 +2101,40 @@ def format_plan_human(plan: dict) -> str:
     lines.append("")
 
     capture = capabilities["capture_backend"]
+    capture_plan = plan["capture_plan"]
     basename = plan["expected_output_basename"]
     lines.append("capture")
-    lines.append(_kv("backend", capture["status"].upper() + " - " + "CAPTURE BACKEND NOT YET AVAILABLE"))
-    lines.append(_kv("expected filename", f"{basename['from_manifest']} (not produced)"))
+    lines.append(_kv("backend", capture["status"].upper() + " (produces_image="
+                     + str(capture["produces_image"]).lower() + ")"))
+    lines.append(_kv("formats supported", ", ".join(capture["supported_formats"])))
+    lines.append(_kv("requested format", capture["requested_format"]))
+    lines.append(_kv("executable", capture_plan["executable"]))
+    for reason in capture_plan["blocking_reasons"]:
+        lines.append(_kv("blocked because", reason))
+    lines.append(_kv("capture frame", capture_plan["frame"]))
+    lines.append(_kv("warmup", capture_plan["warmup"]))
+    lines.append(_kv("warmup mechanism", capture_plan["warmup_mechanism"]))
+    lines.append(_kv("expected filename", basename["from_manifest"]))
     lines.append(_kv("VIS0 naming match", basename["matches_vis0_convention"]))
+    lines.append(_kv("capture produced", "false (nothing was executed)"
+                     if plan["dry_run"] else "see capture_verification"))
     lines.append("")
 
     lines.append("command (deterministic order, no shell)")
     for token in plan["command_argv"]:
         lines.append("    " + token)
+    lines.append("")
+
+    lines.append("argument provenance")
+    lines.append("  manifest-driven:")
+    for argument in capture_plan["manifest_arguments"]:
+        lines.append(
+            f"    {argument['flag']} <- {argument['manifest_field']}"
+        )
+    lines.append("  runner-derived (no manifest field names these):")
+    for argument in capture_plan["derived_arguments"]:
+        source = argument["manifest_field"] or "tooling decision"
+        lines.append(f"    {argument['flag']} <- derived from {source}")
     lines.append("")
 
     git = plan["git"]
@@ -1339,6 +2150,9 @@ def format_plan_human(plan: dict) -> str:
 
     lines.append("output")
     lines.append(_kv("scene dir", plan["scene_output_dir"]))
+    lines.append(_kv("capture image", capture_plan["image_path"]))
+    lines.append(_kv("runtime receipt", capture_plan["receipt_path"]))
+    lines.append(_kv("capture evidence", capture_plan["evidence_path"]))
     lines.append(_kv("run.json", plan["artifact_paths"]["run_json"]))
     lines.append(_kv("stdout.txt", plan["artifact_paths"]["stdout"]))
     lines.append(_kv("stderr.txt", plan["artifact_paths"]["stderr"]))
@@ -1354,13 +2168,20 @@ def format_plan_human(plan: dict) -> str:
             detail = f"-> {mapping['runtime_flag']} {mapping['argv_value']}".rstrip()
         elif status == FIELD_STATUS_CLI:
             detail = f"x  {mapping['runtime_flag']} omitted"
+        elif status == FIELD_STATUS_DERIVED:
+            detail = "~  enforced through another mechanism, no flag of its own"
         else:
             detail = "-  no runtime flag"
         lines.append(f"  [{status:<13}] {name:<34} {detail}")
     lines.append("")
 
+    lines.append("success criteria (an exit code of 0 from rcsim-app is not enough)")
+    for requirement in plan["execution_policy"]["success_requires"]:
+        lines.append("    - " + requirement)
+    lines.append("")
+
     lines.append("verdict policy")
-    lines.append(_kv("visual_pass", "null (never set by VIS0-B)"))
+    lines.append(_kv("visual_pass", "null (never set by VIS0)"))
     return "\n".join(lines)
 
 
@@ -1378,9 +2199,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_benchmark.py",
         description=(
-            "RV2-VIS0-B golden visual benchmark runner: validate a VIS0-A "
-            "manifest, build a deterministic rcsim-app command, and record run "
-            "provenance. Verifies execution reproducibility, NOT visual quality."
+            "RV2-VIS0 golden visual benchmark runner: validate a VIS0-A "
+            "manifest, build a deterministic rcsim-app capture command, verify "
+            "the runtime receipt and PNG independently, and record run "
+            "provenance plus VisualCaptureEvidence. Verifies execution and "
+            "capture reproducibility, NOT visual quality."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1557,29 +2380,100 @@ def _run(args: argparse.Namespace) -> int:
 
     if dry_run:
         print(
-            "\ndry run complete: no application process started, no artifacts written. "
-            "Re-run with --execute --app <path> to launch rcsim-app."
+            "\ndry run complete: no application process started, no artifacts "
+            "written, no image produced, no receipt claimed and no actual value "
+            "inferred. Re-run with --execute --app <path> to launch rcsim-app."
         )
         return EXIT_OK
 
+    # 2. Executability gate. A manifest can be formally valid under
+    #    GoldenSceneManifest 1.1.0 and still be something the VIS0-C2A runtime
+    #    cannot honour; starting a process we know will fail is not fail-closed.
+    enforce_capture_executability(plan["capture_plan"])
+
     execution = execute_plan(plan, app_resolved, args.timeout_seconds)
+
+    # 3. Independent verification. Process exit 0 is necessary but not enough:
+    #    the receipt must parse, match the request plan, and the PNG must be
+    #    re-measured on disk before any of it is believed.
+    verification = verify_capture(plan, execution)
+    evidence = build_capture_evidence(plan, execution, verification)
+    evidence_validation = validate_evidence_document(evidence)
+
+    # 4. The standalone evidence artifact is authoritative and is only published
+    #    when its own validator accepts it. A rejected document is recorded in
+    #    run.json with its errors instead of being written out as if valid.
+    if evidence_validation["valid"]:
+        evidence_path = Path(plan["capture_plan"]["evidence_path"])
+        write_json(evidence_path, evidence)
+        execution["artifacts_written"].append(str(evidence_path))
+
     run_json_path = Path(plan["artifact_paths"]["run_json"])
     execution["artifacts_written"].append(str(run_json_path))
-    metadata = build_run_metadata(plan, execution)
+    metadata = build_run_metadata(
+        plan, execution, verification, evidence, evidence_validation
+    )
     write_json(run_json_path, metadata)
+
+    capture_success = bool(evidence["execution"]["capture_success"])
+    runner_success = bool(metadata["verdict"]["runner_success"])
 
     print(
         f"\nexecution_success: {execution['execution_success']} "
         f"(exit code {execution['exit_code']})"
     )
-    print("visual_pass: null (VIS0-B never decides a visual verdict)")
-    print(f"run.json: {run_json_path}")
+    print(f"capture_success:   {capture_success}")
+    print(f"receipt_trusted:   {bool(verification['trusted'])}")
+    print(f"evidence_valid:    {evidence_validation['valid']}")
+    print(f"runner_success:    {runner_success}")
+    if capture_success:
+        print(f"capture image:     {evidence['capture']['image']['path']}")
+        print(f"  sha256:          {evidence['capture']['image']['sha256']}")
+        print(f"  byte_size:       {evidence['capture']['image']['byte_size']}")
+        print(
+            "  framebuffer:     "
+            f"{evidence['capture']['actual']['framebuffer_width']}x"
+            f"{evidence['capture']['actual']['framebuffer_height']} "
+            f"(presentation frame "
+            f"{evidence['capture']['actual']['presentation_frame_index']})"
+        )
+        requested = evidence["capture"]["requested"]
+        actual = evidence["capture"]["actual"]
+        if (requested["width"], requested["height"]) != (
+            actual["framebuffer_width"], actual["framebuffer_height"]
+        ):
+            print(
+                "  note: requested and actual framebuffer extents differ; both "
+                "are recorded as facts and neither was overwritten"
+            )
+    print(
+        "capture evidence:  "
+        f"{plan['capture_plan']['evidence_path']}"
+        + ("" if evidence_validation["valid"] else "  (NOT PUBLISHED: rejected by its validator)")
+    )
+    print(f"run.json:          {run_json_path}")
+    print("visual_pass:       null (VIS0 never decides a visual verdict)")
 
-    if execution["execution_success"]:
+    if runner_success:
         return EXIT_OK
+
+    if not evidence_validation["valid"]:
+        print(
+            "error: the produced VisualCaptureEvidence failed its own validator; "
+            "no standalone evidence artifact was published:",
+            file=sys.stderr,
+        )
+        for error in evidence_validation["errors"]:
+            print(f"    - {error}", file=sys.stderr)
     if execution["failure_kind"] is not None:
         print(
             f"error: {execution['failure_kind']}: {execution['failure_message']}",
+            file=sys.stderr,
+        )
+    elif not capture_success:
+        print(
+            "error: capture was not verified end-to-end: "
+            f"{evidence['execution']['failure_reason']}",
             file=sys.stderr,
         )
     return EXIT_EXECUTION_FAILED
