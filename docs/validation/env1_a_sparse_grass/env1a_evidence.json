@@ -17,9 +17,9 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_before/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
-        "local_png_sha256": "be68c06022781b842ee99b85f6a526cef65b32ab11f72f4f5307d11e77359551",
-        "image_sha256": "be68c06022781b842ee99b85f6a526cef65b32ab11f72f4f5307d11e77359551",
-        "image_byte_size": 2208249,
+        "local_png_sha256": "2b5c1410e87367ed463b8ecf327c13dfe2a5b366a81d9000ad19ce7f420da1db",
+        "image_sha256": "2b5c1410e87367ed463b8ecf327c13dfe2a5b366a81d9000ad19ce7f420da1db",
+        "image_byte_size": 2207961,
         "framebuffer": [
           1920,
           1080
@@ -90,7 +90,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 17161300,
+            "cpu_frame_duration_ns": 17292700,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -99,38 +99,38 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 13800,
+                "cpu_duration_ns": 14500,
                 "gpu_duration_ns": 139264.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3900,
+                "cpu_duration_ns": 3800,
                 "gpu_duration_ns": 144384.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3800,
+                "cpu_duration_ns": 3600,
                 "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 14300,
-                "gpu_duration_ns": 1166336.0
+                "cpu_duration_ns": 15800,
+                "gpu_duration_ns": 1177600.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1200,
-                "gpu_duration_ns": 24576.0
+                "cpu_duration_ns": 1500,
+                "gpu_duration_ns": 25600.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
                 "cpu_duration_ns": 600,
-                "gpu_duration_ns": 16384.0
+                "gpu_duration_ns": 17408.0
               }
             ]
           }
@@ -140,16 +140,16 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_after/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
-        "local_png_sha256": "5efd09858e326183ffdd832f7abf97dbc9161e58dc4ffcbeae22314a18665243",
-        "image_sha256": "5efd09858e326183ffdd832f7abf97dbc9161e58dc4ffcbeae22314a18665243",
-        "image_byte_size": 2791039,
+        "local_png_sha256": "e8cb1a44ae898d288452c5f367eaac4374e8319c0671cb91422a86c9e6aa03c0",
+        "image_sha256": "e8cb1a44ae898d288452c5f367eaac4374e8319c0671cb91422a86c9e6aa03c0",
+        "image_byte_size": 2790707,
         "framebuffer": [
           1920,
           1080
         ],
         "presentation_frame_index": 10,
-        "git_commit_sha": "e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882",
-        "git_dirty": true,
+        "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
@@ -213,7 +213,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 17370600,
+            "cpu_frame_duration_ns": 17111800,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -222,37 +222,37 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 14600,
-                "gpu_duration_ns": 139264.0
+                "cpu_duration_ns": 8100,
+                "gpu_duration_ns": 140288.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 4500,
+                "cpu_duration_ns": 4100,
                 "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3300,
+                "cpu_duration_ns": 3600,
                 "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 17000,
-                "gpu_duration_ns": 1166336.0
+                "cpu_duration_ns": 9000,
+                "gpu_duration_ns": 1168384.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1800,
-                "gpu_duration_ns": 30720.0
+                "cpu_duration_ns": 800,
+                "gpu_duration_ns": 29696.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 600,
+                "cpu_duration_ns": 500,
                 "gpu_duration_ns": 20480.0
               }
             ]
@@ -264,50 +264,50 @@
         "height": 1080,
         "pixel_count": 2073600,
         "identical": false,
-        "changed_pixels": 1224140,
-        "changed_percent": 59.0345,
-        "pixels_above_one_level": 1212542,
-        "pixels_above_one_level_percent": 58.4752,
+        "changed_pixels": 1227657,
+        "changed_percent": 59.2041,
+        "pixels_above_one_level": 1214634,
+        "pixels_above_one_level_percent": 58.5761,
         "peak_channel_diff": 167,
         "peak_channel_diff_at_xy": [
           948,
           524
         ],
         "mean_abs_diff_per_channel": [
-          6.250131,
-          24.651049,
-          11.680093
+          6.258327,
+          24.658461,
+          11.683878
         ],
-        "mean_abs_diff_overall": 14.193758,
-        "before_brighter_pixels": 1192304,
-        "after_brighter_pixels": 30295,
-        "mean_luminance_before": 79.972074,
-        "mean_luminance_after": 69.310289,
+        "mean_abs_diff_overall": 14.200222,
+        "before_brighter_pixels": 1194027,
+        "after_brighter_pixels": 32019,
+        "mean_luminance_before": 79.971921,
+        "mean_luminance_after": 69.31069,
         "alpha_identical": true,
         "horizontal_bands": {
           "rows_0_to_270": {
             "pixel_count": 518400,
-            "changed_pixels": 4198,
-            "changed_percent": 0.8098,
-            "mean_abs_diff": 0.035006
+            "changed_pixels": 4762,
+            "changed_percent": 0.9186,
+            "mean_abs_diff": 0.03948
           },
           "rows_270_to_540": {
             "pixel_count": 518400,
-            "changed_pixels": 185023,
-            "changed_percent": 35.6912,
-            "mean_abs_diff": 7.76642
+            "changed_pixels": 187976,
+            "changed_percent": 36.2608,
+            "mean_abs_diff": 7.787813
           },
           "rows_540_to_810": {
             "pixel_count": 518400,
             "changed_pixels": 516519,
             "changed_percent": 99.6372,
-            "mean_abs_diff": 25.32165
+            "mean_abs_diff": 25.321651
           },
           "rows_810_to_1080": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 23.651955
+            "mean_abs_diff": 23.651944
           }
         }
       },
@@ -342,16 +342,16 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_before/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
-        "local_png_sha256": "79d5ea9b710a6fb8f90433f40b8be8bbd235be98de6c07f37d53b02a0f266e54",
-        "image_sha256": "79d5ea9b710a6fb8f90433f40b8be8bbd235be98de6c07f37d53b02a0f266e54",
-        "image_byte_size": 3799423,
+        "local_png_sha256": "8188c7ffadafd4dfb2b1020752352d879f98ff2483d75403cf3ac44fb8aae90d",
+        "image_sha256": "8188c7ffadafd4dfb2b1020752352d879f98ff2483d75403cf3ac44fb8aae90d",
+        "image_byte_size": 3799520,
         "framebuffer": [
           2560,
           1440
         ],
         "presentation_frame_index": 10,
         "git_commit_sha": "e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882",
-        "git_dirty": true,
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
@@ -415,7 +415,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 19376600,
+            "cpu_frame_duration_ns": 19500600,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -424,32 +424,32 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 14300,
-                "gpu_duration_ns": 139264.0
+                "cpu_duration_ns": 8000,
+                "gpu_duration_ns": 138240.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3900,
-                "gpu_duration_ns": 143360.0
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 6300,
+                "cpu_duration_ns": 3200,
                 "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 15500,
-                "gpu_duration_ns": 1548288.0
+                "cpu_duration_ns": 13500,
+                "gpu_duration_ns": 1522688.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
                 "cpu_duration_ns": 1000,
-                "gpu_duration_ns": 44032.0
+                "gpu_duration_ns": 43008.0
               },
               {
                 "pass_id": "postprocess",
@@ -465,16 +465,16 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_after/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
-        "local_png_sha256": "719b3a3e5dd61f6d4d9b8ccd661b64bc2a053ec55db8d76f5d813518fbebe8d5",
-        "image_sha256": "719b3a3e5dd61f6d4d9b8ccd661b64bc2a053ec55db8d76f5d813518fbebe8d5",
-        "image_byte_size": 5147290,
+        "local_png_sha256": "b51fb8e1dc874f589b7ab7d688574e8c7ce32ee9ad0128e13e899ffb0c57ba8c",
+        "image_sha256": "b51fb8e1dc874f589b7ab7d688574e8c7ce32ee9ad0128e13e899ffb0c57ba8c",
+        "image_byte_size": 5147234,
         "framebuffer": [
           2560,
           1440
         ],
         "presentation_frame_index": 10,
-        "git_commit_sha": "e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882",
-        "git_dirty": true,
+        "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
@@ -538,7 +538,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 18865200,
+            "cpu_frame_duration_ns": 18874600,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -547,37 +547,37 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 11900,
-                "gpu_duration_ns": 140288.0
+                "cpu_duration_ns": 7600,
+                "gpu_duration_ns": 139264.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3800,
-                "gpu_duration_ns": 145408.0
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 144384.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3400,
-                "gpu_duration_ns": 134144.0
+                "cpu_duration_ns": 3100,
+                "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 12800,
-                "gpu_duration_ns": 1567744.0
+                "cpu_duration_ns": 9200,
+                "gpu_duration_ns": 1569792.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1000,
+                "cpu_duration_ns": 800,
                 "gpu_duration_ns": 53248.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 600,
+                "cpu_duration_ns": 500,
                 "gpu_duration_ns": 34816.0
               }
             ]
@@ -589,50 +589,50 @@
         "height": 1440,
         "pixel_count": 3686400,
         "identical": false,
-        "changed_pixels": 2176410,
-        "changed_percent": 59.0389,
-        "pixels_above_one_level": 2151624,
-        "pixels_above_one_level_percent": 58.3665,
+        "changed_pixels": 2171210,
+        "changed_percent": 58.8978,
+        "pixels_above_one_level": 2148338,
+        "pixels_above_one_level_percent": 58.2774,
         "peak_channel_diff": 235,
         "peak_channel_diff_at_xy": [
           1338,
           698
         ],
         "mean_abs_diff_per_channel": [
-          6.539387,
-          24.422905,
-          11.704734
+          6.531965,
+          24.41613,
+          11.701228
         ],
-        "mean_abs_diff_overall": 14.222342,
-        "before_brighter_pixels": 2084827,
-        "after_brighter_pixels": 88025,
-        "mean_luminance_before": 80.012815,
-        "mean_luminance_after": 69.585513,
+        "mean_abs_diff_overall": 14.216441,
+        "before_brighter_pixels": 2082321,
+        "after_brighter_pixels": 85412,
+        "mean_luminance_before": 80.01296,
+        "mean_luminance_after": 69.585648,
         "alpha_identical": true,
         "horizontal_bands": {
           "rows_0_to_360": {
             "pixel_count": 921600,
-            "changed_pixels": 8267,
-            "changed_percent": 0.897,
-            "mean_abs_diff": 0.030994
+            "changed_pixels": 7757,
+            "changed_percent": 0.8417,
+            "mean_abs_diff": 0.027789
           },
           "rows_360_to_720": {
             "pixel_count": 921600,
-            "changed_pixels": 328319,
-            "changed_percent": 35.6249,
-            "mean_abs_diff": 7.723505
+            "changed_pixels": 323632,
+            "changed_percent": 35.1163,
+            "mean_abs_diff": 7.703104
           },
           "rows_720_to_1080": {
             "pixel_count": 921600,
-            "changed_pixels": 918224,
-            "changed_percent": 99.6337,
-            "mean_abs_diff": 25.485197
+            "changed_pixels": 918221,
+            "changed_percent": 99.6334,
+            "mean_abs_diff": 25.485158
           },
           "rows_1080_to_1440": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 23.649672
+            "mean_abs_diff": 23.649712
           }
         }
       },
@@ -667,16 +667,16 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_before/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
-        "local_png_sha256": "70dbcbdbd4a62e21441e97c59580ad4baf93e6cd6bd27e8c699fe7eaafb49e5e",
-        "image_sha256": "70dbcbdbd4a62e21441e97c59580ad4baf93e6cd6bd27e8c699fe7eaafb49e5e",
-        "image_byte_size": 8171862,
+        "local_png_sha256": "1a4d484911c26f35b34769682d2df0e22dd8fbb38e13930659f95a6cef5fbce7",
+        "image_sha256": "1a4d484911c26f35b34769682d2df0e22dd8fbb38e13930659f95a6cef5fbce7",
+        "image_byte_size": 8173194,
         "framebuffer": [
           3840,
           2160
         ],
         "presentation_frame_index": 10,
         "git_commit_sha": "e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882",
-        "git_dirty": true,
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
@@ -740,7 +740,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 24383700,
+            "cpu_frame_duration_ns": 24402300,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -749,37 +749,37 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 11100,
-                "gpu_duration_ns": 139264.0
+                "cpu_duration_ns": 13000,
+                "gpu_duration_ns": 140288.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3700,
-                "gpu_duration_ns": 143360.0
+                "cpu_duration_ns": 4800,
+                "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3800,
-                "gpu_duration_ns": 132096.0
+                "cpu_duration_ns": 4300,
+                "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 13500,
-                "gpu_duration_ns": 2649088.0
+                "cpu_duration_ns": 22100,
+                "gpu_duration_ns": 2583552.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1300,
+                "cpu_duration_ns": 1600,
                 "gpu_duration_ns": 98304.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 600,
+                "cpu_duration_ns": 700,
                 "gpu_duration_ns": 57344.0
               }
             ]
@@ -790,16 +790,16 @@
         "committed_png": null,
         "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
         "local_png": "tmp/env1a_after/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
-        "local_png_sha256": "e020fcc30b7d22b53aa6f86586d76b72dfaa64e5907f328a1181a5f2a4477cda",
-        "image_sha256": "e020fcc30b7d22b53aa6f86586d76b72dfaa64e5907f328a1181a5f2a4477cda",
-        "image_byte_size": 12192117,
+        "local_png_sha256": "8d47da6941b7ce2cfdb703aed6d179580818e638dd4f78c85ccff165086dcd49",
+        "image_sha256": "8d47da6941b7ce2cfdb703aed6d179580818e638dd4f78c85ccff165086dcd49",
+        "image_byte_size": 12193081,
         "framebuffer": [
           3840,
           2160
         ],
         "presentation_frame_index": 10,
-        "git_commit_sha": "e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882",
-        "git_dirty": true,
+        "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
@@ -863,7 +863,7 @@
           },
           "profiling": {
             "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 24137000,
+            "cpu_frame_duration_ns": 24740700,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 9,
             "gpu_timing_frame_age": 1,
@@ -872,38 +872,38 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 10700,
+                "cpu_duration_ns": 7800,
                 "gpu_duration_ns": 140288.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3800,
-                "gpu_duration_ns": 145408.0
+                "cpu_duration_ns": 3700,
+                "gpu_duration_ns": 144384.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 6000,
-                "gpu_duration_ns": 134144.0
+                "cpu_duration_ns": 3100,
+                "gpu_duration_ns": 133120.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 14500,
-                "gpu_duration_ns": 2703360.0
+                "cpu_duration_ns": 10400,
+                "gpu_duration_ns": 2697216.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1100,
-                "gpu_duration_ns": 124928.0
+                "cpu_duration_ns": 1000,
+                "gpu_duration_ns": 125952.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 500,
-                "gpu_duration_ns": 76800.0
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 75776.0
               }
             ]
           }
@@ -914,50 +914,50 @@
         "height": 2160,
         "pixel_count": 8294400,
         "identical": false,
-        "changed_pixels": 4902709,
-        "changed_percent": 59.1087,
-        "pixels_above_one_level": 4842572,
-        "pixels_above_one_level_percent": 58.3836,
-        "peak_channel_diff": 177,
+        "changed_pixels": 4904703,
+        "changed_percent": 59.1327,
+        "pixels_above_one_level": 4842503,
+        "pixels_above_one_level_percent": 58.3828,
+        "peak_channel_diff": 172,
         "peak_channel_diff_at_xy": [
-          2005,
-          1047
+          1918,
+          1081
         ],
         "mean_abs_diff_per_channel": [
-          7.10036,
-          24.021797,
-          11.962381
+          7.100504,
+          24.021773,
+          11.962189
         ],
-        "mean_abs_diff_overall": 14.361512,
-        "before_brighter_pixels": 4539482,
-        "after_brighter_pixels": 351643,
-        "mean_luminance_before": 80.068629,
-        "mean_luminance_after": 70.12631,
+        "mean_abs_diff_overall": 14.361488,
+        "before_brighter_pixels": 4539747,
+        "after_brighter_pixels": 353323,
+        "mean_luminance_before": 80.068806,
+        "mean_luminance_after": 70.126057,
         "alpha_identical": true,
         "horizontal_bands": {
           "rows_0_to_540": {
             "pixel_count": 2073600,
-            "changed_pixels": 19398,
-            "changed_percent": 0.9355,
-            "mean_abs_diff": 0.0314
+            "changed_pixels": 19405,
+            "changed_percent": 0.9358,
+            "mean_abs_diff": 0.031069
           },
           "rows_540_to_1080": {
             "pixel_count": 2073600,
-            "changed_pixels": 743717,
-            "changed_percent": 35.866,
-            "mean_abs_diff": 7.767378
+            "changed_pixels": 745699,
+            "changed_percent": 35.9616,
+            "mean_abs_diff": 7.767565
           },
           "rows_1080_to_1620": {
             "pixel_count": 2073600,
-            "changed_pixels": 2065994,
-            "changed_percent": 99.6332,
-            "mean_abs_diff": 25.774983
+            "changed_pixels": 2065999,
+            "changed_percent": 99.6334,
+            "mean_abs_diff": 25.775069
           },
           "rows_1620_to_2160": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 23.872289
+            "mean_abs_diff": 23.87225
           }
         }
       },
@@ -992,9 +992,9 @@
       "committed_png": null,
       "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
       "local_png": "tmp/env1a_after_c2d/albedo/c2d_terrain_albedo/c2d_terrain_albedo_1920x1080.png",
-      "local_png_sha256": "0c3ad2208af0a5e2d9edd41018c266d6088a8e78bdd49bfe0be520786e7eb716",
-      "image_sha256": "0c3ad2208af0a5e2d9edd41018c266d6088a8e78bdd49bfe0be520786e7eb716",
-      "image_byte_size": 2099602,
+      "local_png_sha256": "c614242c87acb66a5975a3ed23d8fc42455ca87576af54db51bd68ef9b72fcf7",
+      "image_sha256": "c614242c87acb66a5975a3ed23d8fc42455ca87576af54db51bd68ef9b72fcf7",
+      "image_byte_size": 2100157,
       "framebuffer": [
         1920,
         1080
@@ -1002,8 +1002,14 @@
       "audit_debug_mode": "albedo",
       "audit_material_path_active": true,
       "audit_sampler_anisotropy": 16,
+      "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+      "git_dirty": false,
       "runner_success": true,
-      "visual_audit_valid": true
+      "capture_success": true,
+      "receipt_trusted": true,
+      "capture_evidence_valid": true,
+      "visual_audit_valid": true,
+      "visual_pass": null
     },
     {
       "terrain_debug": "normal",
@@ -1011,9 +1017,9 @@
       "committed_png": null,
       "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
       "local_png": "tmp/env1a_after_c2d/normal/c2d_terrain_normal/c2d_terrain_normal_1920x1080.png",
-      "local_png_sha256": "7ed9098b2efb3ffbf97f73dfbb0f21ca3e80efe6d06df54c7c56f17d4eb58d3c",
-      "image_sha256": "7ed9098b2efb3ffbf97f73dfbb0f21ca3e80efe6d06df54c7c56f17d4eb58d3c",
-      "image_byte_size": 2641325,
+      "local_png_sha256": "64cb18e08321fc74d305b9716c89aad12e86c5aaeb1979a7eff41931c8689bdb",
+      "image_sha256": "64cb18e08321fc74d305b9716c89aad12e86c5aaeb1979a7eff41931c8689bdb",
+      "image_byte_size": 2641405,
       "framebuffer": [
         1920,
         1080
@@ -1021,8 +1027,14 @@
       "audit_debug_mode": "normal",
       "audit_material_path_active": true,
       "audit_sampler_anisotropy": 16,
+      "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+      "git_dirty": false,
       "runner_success": true,
-      "visual_audit_valid": true
+      "capture_success": true,
+      "receipt_trusted": true,
+      "capture_evidence_valid": true,
+      "visual_audit_valid": true,
+      "visual_pass": null
     },
     {
       "terrain_debug": "roughness",
@@ -1030,9 +1042,9 @@
       "committed_png": null,
       "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
       "local_png": "tmp/env1a_after_c2d/roughness/c2d_terrain_roughness/c2d_terrain_roughness_1920x1080.png",
-      "local_png_sha256": "baeb6483e813d18078f7c865956206537e04f697a574169cb22034f3000623ec",
-      "image_sha256": "baeb6483e813d18078f7c865956206537e04f697a574169cb22034f3000623ec",
-      "image_byte_size": 1277289,
+      "local_png_sha256": "b3f354f7cce23d0a2ea0155172fb3f5866301b086daa23b51ea03a2f85068e3d",
+      "image_sha256": "b3f354f7cce23d0a2ea0155172fb3f5866301b086daa23b51ea03a2f85068e3d",
+      "image_byte_size": 1277057,
       "framebuffer": [
         1920,
         1080
@@ -1040,8 +1052,14 @@
       "audit_debug_mode": "roughness",
       "audit_material_path_active": true,
       "audit_sampler_anisotropy": 16,
+      "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+      "git_dirty": false,
       "runner_success": true,
-      "visual_audit_valid": true
+      "capture_success": true,
+      "receipt_trusted": true,
+      "capture_evidence_valid": true,
+      "visual_audit_valid": true,
+      "visual_pass": null
     },
     {
       "terrain_debug": "macro",
@@ -1049,9 +1067,9 @@
       "committed_png": null,
       "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
       "local_png": "tmp/env1a_after_c2d/macro/c2d_terrain_macro/c2d_terrain_macro_1920x1080.png",
-      "local_png_sha256": "0f15cb9b9ccd961e8d6f502e779e67a5ef427eba58f546d390c1eb5be66c4ac9",
-      "image_sha256": "0f15cb9b9ccd961e8d6f502e779e67a5ef427eba58f546d390c1eb5be66c4ac9",
-      "image_byte_size": 2190213,
+      "local_png_sha256": "1fd436a5fbc4a80c202bcabd85c6b1d21f358d8f24e5f8cbe84ae54aff3b0522",
+      "image_sha256": "1fd436a5fbc4a80c202bcabd85c6b1d21f358d8f24e5f8cbe84ae54aff3b0522",
+      "image_byte_size": 2190029,
       "framebuffer": [
         1920,
         1080
@@ -1059,8 +1077,14 @@
       "audit_debug_mode": "macro",
       "audit_material_path_active": true,
       "audit_sampler_anisotropy": 16,
+      "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+      "git_dirty": false,
       "runner_success": true,
-      "visual_audit_valid": true
+      "capture_success": true,
+      "receipt_trusted": true,
+      "capture_evidence_valid": true,
+      "visual_audit_valid": true,
+      "visual_pass": null
     },
     {
       "terrain_debug": "detail",
@@ -1068,8 +1092,8 @@
       "committed_png": null,
       "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
       "local_png": "tmp/env1a_after_c2d/detail/c2d_terrain_detail/c2d_terrain_detail_1920x1080.png",
-      "local_png_sha256": "081c413361d2c08be1670c4941b3434474d5ad8b90643137867ef98862c5d17a",
-      "image_sha256": "081c413361d2c08be1670c4941b3434474d5ad8b90643137867ef98862c5d17a",
+      "local_png_sha256": "c6857c9b5cba3b9d6eeb8ea04386849c7b635bcd6fb4652502cd57f38de24307",
+      "image_sha256": "c6857c9b5cba3b9d6eeb8ea04386849c7b635bcd6fb4652502cd57f38de24307",
       "image_byte_size": 2186149,
       "framebuffer": [
         1920,
@@ -1078,8 +1102,14 @@
       "audit_debug_mode": "detail",
       "audit_material_path_active": true,
       "audit_sampler_anisotropy": 16,
+      "git_commit_sha": "cc297b05933b8c5dab6fab61c28a6d1cf761713e",
+      "git_dirty": false,
       "runner_success": true,
-      "visual_audit_valid": true
+      "capture_success": true,
+      "receipt_trusted": true,
+      "capture_evidence_valid": true,
+      "visual_audit_valid": true,
+      "visual_pass": null
     }
   ],
   "reproduction": {
