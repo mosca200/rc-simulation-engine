@@ -1,0 +1,178 @@
+{
+  "manifest_version": 1,
+  "slice": "ENV1-A",
+  "generated_at_utc": "2026-09-22T17:57:06Z",
+  "attribution": "Powered by Poly Haven (https://polyhaven.com)",
+  "api_terms_note": "The Poly Haven public API was used for all metadata and download URLs; no HTML was scraped. The API terms require the attribution recorded in `attribution`.",
+  "assets": [
+    {
+      "asset_id": "ENV1-GND-01",
+      "provider": "Poly Haven",
+      "slug": "sparse_grass",
+      "name": "Sparse Grass",
+      "source_page": "https://polyhaven.com/a/sparse_grass",
+      "license": "CC0",
+      "license_url": "https://polyhaven.com/license",
+      "license_note": "The Poly Haven /info API payload carries no license field. CC0 is recorded from https://polyhaven.com/license, the same citation the repository already uses in tools/vegetation_processing/PROVENANCE.md.",
+      "authors": {
+        "Amal Kumar": "All"
+      },
+      "api": {
+        "info_url": "https://api.polyhaven.com/info/sparse_grass",
+        "files_url": "https://api.polyhaven.com/files/sparse_grass",
+        "info_payload_sha256": "96b809717edbb26616efdbb5fd2c82238aa3affa6ae7603fdc0dce3a5b74c764",
+        "files_payload_sha256": "385455d28cb04effb36e7775527b88b1e637b3dbf228b0cf37474aa4ae05b54b",
+        "files_hash": "1293431c7316b89282b883ff760be963802f9000",
+        "date_published_unix": 1725926400,
+        "max_resolution": [
+          8192,
+          8192
+        ],
+        "dimensions": [
+          2000,
+          2000
+        ],
+        "dimensions_unit": null,
+        "dimensions_unit_note": "The Poly Haven /info API reports `dimensions` as a bare pair with no unit. The value is recorded verbatim and the unit is left null rather than guessed. ENV1-A therefore does not derive any physical tiling scale from it; the terrain base tile scale is an explicit, documented material parameter instead.",
+        "category": "Ground & Terrain/Grass & Vegetation/Dry & Sparse Grass",
+        "description": "Free 8K texture of sparse grass: thin green tufts and visible roots over rough, damp soil, with subtle height detail and organic, earthy brown-green tones.",
+        "fetched_utc": "2026-09-22T17:56:59Z",
+        "user_agent": "rc-simulation-engine/ENV1-A (CC0 asset provenance; repo mosca200/rc-simulation-engine)"
+      },
+      "source_resolution": "4k",
+      "source_format": "png",
+      "source_files": [
+        {
+          "map_type": "Diffuse",
+          "role": "base_color",
+          "file_name": "sparse_grass_diff_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/sparse_grass/sparse_grass_diff_4k.png",
+          "api_size": 88965861,
+          "api_md5": "278e006a0b4d2df6080f9243e4832edc",
+          "local_size": 88965861,
+          "local_md5": "278e006a0b4d2df6080f9243e4832edc",
+          "local_sha256": "2d6d0b4a167a402be781f2d6259206479c31c5e17506b8333273e81b20ed7744",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/sparse_grass/4k/sparse_grass_diff_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 16,
+          "png_color_type": 2,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "nor_gl",
+          "role": "normal",
+          "file_name": "sparse_grass_nor_gl_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/sparse_grass/sparse_grass_nor_gl_4k.png",
+          "api_size": 95660917,
+          "api_md5": "a719492c379a68d558f579f982420bef",
+          "local_size": 95660917,
+          "local_md5": "a719492c379a68d558f579f982420bef",
+          "local_sha256": "88140611e37a0ddde68cd3e44e030aa5c037e3614e265316c4200ae64479f334",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/sparse_grass/4k/sparse_grass_nor_gl_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 16,
+          "png_color_type": 2,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "Rough",
+          "role": "roughness",
+          "file_name": "sparse_grass_rough_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/sparse_grass/sparse_grass_rough_4k.png",
+          "api_size": 27059416,
+          "api_md5": "981bbf032e135f54af27fe63cd2e912d",
+          "local_size": 27059416,
+          "local_md5": "981bbf032e135f54af27fe63cd2e912d",
+          "local_sha256": "d686601cc8cb30c2d78a3f8bf0dbb52dba4c893b1daff0213a5692f97cac01c1",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/sparse_grass/4k/sparse_grass_rough_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 16,
+          "png_color_type": 0,
+          "png_interlace": 0
+        }
+      ],
+      "processing": {
+        "recipe_version": 1,
+        "processor": "cargo run -p renderer --bin process_env1_terrain_material",
+        "processor_module": "crates/renderer/src/env1_material.rs",
+        "source_edge": 4096,
+        "runtime_edge": 2048,
+        "reduction": "single exact 2x2 box filter, 4096 -> 2048; a source that is not exactly 4096x4096 is rejected rather than resampled with a different filter",
+        "color_space_handling": {
+          "base_color": "sRGB source texels decoded to linear, averaged, re-encoded to sRGB, quantized once to 8 bits",
+          "normal": "linear tangent-space vectors decoded to [-1, 1], summed and renormalized, then re-encoded; OpenGL (+Y) orientation preserved from the nor_gl source",
+          "roughness": "linear 16-bit grayscale reduced with exact u32 integer arithmetic and an exact 65535 -> 255 rescale"
+        },
+        "alpha": "The Diffuse and nor_gl sources carry no alpha channel (PNG color type 2), so the runtime base color and normal maps are opaque RGBA8 with alpha = 255. Alpha preservation through the mip chain is implemented and tested for future foliage sources.",
+        "not_applied": [
+          "saturation_or_contrast_boost",
+          "baked_shadow",
+          "ambient_occlusion_multiplied_into_base_color",
+          "cosmetic_sharpening",
+          "colour_lut",
+          "displacement"
+        ],
+        "determinism": "pure function of the source bytes; re-running the processor produces byte-identical PNGs"
+      },
+      "runtime_outputs": [
+        {
+          "role": "base_color",
+          "file_name": "sparse_grass_base_color.png",
+          "path": "crates/renderer/assets/env1/terrain/sparse_grass/sparse_grass_base_color.png",
+          "color_space": "srgb",
+          "channels": "rgba8",
+          "byte_size": 9475283,
+          "sha256": "3721a8f28dc8a2de86f29b271de8d7f4e7f826265e1e7e0a16b017da29f3d28f",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "normal",
+          "file_name": "sparse_grass_normal.png",
+          "path": "crates/renderer/assets/env1/terrain/sparse_grass/sparse_grass_normal.png",
+          "color_space": "linear",
+          "channels": "rgba8",
+          "byte_size": 13770975,
+          "sha256": "6af58131ecce8d40017bf534e9f2cb9bb1e0f49b89fe9afeaa4cecaf0ba04575",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "roughness",
+          "file_name": "sparse_grass_roughness.png",
+          "path": "crates/renderer/assets/env1/terrain/sparse_grass/sparse_grass_roughness.png",
+          "color_space": "linear",
+          "channels": "r8",
+          "byte_size": 1770555,
+          "sha256": "b5bd29f723b8717c1401dfc05afb6209dd0b35857b53bb47f4c84cda1b64188a",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 0,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,454 @@
+"""ENV1 open-asset provenance: shared library.
+
+Owns the digest, PNG-header and manifest primitives used by the ENV1 asset
+acquisition, manifest-building and verification tools.
+
+Standard library only, matching the deliberate design invariant of
+``tools/visual_benchmark``: reading a PNG header needs 33 bytes and
+``int.from_bytes``, not an image library.
+
+Nothing here invents metadata. Every field in a manifest is either read from
+the Poly Haven API payload, measured from a file on disk, or explicitly set to
+``None`` with a written reason.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import pathlib
+import re
+from typing import Any, Optional
+
+# ---------------------------------------------------------------------------
+# Versions and identity
+# ---------------------------------------------------------------------------
+
+MANIFEST_VERSION = 1
+RECIPE_VERSION = 1
+ASSET_ID_SPARSE_GRASS = "ENV1-GND-01"
+PROVIDER = "Poly Haven"
+SLUG = "sparse_grass"
+SOURCE_PAGE = f"https://polyhaven.com/{'a'}/{SLUG}"
+LICENSE = "CC0"
+LICENSE_URL = "https://polyhaven.com/license"
+ATTRIBUTION = "Powered by Poly Haven (https://polyhaven.com)"
+
+INFO_URL = f"https://api.polyhaven.com/info/{SLUG}"
+FILES_URL = f"https://api.polyhaven.com/files/{SLUG}"
+
+#: Identifying User-Agent required by the Poly Haven API terms.
+USER_AGENT = (
+    "rc-simulation-engine/ENV1-A (CC0 asset provenance; "
+    "repo mosca200/rc-simulation-engine)"
+)
+
+#: Poly Haven map-type key -> (runtime role, source file stem).
+SOURCE_MAPS: tuple[tuple[str, str, str], ...] = (
+    ("Diffuse", "base_color", "sparse_grass_diff_4k.png"),
+    ("nor_gl", "normal", "sparse_grass_nor_gl_4k.png"),
+    ("Rough", "roughness", "sparse_grass_rough_4k.png"),
+)
+
+SOURCE_RESOLUTION = "4k"
+SOURCE_FORMAT = "png"
+SOURCE_EDGE = 4096
+RUNTIME_EDGE = 2048
+
+#: Runtime output role -> (file name, color space, channel layout).
+RUNTIME_OUTPUTS: tuple[tuple[str, str, str, str], ...] = (
+    ("base_color", "sparse_grass_base_color.png", "srgb", "rgba8"),
+    ("normal", "sparse_grass_normal.png", "linear", "rgba8"),
+    ("roughness", "sparse_grass_roughness.png", "linear", "r8"),
+)
+
+RUNTIME_DIR_RELATIVE = "crates/renderer/assets/env1/terrain/sparse_grass"
+SOURCE_CACHE_RELATIVE = "tmp/env1_source_cache/polyhaven/sparse_grass"
+MANIFEST_RELATIVE = "docs/assets/env1/env1_open_assets.json"
+
+#: Expected PNG IHDR color types per role (see the recipe documentation).
+EXPECTED_COLOR_TYPE = {"base_color": 6, "normal": 6, "roughness": 0}
+EXPECTED_BIT_DEPTH = {"source": 16, "runtime": 8}
+
+#: Things the recipe deliberately never does. Recorded in the manifest so a
+#: future reviewer can see the absence was a decision, not an oversight.
+NOT_APPLIED = (
+    "saturation_or_contrast_boost",
+    "baked_shadow",
+    "ambient_occlusion_multiplied_into_base_color",
+    "cosmetic_sharpening",
+    "colour_lut",
+    "displacement",
+)
+
+_CHUNK = 1 << 22
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class Env1AssetError(Exception):
+    """Raised for every fail-closed condition in the ENV1 asset tooling."""
+
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.message = message
+        self.exit_code = exit_code
+
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+
+def repo_root() -> pathlib.Path:
+    """Workspace root: the parent of ``tools/``."""
+    return pathlib.Path(__file__).resolve().parent.parent.parent
+
+
+def source_cache_dir(root: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Gitignored Poly Haven source cache for ``sparse_grass``."""
+    return (root or repo_root()) / SOURCE_CACHE_RELATIVE
+
+
+def runtime_dir(root: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Committed runtime asset directory."""
+    return (root or repo_root()) / RUNTIME_DIR_RELATIVE
+
+
+def manifest_path(root: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Path of the committed provenance manifest."""
+    return (root or repo_root()) / MANIFEST_RELATIVE
+
+
+# ---------------------------------------------------------------------------
+# Digests and PNG headers
+# ---------------------------------------------------------------------------
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    """SHA-256 of a file's bytes, streamed."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_bytes(payload: bytes) -> str:
+    """SHA-256 of an in-memory payload."""
+    return hashlib.sha256(payload).hexdigest()
+
+
+def md5_file(path: pathlib.Path) -> str:
+    """MD5 of a file's bytes.
+
+    Poly Haven publishes MD5 (not SHA-256) per download leaf, so this is the
+    only way to verify a download against the API. It is used for source
+    verification only; every digest recorded for provenance is SHA-256.
+    """
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_png_header(path: pathlib.Path) -> dict[str, int]:
+    """Parse the IHDR of a PNG without an image library.
+
+    Returns ``width``, ``height``, ``bit_depth``, ``color_type`` and
+    ``interlace``. Fails closed on a bad signature or a truncated header.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(33)
+    if len(head) < 33:
+        raise Env1AssetError(f"{path}: file is shorter than a PNG header")
+    if head[:8] != _PNG_SIGNATURE:
+        raise Env1AssetError(f"{path}: not a PNG (bad signature)")
+    width = int.from_bytes(head[16:20], "big")
+    height = int.from_bytes(head[20:24], "big")
+    return {
+        "width": width,
+        "height": height,
+        "bit_depth": head[24],
+        "color_type": head[25],
+        "interlace": head[28],
+    }
+
+
+def describe_file(path: pathlib.Path) -> dict[str, Any]:
+    """Measured facts about a PNG on disk: size, digest and IHDR fields."""
+    if not path.is_file():
+        raise Env1AssetError(f"missing expected file: {path}")
+    header = read_png_header(path)
+    return {
+        "byte_size": path.stat().st_size,
+        "sha256": sha256_file(path),
+        "width": header["width"],
+        "height": header["height"],
+        "png_bit_depth": header["bit_depth"],
+        "png_color_type": header["color_type"],
+        "png_interlace": header["interlace"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Manifest handling
+# ---------------------------------------------------------------------------
+
+#: Fields every asset entry must carry. Missing (as opposed to null) is an
+#: error: an unknown field is a schema drift, a null is an honest "unavailable".
+REQUIRED_ASSET_FIELDS = (
+    "asset_id",
+    "provider",
+    "slug",
+    "name",
+    "source_page",
+    "license",
+    "license_url",
+    "authors",
+    "api",
+    "source_resolution",
+    "source_format",
+    "source_files",
+    "processing",
+    "runtime_outputs",
+)
+
+REQUIRED_SOURCE_FILE_FIELDS = (
+    "map_type",
+    "role",
+    "url",
+    "file_name",
+    "api_size",
+    "api_md5",
+    "local_path",
+    "local_size",
+    "local_md5",
+    "local_sha256",
+    "size_verified",
+    "md5_verified",
+)
+
+REQUIRED_RUNTIME_FIELDS = (
+    "role",
+    "path",
+    "file_name",
+    "color_space",
+    "channels",
+    "byte_size",
+    "sha256",
+    "width",
+    "height",
+    "png_bit_depth",
+    "png_color_type",
+)
+
+REQUIRED_PROCESSING_FIELDS = (
+    "recipe_version",
+    "processor",
+    "source_edge",
+    "runtime_edge",
+    "reduction",
+    "color_space_handling",
+    "not_applied",
+)
+
+
+def load_manifest(path: pathlib.Path) -> dict[str, Any]:
+    """Load the provenance manifest, failing closed on malformed JSON."""
+    if not path.is_file():
+        raise Env1AssetError(f"manifest not found: {path}", exit_code=2)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise Env1AssetError(f"{path}: invalid JSON: {error}") from error
+
+
+def validate_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Return a list of human-readable contract violations (empty == valid)."""
+    errors: list[str] = []
+
+    version = manifest.get("manifest_version")
+    if version != MANIFEST_VERSION:
+        errors.append(f"manifest_version must be {MANIFEST_VERSION}, got {version!r}")
+
+    assets = manifest.get("assets")
+    if not isinstance(assets, list) or not assets:
+        errors.append("assets must be a non-empty list")
+        return errors
+
+    seen_ids: set[str] = set()
+    for index, asset in enumerate(assets):
+        where = f"assets[{index}]"
+        if not isinstance(asset, dict):
+            errors.append(f"{where} must be an object")
+            continue
+        for field in REQUIRED_ASSET_FIELDS:
+            if field not in asset:
+                errors.append(f"{where}.{field}: required field missing")
+        asset_id = asset.get("asset_id")
+        if isinstance(asset_id, str):
+            if asset_id in seen_ids:
+                errors.append(f"{where}.asset_id: duplicate {asset_id!r}")
+            seen_ids.add(asset_id)
+            if not re.fullmatch(r"ENV1-[A-Z]{3}-[0-9]{2}", asset_id):
+                errors.append(
+                    f"{where}.asset_id: must match ENV1-<AAA>-<NN>, got {asset_id!r}"
+                )
+        if asset.get("license") is not None and asset.get("license") != LICENSE:
+            errors.append(
+                f"{where}.license: only {LICENSE} assets are accepted by ENV1-A, "
+                f"got {asset.get('license')!r}"
+            )
+        errors.extend(_validate_api_block(asset.get("api"), where))
+        errors.extend(_validate_source_files(asset.get("source_files"), where))
+        errors.extend(_validate_processing(asset.get("processing"), where))
+        errors.extend(_validate_runtime_outputs(asset.get("runtime_outputs"), where))
+    return errors
+
+
+def _validate_api_block(api: Any, where: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(api, dict):
+        errors.append(f"{where}.api must be an object")
+        return errors
+    for field in (
+        "info_url",
+        "files_url",
+        "info_payload_sha256",
+        "files_payload_sha256",
+        "files_hash",
+    ):
+        if field not in api:
+            errors.append(f"{where}.api.{field}: required field missing")
+    # `dimensions_unit` must be present, and must be null unless the API ever
+    # starts stating a unit: recording a guessed unit would be invention.
+    if "dimensions_unit" not in api:
+        errors.append(f"{where}.api.dimensions_unit: required field missing")
+    elif api["dimensions_unit"] is not None:
+        errors.append(
+            f"{where}.api.dimensions_unit: the Poly Haven API does not state a "
+            "unit for `dimensions`; it must stay null"
+        )
+    if not api.get("dimensions_unit_note"):
+        errors.append(f"{where}.api.dimensions_unit_note: must explain the null")
+    return errors
+
+
+def _validate_source_files(files: Any, where: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(files, list) or not files:
+        errors.append(f"{where}.source_files must be a non-empty list")
+        return errors
+    roles = set()
+    for index, entry in enumerate(files):
+        item = f"{where}.source_files[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{item} must be an object")
+            continue
+        for field in REQUIRED_SOURCE_FILE_FIELDS:
+            if field not in entry:
+                errors.append(f"{item}.{field}: required field missing")
+        role = entry.get("role")
+        if role in roles:
+            errors.append(f"{item}.role: duplicate {role!r}")
+        roles.add(role)
+        for flag in ("size_verified", "md5_verified"):
+            if entry.get(flag) is not True:
+                errors.append(
+                    f"{item}.{flag}: must be true; an unverified source download "
+                    "is a fail-closed condition"
+                )
+        if entry.get("local_sha256") is None:
+            errors.append(f"{item}.local_sha256: the local digest is mandatory")
+    expected_roles = {role for _, role, _ in SOURCE_MAPS}
+    if roles != expected_roles:
+        errors.append(
+            f"{where}.source_files: roles must be exactly {sorted(expected_roles)}, "
+            f"got {sorted(str(r) for r in roles)}"
+        )
+    return errors
+
+
+def _validate_processing(processing: Any, where: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(processing, dict):
+        errors.append(f"{where}.processing must be an object")
+        return errors
+    for field in REQUIRED_PROCESSING_FIELDS:
+        if field not in processing:
+            errors.append(f"{where}.processing.{field}: required field missing")
+    if processing.get("recipe_version") != RECIPE_VERSION:
+        errors.append(
+            f"{where}.processing.recipe_version must be {RECIPE_VERSION}, "
+            f"got {processing.get('recipe_version')!r}"
+        )
+    if processing.get("source_edge") != SOURCE_EDGE:
+        errors.append(f"{where}.processing.source_edge must be {SOURCE_EDGE}")
+    if processing.get("runtime_edge") != RUNTIME_EDGE:
+        errors.append(f"{where}.processing.runtime_edge must be {RUNTIME_EDGE}")
+    not_applied = processing.get("not_applied")
+    if not isinstance(not_applied, list) or tuple(not_applied) != NOT_APPLIED:
+        errors.append(
+            f"{where}.processing.not_applied must be exactly {list(NOT_APPLIED)}"
+        )
+    return errors
+
+
+def _validate_runtime_outputs(outputs: Any, where: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(outputs, list) or not outputs:
+        errors.append(f"{where}.runtime_outputs must be a non-empty list")
+        return errors
+    roles = set()
+    for index, entry in enumerate(outputs):
+        item = f"{where}.runtime_outputs[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{item} must be an object")
+            continue
+        for field in REQUIRED_RUNTIME_FIELDS:
+            if field not in entry:
+                errors.append(f"{item}.{field}: required field missing")
+        role = entry.get("role")
+        if role in roles:
+            errors.append(f"{item}.role: duplicate {role!r}")
+        roles.add(role)
+        if role in EXPECTED_COLOR_TYPE and entry.get("png_color_type") is not None:
+            if entry["png_color_type"] != EXPECTED_COLOR_TYPE[role]:
+                errors.append(
+                    f"{item}.png_color_type: {role} must be PNG color type "
+                    f"{EXPECTED_COLOR_TYPE[role]}, got {entry['png_color_type']}"
+                )
+        if entry.get("png_bit_depth") not in (None, EXPECTED_BIT_DEPTH["runtime"]):
+            errors.append(
+                f"{item}.png_bit_depth: runtime maps must be 8-bit, "
+                f"got {entry.get('png_bit_depth')}"
+            )
+        for field in ("width", "height"):
+            if entry.get(field) != RUNTIME_EDGE:
+                errors.append(f"{item}.{field} must be {RUNTIME_EDGE}")
+        digest = entry.get("sha256")
+        if not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+            errors.append(f"{item}.sha256 must be 64 lowercase hex characters")
+    expected_roles = {role for role, _, _, _ in RUNTIME_OUTPUTS}
+    if roles != expected_roles:
+        errors.append(
+            f"{where}.runtime_outputs: roles must be exactly {sorted(expected_roles)}, "
+            f"got {sorted(str(r) for r in roles)}"
+        )
+    return errors
+
+
+def configure_streams() -> None:
+    """Make redirected stdout/stderr UTF-8 and loss-tolerant.
+
+    Windows redirects default to cp1252, which raises ``UnicodeEncodeError`` on
+    non-ASCII markers and fails every test in a suite.
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass

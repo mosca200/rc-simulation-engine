@@ -84,6 +84,33 @@ pub fn decode_image(data: &[u8]) -> Result<DecodedTexture, TextureLoadError> {
     })
 }
 
+/// sRGB (IEC 61966-2-1) decode of one normalized channel: [0, 1] -> linear.
+///
+/// ENV1-A: this is the single canonical definition of the transfer function in
+/// this crate. Both the terrain mip chain (`terrain_textures`) and the ENV1
+/// photographic source-map processing (`env1_material`) call it, so a color map
+/// can never be filtered with two slightly different curves.
+#[must_use]
+pub(crate) fn srgb_to_linear_f64(channel: f64) -> f64 {
+    let c = channel.clamp(0.0, 1.0);
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB (IEC 61966-2-1) encode of one linear channel: [0, 1] -> [0, 1].
+#[must_use]
+pub(crate) fn linear_to_srgb_f64(linear: f64) -> f64 {
+    let c = linear.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// Compute the padded bytes_per_row for GPU upload.
 ///
 /// WebGPU requires each row to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`.
@@ -220,11 +247,13 @@ impl SamplerWrap {
     }
 }
 
-/// glTF sampler min/mag filter mapping.
+/// glTF sampler min/mag filter mapping: the NEAREST-vs-LINEAR axis only.
 ///
-/// G1C limitation: Mipmap filters are mapped to their non-mipmap equivalents.
-/// A single-mip implementation is used; the distinction between NEAREST and
-/// LINEAR for minification is preserved, but mipmap selection is not.
+/// ENV1-A: this no longer throws information away. A glTF `minFilter` carries
+/// two independent axes — the minification mode and whether a mip chain is
+/// sampled — and the mipmap axis is now preserved separately by
+/// `SamplerMipmapFilter`. `SamplerConfig::mipmap_filter` is `None` exactly when
+/// the asset asked for single-mip sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SamplerFilter {
     Nearest,
@@ -232,7 +261,10 @@ pub enum SamplerFilter {
 }
 
 impl SamplerFilter {
-    /// Map from glTF min filter, discarding mipmap distinctions.
+    /// Map the minification axis of a glTF min filter.
+    ///
+    /// The mipmap-selection axis is handled by
+    /// `SamplerMipmapFilter::from_gltf_min`; nothing is discarded overall.
     #[must_use]
     pub fn from_gltf_min(filter: gltf::texture::MinFilter) -> Self {
         match filter {
@@ -263,6 +295,50 @@ impl SamplerFilter {
     }
 }
 
+/// The mipmap-selection axis of a glTF `minFilter`.
+///
+/// glTF encodes mipmapping inside the min filter: the bare `NEAREST` and
+/// `LINEAR` values mean "sample mip level 0 only", while the four
+/// `*_MIPMAP_*` values request a mip chain and state how levels are selected.
+/// `None` in `SamplerConfig::mipmap_filter` therefore means the asset asked
+/// for single-mip sampling, which is a real distinction rather than a missing
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplerMipmapFilter {
+    Nearest,
+    Linear,
+}
+
+impl SamplerMipmapFilter {
+    /// Map the mipmap-selection axis of a glTF min filter.
+    ///
+    /// Returns `None` when the asset requests no mipmapping at all.
+    #[must_use]
+    pub fn from_gltf_min(filter: gltf::texture::MinFilter) -> Option<Self> {
+        match filter {
+            gltf::texture::MinFilter::Nearest | gltf::texture::MinFilter::Linear => None,
+            gltf::texture::MinFilter::NearestMipmapNearest
+            | gltf::texture::MinFilter::LinearMipmapNearest => Some(Self::Nearest),
+            gltf::texture::MinFilter::NearestMipmapLinear
+            | gltf::texture::MinFilter::LinearMipmapLinear => Some(Self::Linear),
+        }
+    }
+
+    /// Whether a glTF min filter requests a mip chain at all.
+    #[must_use]
+    pub fn mipmapping_requested(filter: gltf::texture::MinFilter) -> bool {
+        Self::from_gltf_min(filter).is_some()
+    }
+
+    #[must_use]
+    pub fn to_wgpu(self) -> wgpu::MipmapFilterMode {
+        match self {
+            Self::Nearest => wgpu::MipmapFilterMode::Nearest,
+            Self::Linear => wgpu::MipmapFilterMode::Linear,
+        }
+    }
+}
+
 /// Sampler configuration extracted from a glTF sampler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SamplerConfig {
@@ -270,10 +346,14 @@ pub struct SamplerConfig {
     pub wrap_t: SamplerWrap,
     pub min_filter: SamplerFilter,
     pub mag_filter: SamplerFilter,
+    /// Mipmap selection, or `None` when the asset asked for single-mip
+    /// sampling (glTF `minFilter` of NEAREST or LINEAR, or no minFilter).
+    pub mipmap_filter: Option<SamplerMipmapFilter>,
 }
 
 impl SamplerConfig {
-    /// Default sampler: linear filtering, repeat wrapping.
+    /// Default sampler: linear filtering, repeat wrapping, no mipmapping
+    /// requested.
     #[must_use]
     pub fn default_sampler() -> Self {
         Self {
@@ -281,10 +361,11 @@ impl SamplerConfig {
             wrap_t: SamplerWrap::Repeat,
             min_filter: SamplerFilter::Linear,
             mag_filter: SamplerFilter::Linear,
+            mipmap_filter: None,
         }
     }
 
-    /// Extract from a glTF sampler, applying G1C mipmap limitations.
+    /// Extract from a glTF sampler, preserving both filter axes.
     #[must_use]
     pub fn from_gltf_sampler(sampler: &gltf::texture::Sampler) -> Self {
         let wrap_s = SamplerWrap::from_gltf(sampler.wrap_s());
@@ -297,11 +378,17 @@ impl SamplerConfig {
             .mag_filter()
             .map(SamplerFilter::from_gltf_mag)
             .unwrap_or(SamplerFilter::Linear);
+        // An absent minFilter means the glTF spec leaves minification
+        // implementation-defined, so no mipmapping is assumed.
+        let mipmap_filter = sampler
+            .min_filter()
+            .and_then(SamplerMipmapFilter::from_gltf_min);
         Self {
             wrap_s,
             wrap_t,
             min_filter,
             mag_filter,
+            mipmap_filter,
         }
     }
 }
@@ -498,6 +585,127 @@ mod tests {
         assert_eq!(config.wrap_t, SamplerWrap::Repeat);
         assert_eq!(config.min_filter, SamplerFilter::Linear);
         assert_eq!(config.mag_filter, SamplerFilter::Linear);
+        assert_eq!(config.mipmap_filter, None);
+    }
+
+    #[test]
+    fn sampler_mipmap_filter_mapping_is_total_over_every_gltf_min_filter() {
+        use gltf::texture::MinFilter;
+        // The two bare values request mip 0 only; the four `*_MIPMAP_*` values
+        // request a chain and say how levels are selected.
+        let cases = [
+            (MinFilter::Nearest, None),
+            (MinFilter::Linear, None),
+            (
+                MinFilter::NearestMipmapNearest,
+                Some(SamplerMipmapFilter::Nearest),
+            ),
+            (
+                MinFilter::LinearMipmapNearest,
+                Some(SamplerMipmapFilter::Nearest),
+            ),
+            (
+                MinFilter::NearestMipmapLinear,
+                Some(SamplerMipmapFilter::Linear),
+            ),
+            (
+                MinFilter::LinearMipmapLinear,
+                Some(SamplerMipmapFilter::Linear),
+            ),
+        ];
+        for (filter, expected) in cases {
+            assert_eq!(
+                SamplerMipmapFilter::from_gltf_min(filter),
+                expected,
+                "mipmap mapping for {filter:?}"
+            );
+            assert_eq!(
+                SamplerMipmapFilter::mipmapping_requested(filter),
+                expected.is_some(),
+                "mipmapping_requested for {filter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampler_minification_and_mipmap_axes_are_independent() {
+        use gltf::texture::MinFilter;
+        // LINEAR_MIPMAP_NEAREST is linear minification with nearest mip
+        // selection: the two axes must not collapse into one value.
+        assert_eq!(
+            SamplerFilter::from_gltf_min(MinFilter::LinearMipmapNearest),
+            SamplerFilter::Linear
+        );
+        assert_eq!(
+            SamplerMipmapFilter::from_gltf_min(MinFilter::LinearMipmapNearest),
+            Some(SamplerMipmapFilter::Nearest)
+        );
+        // NEAREST_MIPMAP_LINEAR is the mirror case.
+        assert_eq!(
+            SamplerFilter::from_gltf_min(MinFilter::NearestMipmapLinear),
+            SamplerFilter::Nearest
+        );
+        assert_eq!(
+            SamplerMipmapFilter::from_gltf_min(MinFilter::NearestMipmapLinear),
+            Some(SamplerMipmapFilter::Linear)
+        );
+    }
+
+    #[test]
+    fn sampler_mipmap_filter_maps_to_the_matching_wgpu_mode() {
+        assert_eq!(
+            SamplerMipmapFilter::Nearest.to_wgpu(),
+            wgpu::MipmapFilterMode::Nearest
+        );
+        assert_eq!(
+            SamplerMipmapFilter::Linear.to_wgpu(),
+            wgpu::MipmapFilterMode::Linear
+        );
+    }
+
+    #[test]
+    fn srgb_transfer_functions_round_trip_at_the_endpoints() {
+        for channel in [0.0f64, 1.0] {
+            let round_trip = linear_to_srgb_f64(srgb_to_linear_f64(channel));
+            assert!(
+                (round_trip - channel).abs() < 1e-12,
+                "round trip must be exact at {channel}, got {round_trip}"
+            );
+        }
+    }
+
+    #[test]
+    fn srgb_transfer_functions_use_the_piecewise_linear_segment() {
+        // Below the 0.04045 knee the curve is exactly the 12.92 linear segment,
+        // so a dark channel must not pick up any gamma curvature.
+        let small = 0.03f64;
+        assert!((srgb_to_linear_f64(small) - small / 12.92).abs() < 1e-15);
+        let dark_linear = 0.002f64;
+        assert!((linear_to_srgb_f64(dark_linear) - dark_linear * 12.92).abs() < 1e-15);
+    }
+
+    #[test]
+    fn srgb_decode_is_monotonic_and_bounded() {
+        let mut previous = f64::NEG_INFINITY;
+        for step in 0..=1000 {
+            let c = f64::from(step) / 1000.0;
+            let linear = srgb_to_linear_f64(c);
+            assert!(linear.is_finite() && (0.0..=1.0).contains(&linear));
+            assert!(linear >= previous, "decode must be monotonic at {c}");
+            previous = linear;
+        }
+    }
+
+    #[test]
+    fn srgb_transfer_functions_clamp_out_of_range_input() {
+        // Tolerance, not equality: `1.055 * 1.0 - 0.055` evaluates to
+        // 0.9999999999999999 in f64 because neither literal is exactly
+        // representable. The 8-bit quantization the mip chain actually uses
+        // still lands on 255 (see terrain_textures' round-trip test).
+        assert!((srgb_to_linear_f64(-0.5) - 0.0).abs() < 1e-12);
+        assert!((srgb_to_linear_f64(1.5) - 1.0).abs() < 1e-12);
+        assert!((linear_to_srgb_f64(-0.5) - 0.0).abs() < 1e-12);
+        assert!((linear_to_srgb_f64(1.5) - 1.0).abs() < 1e-12);
     }
 
     #[test]

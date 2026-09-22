@@ -607,24 +607,17 @@ fn downsample_r8(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
 }
 
 /// sRGB (IEC 61966-2-1) decode of one channel: [0, 255] -> linear [0, 1].
+///
+/// ENV1-A: delegates to the crate's single canonical transfer function in
+/// `texture`, so the mip chain and the photographic source-map processing can
+/// never filter a color map with two slightly different curves.
 fn srgb_to_linear(channel: u8) -> f64 {
-    let c = f64::from(channel) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    crate::texture::srgb_to_linear_f64(f64::from(channel) / 255.0)
 }
 
 /// sRGB (IEC 61966-2-1) encode of one linear channel: [0, 1] -> [0, 255].
 fn linear_to_srgb_u8(linear: f64) -> u8 {
-    let c = linear.clamp(0.0, 1.0);
-    let encoded = if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
+    (crate::texture::linear_to_srgb_f64(linear) * 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -632,6 +625,40 @@ mod tests {
     use super::generated::{TERRAIN_ALBEDO_PNG, TERRAIN_NORMAL_PNG, TERRAIN_ROUGHNESS_PNG};
     use super::*;
     use crate::texture::decode_image;
+
+    #[test]
+    fn srgb_channel_wrappers_round_trip_within_one_level() {
+        // Guards the ENV1-A delegation to `texture::{srgb_to_linear_f64,
+        // linear_to_srgb_f64}`: an 8-bit channel must survive
+        // decode -> encode without drifting more than one quantization step.
+        for channel in 0..=255u8 {
+            let linear = srgb_to_linear(channel);
+            assert!(linear.is_finite() && (0.0..=1.0).contains(&linear));
+            let back = linear_to_srgb_u8(linear);
+            let drift = i32::from(back) - i32::from(channel);
+            assert!(
+                drift.abs() <= 1,
+                "channel {channel} round-tripped to {back} (drift {drift})"
+            );
+        }
+        assert_eq!(srgb_to_linear(0), 0.0);
+        assert_eq!(linear_to_srgb_u8(0.0), 0);
+        assert_eq!(srgb_to_linear(255), 1.0);
+        assert_eq!(linear_to_srgb_u8(1.0), 255);
+    }
+
+    #[test]
+    fn srgb_decode_is_monotonic_over_every_channel() {
+        let mut previous = -1.0f64;
+        for channel in 0..=255u8 {
+            let linear = srgb_to_linear(channel);
+            assert!(
+                linear > previous,
+                "decode must strictly increase at {channel}"
+            );
+            previous = linear;
+        }
+    }
 
     #[test]
     fn generated_size_is_reasonable() {
