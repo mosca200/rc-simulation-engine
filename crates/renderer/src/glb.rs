@@ -21,9 +21,15 @@
 //! (`parent_world * local`); mesh geometry and materials are stored once per
 //! glTF mesh in [`GlbAsset::meshes`] and never duplicated per instance.
 //!
-//! G1D deliberately does NOT yet load:
-//! - metallicRoughnessTexture
-//! - normalTexture
+//! ENV1-A adds parsing for `normalTexture` (with its `scale`) and
+//! `pbrMetallicRoughness.metallicRoughnessTexture`. Both are decoded into
+//! [`PrimitiveMaterial`] as linear data and both are covered by tests, but
+//! neither is consumed by the shading path yet: wiring them in would change the
+//! appearance of existing aircraft and vegetation assets, which ENV1-A must not
+//! do. No committed asset uses either slot today, so parsing them costs nothing
+//! at load time.
+//!
+//! Still deliberately NOT loaded:
 //! - occlusionTexture
 //! - emissiveTexture
 //!   These will follow in later slices.
@@ -58,6 +64,9 @@ const GLTF_DEFAULT_BASE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// glTF 2.0 spec default `pbrMetallicRoughness.metallicFactor` when absent.
 const GLTF_DEFAULT_METALLIC: f32 = 1.0;
+
+/// glTF 2.0 spec default `normalTexture.scale` when absent.
+pub const GLTF_DEFAULT_NORMAL_SCALE: f32 = 1.0;
 
 /// glTF 2.0 spec default `pbrMetallicRoughness.roughnessFactor` when absent.
 const GLTF_DEFAULT_ROUGHNESS: f32 = 1.0;
@@ -159,6 +168,16 @@ pub struct PrimitiveMaterial {
     /// glTF `pbrMetallicRoughness.roughnessFactor` (G1D), clamped to [0, 1].
     /// Defaults to 1.0 per the glTF 2.0 spec when absent.
     pub roughness_factor: f32,
+    /// glTF `normalTexture` (ENV1-A), decoded and ready for upload as linear
+    /// data. Parsed and carried here; not yet consumed by the shading path,
+    /// which would change the appearance of existing assets.
+    pub normal_texture: Option<DecodedTexture>,
+    /// glTF `normalTexture.scale`, defaulting to 1.0 per the spec.
+    pub normal_texture_scale: f32,
+    /// glTF `pbrMetallicRoughness.metallicRoughnessTexture` (ENV1-A), decoded
+    /// and ready for upload as linear data (G in B, B in G per the spec).
+    /// Parsed and carried here; not yet consumed by the shading path.
+    pub metallic_roughness_texture: Option<DecodedTexture>,
     pub sampler_config: SamplerConfig,
 }
 
@@ -180,39 +199,47 @@ impl PrimitiveMaterial {
         let metallic_factor = clamp_unit_factor(pbr.metallic_factor(), GLTF_DEFAULT_METALLIC);
         let roughness_factor = clamp_unit_factor(pbr.roughness_factor(), GLTF_DEFAULT_ROUGHNESS);
 
-        let base_color_texture = if let Some(info) = pbr.base_color_texture() {
-            if info.tex_coord() != 0 {
-                return Err(GlbLoadError::UnsupportedTexCoord {
-                    path: path.to_path_buf(),
-                    primitive_index,
-                    requested: info.tex_coord(),
-                });
-            }
+        let base_color_texture = match pbr.base_color_texture() {
+            Some(info) => Some(decode_cached_texture(
+                &info.texture(),
+                info.tex_coord(),
+                binary,
+                path,
+                primitive_index,
+                texture_cache,
+            )?),
+            None => None,
+        };
 
-            let texture = info.texture();
-            let source = texture.source();
-            let texture_index = source.index();
-            // Shared meshes/instances must not re-decode the same embedded
-            // image: decode once per glTF texture index and clone the pixels.
-            let cached = match texture_cache.entry(texture_index) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    // FIX 6: Borrow directly from the GLB binary blob instead of copying.
-                    let source_data = extract_image_data(source, binary, path)?;
-                    let decoded = decode_image(source_data).map_err(|decode_error| {
-                        GlbLoadError::MalformedImage {
-                            path: path.to_path_buf(),
-                            texture_index,
-                            source: decode_error,
-                        }
-                    })?;
-                    let sampler_config = SamplerConfig::from_gltf_sampler(&texture.sampler());
-                    entry.insert((decoded, sampler_config))
-                }
-            };
-            Some(cached.0.clone())
-        } else {
-            None
+        // ENV1-A: parse the remaining two slots the terrain/vegetation material
+        // foundation needs. Both are linear data and both share the same
+        // per-index decode cache as the base color map, so an asset that reuses
+        // one image across slots decodes it once.
+        let (normal_texture, normal_texture_scale) = match material.normal_texture() {
+            Some(info) => (
+                Some(decode_cached_texture(
+                    &info.texture(),
+                    info.tex_coord(),
+                    binary,
+                    path,
+                    primitive_index,
+                    texture_cache,
+                )?),
+                info.scale(),
+            ),
+            None => (None, GLTF_DEFAULT_NORMAL_SCALE),
+        };
+
+        let metallic_roughness_texture = match pbr.metallic_roughness_texture() {
+            Some(info) => Some(decode_cached_texture(
+                &info.texture(),
+                info.tex_coord(),
+                binary,
+                path,
+                primitive_index,
+                texture_cache,
+            )?),
+            None => None,
         };
 
         let sampler_config = if let Some(info) = pbr.base_color_texture() {
@@ -227,6 +254,9 @@ impl PrimitiveMaterial {
             base_color_texture,
             metallic_factor,
             roughness_factor,
+            normal_texture,
+            normal_texture_scale,
+            metallic_roughness_texture,
             sampler_config,
         })
     }
@@ -237,9 +267,54 @@ impl PrimitiveMaterial {
             base_color_texture: None,
             metallic_factor: GLTF_DEFAULT_METALLIC,
             roughness_factor: GLTF_DEFAULT_ROUGHNESS,
+            normal_texture: None,
+            normal_texture_scale: GLTF_DEFAULT_NORMAL_SCALE,
+            metallic_roughness_texture: None,
             sampler_config: SamplerConfig::default_sampler(),
         }
     }
+}
+
+/// Decode a glTF texture once per texture index and hand out clones.
+///
+/// Shared meshes/instances must not re-decode the same embedded image, and an
+/// asset that references one image from several material slots must not decode
+/// it per slot either. `tex_coord != 0` is rejected exactly as before: only
+/// TEXCOORD_0 is supported.
+fn decode_cached_texture(
+    texture: &gltf::Texture,
+    tex_coord: u32,
+    binary: &[u8],
+    path: &Path,
+    primitive_index: usize,
+    texture_cache: &mut HashMap<usize, (DecodedTexture, SamplerConfig)>,
+) -> Result<DecodedTexture, GlbLoadError> {
+    if tex_coord != 0 {
+        return Err(GlbLoadError::UnsupportedTexCoord {
+            path: path.to_path_buf(),
+            primitive_index,
+            requested: tex_coord,
+        });
+    }
+
+    let source = texture.source();
+    let texture_index = source.index();
+    let cached = match texture_cache.entry(texture_index) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            // FIX 6: Borrow directly from the GLB binary blob instead of copying.
+            let source_data = extract_image_data(source, binary, path)?;
+            let decoded =
+                decode_image(source_data).map_err(|decode_error| GlbLoadError::MalformedImage {
+                    path: path.to_path_buf(),
+                    texture_index,
+                    source: decode_error,
+                })?;
+            let sampler_config = SamplerConfig::from_gltf_sampler(&texture.sampler());
+            entry.insert((decoded, sampler_config))
+        }
+    };
+    Ok(cached.0.clone())
 }
 
 /// Extract raw image data from a glTF image source.

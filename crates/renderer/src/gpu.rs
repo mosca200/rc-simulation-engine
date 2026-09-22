@@ -57,13 +57,17 @@ use crate::shadow::{
     SHADOW_DEPTH_BIAS_SLOPE_SCALE, SHADOW_MAP_RESOLUTION, ShadowCascade, build_shadow_cascades,
 };
 use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_terrain_chunks};
-use crate::terrain_textures::generated as terrain_assets;
+// ENV1-A: the terrain FINAL path samples the processed Poly Haven
+// `sparse_grass` maps (2048^2) instead of the procedural 1024^2 set. The
+// procedural generator and its committed assets stay in `terrain_textures`
+// unchanged; only this import moves.
+use crate::env1_material::ENV1_RUNTIME_EDGE;
+use crate::env1_material::runtime_assets as terrain_assets;
 use crate::terrain_textures::{
-    TERRAIN_TEXTURE_SIZE, generate_terrain_mip_chain, mip_level_count_for_size,
-    terrain_texture_set_from_decoded,
+    generate_terrain_mip_chain, mip_level_count_for_size, terrain_texture_set_from_decoded,
 };
 use crate::texture::{
-    SamplerConfig, TextureLoadError, create_staging_buffer, decode_image,
+    SamplerConfig, SamplerMipmapFilter, TextureLoadError, create_staging_buffer, decode_image,
     padded_bytes_per_row_checked_for_bytes_per_pixel,
 };
 use crate::vegetation::{
@@ -3699,7 +3703,16 @@ fn create_gpu_material(
         address_mode_w: wgpu::AddressMode::Repeat,
         mag_filter: sampler_config.mag_filter.to_wgpu(),
         min_filter: sampler_config.min_filter.to_wgpu(),
-        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        // ENV1-A: honour the glTF min filter's mipmap-selection axis instead of
+        // hard-coding trilinear. GLB textures are still created with
+        // `mip_level_count: 1` (a deliberate ENV1-A scope decision, so no
+        // existing aircraft or vegetation pixel changes), which makes this
+        // mapping inert for them; it is the seam a later tranche uses to give
+        // GLB maps a real mip chain without touching the sampler again.
+        mipmap_filter: sampler_config.mipmap_filter.map_or(
+            wgpu::MipmapFilterMode::Nearest,
+            SamplerMipmapFilter::to_wgpu,
+        ),
         ..Default::default()
     });
 
@@ -3803,7 +3816,7 @@ fn upload_terrain_mip_level(
 /// Create the textured, mipmapped terrain material from the embedded maps.
 ///
 /// Decodes the committed PNGs once at initialization, builds the full
-/// deterministic mip chain (1024 -> 1, 11 levels: sRGB-correct albedo,
+/// deterministic mip chain (ENV1-A: 2048 -> 1, 12 levels: sRGB-correct albedo,
 /// renormalized normals, linear roughness averages), and uploads all levels
 /// into three persistent textures. One repeat/trilinear sampler with
 /// anisotropic filtering (clamped to the device capability) serves all three
@@ -3829,11 +3842,11 @@ fn create_terrain_material(
     // initialization. Missing mips would silently downgrade sampling to
     // mip-0-only bilinear, so the level count is asserted up front.
     let base_set = terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness.rgba8);
-    let mip_chain = generate_terrain_mip_chain(&base_set, TERRAIN_TEXTURE_SIZE);
+    let mip_chain = generate_terrain_mip_chain(&base_set, ENV1_RUNTIME_EDGE);
     let mip_levels = mip_chain.albedo.len() as u32;
     debug_assert_eq!(
         mip_levels,
-        mip_level_count_for_size(TERRAIN_TEXTURE_SIZE),
+        mip_level_count_for_size(ENV1_RUNTIME_EDGE),
         "terrain textures must carry the full mip chain"
     );
     assert!(
@@ -5568,6 +5581,9 @@ mod glb_material_upload_tests {
             base_color_texture,
             metallic_factor,
             roughness_factor,
+            normal_texture: None,
+            normal_texture_scale: 1.0,
+            metallic_roughness_texture: None,
             sampler_config: SamplerConfig::default_sampler(),
         }
     }
@@ -5956,7 +5972,7 @@ mod terrain_material_uniform_tests {
         assert_eq!(uniform.roughness, 0.9);
         assert_eq!(uniform.normal_strength, 1.0);
         assert_eq!(uniform.debug_mode, 0);
-        assert_eq!(uniform.base_scale_m, 4.0);
+        assert_eq!(uniform.base_scale_m, 2.0);
         assert_eq!(uniform.detail_scale_m, 0.40);
         assert_eq!(uniform.macro_scale_m, 48.0);
         assert_eq!(uniform.albedo_uv_offset, [0.0, 0.0]);
@@ -6446,58 +6462,66 @@ mod terrain_headless_gpu_tests {
 
         // CPU expectation from the same committed assets (bit-exact).
         let base = committed_base_set();
-        let chain = generate_terrain_mip_chain(&base, TERRAIN_TEXTURE_SIZE);
+        let chain = generate_terrain_mip_chain(&base, ENV1_RUNTIME_EDGE);
 
-        // Level 0 and mid/1x1 levels of the sRGB albedo must round-trip.
-        for (level, width, height) in [(0u32, 1024u32, 1024u32), (5, 32, 32), (10, 1, 1)] {
+        // ENV1-A: the level dimensions come from the chain itself instead of a
+        // hard-coded 1024, so this probe follows whatever runtime edge the
+        // committed maps carry (2048 -> 12 levels for ENV1-A).
+        let last = chain.albedo.len() - 1;
+        assert!(last >= 11, "the ENV1 chain must reach 1x1 at level {last}");
+
+        // Level 0, a mid level and the 1x1 level of the sRGB albedo must
+        // round-trip.
+        for level in [0usize, 5, last] {
+            let mip = &chain.albedo[level];
             let gpu = read_texture_level(
                 &device,
                 &queue,
                 &material._albedo_texture,
-                level,
-                width,
-                height,
+                level as u32,
+                mip.width,
+                mip.height,
                 4,
             );
-            let expected = &chain.albedo[level as usize].bytes;
             assert!(
-                gpu.len() >= expected.len(),
+                gpu.len() >= mip.bytes.len(),
                 "albedo level {level} readback must span the level bytes"
             );
             assert_eq!(
-                &gpu[..expected.len()],
-                expected.as_slice(),
+                &gpu[..mip.bytes.len()],
+                mip.bytes.as_slice(),
                 "albedo level {level} must round-trip the committed pixels"
             );
         }
 
         // Normal levels must also round-trip (linear data).
-        for (level, width) in [(0u32, 1024u32), (5, 32), (10, 1)] {
+        for level in [0usize, 5, last] {
+            let mip = &chain.normal[level];
             let gpu = read_texture_level(
                 &device,
                 &queue,
                 &material._normal_texture,
-                level,
-                width,
-                width,
+                level as u32,
+                mip.width,
+                mip.height,
                 4,
             );
-            let expected = &chain.normal[level as usize].bytes;
             assert_eq!(
-                &gpu[..expected.len()],
-                expected.as_slice(),
+                &gpu[..mip.bytes.len()],
+                mip.bytes.as_slice(),
                 "normal level {level} must round-trip the committed pixels"
             );
         }
 
         // Roughness (R8) base level.
+        let roughness_base = &chain.roughness[0];
         let gpu_roughness = read_texture_level(
             &device,
             &queue,
             &material._roughness_texture,
             0,
-            1024,
-            1024,
+            roughness_base.width,
+            roughness_base.height,
             1,
         );
         assert_eq!(
@@ -6509,16 +6533,16 @@ mod terrain_headless_gpu_tests {
 
     #[test]
     #[ignore = "requires a GPU; run with -- --ignored"]
-    fn fs_terrain_offscreen_renders_lit_green_grass() {
+    fn fs_terrain_offscreen_renders_lit_terrain_material() {
         let pixels = render_offscreen_with_debug_mode(TerrainDebugMode::Final);
-        verify_lit_green_grass_bands(&pixels, "final", 15.0, 20.0);
+        verify_lit_terrain_material_bands(&pixels, "final", 3.0, 15.0);
     }
 
     #[test]
     #[ignore = "requires a GPU; run with -- --ignored"]
-    fn fs_terrain_debug_albedo_is_green_dominant() {
+    fn fs_terrain_debug_albedo_tracks_the_sparse_grass_material() {
         let pixels = render_offscreen_with_debug_mode(TerrainDebugMode::Albedo);
-        verify_green_dominant_bands(&pixels, "albedo");
+        verify_warm_terrain_bands(&pixels, "albedo");
     }
 
     #[test]
@@ -6539,7 +6563,7 @@ mod terrain_headless_gpu_tests {
     #[ignore = "requires a GPU; run with -- --ignored"]
     fn fs_terrain_debug_macro_matches_g2d_carrier() {
         let pixels = render_offscreen_with_debug_mode(TerrainDebugMode::Macro);
-        verify_green_dominant_bands(&pixels, "macro");
+        verify_warm_terrain_bands(&pixels, "macro");
     }
 
     /// Shared headless render used by every `fs_terrain` channel probe:
@@ -6789,37 +6813,42 @@ mod terrain_headless_gpu_tests {
         eprintln!("offscreen {label} band means: {}", band_means.join(" "));
     }
 
-    fn verify_lit_green_grass_bands(
+    /// ENV1-A: the terrain material is the photographic Poly Haven
+    /// `sparse_grass` map — thin green tufts over damp brown soil — so its
+    /// signature is warm and blue-starved (R > G > B), not the green-dominant
+    /// signature of the retired procedural grass. The margins are taken from
+    /// the measured lower-half means of the committed material, not invented.
+    fn verify_lit_terrain_material_bands(
         pixels: &[u8],
         label: &str,
-        green_over_red: f64,
-        green_over_blue: f64,
+        red_over_green: f64,
+        red_over_blue: f64,
     ) {
         log_band_means(pixels, label);
         let mean = lower_half_mean(pixels);
         assert!(
-            mean[1] > mean[0] + green_over_red,
-            "grass must be green-dominant in G, got mean RGB {mean:?}"
+            mean[0] > mean[1] + red_over_green,
+            "the sparse-grass material must stay warm (R over G), got mean RGB {mean:?}"
         );
         assert!(
-            mean[1] > mean[2] + green_over_blue,
-            "grass must be blue-starved, got mean RGB {mean:?}"
+            mean[0] > mean[2] + red_over_blue,
+            "the sparse-grass material must stay blue-starved, got mean RGB {mean:?}"
         );
         assert!(
-            mean[0] > 30.0 && mean[0] < 230.0 && mean[1] > 30.0 && mean[1] < 250.0,
-            "lit grass must stay within a sane band, got mean RGB {mean:?}"
+            mean[0] > 30.0 && mean[0] < 230.0 && mean[1] > 25.0 && mean[1] < 250.0,
+            "lit terrain must stay within a sane band, got mean RGB {mean:?}"
         );
     }
 
-    fn verify_green_dominant_bands(pixels: &[u8], label: &str) {
+    fn verify_warm_terrain_bands(pixels: &[u8], label: &str) {
         log_band_means(pixels, label);
         let mean = lower_half_mean(pixels);
         assert!(
-            mean[1] > mean[0] + 5.0,
-            "{label} channel must be green-dominant, got mean RGB {mean:?}"
+            mean[0] > mean[1] + 5.0,
+            "{label} channel must be red-dominant for the sparse-grass material, got mean RGB {mean:?}"
         );
         assert!(
-            mean[1] > mean[2] + 5.0,
+            mean[0] > mean[2] + 5.0,
             "{label} channel must be blue-starved, got mean RGB {mean:?}"
         );
     }

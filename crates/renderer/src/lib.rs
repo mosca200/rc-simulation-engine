@@ -16,6 +16,7 @@ mod backend;
 mod camera;
 mod capture;
 mod device;
+pub mod env1_material;
 mod glb;
 mod gpu;
 mod math;
@@ -44,7 +45,7 @@ pub use camera::{
 pub use capture::{CaptureRenderOutcome, CapturedFrame, FrameCaptureError};
 pub use glb::{
     GlbAsset, GlbLoadError, GlbMesh, GlbSceneInstance, PrimitiveMaterial, RenderPrimitive,
-    load_glb_asset, load_glb_mesh,
+    load_glb_asset, load_glb_bytes, load_glb_mesh,
 };
 pub use gpu::{
     DEFAULT_EXPOSURE_EV, ExposureError, PresentationAsset, RenderOutcome, RenderTerrainMode,
@@ -69,7 +70,8 @@ pub use terrain::{
     generate_terrain_chunks, rotated_secondary_uv,
 };
 pub use texture::{
-    DecodedTexture, SamplerConfig, SamplerFilter, SamplerWrap, TextureLoadError, decode_image,
+    DecodedTexture, SamplerConfig, SamplerFilter, SamplerMipmapFilter, SamplerWrap,
+    TextureLoadError, decode_image,
 };
 pub use vegetation::{
     DEFAULT_DISTANCE_CULL_M, DEFAULT_HYSTERESIS_BAND, DEFAULT_LOD0_MAX_M, DEFAULT_LOD1_MAX_M,

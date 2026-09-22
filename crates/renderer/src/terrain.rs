@@ -59,9 +59,18 @@ use std::f32::consts::PI;
 
 /// Default terrain texture scale in metres.
 ///
-/// At 4.0m per tile, a 1024x1024 texture covers a 2km x 2km field with
-/// reasonable ground detail without appearing stretched.
-pub const DEFAULT_TERRAIN_TEXTURE_SCALE_M: f32 = 4.0;
+/// ENV1-A: 2.0 m per base tile. The photographic Poly Haven `sparse_grass`
+/// material replaces the procedural maps and is tiled at its own scanned
+/// extent rather than at the previous 4 m, so one 2048x2048 tile covers a 2 m
+/// square of ground (1024 texels/m).
+///
+/// Only the base layer's tiling frequency changes. The macro and detail layers
+/// are derived in the shader as `uv * (base_scale / layer_scale)`, where `uv`
+/// is already `world / base_scale`, so both resolve to absolute world metres
+/// (48 m and 0.40 m) and are invariant to this constant. The anti-repetition
+/// companion sample is derived from the same base UV and therefore scales with
+/// it, which is what keeps its tile borders decorrelated from the base grid.
+pub const DEFAULT_TERRAIN_TEXTURE_SCALE_M: f32 = 2.0;
 
 // ---------------------------------------------------------------------------
 // G3A-R: three-frequency stack tuning (central, documented constants)

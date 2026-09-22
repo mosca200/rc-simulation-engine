@@ -260,6 +260,9 @@ mod tests {
                 base_color_texture: None,
                 metallic_factor: 0.0,
                 roughness_factor: 0.5,
+                normal_texture: None,
+                normal_texture_scale: 1.0,
+                metallic_roughness_texture: None,
                 sampler_config: SamplerConfig::default_sampler(),
             },
         }
