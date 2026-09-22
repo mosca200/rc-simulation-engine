@@ -24,8 +24,9 @@ use winit::window::Window;
 
 use crate::{
     CameraConfig, CaptureRenderOutcome, ExposureError, FrameCaptureError, PresentationAsset,
-    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, SurfaceError, TerrainDebugMode,
-    VegetationDebugMode, WgpuRenderer, renderer_v2::RendererV2Shell, scenery::SceneryPreset,
+    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, RuntimeVisualAudit, SurfaceError,
+    TerrainDebugMode, VegetationDebugMode, WgpuRenderer, renderer_v2::RendererV2Shell,
+    scenery::SceneryPreset,
 };
 
 /// Which rendering backend the application selected.
@@ -187,6 +188,19 @@ impl DesktopRenderer {
         }
     }
 
+    /// Present a frame while associating the V2 profiler with the explicit
+    /// application presentation index. V1 ignores the metadata.
+    pub fn render_presentation(
+        &mut self,
+        frame: &RenderFrame,
+        presentation_frame_index: u64,
+    ) -> Result<RenderOutcome, SurfaceError> {
+        match &mut self.backend {
+            Backend::V1(inner) => inner.render(frame),
+            Backend::V2(inner) => inner.render_presentation(frame, Some(presentation_frame_index)),
+        }
+    }
+
     /// Render, capture the final display-referred target, and present it.
     ///
     /// This one-shot path allocates capture resources only for this call. No
@@ -202,6 +216,30 @@ impl DesktopRenderer {
         match &mut self.backend {
             Backend::V1(inner) => inner.render_and_capture(frame),
             Backend::V2(inner) => inner.render_and_capture(frame),
+        }
+    }
+
+    /// Capture and present while associating all audit/profiling data with the
+    /// application's explicit presentation index. V1 ignores the metadata.
+    pub fn render_and_capture_presentation(
+        &mut self,
+        frame: &RenderFrame,
+        presentation_frame_index: u64,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        match &mut self.backend {
+            Backend::V1(inner) => inner.render_and_capture(frame),
+            Backend::V2(inner) => {
+                inner.render_and_capture_presentation(frame, Some(presentation_frame_index))
+            }
+        }
+    }
+
+    /// Snapshot the latest completed V2 frame into a wgpu-free audit DTO.
+    #[must_use]
+    pub fn runtime_visual_audit(&self) -> Option<RuntimeVisualAudit> {
+        match &self.backend {
+            Backend::V1(_) => None,
+            Backend::V2(inner) => inner.runtime_visual_audit(),
         }
     }
 

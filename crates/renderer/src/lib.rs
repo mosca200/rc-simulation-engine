@@ -33,6 +33,7 @@ pub mod terrain_textures;
 pub mod texture;
 pub mod vegetation;
 pub mod vegetation_assets;
+mod visual_audit;
 
 pub use accumulator::{FixedStepAccumulator, FixedStepAccumulatorError, FixedStepPlan};
 pub use backend::{DesktopRenderer, RendererVersion};
@@ -80,4 +81,10 @@ pub use vegetation_assets::{
     BARK_BASE, FOLIAGE_BASE, SPECIES_TARGET, VARIANTS_PER_SPECIES_TARGET, VegetationAsset,
     VegetationAssetSet, VegetationLod, VegetationLodSet, VegetationPart, VegetationSpecies,
     export_glb, part_metallic, part_roughness,
+};
+pub use visual_audit::{
+    RuntimeVisualAudit, RuntimeVisualAuditDevice, RuntimeVisualAuditEnvironment,
+    RuntimeVisualAuditIdentity, RuntimeVisualAuditImagePipeline, RuntimeVisualAuditPassTiming,
+    RuntimeVisualAuditProfiling, RuntimeVisualAuditShadows, RuntimeVisualAuditTerrain,
+    RuntimeVisualAuditVegetation, RuntimeVisualAuditVegetationStats,
 };

@@ -19,6 +19,14 @@ pub(crate) enum PassId {
 
 impl PassId {
     pub(crate) const COUNT: usize = 6;
+    pub(crate) const ALL: [Self; Self::COUNT] = [
+        Self::ShadowNear,
+        Self::ShadowMid,
+        Self::ShadowFar,
+        Self::Scene,
+        Self::TemporalResolve,
+        Self::Postprocess,
+    ];
 
     pub(crate) const fn index(self) -> usize {
         match self {
@@ -39,6 +47,17 @@ impl PassId {
             Self::Scene => "G1C scene pass",
             Self::TemporalResolve => "RV2 temporal resolve pass",
             Self::Postprocess => "G3B HDR postprocess pass",
+        }
+    }
+
+    pub(crate) const fn audit_id(self) -> &'static str {
+        match self {
+            Self::ShadowNear => "shadow_near",
+            Self::ShadowMid => "shadow_mid",
+            Self::ShadowFar => "shadow_far",
+            Self::Scene => "scene",
+            Self::TemporalResolve => "temporal_resolve",
+            Self::Postprocess => "postprocess",
         }
     }
 

@@ -71,6 +71,11 @@ use crate::vegetation::{
     VegetationFrameStats, VegetationGpuInstance, VegetationWorld,
 };
 use crate::vegetation_assets::{VegetationPart, part_metallic, part_roughness};
+use crate::visual_audit::{
+    RuntimeVisualAudit, RuntimeVisualAuditDevice, RuntimeVisualAuditIdentity,
+    RuntimeVisualAuditImagePipeline, RuntimeVisualAuditTerrain, environment_from_runtime,
+    profiling_from_runtime, shadows_from_runtime_source, vegetation_from_runtime,
+};
 use crate::{
     AircraftMesh, CameraConfig, CameraMode, GlbAsset, Mat4, RenderFrame, Vertex,
     matrix_to_wgsl_columns, reference_grid_and_axes_at,
@@ -996,6 +1001,9 @@ impl TemporalGpuResources {
 /// Minimal depth-tested wgpu renderer with G1C texture/material support.
 pub struct WgpuRenderer {
     device_context: DeviceContext,
+    environment_mode: V2EnvironmentMode,
+    aerial_perspective_active: bool,
+    terrain_mode: RenderTerrainMode,
 
     sky_pipeline: wgpu::RenderPipeline,
     triangle_pipeline: wgpu::RenderPipeline,
@@ -2002,6 +2010,10 @@ impl WgpuRenderer {
 
         Ok(Self {
             device_context,
+            environment_mode,
+            aerial_perspective_active: use_physical
+                && initialization_policy.aerial_perspective_enabled,
+            terrain_mode,
             sky_pipeline,
             triangle_pipeline,
             line_pipeline,
@@ -2195,6 +2207,62 @@ impl WgpuRenderer {
         self.terrain_material.sampler_anisotropy
     }
 
+    /// Build the plain-data audit for the latest V2 presentation frame.
+    ///
+    /// This is intentionally an on-demand snapshot: it performs no GPU
+    /// readback, resource discovery, or file I/O and is never called by the
+    /// production path unless the application explicitly requested an audit.
+    pub(crate) fn runtime_visual_audit(&self, profiler: &Profiler) -> Option<RuntimeVisualAudit> {
+        let profile = profiler.latest();
+        let presentation_frame_index = profile.presentation_frame_index?;
+        let capabilities = self.device_context.capabilities();
+        let adapter = &capabilities.adapter_info;
+        let profiling = profiling_from_runtime(profile)?;
+
+        Some(RuntimeVisualAudit {
+            schema_version: RuntimeVisualAudit::SCHEMA_VERSION,
+            identity: RuntimeVisualAuditIdentity {
+                presentation_frame_index,
+                framebuffer_width: self.device_context.surface_width(),
+                framebuffer_height: self.device_context.surface_height(),
+                renderer_version: "v2",
+            },
+            device: RuntimeVisualAuditDevice {
+                adapter_name: adapter.name.clone(),
+                backend: format!("{:?}", adapter.backend).to_ascii_lowercase(),
+                driver: adapter.driver.clone(),
+                driver_info: adapter.driver_info.clone(),
+            },
+            environment: environment_from_runtime(
+                self.environment_mode,
+                self.aerial_perspective_active,
+            ),
+            image_pipeline: RuntimeVisualAuditImagePipeline {
+                hdr_scene_format: "Rgba16Float",
+                exposure_ev: self.exposure_ev,
+                tone_mapper: "Khronos PBR Neutral",
+                temporal_resolve_active: self.temporal_gpu.is_some(),
+            },
+            shadows: shadows_from_runtime_source(),
+            terrain: RuntimeVisualAuditTerrain {
+                render_mode: self.terrain_mode.as_str(),
+                debug_mode: self.terrain_debug_mode.label(),
+                material_path_active: true,
+                sampler_anisotropy: self.terrain_sampler_anisotropy(),
+                material_scale: None,
+                material_scale_unavailable_reason: Some(
+                    "no single scalar represents the authoritative multi-frequency material",
+                ),
+            },
+            vegetation: vegetation_from_runtime(
+                self.vegetation_debug_mode,
+                self.vegetation_stats(),
+                self.vegetation_last_instance_bytes(),
+            ),
+            profiling,
+        })
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         let temporal_extent_changed = width != self.device_context.surface_width()
             || height != self.device_context.surface_height();
@@ -2249,7 +2317,7 @@ impl WgpuRenderer {
     /// Render through the frozen V1 schedule. This path does not construct or
     /// consult the V2 graph and retains the legacy empty-feature device policy.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
-        match self.render_scheduled(frame, None, None, None, false) {
+        match self.render_scheduled(frame, None, None, None, None, false) {
             Ok(ScheduledRenderOutcome::Presented(None)) => Ok(RenderOutcome::Presented),
             Ok(ScheduledRenderOutcome::SkippedZeroExtent) => Ok(RenderOutcome::SkippedZeroExtent),
             Ok(ScheduledRenderOutcome::Presented(Some(_))) => {
@@ -2275,7 +2343,7 @@ impl WgpuRenderer {
         &mut self,
         frame: &RenderFrame,
     ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
-        match self.render_scheduled(frame, None, None, None, true)? {
+        match self.render_scheduled(frame, None, None, None, None, true)? {
             ScheduledRenderOutcome::Presented(Some(captured)) => {
                 Ok(CaptureRenderOutcome::CapturedAndPresented(captured))
             }
@@ -2300,8 +2368,16 @@ impl WgpuRenderer {
         graph: &CompiledGraph,
         profiler: &mut Profiler,
         temporal: &mut TemporalState,
+        presentation_frame_index: Option<u64>,
     ) -> Result<RenderOutcome, SurfaceError> {
-        match self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal), false) {
+        match self.render_scheduled(
+            frame,
+            Some(graph),
+            Some(profiler),
+            Some(temporal),
+            presentation_frame_index,
+            false,
+        ) {
             Ok(ScheduledRenderOutcome::Presented(None)) => Ok(RenderOutcome::Presented),
             Ok(ScheduledRenderOutcome::SkippedZeroExtent) => Ok(RenderOutcome::SkippedZeroExtent),
             Ok(ScheduledRenderOutcome::Presented(Some(_))) => Err(SurfaceError::Validation),
@@ -2316,8 +2392,16 @@ impl WgpuRenderer {
         graph: &CompiledGraph,
         profiler: &mut Profiler,
         temporal: &mut TemporalState,
+        presentation_frame_index: Option<u64>,
     ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
-        match self.render_scheduled(frame, Some(graph), Some(profiler), Some(temporal), true)? {
+        match self.render_scheduled(
+            frame,
+            Some(graph),
+            Some(profiler),
+            Some(temporal),
+            presentation_frame_index,
+            true,
+        )? {
             ScheduledRenderOutcome::Presented(Some(captured)) => {
                 Ok(CaptureRenderOutcome::CapturedAndPresented(captured))
             }
@@ -2334,6 +2418,7 @@ impl WgpuRenderer {
         graph: Option<&CompiledGraph>,
         mut profiler: Option<&mut Profiler>,
         mut temporal: Option<&mut TemporalState>,
+        presentation_frame_index: Option<u64>,
         capture_requested: bool,
     ) -> Result<ScheduledRenderOutcome, FrameCaptureError> {
         self.check_asynchronous_gpu_error()
@@ -2347,7 +2432,7 @@ impl WgpuRenderer {
             CompiledGraph::execution_order,
         );
         if let Some(profiler) = profiler.as_deref_mut() {
-            profiler.begin_frame(self.device_context.device());
+            profiler.begin_frame(self.device_context.device(), presentation_frame_index);
         }
 
         let (surface_texture, reconfigure_after_present) =
@@ -3077,7 +3162,7 @@ impl WgpuRenderer {
         }
 
         if let Some(profiler) = profiler {
-            profiler.finish_frame();
+            profiler.finish_frame(self.device_context.device());
         }
         self.check_asynchronous_gpu_error()
             .map_err(FrameCaptureError::Surface)?;

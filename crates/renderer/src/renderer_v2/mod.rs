@@ -21,8 +21,8 @@ use winit::window::Window;
 
 use crate::{
     CameraConfig, CaptureRenderOutcome, ExposureError, FrameCaptureError, PresentationAsset,
-    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, SurfaceError, TerrainDebugMode,
-    VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
+    RenderFrame, RenderOutcome, RenderTerrainMode, RendererError, RuntimeVisualAudit, SurfaceError,
+    TerrainDebugMode, VegetationDebugMode, WgpuRenderer, scenery::SceneryPreset,
 };
 use crate::{profiling::Profiler, render_graph::CompiledGraph};
 use temporal::{InvalidationReason, TemporalState};
@@ -107,16 +107,46 @@ impl RendererV2Shell {
     /// surface-event policy (lost / outdated / timeout / out-of-memory /
     /// validation) behaves identically for V1 and V2.
     pub fn render(&mut self, frame: &RenderFrame) -> Result<RenderOutcome, SurfaceError> {
-        self.inner
-            .render_v2(frame, &self.graph, &mut self.profiler, &mut self.temporal)
+        self.render_presentation(frame, None)
+    }
+
+    pub fn render_presentation(
+        &mut self,
+        frame: &RenderFrame,
+        presentation_frame_index: Option<u64>,
+    ) -> Result<RenderOutcome, SurfaceError> {
+        self.inner.render_v2(
+            frame,
+            &self.graph,
+            &mut self.profiler,
+            &mut self.temporal,
+            presentation_frame_index,
+        )
     }
 
     pub fn render_and_capture(
         &mut self,
         frame: &RenderFrame,
     ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
-        self.inner
-            .render_v2_and_capture(frame, &self.graph, &mut self.profiler, &mut self.temporal)
+        self.render_and_capture_presentation(frame, None)
+    }
+
+    pub fn render_and_capture_presentation(
+        &mut self,
+        frame: &RenderFrame,
+        presentation_frame_index: Option<u64>,
+    ) -> Result<CaptureRenderOutcome, FrameCaptureError> {
+        self.inner.render_v2_and_capture(
+            frame,
+            &self.graph,
+            &mut self.profiler,
+            &mut self.temporal,
+            presentation_frame_index,
+        )
+    }
+
+    pub fn runtime_visual_audit(&self) -> Option<RuntimeVisualAudit> {
+        self.inner.runtime_visual_audit(&self.profiler)
     }
 
     /// Resize the presentation surface, delegating to the V1 backend.

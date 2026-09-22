@@ -35,16 +35,22 @@ pub(crate) const fn readback_buffer_usage() -> wgpu::BufferUsages {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub(crate) struct ProfileSnapshot {
+    pub(crate) presentation_frame_index: Option<u64>,
     pub(crate) cpu_frame: Duration,
     pub(crate) cpu_passes: [Duration; PassId::COUNT],
+    pub(crate) gpu_timing_supported: bool,
+    pub(crate) gpu_presentation_frame_index: Option<u64>,
     pub(crate) gpu_pass_ns: [Option<f64>; PassId::COUNT],
 }
 
 impl Default for ProfileSnapshot {
     fn default() -> Self {
         Self {
+            presentation_frame_index: None,
             cpu_frame: Duration::ZERO,
             cpu_passes: [Duration::ZERO; PassId::COUNT],
+            gpu_timing_supported: false,
+            gpu_presentation_frame_index: None,
             gpu_pass_ns: [None; PassId::COUNT],
         }
     }
@@ -53,6 +59,7 @@ impl Default for ProfileSnapshot {
 struct ReadbackSlot {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    presentation_frame_index: Option<u64>,
 }
 
 struct GpuProfiler {
@@ -62,6 +69,7 @@ struct GpuProfiler {
     next_slot: usize,
     active_slot: Option<usize>,
     timestamp_period_ns: f64,
+    latest_presentation_frame_index: Option<u64>,
     latest_pass_ns: [Option<f64>; PassId::COUNT],
 }
 
@@ -90,6 +98,7 @@ impl GpuProfiler {
                 mapped_at_creation: false,
             }),
             state: Arc::new(AtomicU8::new(SLOT_FREE)),
+            presentation_frame_index: None,
         });
         Self {
             query_set,
@@ -98,15 +107,19 @@ impl GpuProfiler {
             next_slot: 0,
             active_slot: None,
             timestamp_period_ns: f64::from(queue.get_timestamp_period()),
+            latest_presentation_frame_index: None,
             latest_pass_ns: [None; PassId::COUNT],
         }
     }
 
-    fn begin_frame(&mut self, device: &wgpu::Device) {
+    fn begin_frame(&mut self, device: &wgpu::Device, presentation_frame_index: Option<u64>) {
         self.poll_ready(device);
         self.active_slot = (0..READBACK_RING_SIZE)
             .map(|offset| (self.next_slot + offset) % READBACK_RING_SIZE)
             .find(|index| self.readback_slots[*index].state.load(Ordering::Acquire) == SLOT_FREE);
+        if let Some(slot_index) = self.active_slot {
+            self.readback_slots[slot_index].presentation_frame_index = presentation_frame_index;
+        }
     }
 
     fn timestamp_writes(&self, pass: PassId) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
@@ -157,7 +170,7 @@ impl GpuProfiler {
 
     fn poll_ready(&mut self, device: &wgpu::Device) {
         let _ = device.poll(wgpu::PollType::Poll);
-        for slot in &self.readback_slots {
+        for slot in &mut self.readback_slots {
             match slot.state.load(Ordering::Acquire) {
                 SLOT_READY => {
                     if let Ok(mapped) = slot.buffer.slice(..QUERY_BYTES).get_mapped_range() {
@@ -168,12 +181,15 @@ impl GpuProfiler {
                             self.latest_pass_ns[pass_index] =
                                 Some(end.saturating_sub(start) as f64 * self.timestamp_period_ns);
                         }
+                        self.latest_presentation_frame_index = slot.presentation_frame_index;
                         drop(mapped);
                     }
                     slot.buffer.unmap();
+                    slot.presentation_frame_index = None;
                     slot.state.store(SLOT_FREE, Ordering::Release);
                 }
                 SLOT_FAILED => {
+                    slot.presentation_frame_index = None;
                     slot.state.store(SLOT_FREE, Ordering::Release);
                 }
                 _ => {}
@@ -186,6 +202,7 @@ impl GpuProfiler {
 /// during initialization.
 pub(crate) struct Profiler {
     frame_started: Option<Instant>,
+    presentation_frame_index: Option<u64>,
     cpu_passes: [Duration; PassId::COUNT],
     gpu: Option<GpuProfiler>,
     latest: ProfileSnapshot,
@@ -202,17 +219,23 @@ impl Profiler {
             .then(|| GpuProfiler::new(device, queue));
         Self {
             frame_started: None,
+            presentation_frame_index: None,
             cpu_passes: [Duration::ZERO; PassId::COUNT],
             gpu,
             latest: ProfileSnapshot::default(),
         }
     }
 
-    pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
+    pub(crate) fn begin_frame(
+        &mut self,
+        device: &wgpu::Device,
+        presentation_frame_index: Option<u64>,
+    ) {
         self.cpu_passes.fill(Duration::ZERO);
         self.frame_started = Some(Instant::now());
+        self.presentation_frame_index = presentation_frame_index;
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.begin_frame(device);
+            gpu.begin_frame(device, presentation_frame_index);
         }
     }
 
@@ -244,14 +267,26 @@ impl Profiler {
         }
     }
 
-    pub(crate) fn finish_frame(&mut self) {
+    pub(crate) fn finish_frame(&mut self, device: &wgpu::Device) {
+        // Non-blocking refresh only. Capture readback may already have waited
+        // for this submission, in which case the matching timestamps can be
+        // associated with this frame; normal presentation never busy-waits.
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.poll_ready(device);
+        }
         let cpu_frame = self
             .frame_started
             .take()
             .map_or(Duration::ZERO, |started| started.elapsed());
         self.latest = ProfileSnapshot {
+            presentation_frame_index: self.presentation_frame_index.take(),
             cpu_frame,
             cpu_passes: self.cpu_passes,
+            gpu_timing_supported: self.gpu.is_some(),
+            gpu_presentation_frame_index: self
+                .gpu
+                .as_ref()
+                .and_then(|gpu| gpu.latest_presentation_frame_index),
             gpu_pass_ns: self
                 .gpu
                 .as_ref()
@@ -259,7 +294,6 @@ impl Profiler {
         };
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn latest(&self) -> &ProfileSnapshot {
         &self.latest
     }
