@@ -21,6 +21,10 @@ jobs:
       - name: Install Linux input dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes libudev-dev
+      - name: Test ENV1 open-asset pipeline
+        run: python -X utf8 -m unittest tools/env1_asset_pipeline/test_env1_assets.py -v
+      - name: Verify committed ENV1 runtime assets
+        run: python -X utf8 tools/env1_asset_pipeline/verify_env1_assets.py
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
