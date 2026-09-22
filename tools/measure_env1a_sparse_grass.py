@@ -1,10 +1,9 @@
-"""ENV1-A: measure and collect the BEFORE/AFTER capture evidence.
+"""Measure and collect ENV1-A or ENV1-B0 BEFORE/AFTER capture evidence.
 
-Compares the base-SHA capture against the ENV1-A capture of the same canonical
-scene at three resolutions, folds in the runtime receipts, the C2D visual
-audits and the runner's capture evidence, and writes one machine-readable
-document plus the PNG artifacts under
-``docs/validation/env1_a_sparse_grass/``.
+Compares a profile's base-SHA capture against its AFTER capture of the same
+canonical scene at three resolutions, folds in the runtime receipts, the C2D
+visual audits and the runner's capture evidence, and writes one
+machine-readable document under that profile's validation directory.
 
 Every metric in the output is either read from a runtime artifact or computed
 from two PNGs on disk. Nothing is estimated: a metric the runtime does not
@@ -18,6 +17,7 @@ invariant is not weakened.
 
 Usage:
     python -X utf8 tools/measure_env1a_sparse_grass.py
+    python -X utf8 tools/measure_env1a_sparse_grass.py --profile env1-b0
 """
 
 from __future__ import annotations
@@ -33,12 +33,64 @@ import numpy as np
 from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BEFORE_ROOT = ROOT / "tmp" / "env1a_before"
-AFTER_ROOT = ROOT / "tmp" / "env1a_after"
-C2D_ROOT = ROOT / "tmp" / "env1a_after_c2d"
-OUT_DIR = ROOT / "docs" / "validation" / "env1_a_sparse_grass"
-PNG_DIR = OUT_DIR / "png"
-EVIDENCE_PATH = OUT_DIR / "env1a_evidence.json"
+PROFILES = {
+    "env1-a": {
+        "slice": "ENV1-A",
+        "before_root": ROOT / "tmp" / "env1a_before",
+        "after_root": ROOT / "tmp" / "env1a_after",
+        "c2d_root": ROOT / "tmp" / "env1a_after_c2d",
+        "out_dir": ROOT / "docs" / "validation" / "env1_a_sparse_grass",
+        "evidence_name": "env1a_evidence.json",
+        "title": "Photorealistic flying field: Sparse Grass production material BEFORE/AFTER",
+        "method": (
+            "The canonical VIS0 reference scene was captured with the VIS0-B "
+            "runner (rv2-vis0-benchmark-runner 1.3.0) driving rcsim-app render "
+            "--renderer v2. BEFORE was produced by the release binary built at "
+            "the base SHA before any ENV1-A edit; AFTER by the release binary "
+            "with the ENV1-A material. Both runs use the identical manifest, so "
+            "camera, scenery, exposure, aircraft state, warmup and capture frame "
+            "are held constant by construction."
+        ),
+        "before_reproduction": (
+            "check out the base SHA e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882, "
+            "cargo build --release --workspace --all-features, then run "
+            "tools/visual_benchmark/run_benchmark.py --execute with each manifest"
+        ),
+        "after_reproduction": (
+            "cargo build --release --workspace --all-features on the ENV1-A "
+            "HEAD, then run tools/visual_benchmark/run_benchmark.py --execute "
+            "with the same manifests"
+        ),
+    },
+    "env1-b0": {
+        "slice": "ENV1-B0",
+        "before_root": ROOT / "tmp" / "env1b0_before",
+        "after_root": ROOT / "tmp" / "env1b0_after",
+        "c2d_root": ROOT / "tmp" / "env1b0_after_c2d",
+        "out_dir": ROOT / "docs" / "validation" / "env1_b0_coherent_pbr",
+        "evidence_name": "env1b0_evidence.json",
+        "title": "Coherent registered PBR terrain sampling BEFORE/AFTER",
+        "method": (
+            "The canonical VIS0 reference scene was captured with the VIS0-B "
+            "runner (rv2-vis0-benchmark-runner 1.3.0) driving rcsim-app render "
+            "--renderer v2. BEFORE was produced by the release binary at the "
+            "merged ENV1-A authority; AFTER by the release binary with ENV1-B0 "
+            "coherent terrain sampling. Both runs use the identical manifest, "
+            "so camera, scenery, exposure, aircraft state, warmup and capture "
+            "frame are held constant by construction."
+        ),
+        "before_reproduction": (
+            "check out the base SHA 1ec35c7c92dda6e15527ecb5fe50fd5f82d1bb0e, "
+            "cargo build --release --workspace --all-features, then run "
+            "tools/visual_benchmark/run_benchmark.py --execute with each manifest"
+        ),
+        "after_reproduction": (
+            "cargo build --release --workspace --all-features on the ENV1-B0 "
+            "implementation HEAD, then run tools/visual_benchmark/run_benchmark.py "
+            "--execute with the same manifests"
+        ),
+    },
+}
 
 RESOLUTIONS = (
     ("1920x1080", "aircraft_acro_static_front", "docs/validation/visual_benchmark/vis0_reference_scene.json"),
@@ -203,16 +255,22 @@ def audit_summary(audit: dict) -> dict:
 CANDIDATE_NOTE = (
     "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are "
     "referenced here by path and SHA-256. A PNG is committed only when it is "
-    "explicitly promoted to an approved golden/beauty baseline; ENV1-A has no "
-    "such promotion (visual_pass is null), so committed_png is null."
+    "explicitly promoted to an approved golden/beauty baseline; these evidence "
+    "profiles have no such promotion (visual_pass is null), so committed_png "
+    "is null."
 )
 
 
-def artifact_entry(local: pathlib.Path, promoted_name: str, promote: bool) -> dict:
+def artifact_entry(
+    local: pathlib.Path,
+    promoted_name: str,
+    promote: bool,
+    committed_png_root: str,
+) -> dict:
     """Record a capture artifact without ever implying a committed PNG exists."""
     return {
         "committed_png": (
-            f"docs/validation/env1_a_sparse_grass/png/{promoted_name}" if promote else None
+            f"{committed_png_root}/png/{promoted_name}" if promote else None
         ),
         "committed_png_note": (
             "Explicitly promoted to a committed baseline." if promote else CANDIDATE_NOTE
@@ -233,13 +291,19 @@ def sha256_file(path: pathlib.Path) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="measure_env1a_sparse_grass.py",
-        description="Measure and collect the ENV1-A BEFORE/AFTER capture evidence.",
+        description="Measure and collect ENV1-A or ENV1-B0 BEFORE/AFTER evidence.",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        default="env1-a",
+        help="evidence profile to collect (default: env1-a)",
     )
     parser.add_argument(
         "--promote-png",
         action="store_true",
         help=(
-            "copy the capture PNGs into docs/validation/env1_a_sparse_grass/png/ "
+            "copy the capture PNGs into the selected validation profile's png/ "
             "and record committed paths. Off by default: candidate captures stay "
             "under tmp/ and are referenced by digest only."
         ),
@@ -249,19 +313,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    if not BEFORE_ROOT.is_dir() or not AFTER_ROOT.is_dir():
+    profile = PROFILES[args.profile]
+    before_root = profile["before_root"]
+    after_root = profile["after_root"]
+    c2d_root = profile["c2d_root"]
+    out_dir = profile["out_dir"]
+    png_dir = out_dir / "png"
+    evidence_path = out_dir / profile["evidence_name"]
+    committed_png_root = str(out_dir.relative_to(ROOT)).replace("\\", "/")
+
+    if not before_root.is_dir() or not after_root.is_dir():
         raise SystemExit(
-            f"expected BEFORE runs under {BEFORE_ROOT} and AFTER runs under {AFTER_ROOT}"
+            f"expected BEFORE runs under {before_root} and AFTER runs under {after_root}"
         )
 
     promote = bool(args.promote_png)
     if promote:
-        PNG_DIR.mkdir(parents=True, exist_ok=True)
+        png_dir.mkdir(parents=True, exist_ok=True)
     resolutions = []
 
     for resolution, scene_id, manifest in RESOLUTIONS:
-        before = run_artifacts(BEFORE_ROOT, resolution, scene_id)
-        after = run_artifacts(AFTER_ROOT, resolution, scene_id)
+        before = run_artifacts(before_root, resolution, scene_id)
+        after = run_artifacts(after_root, resolution, scene_id)
         print(f"=== {resolution} ({scene_id}) ===")
 
         comparison = compare_pngs(before["png"], after["png"])
@@ -274,8 +347,8 @@ def main(argv: list[str] | None = None) -> int:
         before_name = f"BEFORE_{resolution}.png"
         after_name = f"AFTER_{resolution}.png"
         if promote:
-            shutil.copyfile(before["png"], PNG_DIR / before_name)
-            shutil.copyfile(after["png"], PNG_DIR / after_name)
+            shutil.copyfile(before["png"], png_dir / before_name)
+            shutil.copyfile(after["png"], png_dir / after_name)
 
         resolutions.append(
             {
@@ -283,7 +356,9 @@ def main(argv: list[str] | None = None) -> int:
                 "scene_id": scene_id,
                 "manifest": manifest,
                 "before": {
-                    **artifact_entry(before["png"], before_name, promote),
+                    **artifact_entry(
+                        before["png"], before_name, promote, committed_png_root
+                    ),
                     "image_sha256": before["receipt"]["image_sha256"],
                     "image_byte_size": before["receipt"]["image_byte_size"],
                     "framebuffer": [
@@ -299,7 +374,9 @@ def main(argv: list[str] | None = None) -> int:
                     "audit": audit_summary(before["audit"]),
                 },
                 "after": {
-                    **artifact_entry(after["png"], after_name, promote),
+                    **artifact_entry(
+                        after["png"], after_name, promote, committed_png_root
+                    ),
                     "image_sha256": after["receipt"]["image_sha256"],
                     "image_byte_size": after["receipt"]["image_byte_size"],
                     "framebuffer": [
@@ -326,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     # material; their PNGs are the proof, and the audits carry the selector.
     debug_channels = []
     for channel in C2D_CHANNELS:
-        channel_root = C2D_ROOT / channel
+        channel_root = c2d_root / channel
         scenes = sorted(entry for entry in channel_root.glob("*") if entry.is_dir())
         if len(scenes) != 1:
             raise SystemExit(f"expected one scene directory under {channel_root}, found {len(scenes)}")
@@ -339,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         run = load_json(scene / "run.json")
         name = f"AFTER_c2d_terrain_{channel}.png"
         if promote:
-            shutil.copyfile(pngs[0], PNG_DIR / name)
+            shutil.copyfile(pngs[0], png_dir / name)
         reported = audit["terrain"]["debug_mode"]
         if reported != channel:
             raise SystemExit(
@@ -350,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "terrain_debug": channel,
                 "manifest": f"docs/validation/visual_benchmark/c2d_terrain_{channel}.json",
-                **artifact_entry(pngs[0], name, promote),
+                **artifact_entry(pngs[0], name, promote, committed_png_root),
                 "image_sha256": receipt["image_sha256"],
                 "image_byte_size": receipt["image_byte_size"],
                 "framebuffer": [receipt["framebuffer_width"], receipt["framebuffer_height"]],
@@ -364,17 +441,9 @@ def main(argv: list[str] | None = None) -> int:
 
     document = {
         "schema_version": 1,
-        "slice": "ENV1-A",
-        "title": "Photorealistic flying field: Sparse Grass production material BEFORE/AFTER",
-        "method": (
-            "The canonical VIS0 reference scene was captured with the VIS0-B "
-            "runner (rv2-vis0-benchmark-runner 1.3.0) driving rcsim-app render "
-            "--renderer v2. BEFORE was produced by the release binary built at "
-            "the base SHA before any ENV1-A edit; AFTER by the release binary "
-            "with the ENV1-A material. Both runs use the identical manifest, so "
-            "camera, scenery, exposure, aircraft state, warmup and capture frame "
-            "are held constant by construction."
-        ),
+        "slice": profile["slice"],
+        "title": profile["title"],
+        "method": profile["method"],
         "hardware_note": (
             "adapter_name/backend/driver are copied verbatim from "
             "RuntimeVisualAudit.device. VisualCaptureEvidence.hardware keeps "
@@ -385,25 +454,20 @@ def main(argv: list[str] | None = None) -> int:
         "resolutions": resolutions,
         "c2d_terrain_debug_channels": debug_channels,
         "reproduction": {
-            "before": (
-                "check out the base SHA e84876a1b93b9ccf7a4d04af777bf3d4eb2a0882, "
-                "cargo build --release --workspace --all-features, then run "
-                "tools/visual_benchmark/run_benchmark.py --execute with each manifest"
+            "before": profile["before_reproduction"],
+            "after": profile["after_reproduction"],
+            "measure": (
+                "python -X utf8 tools/measure_env1a_sparse_grass.py"
+                + ("" if args.profile == "env1-a" else f" --profile {args.profile}")
             ),
-            "after": (
-                "cargo build --release --workspace --all-features on the ENV1-A "
-                "HEAD, then run tools/visual_benchmark/run_benchmark.py --execute "
-                "with the same manifests"
-            ),
-            "measure": "python -X utf8 tools/measure_env1a_sparse_grass.py",
         },
     }
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    EVIDENCE_PATH.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    print(f"\nwrote {EVIDENCE_PATH}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    print(f"\nwrote {evidence_path}")
     if promote:
-        print(f"png artifacts promoted into {PNG_DIR}")
+        print(f"png artifacts promoted into {png_dir}")
     else:
         print("png artifacts left under tmp/ (candidate); evidence records digests only")
     return 0
