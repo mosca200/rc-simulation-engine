@@ -26,9 +26,9 @@ use renderer::{
     DesktopRenderer, ExposureError, FixedStepAccumulator, FixedStepAccumulatorError,
     FrameCaptureError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
     PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode, RendererError,
-    RendererVersion, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode, VegetationDebugMode,
-    aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh, scenery::SceneryPreset,
-    validate_exposure_ev,
+    RendererVersion, RuntimeVisualAudit, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode,
+    VegetationDebugMode, aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh,
+    scenery::SceneryPreset, validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use serde::Serialize;
@@ -40,7 +40,8 @@ use sim_core::{
 };
 use sim_math::{Orientation, Vec3};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -108,6 +109,8 @@ pub struct RenderOptions {
     exit_after_frame: Option<u64>,
     // VIS0-C2A: complete one-shot display-frame capture configuration.
     capture: Option<CaptureConfig>,
+    // VIS0-C2D: runner-owned, one-shot audit path. None is the historical path.
+    visual_audit_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,6 +557,7 @@ impl RenderOptions {
             render_resolution: None,
             exit_after_frame: None,
             capture: None,
+            visual_audit_out: None,
         }
     }
 
@@ -587,6 +591,7 @@ impl RenderOptions {
         let mut capture_out = None;
         let mut capture_format = None;
         let mut capture_receipt_out = None;
+        let mut visual_audit_out = None;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--model" => {
@@ -750,6 +755,12 @@ impl RenderOptions {
                         RenderAppError::MissingArgumentValue("--capture-receipt-out"),
                     )?));
                 }
+                "--visual-audit-out" => {
+                    visual_audit_out =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            RenderAppError::MissingArgumentValue("--visual-audit-out"),
+                        )?));
+                }
                 "--rv2-6-validation-scene" => {
                     let value = arguments
                         .next()
@@ -870,16 +881,33 @@ impl RenderOptions {
         } else {
             None
         };
-        if let Some(capture) = options.capture.as_ref()
-            && let Some(receipt_path) = capture.receipt_path.as_ref()
+        options.visual_audit_out = visual_audit_out;
+        if options.visual_audit_out.is_some() && options.renderer != RendererVersion::V2 {
+            return Err(RenderAppError::VisualAuditRequiresV2);
+        }
+        if options.visual_audit_out.is_some()
+            && options.capture.is_none()
+            && options.exit_after_frame.is_none()
         {
-            let image_temporary = temporary_output_path(&capture.image_path).ok();
-            let receipt_temporary = temporary_output_path(receipt_path).ok();
-            if receipt_path == &capture.image_path
-                || image_temporary.as_ref() == Some(receipt_path)
-                || receipt_temporary.as_ref() == Some(&capture.image_path)
-                || image_temporary == receipt_temporary
-            {
+            return Err(RenderAppError::VisualAuditRequiresControlledFrame);
+        }
+        let mut output_paths = Vec::new();
+        if let Some(capture) = options.capture.as_ref() {
+            output_paths.push(capture.image_path.clone());
+            if let Some(receipt_path) = capture.receipt_path.as_ref() {
+                output_paths.push(receipt_path.clone());
+            }
+        }
+        if let Some(audit_path) = options.visual_audit_out.as_ref() {
+            output_paths.push(audit_path.clone());
+        }
+        let temporary_paths = output_paths
+            .iter()
+            .filter_map(|path| temporary_output_path(path).ok())
+            .collect::<Vec<_>>();
+        output_paths.extend(temporary_paths);
+        for (index, path) in output_paths.iter().enumerate() {
+            if output_paths[index + 1..].contains(path) {
                 return Err(RenderAppError::ConflictingCaptureOutputs);
             }
         }
@@ -952,14 +980,24 @@ pub enum RenderAppError {
     IncompleteCaptureOptions(&'static str),
     #[error("unsupported capture format `{0}`; only `png` is supported")]
     UnsupportedCaptureFormat(String),
-    #[error("capture image, receipt, and their temporary paths must be distinct")]
+    #[error("capture image, receipt, visual audit, and their temporary paths must be distinct")]
     ConflictingCaptureOutputs,
+    #[error("`--visual-audit-out` requires `--renderer v2`")]
+    VisualAuditRequiresV2,
+    #[error("`--visual-audit-out` requires `--capture-frame` or `--exit-after-frame`")]
+    VisualAuditRequiresControlledFrame,
     #[error(
         "exit frame {exit_frame} is before capture frame {capture_frame}; exit must be at or after capture"
     )]
     ExitBeforeCaptureFrame { exit_frame: u64, capture_frame: u64 },
     #[error("failed to remove stale capture output {path}: {source}")]
     StaleCaptureOutput {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to remove stale runtime visual audit output {path}: {source}")]
+    StaleVisualAuditOutput {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -1104,10 +1142,25 @@ pub enum RenderRuntimeError {
         #[source]
         source: io::Error,
     },
+    #[error("the V2 renderer did not provide an audit for the presented frame")]
+    VisualAuditUnavailable,
+    #[error("runtime visual audit frame/extent does not match the captured presentation frame")]
+    VisualAuditIdentityMismatch,
+    #[error("failed to serialize runtime visual audit: {0}")]
+    VisualAuditSerialization(#[source] serde_json::Error),
+    #[error("failed to write runtime visual audit to {path}: {source}")]
+    VisualAuditWrite {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the application exited before the requested runtime visual audit was written")]
+    VisualAuditNotCompleted,
 }
 
 pub fn run_render(options: RenderOptions) -> Result<(), RenderAppError> {
     prepare_capture_outputs(options.capture.as_ref())?;
+    prepare_visual_audit_output(options.visual_audit_out.as_deref())?;
     let mut application = RenderApplication::new(options)?;
     let event_loop = EventLoop::new().map_err(RenderAppError::EventLoopCreation)?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -1164,6 +1217,26 @@ fn prepare_capture_outputs(capture: Option<&CaptureConfig>) -> Result<(), Render
     Ok(())
 }
 
+fn prepare_visual_audit_output(path: Option<&Path>) -> Result<(), RenderAppError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let temporary =
+        temporary_output_path(path).map_err(|source| RenderAppError::StaleVisualAuditOutput {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    for target in [path, temporary.as_path()] {
+        remove_file_if_present(target).map_err(|source| {
+            RenderAppError::StaleVisualAuditOutput {
+                path: target.to_path_buf(),
+                source,
+            }
+        })?;
+    }
+    Ok(())
+}
+
 fn write_capture_file(path: &Path, bytes: &[u8]) -> Result<(), RenderRuntimeError> {
     let temporary =
         temporary_output_path(path).map_err(|source| RenderRuntimeError::CaptureImageWrite {
@@ -1208,6 +1281,49 @@ fn write_receipt_file(path: &Path, bytes: &[u8]) -> Result<(), RenderRuntimeErro
         });
     }
     Ok(())
+}
+
+fn write_visual_audit_file(path: &Path, bytes: &[u8]) -> Result<(), RenderRuntimeError> {
+    let temporary =
+        temporary_output_path(path).map_err(|source| RenderRuntimeError::VisualAuditWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let result = (|| -> io::Result<()> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if let Err(source) = result {
+        let _ = remove_file_if_present(&temporary);
+        return Err(RenderRuntimeError::VisualAuditWrite {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+fn persist_runtime_visual_audit(
+    path: &Path,
+    audit: &RuntimeVisualAudit,
+    expected_frame: u64,
+    expected_extent: Option<(u32, u32)>,
+) -> Result<(), RenderRuntimeError> {
+    if audit.identity.presentation_frame_index != expected_frame
+        || audit.profiling.presentation_frame_index != expected_frame
+        || expected_extent.is_some_and(|(width, height)| {
+            audit.identity.framebuffer_width != width || audit.identity.framebuffer_height != height
+        })
+    {
+        return Err(RenderRuntimeError::VisualAuditIdentityMismatch);
+    }
+    let mut bytes =
+        serde_json::to_vec_pretty(audit).map_err(RenderRuntimeError::VisualAuditSerialization)?;
+    bytes.push(b'\n');
+    write_visual_audit_file(path, &bytes)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1558,6 +1674,9 @@ struct RenderApplication {
     run_control: RenderRunControl,
     capture: Option<CaptureConfig>,
     capture_completed: bool,
+    visual_audit_out: Option<PathBuf>,
+    visual_audit_frame: Option<u64>,
+    visual_audit_completed: bool,
     runtime_error: Option<RenderRuntimeError>,
 }
 
@@ -1568,6 +1687,12 @@ impl RenderApplication {
         let capture_frame = capture
             .as_ref()
             .map(|capture| capture.presentation_frame_index);
+        let visual_audit_out = options.visual_audit_out;
+        let visual_audit_frame = visual_audit_out.as_ref().map(|_| {
+            capture_frame
+                .or(options.exit_after_frame)
+                .expect("validated audit frame")
+        });
         let run_control = RenderRunControl::new(
             options.render_resolution,
             options.exit_after_frame,
@@ -1669,6 +1794,9 @@ impl RenderApplication {
             run_control,
             capture,
             capture_completed: false,
+            visual_audit_out,
+            visual_audit_frame,
+            visual_audit_completed: false,
             runtime_error: None,
         })
     }
@@ -1859,6 +1987,11 @@ impl RenderApplication {
             event_loop.exit();
             return;
         }
+        if self.visual_audit_out.is_some() && !self.visual_audit_completed {
+            self.runtime_error = Some(RenderRuntimeError::VisualAuditNotCompleted);
+            event_loop.exit();
+            return;
+        }
         if let Err(error) = self.save_recording() {
             self.runtime_error = Some(error);
         }
@@ -1879,6 +2012,28 @@ impl RenderApplication {
             path: path.clone(),
             source,
         })
+    }
+
+    fn persist_visual_audit_for_presented_frame(
+        &mut self,
+        presentation_frame_index: u64,
+        expected_extent: Option<(u32, u32)>,
+    ) -> Result<(), RenderRuntimeError> {
+        if self.visual_audit_frame != Some(presentation_frame_index) {
+            return Ok(());
+        }
+        let path = self
+            .visual_audit_out
+            .as_ref()
+            .expect("an audit frame is configured only with an output path");
+        let audit = self
+            .renderer
+            .as_ref()
+            .and_then(DesktopRenderer::runtime_visual_audit)
+            .ok_or(RenderRuntimeError::VisualAuditUnavailable)?;
+        persist_runtime_visual_audit(path, &audit, presentation_frame_index, expected_extent)?;
+        self.visual_audit_completed = true;
+        Ok(())
     }
 
     fn reset_flight_session(
@@ -2003,10 +2158,14 @@ impl RenderApplication {
         let frame = snapshot.render_frame(pose);
         let pending_frame = self.run_control.pending_frame();
         if pending_frame.capture_requested {
-            let capture_result = self
-                .renderer
-                .as_mut()
-                .map(|renderer| renderer.render_and_capture(&frame));
+            let audit_requested = self.visual_audit_out.is_some();
+            let capture_result = self.renderer.as_mut().map(|renderer| {
+                if audit_requested {
+                    renderer.render_and_capture_presentation(&frame, pending_frame.index)
+                } else {
+                    renderer.render_and_capture(&frame)
+                }
+            });
             match capture_result {
                 Some(Ok(CaptureRenderOutcome::CapturedAndPresented(captured))) => {
                     let exit_after_present = self.run_control.commit_presented(pending_frame);
@@ -2022,6 +2181,13 @@ impl RenderApplication {
                         return;
                     }
                     self.capture_completed = true;
+                    if let Err(error) = self.persist_visual_audit_for_presented_frame(
+                        pending_frame.index,
+                        Some((captured.width, captured.height)),
+                    ) {
+                        self.fail(event_loop, error);
+                        return;
+                    }
                     if exit_after_present {
                         self.finish_and_exit(event_loop);
                         return;
@@ -2058,13 +2224,29 @@ impl RenderApplication {
             }
             return;
         }
-        let render_result = self
-            .renderer
-            .as_mut()
-            .map(|renderer| renderer.render(&frame));
+        let audit_requested = self.visual_audit_out.is_some();
+        let render_result = self.renderer.as_mut().map(|renderer| {
+            if audit_requested {
+                renderer.render_presentation(&frame, pending_frame.index)
+            } else {
+                renderer.render(&frame)
+            }
+        });
         match render_result {
             Some(Ok(RenderOutcome::Presented)) => {
-                if self.run_control.commit_presented(pending_frame) {
+                let exit_after_present = self.run_control.commit_presented(pending_frame);
+                let expected_extent = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.inner_size())
+                    .map(|extent| (extent.width, extent.height));
+                if let Err(error) = self
+                    .persist_visual_audit_for_presented_frame(pending_frame.index, expected_extent)
+                {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                if exit_after_present {
                     self.finish_and_exit(event_loop);
                     return;
                 }
@@ -2558,6 +2740,7 @@ mod tests {
         assert_eq!(options.render_resolution, None);
         assert_eq!(options.exit_after_frame, None);
         assert_eq!(options.capture, None);
+        assert_eq!(options.visual_audit_out, None);
         assert_eq!(DEFAULT_RENDER_WIDTH_LOGICAL, 1_280.0);
         assert_eq!(DEFAULT_RENDER_HEIGHT_LOGICAL, 720.0);
     }
@@ -2590,6 +2773,68 @@ mod tests {
                 receipt_path: Some(PathBuf::from("receipt.json")),
             })
         );
+    }
+
+    #[test]
+    fn visual_audit_cli_requires_v2_and_a_controlled_frame() {
+        assert!(matches!(
+            RenderOptions::parse(
+                [
+                    "--visual-audit-out",
+                    "audit.json",
+                    "--exit-after-frame",
+                    "10"
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            ),
+            Err(RenderAppError::VisualAuditRequiresV2)
+        ));
+        assert!(matches!(
+            RenderOptions::parse(
+                ["--renderer", "v2", "--visual-audit-out", "audit.json"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(RenderAppError::VisualAuditRequiresControlledFrame)
+        ));
+        let options = RenderOptions::parse(
+            [
+                "--renderer",
+                "v2",
+                "--visual-audit-out",
+                "audit.json",
+                "--exit-after-frame",
+                "10",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(options.visual_audit_out, Some(PathBuf::from("audit.json")));
+    }
+
+    #[test]
+    fn visual_audit_path_must_not_collide_with_capture_outputs() {
+        assert!(matches!(
+            RenderOptions::parse(
+                [
+                    "--renderer",
+                    "v2",
+                    "--capture-frame",
+                    "0",
+                    "--capture-out",
+                    "capture.png",
+                    "--capture-format",
+                    "png",
+                    "--visual-audit-out",
+                    "capture.png",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            ),
+            Err(RenderAppError::ConflictingCaptureOutputs)
+        ));
     }
 
     #[test]
@@ -3004,6 +3249,22 @@ mod tests {
         assert!(!receipt_path.exists());
         assert!(!temporary_output_path(&image_path).unwrap().exists());
         assert!(!temporary_output_path(&receipt_path).unwrap().exists());
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn visual_audit_startup_removes_stale_target_and_temporary_file() {
+        let directory = capture_test_directory("audit-stale");
+        fs::create_dir(&directory).unwrap();
+        let audit_path = directory.join("runtime_visual_audit.json");
+        let temporary = temporary_output_path(&audit_path).unwrap();
+        fs::write(&audit_path, b"stale").unwrap();
+        fs::write(&temporary, b"partial").unwrap();
+
+        prepare_visual_audit_output(Some(&audit_path)).unwrap();
+
+        assert!(!audit_path.exists());
+        assert!(!temporary.exists());
         fs::remove_dir(directory).unwrap();
     }
 
