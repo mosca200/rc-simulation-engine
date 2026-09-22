@@ -1,0 +1,1090 @@
+{
+  "schema_version": 1,
+  "slice": "ENV1-B0",
+  "title": "Coherent registered PBR terrain sampling BEFORE/AFTER",
+  "method": "The canonical VIS0 reference scene was captured with the VIS0-B runner (rv2-vis0-benchmark-runner 1.3.0) driving rcsim-app render --renderer v2. BEFORE was produced by the release binary at the merged ENV1-A authority; AFTER by the release binary with ENV1-B0 coherent terrain sampling. Both runs use the identical manifest, so camera, scenery, exposure, aircraft state, warmup and capture frame are held constant by construction.",
+  "hardware_note": "adapter_name/backend/driver are copied verbatim from RuntimeVisualAudit.device. VisualCaptureEvidence.hardware keeps them null by contract (no runtime source feeds those leaves), so the audit is the authority here.",
+  "verdict": {
+    "visual_pass": null,
+    "visual_pass_reason": "visual_pass stays null: capture evidence records facts and never a visual verdict. No SSIM/PSNR/LPIPS threshold and no automatic PASS/FAIL exists in this repository; a visual verdict needs human review or an approved metrics engine, neither of which exists here."
+  },
+  "resolutions": [
+    {
+      "resolution": "1920x1080",
+      "scene_id": "aircraft_acro_static_front",
+      "manifest": "docs/validation/visual_benchmark/vis0_reference_scene.json",
+      "before": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_before/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "local_png_sha256": "db794b164e693b9010b58a731cddf706a201361d1baf4f2ef40b6650a5cef98e",
+        "image_sha256": "db794b164e693b9010b58a731cddf706a201361d1baf4f2ef40b6650a5cef98e",
+        "image_byte_size": 2790937,
+        "framebuffer": [
+          1920,
+          1080
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "1ec35c7c92dda6e15527ecb5fe50fd5f82d1bb0e",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 1920,
+            "framebuffer_height": 1080,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 17233100,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 14500,
+                "gpu_duration_ns": 138240.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4300,
+                "gpu_duration_ns": 144384.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 133120.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 16300,
+                "gpu_duration_ns": 1171456.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1100,
+                "gpu_duration_ns": 28672.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 20480.0
+              }
+            ]
+          }
+        }
+      },
+      "after": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_after/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "local_png_sha256": "24ad0fa1b322c56777285f8e06672e4554ceecfc2f94d6de47b07af816caacac",
+        "image_sha256": "24ad0fa1b322c56777285f8e06672e4554ceecfc2f94d6de47b07af816caacac",
+        "image_byte_size": 2551134,
+        "framebuffer": [
+          1920,
+          1080
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "679eca0bfee9f7d69efdab03f1e1ed14a395bad8",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 1920,
+            "framebuffer_height": 1080,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 17421500,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 17100,
+                "gpu_duration_ns": 139264.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4200,
+                "gpu_duration_ns": 144384.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 133120.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 18800,
+                "gpu_duration_ns": 1231872.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1700,
+                "gpu_duration_ns": 28672.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 20480.0
+              }
+            ]
+          }
+        }
+      },
+      "pixel_comparison": {
+        "width": 1920,
+        "height": 1080,
+        "pixel_count": 2073600,
+        "identical": false,
+        "changed_pixels": 1185806,
+        "changed_percent": 57.1859,
+        "pixels_above_one_level": 1054376,
+        "pixels_above_one_level_percent": 50.8476,
+        "peak_channel_diff": 162,
+        "peak_channel_diff_at_xy": [
+          960,
+          522
+        ],
+        "mean_abs_diff_per_channel": [
+          1.706525,
+          2.036641,
+          3.452779
+        ],
+        "mean_abs_diff_overall": 2.398648,
+        "before_brighter_pixels": 814535,
+        "after_brighter_pixels": 350340,
+        "mean_luminance_before": 69.308501,
+        "mean_luminance_after": 67.915908,
+        "alpha_identical": true,
+        "horizontal_bands": {
+          "rows_0_to_270": {
+            "pixel_count": 518400,
+            "changed_pixels": 449,
+            "changed_percent": 0.0866,
+            "mean_abs_diff": 0.002911
+          },
+          "rows_270_to_540": {
+            "pixel_count": 518400,
+            "changed_pixels": 162704,
+            "changed_percent": 31.3858,
+            "mean_abs_diff": 1.212705
+          },
+          "rows_540_to_810": {
+            "pixel_count": 518400,
+            "changed_pixels": 509881,
+            "changed_percent": 98.3567,
+            "mean_abs_diff": 4.609376
+          },
+          "rows_810_to_1080": {
+            "pixel_count": 518400,
+            "changed_pixels": 512772,
+            "changed_percent": 98.9144,
+            "mean_abs_diff": 3.769601
+          }
+        }
+      },
+      "unavailable_metrics": {
+        "gpu_frame_duration_ns": {
+          "value": null,
+          "reason": "RuntimeVisualAudit 1.0.0 exposes six per-pass GPU timestamp durations but no whole-frame GPU timestamp. Summing the passes would be this script's arithmetic, not a measurement, and the passes are not proven to be contiguous."
+        },
+        "terrain_duration_ns": {
+          "value": null,
+          "reason": "The terrain is drawn inside the `scene` pass. There is no terrain pass in PassId and no terrain-specific timing instrumentation; the audit's terrain block is configuration only."
+        },
+        "total_draw_calls": {
+          "value": null,
+          "reason": "Only vegetation draw calls are counted (vegetation.stats.scene_draw_calls and shadow_draw_calls). Terrain, aircraft, sky and postprocess draws are not instrumented."
+        },
+        "vram_bytes": {
+          "value": null,
+          "reason": "No VRAM introspection exists anywhere in this repository (no wgpu memory query, no NVML, no nvidia-smi scraping), and the VisualCaptureEvidence 1.0.0 schema forbids a hardware.vram_gb key. No authoritative measurement exists, so none is reported."
+        },
+        "frame_timing_frame_age_note": {
+          "value": null,
+          "reason": "The profiler polls GPU timestamps without ever busy-waiting, so the capture frame may legitimately report an older sample or none at all. gpu_timing_status is recorded verbatim rather than treated as a failure."
+        }
+      }
+    },
+    {
+      "resolution": "2560x1440",
+      "scene_id": "env1a_reference_1440p",
+      "manifest": "docs/validation/env1_a_sparse_grass/env1a_reference_1440p.json",
+      "before": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_before/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "local_png_sha256": "838f7aa2c705bfb1017d8ed960b16a803742780b05b5ba96d957a2a526322e20",
+        "image_sha256": "838f7aa2c705bfb1017d8ed960b16a803742780b05b5ba96d957a2a526322e20",
+        "image_byte_size": 5147088,
+        "framebuffer": [
+          2560,
+          1440
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "1ec35c7c92dda6e15527ecb5fe50fd5f82d1bb0e",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 2560,
+            "framebuffer_height": 1440,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 19046900,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 15900,
+                "gpu_duration_ns": 140288.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4400,
+                "gpu_duration_ns": 145408.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 133120.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 16800,
+                "gpu_duration_ns": 1575936.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1000,
+                "gpu_duration_ns": 53248.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 33792.0
+              }
+            ]
+          }
+        }
+      },
+      "after": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_after/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "local_png_sha256": "81e895354bbb3c051a5d405b4f28b715a0880166023e548a6a6080715e5eec62",
+        "image_sha256": "81e895354bbb3c051a5d405b4f28b715a0880166023e548a6a6080715e5eec62",
+        "image_byte_size": 4650508,
+        "framebuffer": [
+          2560,
+          1440
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "679eca0bfee9f7d69efdab03f1e1ed14a395bad8",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 2560,
+            "framebuffer_height": 1440,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 19889800,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 17200,
+                "gpu_duration_ns": 139264.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4200,
+                "gpu_duration_ns": 145408.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3500,
+                "gpu_duration_ns": 133120.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 17900,
+                "gpu_duration_ns": 1703936.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1400,
+                "gpu_duration_ns": 52224.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 32768.0
+              }
+            ]
+          }
+        }
+      },
+      "pixel_comparison": {
+        "width": 2560,
+        "height": 1440,
+        "pixel_count": 3686400,
+        "identical": false,
+        "changed_pixels": 2131879,
+        "changed_percent": 57.8309,
+        "pixels_above_one_level": 1927046,
+        "pixels_above_one_level_percent": 52.2745,
+        "peak_channel_diff": 144,
+        "peak_channel_diff_at_xy": [
+          1285,
+          699
+        ],
+        "mean_abs_diff_per_channel": [
+          2.161081,
+          2.5695,
+          4.190059
+        ],
+        "mean_abs_diff_overall": 2.973546,
+        "before_brighter_pixels": 1411664,
+        "after_brighter_pixels": 687384,
+        "mean_luminance_before": 69.586049,
+        "mean_luminance_after": 68.019051,
+        "alpha_identical": true,
+        "horizontal_bands": {
+          "rows_0_to_360": {
+            "pixel_count": 921600,
+            "changed_pixels": 3756,
+            "changed_percent": 0.4076,
+            "mean_abs_diff": 0.016866
+          },
+          "rows_360_to_720": {
+            "pixel_count": 921600,
+            "changed_pixels": 305697,
+            "changed_percent": 33.1702,
+            "mean_abs_diff": 1.422251
+          },
+          "rows_720_to_1080": {
+            "pixel_count": 921600,
+            "changed_pixels": 908803,
+            "changed_percent": 98.6114,
+            "mean_abs_diff": 5.639414
+          },
+          "rows_1080_to_1440": {
+            "pixel_count": 921600,
+            "changed_pixels": 913623,
+            "changed_percent": 99.1344,
+            "mean_abs_diff": 4.815655
+          }
+        }
+      },
+      "unavailable_metrics": {
+        "gpu_frame_duration_ns": {
+          "value": null,
+          "reason": "RuntimeVisualAudit 1.0.0 exposes six per-pass GPU timestamp durations but no whole-frame GPU timestamp. Summing the passes would be this script's arithmetic, not a measurement, and the passes are not proven to be contiguous."
+        },
+        "terrain_duration_ns": {
+          "value": null,
+          "reason": "The terrain is drawn inside the `scene` pass. There is no terrain pass in PassId and no terrain-specific timing instrumentation; the audit's terrain block is configuration only."
+        },
+        "total_draw_calls": {
+          "value": null,
+          "reason": "Only vegetation draw calls are counted (vegetation.stats.scene_draw_calls and shadow_draw_calls). Terrain, aircraft, sky and postprocess draws are not instrumented."
+        },
+        "vram_bytes": {
+          "value": null,
+          "reason": "No VRAM introspection exists anywhere in this repository (no wgpu memory query, no NVML, no nvidia-smi scraping), and the VisualCaptureEvidence 1.0.0 schema forbids a hardware.vram_gb key. No authoritative measurement exists, so none is reported."
+        },
+        "frame_timing_frame_age_note": {
+          "value": null,
+          "reason": "The profiler polls GPU timestamps without ever busy-waiting, so the capture frame may legitimately report an older sample or none at all. gpu_timing_status is recorded verbatim rather than treated as a failure."
+        }
+      }
+    },
+    {
+      "resolution": "3840x2160",
+      "scene_id": "env1a_reference_2160p",
+      "manifest": "docs/validation/env1_a_sparse_grass/env1a_reference_2160p.json",
+      "before": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_before/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "local_png_sha256": "63d5be3792e6ffd9cf4902f155df21428c709ec7b5e5d94555c18ad112848d72",
+        "image_sha256": "63d5be3792e6ffd9cf4902f155df21428c709ec7b5e5d94555c18ad112848d72",
+        "image_byte_size": 12192032,
+        "framebuffer": [
+          3840,
+          2160
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "1ec35c7c92dda6e15527ecb5fe50fd5f82d1bb0e",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 3840,
+            "framebuffer_height": 2160,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 24696400,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 15000,
+                "gpu_duration_ns": 139264.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4200,
+                "gpu_duration_ns": 145408.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3900,
+                "gpu_duration_ns": 133120.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 14800,
+                "gpu_duration_ns": 2694144.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1200,
+                "gpu_duration_ns": 124928.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 76800.0
+              }
+            ]
+          }
+        }
+      },
+      "after": {
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1b0_after/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "local_png_sha256": "4185c6ca89bf60e1f656a440205ca49968524543ddc9ed9f1b11c5f439d86731",
+        "image_sha256": "4185c6ca89bf60e1f656a440205ca49968524543ddc9ed9f1b11c5f439d86731",
+        "image_byte_size": 10985228,
+        "framebuffer": [
+          3840,
+          2160
+        ],
+        "presentation_frame_index": 10,
+        "git_commit_sha": "679eca0bfee9f7d69efdab03f1e1ed14a395bad8",
+        "git_dirty": false,
+        "runner_success": true,
+        "capture_evidence_valid": true,
+        "visual_audit_valid": true,
+        "audit": {
+          "identity": {
+            "presentation_frame_index": 10,
+            "framebuffer_width": 3840,
+            "framebuffer_height": 2160,
+            "renderer_version": "v2"
+          },
+          "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "595.97"
+          },
+          "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": true,
+            "sampler_anisotropy": 16,
+            "material_scale": null,
+            "material_scale_unavailable_reason": "no single scalar represents the authoritative multi-frequency material"
+          },
+          "vegetation": {
+            "vegetation_present": true,
+            "debug_mode": "final",
+            "stats": {
+              "total": 171,
+              "visible": 49,
+              "culled_frustum": 122,
+              "culled_distance": 0,
+              "lod_counts": [
+                3,
+                30,
+                16
+              ],
+              "scene_draw_calls": 22,
+              "shadow_draw_calls": 42,
+              "uploaded_instance_bytes": 2352
+            }
+          },
+          "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": true
+          },
+          "shadows": {
+            "path_active": true,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [
+              32.0,
+              128.0,
+              512.0
+            ],
+            "filtering": "linear comparison sampler with shader PCF",
+            "filter_tap_count": null,
+            "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
+          },
+          "profiling": {
+            "presentation_frame_index": 10,
+            "cpu_frame_duration_ns": 25491500,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 9,
+            "gpu_timing_frame_age": 1,
+            "gpu_timing_unavailable_reason": null,
+            "passes": [
+              {
+                "pass_id": "shadow_near",
+                "label": "G3E near cascade shadow depth pass",
+                "cpu_duration_ns": 14400,
+                "gpu_duration_ns": 139264.0
+              },
+              {
+                "pass_id": "shadow_mid",
+                "label": "G3E mid cascade shadow depth pass",
+                "cpu_duration_ns": 4500,
+                "gpu_duration_ns": 144384.0
+              },
+              {
+                "pass_id": "shadow_far",
+                "label": "G3E far cascade shadow depth pass",
+                "cpu_duration_ns": 3300,
+                "gpu_duration_ns": 134144.0
+              },
+              {
+                "pass_id": "scene",
+                "label": "G1C scene pass",
+                "cpu_duration_ns": 16000,
+                "gpu_duration_ns": 2961408.0
+              },
+              {
+                "pass_id": "temporal_resolve",
+                "label": "RV2 temporal resolve pass",
+                "cpu_duration_ns": 1100,
+                "gpu_duration_ns": 122880.0
+              },
+              {
+                "pass_id": "postprocess",
+                "label": "G3B HDR postprocess pass",
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 73728.0
+              }
+            ]
+          }
+        }
+      },
+      "pixel_comparison": {
+        "width": 3840,
+        "height": 2160,
+        "pixel_count": 8294400,
+        "identical": false,
+        "changed_pixels": 4759946,
+        "changed_percent": 57.3875,
+        "pixels_above_one_level": 4423309,
+        "pixels_above_one_level_percent": 53.3289,
+        "peak_channel_diff": 189,
+        "peak_channel_diff_at_xy": [
+          1923,
+          1047
+        ],
+        "mean_abs_diff_per_channel": [
+          2.938936,
+          3.506224,
+          5.519251
+        ],
+        "mean_abs_diff_overall": 3.988137,
+        "before_brighter_pixels": 3023199,
+        "after_brighter_pixels": 1676448,
+        "mean_luminance_before": 70.125976,
+        "mean_luminance_after": 68.25438,
+        "alpha_identical": true,
+        "horizontal_bands": {
+          "rows_0_to_540": {
+            "pixel_count": 2073600,
+            "changed_pixels": 1532,
+            "changed_percent": 0.0739,
+            "mean_abs_diff": 0.004233
+          },
+          "rows_540_to_1080": {
+            "pixel_count": 2073600,
+            "changed_pixels": 646956,
+            "changed_percent": 31.1997,
+            "mean_abs_diff": 1.424644
+          },
+          "rows_1080_to_1620": {
+            "pixel_count": 2073600,
+            "changed_pixels": 2050233,
+            "changed_percent": 98.8731,
+            "mean_abs_diff": 7.359925
+          },
+          "rows_1620_to_2160": {
+            "pixel_count": 2073600,
+            "changed_pixels": 2061225,
+            "changed_percent": 99.4032,
+            "mean_abs_diff": 7.163748
+          }
+        }
+      },
+      "unavailable_metrics": {
+        "gpu_frame_duration_ns": {
+          "value": null,
+          "reason": "RuntimeVisualAudit 1.0.0 exposes six per-pass GPU timestamp durations but no whole-frame GPU timestamp. Summing the passes would be this script's arithmetic, not a measurement, and the passes are not proven to be contiguous."
+        },
+        "terrain_duration_ns": {
+          "value": null,
+          "reason": "The terrain is drawn inside the `scene` pass. There is no terrain pass in PassId and no terrain-specific timing instrumentation; the audit's terrain block is configuration only."
+        },
+        "total_draw_calls": {
+          "value": null,
+          "reason": "Only vegetation draw calls are counted (vegetation.stats.scene_draw_calls and shadow_draw_calls). Terrain, aircraft, sky and postprocess draws are not instrumented."
+        },
+        "vram_bytes": {
+          "value": null,
+          "reason": "No VRAM introspection exists anywhere in this repository (no wgpu memory query, no NVML, no nvidia-smi scraping), and the VisualCaptureEvidence 1.0.0 schema forbids a hardware.vram_gb key. No authoritative measurement exists, so none is reported."
+        },
+        "frame_timing_frame_age_note": {
+          "value": null,
+          "reason": "The profiler polls GPU timestamps without ever busy-waiting, so the capture frame may legitimately report an older sample or none at all. gpu_timing_status is recorded verbatim rather than treated as a failure."
+        }
+      }
+    }
+  ],
+  "c2d_terrain_debug_channels": [
+    {
+      "terrain_debug": "albedo",
+      "manifest": "docs/validation/visual_benchmark/c2d_terrain_albedo.json",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1b0_after_c2d/albedo/c2d_terrain_albedo/c2d_terrain_albedo_1920x1080.png",
+      "local_png_sha256": "28721d979f08312833ff42cf4cada9f387b179ee0e868236dac2bfbabe85d6a3",
+      "image_sha256": "28721d979f08312833ff42cf4cada9f387b179ee0e868236dac2bfbabe85d6a3",
+      "image_byte_size": 2099607,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "audit_debug_mode": "albedo",
+      "audit_material_path_active": true,
+      "audit_sampler_anisotropy": 16,
+      "runner_success": true,
+      "visual_audit_valid": true
+    },
+    {
+      "terrain_debug": "normal",
+      "manifest": "docs/validation/visual_benchmark/c2d_terrain_normal.json",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1b0_after_c2d/normal/c2d_terrain_normal/c2d_terrain_normal_1920x1080.png",
+      "local_png_sha256": "c1c17bf0b18f72afe5cdd74e7894c719e6f139fde0674a1e739cc2a3ac7b631b",
+      "image_sha256": "c1c17bf0b18f72afe5cdd74e7894c719e6f139fde0674a1e739cc2a3ac7b631b",
+      "image_byte_size": 2454203,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "audit_debug_mode": "normal",
+      "audit_material_path_active": true,
+      "audit_sampler_anisotropy": 16,
+      "runner_success": true,
+      "visual_audit_valid": true
+    },
+    {
+      "terrain_debug": "roughness",
+      "manifest": "docs/validation/visual_benchmark/c2d_terrain_roughness.json",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1b0_after_c2d/roughness/c2d_terrain_roughness/c2d_terrain_roughness_1920x1080.png",
+      "local_png_sha256": "1ecd0627f1e43084236306ce8cda166e76b03c0041e3f8839874e3c0fd7c1f70",
+      "image_sha256": "1ecd0627f1e43084236306ce8cda166e76b03c0041e3f8839874e3c0fd7c1f70",
+      "image_byte_size": 1050895,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "audit_debug_mode": "roughness",
+      "audit_material_path_active": true,
+      "audit_sampler_anisotropy": 16,
+      "runner_success": true,
+      "visual_audit_valid": true
+    },
+    {
+      "terrain_debug": "macro",
+      "manifest": "docs/validation/visual_benchmark/c2d_terrain_macro.json",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1b0_after_c2d/macro/c2d_terrain_macro/c2d_terrain_macro_1920x1080.png",
+      "local_png_sha256": "21e6dc7dd8604e8780ec275d210150f77df4df8043c482ddcab8dec272c6582d",
+      "image_sha256": "21e6dc7dd8604e8780ec275d210150f77df4df8043c482ddcab8dec272c6582d",
+      "image_byte_size": 2190245,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "audit_debug_mode": "macro",
+      "audit_material_path_active": true,
+      "audit_sampler_anisotropy": 16,
+      "runner_success": true,
+      "visual_audit_valid": true
+    },
+    {
+      "terrain_debug": "detail",
+      "manifest": "docs/validation/visual_benchmark/c2d_terrain_detail.json",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; these evidence profiles have no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1b0_after_c2d/detail/c2d_terrain_detail/c2d_terrain_detail_1920x1080.png",
+      "local_png_sha256": "d23a35a96d52f011dcf2b8ff1c13a60bf62b8b73989c3855d01e156aba849a6e",
+      "image_sha256": "d23a35a96d52f011dcf2b8ff1c13a60bf62b8b73989c3855d01e156aba849a6e",
+      "image_byte_size": 2185889,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "audit_debug_mode": "detail",
+      "audit_material_path_active": true,
+      "audit_sampler_anisotropy": 16,
+      "runner_success": true,
+      "visual_audit_valid": true
+    }
+  ],
+  "reproduction": {
+    "before": "check out the base SHA 1ec35c7c92dda6e15527ecb5fe50fd5f82d1bb0e, cargo build --release --workspace --all-features, then run tools/visual_benchmark/run_benchmark.py --execute with each manifest",
+    "after": "cargo build --release --workspace --all-features on the ENV1-B0 implementation HEAD, then run tools/visual_benchmark/run_benchmark.py --execute with the same manifests",
+    "measure": "python -X utf8 tools/measure_env1a_sparse_grass.py --profile env1-b0"
+  }
+}
