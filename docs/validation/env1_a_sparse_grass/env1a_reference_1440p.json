@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.1.0",
+  "scene_id": "env1a_reference_1440p",
+  "description": "ENV1-A resolution variant of the canonical VIS0 reference scene aircraft_acro_static_front. Identical renderer, scenery, camera, exposure, aircraft state, warmup and capture frame; only resolution and capture filename differ. Used for the ENV1-A Sparse Grass material BEFORE/AFTER comparison at 2560x1440.",
+  "renderer": {
+    "version": "v2",
+    "terrain_debug": "final",
+    "vegetation_debug": "final"
+  },
+  "scenery": {
+    "preset": "flying-field"
+  },
+  "camera": {
+    "mode": "pilot",
+    "vertical_fov_deg": 55,
+    "pilot_position_render_m": [0.0, 1.8, 20.0]
+  },
+  "resolution": {
+    "width": 2560,
+    "height": 1440
+  },
+  "exposure_ev": 0,
+  "aircraft": {
+    "model": "models/acro_electric_01/model.json",
+    "throttle": 0.0,
+    "start_on_ground": true
+  },
+  "warmup": 10,
+  "capture": {
+    "filename": "env1a_reference_1440p_2560x1440.png",
+    "format": "png",
+    "frame": 10
+  },
+  "tags": ["aircraft", "acro", "static", "front-view", "benchmark", "env1-a"]
+}
