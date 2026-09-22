@@ -362,6 +362,48 @@ def warmup_mismatch_reason(warmup: Any, frame: Any) -> str:
     )
 
 
+# --- C2D audit applicability (V2 renderer only) -------------------------------
+#
+# RuntimeVisualAudit 1.0.0 is a V2 renderer contract. rcsim-app accepts
+# --visual-audit-out only together with --renderer v2 and rejects it otherwise
+# (RenderAppError::VisualAuditRequiresV2), so a plan that emitted the flag for a
+# v1 scene would hand the runtime a command it refuses. Applicability is derived
+# from the manifest the runner already holds; GoldenSceneManifest 1.1.0 keeps
+# supporting both renderer versions and gains no field here.
+
+AUDIT_RENDERER_VERSION = "v2"
+
+# Explicit applicability vocabulary: "not applicable" must never be encoded as a
+# failed audit, so the two states are named rather than inferred from `valid`.
+AUDIT_APPLICABILITY_REQUIRED = "required"
+AUDIT_APPLICABILITY_NOT_APPLICABLE = "not_applicable"
+
+AUDIT_REQUIRED_REASON = (
+    "RuntimeVisualAudit 1.0.0 is required: C2D is a V2 renderer audit contract "
+    "and this manifest requests renderer v2, so the runner derives "
+    "--visual-audit-out, removes a stale audit, and requires a valid audit bound "
+    "to the trusted receipt's presentation frame and framebuffer extent."
+)
+
+AUDIT_NOT_EXECUTABLE_REASON = (
+    "RuntimeVisualAudit is not requested: the scene is not runtime-executable "
+    "under the VIS0-C2B capture policy, so no process is started and no audit "
+    "can exist."
+)
+
+
+def audit_not_applicable_reason(renderer_version: Any) -> str:
+    return (
+        "RuntimeVisualAudit 1.0.0 is not applicable: C2D is a V2 renderer audit "
+        f"contract and this manifest requests renderer '{renderer_version}'. "
+        "rcsim-app rejects --visual-audit-out unless --renderer v2 "
+        "(RenderAppError::VisualAuditRequiresV2), so the runner emits no audit "
+        "flag and requires no audit. Not applicable is not a failed audit: the "
+        "VIS0-C2B process/receipt/PNG/evidence conditions remain the whole "
+        "success criterion, and no audit is fabricated."
+    )
+
+
 # --- Capture evidence contract (VIS0-C1B, filled by VIS0-C2B) -----------------
 
 EVIDENCE_NOT_EXECUTED_REASON = (
@@ -744,6 +786,10 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
     1.1.0 accepts an absent capture.frame and accepts jpg/exr, while the VIS0-C2A
     runtime implements neither. The schema is not narrowed here; the runner simply
     refuses to start a process it knows cannot honour the request.
+
+    The derived argument list is renderer-aware for the same reason: the C2D
+    audit is a V2 contract and rcsim-app rejects --visual-audit-out under
+    --renderer v1, so a v1 plan must not contain a flag the runtime refuses.
     """
     capture = manifest.get("capture") or {}
     filename = capture.get("filename")
@@ -751,6 +797,7 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
     frame = capture.get("frame")
     quality = capture.get("quality")
     warmup = manifest.get("warmup")
+    renderer_version = get_field(manifest, "renderer.version")
 
     image_path = scene_output_dir / filename if filename else None
     receipt_path = scene_output_dir / RUNTIME_RECEIPT_FILENAME
@@ -779,6 +826,14 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
     executable = not blocking_reasons
     frame_text = format_number(frame) if executable else None
 
+    audit_required = bool(executable) and renderer_version == AUDIT_RENDERER_VERSION
+    if renderer_version == AUDIT_RENDERER_VERSION:
+        audit_applicability_reason = (
+            AUDIT_REQUIRED_REASON if executable else AUDIT_NOT_EXECUTABLE_REASON
+        )
+    else:
+        audit_applicability_reason = audit_not_applicable_reason(renderer_version)
+
     manifest_arguments = []
     if executable:
         manifest_arguments = [
@@ -804,7 +859,7 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
 
     derived_arguments = []
     if executable:
-        derived_arguments = [
+        derived_arguments.append(
             {
                 "flag": "--capture-receipt-out",
                 "value": str(receipt_path),
@@ -815,17 +870,24 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
                     "location so it can parse, trust and cross-check it. No "
                     "GoldenSceneManifest field names a receipt path."
                 ),
-            },
-            {
-                "flag": "--visual-audit-out",
-                "value": str(audit_path),
-                "manifest_field": None,
-                "provenance": "runner-derived",
-                "derived_from": (
-                    "C2D runtime visual audit handshake: the runner owns the "
-                    "artifact path; GoldenSceneManifest remains unchanged."
-                ),
-            },
+            }
+        )
+        if audit_required:
+            derived_arguments.append(
+                {
+                    "flag": "--visual-audit-out",
+                    "value": str(audit_path),
+                    "manifest_field": None,
+                    "provenance": "runner-derived",
+                    "derived_from": (
+                        "C2D runtime visual audit handshake: the runner owns the "
+                        "artifact path; GoldenSceneManifest remains unchanged. "
+                        "Emitted only for renderer v2, which is the only "
+                        "renderer rcsim-app accepts this flag with."
+                    ),
+                }
+            )
+        derived_arguments.append(
             {
                 "flag": "--exit-after-frame",
                 "value": frame_text,
@@ -838,8 +900,8 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
                     "case captures, presents, writes the PNG and the receipt, "
                     "then exits."
                 ),
-            },
-        ]
+            }
+        )
 
     return {
         "executable": executable,
@@ -866,6 +928,10 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
         ),
         "receipt_path": str(receipt_path),
         "receipt_path_display": display_path(receipt_path, REPO_ROOT),
+        # audit_path is the runner-owned location a V2 audit would occupy. It is
+        # reported for every renderer so the stale-artifact sweep can remove a
+        # leftover audit defensively; whether this run may CLAIM one is decided
+        # by audit_required alone (see build_run_metadata/artifacts).
         "audit_path": str(audit_path),
         "audit_path_display": display_path(audit_path, REPO_ROOT),
         "evidence_path": str(evidence_path),
@@ -874,6 +940,13 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
         "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
         "audit_kind": AUDIT_KIND,
         "audit_schema_version": AUDIT_SCHEMA_VERSION,
+        "renderer_version": renderer_version,
+        "audit_required": audit_required,
+        "audit_applicability": (
+            AUDIT_APPLICABILITY_REQUIRED if audit_required
+            else AUDIT_APPLICABILITY_NOT_APPLICABLE
+        ),
+        "audit_applicability_reason": audit_applicability_reason,
         "manifest_arguments": manifest_arguments,
         "derived_arguments": derived_arguments,
         # Absolute paths are handed to the app so the receipt's image_path echo
@@ -889,7 +962,11 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
             "covers the cases the runtime's own stale-output policy cannot: the "
             "process never starting, or crashing before its cleanup ran. Nothing "
             "outside <output_dir>/<scene_id>/ is touched, so approved baselines "
-            "are never deleted."
+            "are never deleted. The audit is swept for every renderer version, "
+            "including one that does not require it, so a stale "
+            "runtime_visual_audit.json can never be advertised as belonging to "
+            "the current run; for renderer v1 the runner additionally reports no "
+            "audit path in run.json/artifacts and claims no audit at all."
         ),
     }
 
@@ -1474,6 +1551,22 @@ def build_plan(
 
     schema_version = manifest.get("schema_version") or ""
 
+    # The C2B conditions are the whole success criterion for a renderer with no
+    # C2D audit contract; for renderer v2 the audit is an ADDITIONAL condition,
+    # never a substitute for the capture/receipt/PNG/evidence ones.
+    success_requires = [
+        "process exit code 0",
+        f"trusted {RECEIPT_KIND} {RECEIPT_SCHEMA_VERSION}",
+    ]
+    if capture_plan["audit_required"]:
+        success_requires.append(
+            f"valid {AUDIT_KIND} {AUDIT_SCHEMA_VERSION} matching receipt frame/extent"
+        )
+    success_requires.extend([
+        "PNG independently verified (bytes, SHA-256, IHDR, RGBA8)",
+        f"{EVIDENCE_KIND} {EVIDENCE_SCHEMA_VERSION} accepted by its validator",
+    ])
+
     return {
         "plan_version": PLAN_VERSION,
         "runner": {"name": RUNNER_NAME, "version": RUNNER_VERSION},
@@ -1499,7 +1592,12 @@ def build_plan(
             "stderr": str(scene_output_dir / STDERR_FILENAME),
             "capture_image": capture_plan["image_path"],
             "runtime_capture_receipt": capture_plan["receipt_path"],
-            "runtime_visual_audit": capture_plan["audit_path"],
+            # A renderer with no C2D audit contract must never see an audit path
+            # advertised as one of this run's artifacts.
+            "runtime_visual_audit": (
+                capture_plan["audit_path"]
+                if capture_plan["audit_required"] else None
+            ),
             "capture_evidence": capture_plan["evidence_path"],
         },
         "command_argv": argv,
@@ -1520,13 +1618,12 @@ def build_plan(
             "default_is_dry_run": True,
             "visual_verdict_automatic": False,
             "capture_executable": bool(capture_plan["executable"]),
-            "success_requires": [
-                "process exit code 0",
-                f"trusted {RECEIPT_KIND} {RECEIPT_SCHEMA_VERSION}",
-                f"valid {AUDIT_KIND} {AUDIT_SCHEMA_VERSION} matching receipt frame/extent",
-                "PNG independently verified (bytes, SHA-256, IHDR, RGBA8)",
-                f"{EVIDENCE_KIND} {EVIDENCE_SCHEMA_VERSION} accepted by its validator",
-            ],
+            "visual_audit_required": bool(capture_plan["audit_required"]),
+            "visual_audit_applicability": capture_plan["audit_applicability"],
+            "visual_audit_applicability_reason": (
+                capture_plan["audit_applicability_reason"]
+            ),
+            "success_requires": success_requires,
             "process_exit_zero_is_sufficient": False,
         },
         "visual_pass": None,
@@ -1754,6 +1851,11 @@ def stale_artifact_paths(plan: dict) -> list:
     Includes the runtime's own `<name>.tmp` siblings, which exist when a capture
     crashed between write and rename. Only paths under scene_output_dir are
     ever returned, so an approved baseline elsewhere cannot be deleted.
+
+    The audit path is swept for every renderer version, including one whose plan
+    requires no audit: deleting a leftover runtime_visual_audit.json from an
+    earlier v2 run is what guarantees a v1 scene directory cannot hold an audit
+    that looks like it belongs to this run.
     """
     capture_plan = plan.get("capture_plan") or {}
     scene_output_dir = Path(plan["scene_output_dir"])
@@ -1859,7 +1961,10 @@ def execute_plan(
         "stale_artifacts_removed": stale_removed,
         "capture_image_path": capture_plan.get("image_path"),
         "runtime_receipt_path": capture_plan.get("receipt_path"),
-        "runtime_visual_audit_path": capture_plan.get("audit_path"),
+        "runtime_visual_audit_path": (
+            capture_plan.get("audit_path")
+            if capture_plan.get("audit_required") else None
+        ),
         "capture_evidence_path": capture_plan.get("evidence_path"),
         "artifacts_written": [
             str(stdout_path),
@@ -1980,8 +2085,29 @@ def verify_runtime_visual_audit(
     execution: dict,
     capture_verification: dict,
 ) -> dict:
-    """Validate the separate C2D audit and bind it to the trusted receipt."""
+    """Validate the separate C2D audit and bind it to the trusted receipt.
+
+    Only a plan that requires an audit (executable renderer v2) is verified. For
+    any other renderer the C2D contract does not apply: `required` is false,
+    nothing is attempted, `valid` is null rather than false, and no file is read,
+    so "not applicable" can never be mistaken for a failed audit.
+    """
     capture_plan = plan.get("capture_plan") or {}
+    audit_required = bool(capture_plan.get("audit_required"))
+    if not audit_required:
+        return {
+            "required": False,
+            "attempted": False,
+            "valid": None,
+            "path": capture_plan.get("audit_path"),
+            "audit": None,
+            "parse_errors": [],
+            "expectation_errors": [],
+            "checks": [],
+            "failure_reason": None,
+            "not_applicable_reason": capture_plan.get("audit_applicability_reason"),
+        }
+
     audit_path = Path(capture_plan["audit_path"])
     checks = []
 
@@ -1990,6 +2116,7 @@ def verify_runtime_visual_audit(
         return bool(passed)
 
     result = {
+        "required": True,
         "attempted": True,
         "valid": False,
         "path": str(audit_path),
@@ -2022,7 +2149,7 @@ def verify_runtime_visual_audit(
             expected_frame=receipt.get("presentation_frame_index"),
             expected_width=receipt.get("framebuffer_width"),
             expected_height=receipt.get("framebuffer_height"),
-            expected_renderer="v2",
+            expected_renderer=AUDIT_RENDERER_VERSION,
         )
     elif audit is not None:
         expectation_errors = [
@@ -2057,15 +2184,23 @@ def build_run_metadata(
         capture_evidence = build_capture_evidence(plan, execution, verification)
     if evidence_validation is None:
         evidence_validation = validate_evidence_document(capture_evidence)
+    capture_plan = plan.get("capture_plan") or {}
+    audit_required = bool(capture_plan.get("audit_required"))
     if audit_validation is None:
         audit_validation = {
+            "required": audit_required,
             "attempted": False,
-            "valid": False,
-            "path": (plan.get("capture_plan") or {}).get("audit_path"),
+            "valid": False if audit_required else None,
+            "path": capture_plan.get("audit_path"),
             "audit": None,
-            "failure_reason": "runtime visual audit was not verified",
+            "failure_reason": (
+                "runtime visual audit was not verified" if audit_required else None
+            ),
+            "not_applicable_reason": (
+                None if audit_required
+                else capture_plan.get("audit_applicability_reason")
+            ),
         }
-    capture_plan = plan.get("capture_plan") or {}
     capture_success = bool(
         capture_evidence.get("execution", {}).get("capture_success")
     )
@@ -2130,7 +2265,8 @@ def build_run_metadata(
                 if (verification or {}).get("receipt") else None
             ),
             "runtime_visual_audit": (
-                capture_plan.get("audit_path") if audit_validation.get("valid") else None
+                capture_plan.get("audit_path")
+                if audit_required and audit_validation.get("valid") else None
             ),
             "capture_evidence": (
                 capture_plan.get("evidence_path")
@@ -2140,11 +2276,14 @@ def build_run_metadata(
         "verdict": {
             "execution_success": execution.get("execution_success"),
             "capture_success": capture_success,
+            # An audit that is not required cannot fail the run, and a required
+            # one that is missing or invalid still fails it closed: the audit
+            # term is "(not required) OR valid", never "valid" alone.
             "runner_success": bool(
                 execution.get("execution_success")
                 and capture_success
                 and evidence_validation.get("valid")
-                and audit_validation.get("valid")
+                and (not audit_required or audit_validation.get("valid"))
             ),
             "visual_pass": None,
             "visual_pass_reason": (
@@ -2233,6 +2372,11 @@ def format_plan_human(plan: dict) -> str:
     lines.append(_kv("executable", capture_plan["executable"]))
     for reason in capture_plan["blocking_reasons"]:
         lines.append(_kv("blocked because", reason))
+    lines.append(_kv(
+        "visual audit",
+        f"{str(capture_plan['audit_applicability']).upper()} "
+        f"(renderer {capture_plan['renderer_version']})",
+    ))
     lines.append(_kv("capture frame", capture_plan["frame"]))
     lines.append(_kv("warmup", capture_plan["warmup"]))
     lines.append(_kv("warmup mechanism", capture_plan["warmup_mechanism"]))
@@ -2274,7 +2418,12 @@ def format_plan_human(plan: dict) -> str:
     lines.append(_kv("scene dir", plan["scene_output_dir"]))
     lines.append(_kv("capture image", capture_plan["image_path"]))
     lines.append(_kv("runtime receipt", capture_plan["receipt_path"]))
-    lines.append(_kv("runtime visual audit", capture_plan["audit_path"]))
+    lines.append(_kv(
+        "runtime visual audit",
+        capture_plan["audit_path"] if capture_plan["audit_required"]
+        else "not applicable (C2D is a v2 renderer audit contract; renderer "
+             f"{capture_plan['renderer_version']} requests no audit)",
+    ))
     lines.append(_kv("capture evidence", capture_plan["evidence_path"]))
     lines.append(_kv("run.json", plan["artifact_paths"]["run_json"]))
     lines.append(_kv("stdout.txt", plan["artifact_paths"]["stdout"]))
@@ -2554,7 +2703,13 @@ def _run(args: argparse.Namespace) -> int:
     print(f"capture_success:   {capture_success}")
     print(f"receipt_trusted:   {bool(verification['trusted'])}")
     print(f"evidence_valid:    {evidence_validation['valid']}")
-    print(f"visual_audit_valid:{audit_validation['valid']}")
+    if audit_validation.get("required"):
+        print(f"visual_audit_valid:{audit_validation['valid']}")
+    else:
+        print(
+            "visual_audit_valid:null (not required: C2D is a v2 renderer audit "
+            f"contract, this manifest requests renderer {plan['renderer']})"
+        )
     print(f"runner_success:    {runner_success}")
     if capture_success:
         print(f"capture image:     {evidence['capture']['image']['path']}")
@@ -2595,7 +2750,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         for error in evidence_validation["errors"]:
             print(f"    - {error}", file=sys.stderr)
-    if not audit_validation["valid"]:
+    if audit_validation.get("required") and not audit_validation.get("valid"):
         print(
             "error: RuntimeVisualAudit validation failed: "
             f"{audit_validation['failure_reason']}",

@@ -104,15 +104,19 @@ def airborne_manifest() -> dict:
 
 
 def small_manifest(width: int = 320, height: int = 240, frame=10, warmup=10,
-                   image_format: str = "png", filename=None, quality=None) -> dict:
+                   image_format: str = "png", filename=None, quality=None,
+                   renderer_version: str = "v2") -> dict:
     """base_manifest() at the smallest extent the VIS0-A contract allows.
 
     320x240 is MINIMUM_WIDTH x MINIMUM_HEIGHT, so real end-to-end tests stay
     fast without asking the manifest validator for something it must reject.
     `frame=None` omits capture.frame entirely, which GoldenSceneManifest 1.1.0
     still permits and the C2B executability policy does not.
+    `renderer_version="v1"` keeps the scene executable while selecting the
+    renderer that has no C2D audit contract.
     """
     manifest = base_manifest()
+    manifest["renderer"] = dict(manifest["renderer"], version=renderer_version)
     manifest["resolution"] = {"width": width, "height": height}
     manifest["warmup"] = warmup
     capture = {
@@ -269,6 +273,11 @@ RECEIPT_SIZE = __RECEIPT_SIZE__
 EXIT_CODE = __EXIT_CODE__
 SKIP_RECEIPT = __SKIP_RECEIPT__
 SKIP_AUDIT = __SKIP_AUDIT__
+AUDIT_MALFORMED = __AUDIT_MALFORMED__
+AUDIT_FRAME = __AUDIT_FRAME__
+AUDIT_WIDTH = __AUDIT_WIDTH__
+AUDIT_HEIGHT = __AUDIT_HEIGHT__
+AUDIT_RENDERER = __AUDIT_RENDERER__
 CORRUPT_PNG = __CORRUPT_PNG__
 
 
@@ -329,6 +338,10 @@ def main():
         json.dump(receipt, handle, indent=2)
         handle.write("\\n")
     if not SKIP_AUDIT and audit_out is not None:
+        if AUDIT_MALFORMED:
+            with open(audit_out, "w", encoding="utf-8") as handle:
+                handle.write("{broken")
+            return EXIT_CODE
         passes = [{
             "pass_id": pass_id,
             "label": pass_id,
@@ -338,13 +351,20 @@ def main():
             "shadow_near", "shadow_mid", "shadow_far", "scene",
             "temporal_resolve", "postprocess",
         )]
+        audit_frame = (AUDIT_FRAME if AUDIT_FRAME is not None
+                       else receipt["presentation_frame_index"])
+        audit_width = (AUDIT_WIDTH if AUDIT_WIDTH is not None
+                       else receipt["framebuffer_width"])
+        audit_height = (AUDIT_HEIGHT if AUDIT_HEIGHT is not None
+                        else receipt["framebuffer_height"])
+        audit_renderer = AUDIT_RENDERER if AUDIT_RENDERER is not None else "v2"
         audit = {
             "schema_version": "1.0.0",
             "identity": {
-                "presentation_frame_index": receipt["presentation_frame_index"],
-                "framebuffer_width": receipt["framebuffer_width"],
-                "framebuffer_height": receipt["framebuffer_height"],
-                "renderer_version": "v2",
+                "presentation_frame_index": audit_frame,
+                "framebuffer_width": audit_width,
+                "framebuffer_height": audit_height,
+                "renderer_version": audit_renderer,
             },
             "device": {
                 "adapter_name": "test adapter", "backend": "test backend",
@@ -384,7 +404,7 @@ def main():
                 },
             },
             "profiling": {
-                "presentation_frame_index": receipt["presentation_frame_index"],
+                "presentation_frame_index": audit_frame,
                 "cpu_frame_duration_ns": 1,
                 "gpu_timing_status": "timestamp_query_unsupported",
                 "gpu_timing_source_presentation_frame_index": None,
@@ -415,6 +435,11 @@ FAKE_RUNTIME_DEFAULTS = {
     "EXIT_CODE": 0,
     "SKIP_RECEIPT": False,
     "SKIP_AUDIT": False,
+    "AUDIT_MALFORMED": False,
+    "AUDIT_FRAME": None,
+    "AUDIT_WIDTH": None,
+    "AUDIT_HEIGHT": None,
+    "AUDIT_RENDERER": None,
     "CORRUPT_PNG": False,
 }
 
@@ -3204,8 +3229,276 @@ class TestRuntimeVisualAuditContract(RunnerTestCase):
         )
         self.assertEqual(code, rb.EXIT_EXECUTION_FAILED)
         metadata = self.read_json(self.scene_dir(out_dir) / "run.json")
-        self.assertFalse(metadata["runtime_visual_audit_validation"]["valid"])
+        validation = metadata["runtime_visual_audit_validation"]
+        self.assertTrue(validation["required"])
+        self.assertTrue(validation["attempted"])
+        self.assertFalse(validation["valid"])
+        self.assertFalse(metadata["verdict"]["runner_success"])
         self.assertIsNone(metadata["verdict"]["visual_pass"])
+
+    def test_v2_plan_requires_the_audit_and_emits_the_flag(self):
+        plan = self.build_plan(small_manifest())
+        capture_plan = plan["capture_plan"]
+        self.assertEqual(capture_plan["renderer_version"], "v2")
+        self.assertTrue(capture_plan["audit_required"])
+        self.assertEqual(capture_plan["audit_applicability"],
+                         rb.AUDIT_APPLICABILITY_REQUIRED)
+        self.assertEqual(Path(self.argv_value(plan, "--visual-audit-out")).name,
+                         "runtime_visual_audit.json")
+        self.assertEqual(plan["artifact_paths"]["runtime_visual_audit"],
+                         capture_plan["audit_path"])
+        self.assertTrue(plan["execution_policy"]["visual_audit_required"])
+
+    def test_execute_fails_closed_when_the_audit_is_malformed(self):
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest(), AUDIT_MALFORMED=True
+        )
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED, err)
+        metadata = self.read_json(self.scene_dir(out_dir) / "run.json")
+        validation = metadata["runtime_visual_audit_validation"]
+        self.assertTrue(validation["required"])
+        self.assertFalse(validation["valid"])
+        self.assertTrue(validation["parse_errors"])
+        self.assertIsNone(metadata["runtime_visual_audit"])
+        self.assertIsNone(metadata["artifacts"]["runtime_visual_audit"])
+        self.assertFalse(metadata["verdict"]["runner_success"])
+        self.assertIn("RuntimeVisualAudit validation failed", err)
+
+    def test_execute_fails_closed_when_the_audit_frame_disagrees_with_the_receipt(self):
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest(), AUDIT_FRAME=9
+        )
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED, err)
+        validation = self.read_json(
+            self.scene_dir(out_dir) / "run.json")["runtime_visual_audit_validation"]
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["parse_errors"], [])
+        self.assertTrue(any("presentation_frame_index" in error
+                            for error in validation["expectation_errors"]),
+                        validation["expectation_errors"])
+
+    def test_execute_fails_closed_when_the_audit_extent_disagrees_with_the_receipt(self):
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest(), AUDIT_WIDTH=640
+        )
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED, err)
+        validation = self.read_json(
+            self.scene_dir(out_dir) / "run.json")["runtime_visual_audit_validation"]
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("framebuffer_width" in error
+                            for error in validation["expectation_errors"]),
+                        validation["expectation_errors"])
+
+    def test_execute_fails_closed_when_the_audit_declares_another_renderer(self):
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest(), AUDIT_RENDERER="v1"
+        )
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED, err)
+        validation = self.read_json(
+            self.scene_dir(out_dir) / "run.json")["runtime_visual_audit_validation"]
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("renderer_version" in error
+                            for error in validation["expectation_errors"]),
+                        validation["expectation_errors"])
+
+    def test_valid_audit_contributes_to_runner_success(self):
+        code, out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest())
+        self.assertEqual(code, rb.EXIT_OK, err)
+        self.assertIn("visual_audit_valid:True", out)
+        metadata = self.read_json(self.scene_dir(out_dir) / "run.json")
+        validation = metadata["runtime_visual_audit_validation"]
+        self.assertTrue(validation["required"])
+        self.assertTrue(validation["attempted"])
+        self.assertTrue(validation["valid"])
+        self.assertEqual(metadata["runtime_visual_audit"]["schema_version"], "1.0.0")
+        self.assertEqual(metadata["artifacts"]["runtime_visual_audit"],
+                         metadata["plan"]["capture_plan"]["audit_path"])
+        self.assertTrue(metadata["verdict"]["runner_success"])
+        self.assertIsNone(metadata["verdict"]["visual_pass"])
+
+    def test_valid_physical_environment_is_accepted(self):
+        audit, errors = rva.parse_runtime_visual_audit(audit_for())
+        self.assertIsNotNone(audit, errors)
+        self.assertEqual(audit.to_json()["environment"]["environment_mode"], "physical")
+
+    def test_analytical_fallback_without_physical_paths_is_accepted(self):
+        payload = audit_for()
+        payload["environment"] = {
+            "environment_mode": "analytical_fallback",
+            "physical_atmosphere_active": False,
+            "physical_ibl_active": False,
+            "aerial_perspective_active": False,
+        }
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNotNone(audit, errors)
+
+    def test_physical_mode_requires_the_physical_atmosphere_flag(self):
+        """environment_from_runtime derives mode and flags from one source."""
+        payload = audit_for()
+        payload["environment"]["physical_atmosphere_active"] = False
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNone(audit)
+        self.assertTrue(any("physical_atmosphere_active" in error for error in errors),
+                        errors)
+
+    def test_physical_mode_requires_the_physical_ibl_flag(self):
+        payload = audit_for()
+        payload["environment"]["physical_ibl_active"] = False
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNone(audit)
+        self.assertTrue(any("physical_ibl_active" in error for error in errors), errors)
+
+    def test_physical_mode_does_not_imply_aerial_perspective(self):
+        """Aerial perspective is a separately reported runtime path."""
+        payload = audit_for()
+        payload["environment"]["aerial_perspective_active"] = False
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNotNone(audit, errors)
+
+
+class TestRendererV1AuditApplicability(RunnerTestCase):
+    """C2D is a V2 renderer audit contract, so V1 must stay runnable without it.
+
+    GoldenSceneManifest 1.1.0 still supports renderer.version "v1" | "v2", while
+    rcsim-app rejects --visual-audit-out unless --renderer v2
+    (RenderAppError::VisualAuditRequiresV2). Planning that flag for a V1 scene
+    therefore hands the runtime a command it refuses and breaks valid V1
+    benchmarks: the audit has to be absent, not required and not claimed.
+    """
+
+    def v1_manifest(self):
+        return small_manifest(renderer_version="v1")
+
+    def test_v1_manifest_stays_executable_and_requests_renderer_v1(self):
+        plan = self.build_plan(self.v1_manifest())
+        self.assertEqual(plan["renderer"], "v1")
+        self.assertEqual(plan["capture_plan"]["blocking_reasons"], [])
+        self.assertTrue(plan["capture_plan"]["executable"])
+        self.assertTrue(plan["execution_policy"]["capture_executable"])
+        self.assertEqual(self.argv_value(plan, "--renderer"), "v1")
+
+    def test_v1_plan_never_emits_the_visual_audit_flag(self):
+        plan = self.build_plan(self.v1_manifest())
+        self.assertNotIn("--visual-audit-out", plan["command_argv"])
+        self.assertIsNone(self.argv_value(plan, "--visual-audit-out"))
+        derived = [item["flag"] for item in plan["capture_plan"]["derived_arguments"]]
+        self.assertEqual(derived, ["--capture-receipt-out", "--exit-after-frame"])
+        # The historical C2B capture handshake is untouched.
+        for flag in ("--capture-out", "--capture-format", "--capture-frame",
+                     "--capture-receipt-out", "--exit-after-frame"):
+            self.assertIn(flag, plan["command_argv"], flag)
+
+    def test_v1_plan_declares_the_audit_not_applicable(self):
+        plan = self.build_plan(self.v1_manifest())
+        capture_plan = plan["capture_plan"]
+        self.assertFalse(capture_plan["audit_required"])
+        self.assertEqual(capture_plan["audit_applicability"],
+                         rb.AUDIT_APPLICABILITY_NOT_APPLICABLE)
+        self.assertEqual(capture_plan["renderer_version"], "v1")
+        reason = capture_plan["audit_applicability_reason"]
+        self.assertIn("V2 renderer audit contract", reason)
+        self.assertIn("VisualAuditRequiresV2", reason)
+        self.assertIsNone(plan["artifact_paths"]["runtime_visual_audit"])
+        self.assertFalse(plan["execution_policy"]["visual_audit_required"])
+
+    def test_v1_success_requires_only_the_historical_c2b_conditions(self):
+        requirements = self.build_plan(
+            self.v1_manifest())["execution_policy"]["success_requires"]
+        self.assertEqual(len(requirements), 4)
+        self.assertFalse(any("runtime_visual_audit" in item for item in requirements))
+        v2_requirements = self.build_plan(
+            small_manifest())["execution_policy"]["success_requires"]
+        self.assertEqual(len(v2_requirements), 5)
+        self.assertEqual(requirements,
+                         [item for item in v2_requirements
+                          if "runtime_visual_audit" not in item])
+
+    def test_v1_execute_succeeds_without_any_audit(self):
+        code, out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=self.v1_manifest())
+        self.assertEqual(code, rb.EXIT_OK, err)
+        scene = self.scene_dir(out_dir)
+        self.assertIn("capture_success:   True", out)
+        self.assertIn("receipt_trusted:   True", out)
+        self.assertIn("evidence_valid:    True", out)
+        self.assertIn("visual_audit_valid:null", out)
+        self.assertIn("runner_success:    True", out)
+        self.assertIn("visual_pass:       null", out)
+        self.assertTrue((scene / "test_scene_320x240.png").exists())
+        self.assertTrue((scene / "runtime_capture_receipt.json").exists())
+        self.assertTrue((scene / "capture_evidence.json").exists())
+        self.assertEqual(list(out_dir.rglob("runtime_visual_audit.json")), [])
+        metadata = self.read_json(scene / "run.json")
+        validation = metadata["runtime_visual_audit_validation"]
+        self.assertFalse(validation["required"])
+        self.assertFalse(validation["attempted"])
+        self.assertIsNone(validation["valid"])
+        self.assertIsNone(validation["audit"])
+        self.assertIsNone(validation["failure_reason"])
+        self.assertTrue(validation["not_applicable_reason"])
+        self.assertIsNone(metadata["runtime_visual_audit"])
+        self.assertIsNone(metadata["artifacts"]["runtime_visual_audit"])
+        self.assertIsNone(metadata["execution"]["runtime_visual_audit_path"])
+        self.assertIsNone(metadata["plan"]["artifact_paths"]["runtime_visual_audit"])
+        self.assertTrue(metadata["verdict"]["capture_success"])
+        self.assertTrue(metadata["verdict"]["runner_success"])
+        self.assertIsNone(metadata["verdict"]["visual_pass"])
+
+    def test_v1_capture_evidence_is_still_published_and_validates(self):
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=self.v1_manifest())
+        self.assertEqual(code, rb.EXIT_OK, err)
+        scene = self.scene_dir(out_dir)
+        evidence = self.read_json(scene / "capture_evidence.json")
+        self.assertEqual(evidence["renderer"]["version"], "v1")
+        self.assertTrue(evidence["execution"]["capture_success"])
+        self.assertEqual(evidence["capture"]["actual"]["presentation_frame_index"], 10)
+        self.assertIsNone(evidence["verdict"]["visual_pass"])
+        self.assertEqual(
+            validate_capture_evidence(scene / "capture_evidence.json",
+                                      self.tmp / "manifest.json"), 0)
+
+    def test_v1_execute_still_fails_closed_without_a_receipt(self):
+        """Dropping the audit requirement must not weaken the C2B conditions."""
+        code, _out, err, out_dir = self.execute_with_fake_runtime(
+            manifest=self.v1_manifest(), SKIP_RECEIPT=True)
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED, err)
+        metadata = self.read_json(self.scene_dir(out_dir) / "run.json")
+        self.assertFalse(metadata["verdict"]["capture_success"])
+        self.assertFalse(metadata["verdict"]["runner_success"])
+        self.assertFalse(metadata["runtime_visual_audit_validation"]["required"])
+        self.assertIsNone(metadata["runtime_visual_audit_validation"]["valid"])
+
+    def test_v1_execute_never_claims_a_stale_audit_from_an_earlier_v2_run(self):
+        """A valid leftover audit must be swept, not advertised as this run's."""
+        out = self.tmp / "out"
+        scene = self.scene_dir(out)
+        scene.mkdir(parents=True, exist_ok=True)
+        stale = scene / "runtime_visual_audit.json"
+        stale.write_text(json.dumps(audit_for()), encoding="utf-8")
+        code, _out, err, _out_dir = self.execute_with_fake_runtime(
+            manifest=self.v1_manifest(), output_dir=out)
+        self.assertEqual(code, rb.EXIT_OK, err)
+        self.assertFalse(stale.exists())
+        metadata = self.read_json(scene / "run.json")
+        self.assertIsNone(metadata["runtime_visual_audit"])
+        self.assertIsNone(metadata["artifacts"]["runtime_visual_audit"])
+        self.assertTrue(metadata["verdict"]["runner_success"])
+
+    def test_v1_dry_run_reports_the_audit_as_not_applicable(self):
+        path = self.write_manifest(self.v1_manifest())
+        self.patch("collect_git_provenance", lambda _root: dict(FAKE_GIT))
+        plan_path = self.tmp / "plan.json"
+        code, out, _err = self.run_main([
+            "--manifest", str(path), "--dry-run",
+            "--output-dir", str(self.tmp / "out"), "--plan-json", str(plan_path),
+        ])
+        self.assertEqual(code, rb.EXIT_OK)
+        self.assertIn("NOT_APPLICABLE (renderer v1)", out)
+        self.assertIn("not applicable (C2D is a v2 renderer audit contract", out)
+        self.assertNotIn("--visual-audit-out",
+                         self.read_json(plan_path)["command_argv"])
 
 
 class TestEndToEndCaptureExecution(RunnerTestCase):

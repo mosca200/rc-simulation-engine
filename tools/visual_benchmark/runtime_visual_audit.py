@@ -185,6 +185,22 @@ def parse_runtime_visual_audit(payload: Any) -> tuple:
         aerial = _boolean(errors, "environment.aerial_perspective_active", environment.get("aerial_perspective_active"))
         if mode == "analytical_fallback" and any(value is True for value in (atmosphere, ibl, aerial)):
             errors.append("environment: analytical_fallback cannot report physical paths active")
+        # Inverse of the rule above. environment_from_runtime derives the mode
+        # and both physical flags from the same V2EnvironmentMode, so "physical"
+        # with either flag off is internally contradictory rather than a runtime
+        # state. aerial_perspective_active is deliberately NOT implied: it is a
+        # separately reported runtime path that physical mode may leave off.
+        if mode == "physical":
+            if atmosphere is False:
+                errors.append(
+                    "environment.physical_atmosphere_active: must be true when "
+                    "environment_mode is 'physical'"
+                )
+            if ibl is False:
+                errors.append(
+                    "environment.physical_ibl_active: must be true when "
+                    "environment_mode is 'physical'"
+                )
 
     image = groups["image_pipeline"]
     if image is not None:
