@@ -12,7 +12,10 @@ use renderer::terrain_textures::{
     terrain_texture_set_from_decoded,
 };
 use renderer::texture::{SamplerMipmapFilter, decode_image};
-use renderer::{PrimitiveMaterial, SamplerConfig, load_glb_bytes};
+use renderer::{
+    PrimitiveMaterial, SamplerConfig, TerrainMaterial, blend_linear_roughness,
+    blend_registered_tangent_normals, load_glb_bytes, reorient_rotated_tangent_normal,
+};
 use std::io::Cursor;
 
 // ---------------------------------------------------------------------------
@@ -758,4 +761,137 @@ fn env1_runtime_material_uses_the_documented_physical_tile_span() {
     assert_eq!(material.ar_angle_degrees, 27.0);
     assert_eq!(material.ar_offset, [0.315, 0.571]);
     assert_eq!(material.metallic, 0.0, "terrain stays dielectric");
+}
+
+// ---------------------------------------------------------------------------
+// ENV1-B0 registered PBR sampling
+// ---------------------------------------------------------------------------
+
+fn assert_vec3_close(actual: [f32; 3], expected: [f32; 3], tolerance: f32) {
+    for axis in 0..3 {
+        assert!(
+            (actual[axis] - expected[axis]).abs() <= tolerance,
+            "axis {axis}: expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+
+fn assert_finite_unit(normal: [f32; 3]) {
+    assert!(normal.iter().all(|component| component.is_finite()));
+    let length = normal
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>()
+        .sqrt();
+    assert!(
+        (length - 1.0).abs() < 1.0e-6,
+        "normal {normal:?} has length {length}"
+    );
+}
+
+#[test]
+fn env1_production_defaults_lock_the_registered_pbr_contract() {
+    let material = TerrainMaterial::default();
+    assert_eq!(material.texture_scale_m, 2.0);
+    assert_eq!(material.albedo_uv_offset, [0.0, 0.0]);
+    assert_eq!(material.normal_uv_offset, material.albedo_uv_offset);
+    assert_eq!(material.roughness_uv_offset, material.albedo_uv_offset);
+    assert_eq!(
+        material.roughness, 1.0,
+        "the photographed map is authoritative"
+    );
+    assert_eq!(material.metallic, 0.0);
+    assert_eq!(material.macro_scale_m, 48.0);
+    assert_eq!(material.detail_scale_m, 0.40);
+    assert_eq!(material.ar_scale, 1.370);
+    assert_eq!(material.ar_angle_degrees, 27.0);
+    assert_eq!(material.ar_offset, [0.315, 0.571]);
+}
+
+#[test]
+fn rotated_uv_normal_reorientation_has_unambiguous_inverse_sign() {
+    assert_vec3_close(
+        reorient_rotated_tangent_normal([1.0, 0.0, 0.0], 0.0),
+        [1.0, 0.0, 0.0],
+        1.0e-6,
+    );
+    assert_vec3_close(
+        reorient_rotated_tangent_normal([1.0, 0.0, 0.0], 90.0),
+        [0.0, -1.0, 0.0],
+        1.0e-6,
+    );
+    assert_vec3_close(
+        reorient_rotated_tangent_normal([1.0, 0.0, 0.0], -90.0),
+        [0.0, 1.0, 0.0],
+        1.0e-6,
+    );
+
+    let radians = 27.0f32.to_radians();
+    assert_vec3_close(
+        reorient_rotated_tangent_normal([1.0, 0.0, 0.0], 27.0),
+        [radians.cos(), -radians.sin(), 0.0],
+        1.0e-6,
+    );
+}
+
+#[test]
+fn rotated_uv_normal_reorientation_preserves_flat_finite_unit_normals() {
+    for angle in [0.0, 90.0, -90.0, 27.0, 721.0] {
+        let flat = reorient_rotated_tangent_normal([0.0, 0.0, 1.0], angle);
+        assert_vec3_close(flat, [0.0, 0.0, 1.0], 1.0e-6);
+        assert_finite_unit(flat);
+
+        let tilted = reorient_rotated_tangent_normal([0.25, -0.5, 0.829_156_2], angle);
+        assert_finite_unit(tilted);
+    }
+    assert_eq!(
+        reorient_rotated_tangent_normal([0.0, 0.0, 0.0], 27.0),
+        [0.0, 0.0, 1.0],
+        "degenerate data must fail safely to a flat tangent normal"
+    );
+}
+
+#[test]
+fn registered_normal_and_linear_roughness_blends_are_well_formed() {
+    let primary = [0.0, 0.0, 1.0];
+    let secondary = reorient_rotated_tangent_normal([0.3, 0.2, 0.932_737_9], 27.0);
+    let blended = blend_registered_tangent_normals(primary, secondary, 0.5);
+    assert_finite_unit(blended);
+    assert_eq!(
+        blend_registered_tangent_normals(primary, secondary, 0.0),
+        primary
+    );
+    assert_vec3_close(
+        blend_registered_tangent_normals(primary, secondary, 1.0),
+        secondary,
+        1.0e-6,
+    );
+
+    assert!((blend_linear_roughness(0.2, 0.8, 0.5) - 0.5).abs() < 1.0e-6);
+    assert_eq!(blend_linear_roughness(0.2, 0.8, 0.0), 0.2);
+    assert_eq!(blend_linear_roughness(0.2, 0.8, 1.0), 0.8);
+}
+
+#[test]
+fn production_shader_uses_shared_a_b_transforms_for_the_registered_triplet() {
+    let source = include_str!("../src/shader.wgsl").replace("\r\n", "\n");
+    let sampling = source
+        .split("fn terrain_surface(input: VertexOutput) -> TerrainSurface {")
+        .nth(1)
+        .and_then(|tail| tail.split("fn terrain_fragment_output(").next())
+        .expect("terrain_surface body");
+
+    assert!(sampling.contains("ar_cos * base_uv.x - ar_sin * base_uv.y"));
+    assert!(sampling.contains("textureSample(terrain_albedo_texture, terrain_sampler, base_uv)"));
+    assert!(sampling.contains("textureSample(terrain_albedo_texture, terrain_sampler, ar_uv)"));
+    assert!(
+        sampling.contains("textureSample(terrain_roughness_texture, terrain_sampler, base_uv)")
+    );
+    assert!(sampling.contains("textureSample(terrain_roughness_texture, terrain_sampler, ar_uv)"));
+    assert!(sampling.contains("textureSample(terrain_normal_texture, terrain_sampler, base_uv)"));
+    assert!(sampling.contains("textureSample(terrain_normal_texture, terrain_sampler, ar_uv)"));
+    assert!(sampling.contains("reorient_secondary_tangent_normal("));
+    assert!(sampling.contains("mix(r_base_a, r_base_b, TERRAIN_BASE_AR_BLEND)"));
+    assert!(!sampling.contains("terrain_material.normal_uv_offset"));
+    assert!(!sampling.contains("terrain_material.roughness_uv_offset"));
 }
