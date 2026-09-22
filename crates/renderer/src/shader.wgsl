@@ -153,8 +153,11 @@ struct MaterialUniform {
 //   XY of the base + detail normal stack.
 // debug_mode: presentation-only channel selector (0 = FINAL).
 // base/detail/macro_scale_m: three-frequency stack tile scales in metres.
-// *_uv_offset: per-layer world-space UV anchors (tile units) that decorrelate
-//   each layer's tile borders.
+// albedo_uv_offset: legacy field name for the common registered base-PBR UV
+//   anchor used by albedo, normal, and roughness together.
+// normal_uv_offset/roughness_uv_offset: reserved layout slots; production ENV1
+//   sampling deliberately ignores them so the photographic triplet stays
+//   registered. detail/macro offsets remain presentation-carrier anchors.
 // ar_angle_cos_sin: (cos, sin) of the anti-repetition second-sample rotation.
 // ar_scale_offset: (scale, offset.x, offset.y) of the rotated second sample.
 // detail_fade_near_far: detail-layer distance fade range in metres (xy).
@@ -1060,6 +1063,29 @@ struct TerrainSurface {
     albedo_detail_s: vec4<f32>,
 };
 
+fn normalize_tangent_normal(normal: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(normal, normal);
+    if (length_squared <= 1e-12) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return normal * inverseSqrt(length_squared);
+}
+
+// A secondary sample uses UV_B = R(theta) * UV_A * scale + offset. Its
+// tangent-space normal is expressed in B's rotated texture basis, so XY must
+// be transformed by R(-theta) before blending in the primary terrain frame.
+fn reorient_secondary_tangent_normal(
+    normal: vec3<f32>,
+    angle_cos: f32,
+    angle_sin: f32,
+) -> vec3<f32> {
+    return normalize_tangent_normal(vec3<f32>(
+        angle_cos * normal.x + angle_sin * normal.y,
+        -angle_sin * normal.x + angle_cos * normal.y,
+        normal.z,
+    ));
+}
+
 @fragment
 fn fs_terrain(input: VertexOutput) -> @location(0) vec4<f32> {
     let surface = terrain_surface(input);
@@ -1089,9 +1115,10 @@ fn fs_terrain_v2(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 fn terrain_surface(input: VertexOutput) -> TerrainSurface {
-    // G3A-R: three-frequency world-space UVs. `uv` is the world-anchored
-    // base UV (render position / base tile scale); each layer divides the
-    // tile scale out and adds its own anchor so layer borders never align.
+    // ENV1-B0: `uv` is world position X/Z divided by the physical 2 m scan
+    // span. `base_uv` is the single registered coordinate for the base albedo,
+    // normal, and roughness triplet. Macro/detail remain inherited
+    // presentation carriers with their own absolute-world scales.
     let uv = input.uv;
     let base_uv = uv + terrain_material.albedo_uv_offset;
     let base_scale = terrain_material.base_scale_m;
@@ -1103,16 +1130,16 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // G3A-R: anti-repetition rotated second sample. Rotating the base UV by
     // the fixed 2D angle, scaling it, and shifting it makes the second sample
     // tile at a different frequency and angle than the base grid, so no
-    // single 4 m tile border ever repeats recognizably across the field.
+    // single physical base-tile border repeats recognizably across the field.
     let ar_scale = terrain_material.ar_scale_offset.x;
     let ar_offset = terrain_material.ar_scale_offset.yz;
     let ar_cos = terrain_material.ar_angle_cos_sin.x;
     let ar_sin = terrain_material.ar_angle_cos_sin.y;
     let ar_uv = vec2<f32>(
-            ar_cos * uv.x - ar_sin * uv.y,
-            ar_sin * uv.x + ar_cos * uv.y,
+            ar_cos * base_uv.x - ar_sin * base_uv.y,
+            ar_sin * base_uv.x + ar_cos * base_uv.y,
         ) * ar_scale + ar_offset;
-    // PV2: decorrelate the macro carrier as well as the 4 m base tile. The
+    // PV2: decorrelate the macro carrier as well as the physical base tile. The
     // second macro sample has an unrelated angle/period, so 30-80 m tonal
     // patches cannot reveal a single repeated square in oblique views.
     let macro_ar_uv = vec2<f32>(
@@ -1136,8 +1163,8 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     let albedo_detail_s = textureSample(terrain_albedo_texture, terrain_sampler, detail_uv);
 
     // Base + rotated second sample 50/50: tile borders of the two samples run
-    // at different angles/frequencies, breaking the 4 m grid's repetition.
-    var albedo = mix(albedo_base, albedo_ar, TERRAIN_ALBEDO_AR_BLEND);
+    // at different angles/frequencies, breaking the base grid's repetition.
+    var albedo = mix(albedo_base, albedo_ar, TERRAIN_BASE_AR_BLEND);
     // Soft macro tone: multiplicative luminance modulation around the sample
     // mean, so large patches breathe without a hue shift or contrast boost.
     let macro_luminance = mix(
@@ -1158,13 +1185,12 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // The base/macro/detail weights sum to 1 at full detail, so the mean is
     // preserved; the detail term is distance-faded and the weights are
     // renormalized so the surface never turns wet/specular at distance.
-    let r_base = textureSample(
-        terrain_roughness_texture,
-        terrain_sampler,
-        uv + terrain_material.roughness_uv_offset,
-    )
-    .r;
-    let r_macro_s = textureSample(terrain_roughness_texture, terrain_sampler, macro_uv).r;
+    let r_base_a = textureSample(terrain_roughness_texture, terrain_sampler, base_uv).r;
+    let r_base_b = textureSample(terrain_roughness_texture, terrain_sampler, ar_uv).r;
+    let r_base = mix(r_base_a, r_base_b, TERRAIN_BASE_AR_BLEND);
+    let r_macro_a = textureSample(terrain_roughness_texture, terrain_sampler, macro_uv).r;
+    let r_macro_b = textureSample(terrain_roughness_texture, terrain_sampler, macro_ar_uv).r;
+    let r_macro_s = mix(r_macro_a, r_macro_b, TERRAIN_MACRO_AR_BLEND);
     let r_detail_s = textureSample(terrain_roughness_texture, terrain_sampler, detail_uv).r;
     let detail_weight = TERRAIN_ROUGHNESS_DETAIL_WEIGHT * detail_fade;
     let r_stack = (r_base * TERRAIN_ROUGHNESS_BASE_WEIGHT
@@ -1181,14 +1207,25 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // unit length (linear map data, decoded to [-1, 1]). The detail normal
     // contributes only near the camera (detail_fade), stabilizing distant
     // oblique views without popping.
-    let normal_base_raw = textureSample(
-        terrain_normal_texture,
-        terrain_sampler,
-        uv + terrain_material.normal_uv_offset,
-    )
-    .rgb
+    let normal_base_a_raw = normalize_tangent_normal(
+        textureSample(terrain_normal_texture, terrain_sampler, base_uv).rgb
+            * 2.0
+            - vec3<f32>(1.0),
+    );
+    let normal_base_b_rotated_raw = textureSample(terrain_normal_texture, terrain_sampler, ar_uv)
+        .rgb
         * 2.0
         - vec3<f32>(1.0);
+    let normal_base_b_raw = reorient_secondary_tangent_normal(
+        normal_base_b_rotated_raw,
+        ar_cos,
+        ar_sin,
+    );
+    let normal_base_raw = normalize_tangent_normal(mix(
+        normal_base_a_raw,
+        normal_base_b_raw,
+        TERRAIN_BASE_AR_BLEND,
+    ));
     let normal_detail_raw = textureSample(
         terrain_normal_texture,
         terrain_sampler,
@@ -1200,7 +1237,7 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     let strength = clamp(terrain_material.normal_strength, 0.0, 1.0);
     let n_ts_xy = normal_base_raw.xy * strength
         + normal_detail_raw.xy * (strength * TERRAIN_DETAIL_NORMAL_BLEND * detail_fade);
-    let n_ts = normalize(vec3<f32>(
+    let n_ts = normalize_tangent_normal(vec3<f32>(
         n_ts_xy,
         sqrt(max(1.0 - dot(n_ts_xy, n_ts_xy), 0.0)),
     ));
@@ -1271,9 +1308,9 @@ fn terrain_fragment_output(
 // G3A-R: terrain stack tuning constants (WGSL side of the central values in
 // `terrain.rs`). Low-contrast by design: the field must read as a maintained
 // flying field, not a wild biome. G3-VR1: slightly stronger macro gain and
-// detail blend break the perceived 4 m tile repetition without changing UVs.
+// detail blend break perceived base-tile repetition without changing UVs.
 const TERRAIN_MACRO_ALBEDO_GAIN: f32 = 0.32;
-const TERRAIN_ALBEDO_AR_BLEND: f32 = 0.5;
+const TERRAIN_BASE_AR_BLEND: f32 = 0.5;
 const TERRAIN_DETAIL_ALBEDO_BLEND: f32 = 0.35;
 const TERRAIN_DETAIL_NORMAL_BLEND: f32 = 0.55;
 const TERRAIN_ROUGHNESS_BASE_WEIGHT: f32 = 0.70;

@@ -1,11 +1,10 @@
 //! G3A: deterministic, development-time terrain texture generation.
 //!
-//! The terrain material is textured with three maps generated off-line by a
-//! pure, deterministic generator (this module) and versioned in the repository
-//! as PNGs (`crates/renderer/assets/terrain_grass_{albedo,normal,roughness}.png`),
-//! embedded into the binary via `include_bytes!`. Generation happens exactly
-//! once at development time; the renderer only decodes the embedded PNGs once
-//! at initialization. There is no per-frame or per-chunk procedural work.
+//! This module owns the legacy 1024Â² procedural regression fixture, versioned as
+//! `crates/renderer/assets/terrain_grass_{albedo,normal,roughness}.png`. ENV1
+//! production rendering instead embeds the 2048Â² Sparse Grass assets declared
+//! by `env1_material`; both paths reuse the generic deterministic mip builder
+//! below. Generation and decoding happen outside the frame path.
 //!
 //! # Seamless tiling
 //!
@@ -30,15 +29,17 @@
 //!
 //! # G3A-R deterministic mip chain
 //!
-//! `generate_terrain_mip_chain` produces the complete mip pyramid (1024 -> 1,
-//! 11 levels) with a wrap-free 2x2 box filter in the correct color space:
+//! `generate_terrain_mip_chain` produces a complete edge-to-1 mip pyramid: the
+//! procedural fixture is 1024 -> 1 (11 levels), while ENV1 production is
+//! 2048 -> 1 (12 levels). Its wrap-free 2x2 box filter uses the correct color space:
 //! albedo is averaged in linear space and re-encoded to sRGB, normal vectors
 //! are decoded, averaged, and renormalized (never flattening), and roughness
 //! (linear R8) is averaged directly. Generation is pure and deterministic, so
 //! the GPU mips can be produced once at initialization from the committed
 //! assets without any per-frame work.
 
-/// Texture edge length in texels for all three maps.
+/// Texture edge length for the legacy procedural regression fixture. ENV1
+/// production runtime maps are 2048Â² and do not change this generator constant.
 pub const TERRAIN_TEXTURE_SIZE: u32 = 1024;
 
 /// Fixed, platform-independent generator seeds. Changing any of these changes
@@ -65,8 +66,9 @@ const GRASS_LUMINANCE_SWING: f32 = 0.16;
 /// Dry-patch noise threshold ([0,1] field, above this the patch is dry).
 const DRY_PATCH_START: f32 = 0.74;
 const DRY_PATCH_PEAK: f32 = 0.94;
-/// Caps colour wear in the base 4 m sample; larger-scale variation comes
-/// from the independent macro carrier rather than repeated yellow patches.
+/// Caps colour wear in the legacy procedural base sample; larger-scale
+/// variation comes from the independent macro carrier rather than repeated
+/// yellow patches. This does not describe the ENV1 photographic scan.
 const DRY_PATCH_MAX_MIX: f32 = 0.16;
 /// Low-contrast directional fibre modulation. Unlike the previous two-pixel
 /// mottle it survives minification as continuous grass grain, not dots.

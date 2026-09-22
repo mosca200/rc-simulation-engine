@@ -5910,9 +5910,9 @@ mod terrain_material_uniform_tests {
 
     #[test]
     fn terrain_material_uniform_layout_is_128_bytes() {
-        // WGSL: eight vec4 slots (PBR factors + debug, stack scales, five
-        // vec2 anchors, ar transform, fade range, padding). Must match the
-        // shader struct exactly.
+        // WGSL: eight vec4 slots (PBR factors + debug, stack scales, common +
+        // legacy-reserved + presentation-carrier anchors, ar transform, fade
+        // range, padding). Must match the shader struct exactly.
         assert_eq!(
             size_of::<TerrainMaterialUniform>(),
             128,
@@ -5969,15 +5969,15 @@ mod terrain_material_uniform_tests {
         let uniform =
             TerrainMaterialUniform::from_terrain_material(&material, TerrainDebugMode::default());
         assert_eq!(uniform.metallic, 0.0);
-        assert_eq!(uniform.roughness, 0.9);
+        assert_eq!(uniform.roughness, 1.0);
         assert_eq!(uniform.normal_strength, 1.0);
         assert_eq!(uniform.debug_mode, 0);
         assert_eq!(uniform.base_scale_m, 2.0);
         assert_eq!(uniform.detail_scale_m, 0.40);
         assert_eq!(uniform.macro_scale_m, 48.0);
         assert_eq!(uniform.albedo_uv_offset, [0.0, 0.0]);
-        assert_eq!(uniform.normal_uv_offset, [0.271, 0.137]);
-        assert_eq!(uniform.roughness_uv_offset, [0.413, 0.303]);
+        assert_eq!(uniform.normal_uv_offset, [0.0, 0.0]);
+        assert_eq!(uniform.roughness_uv_offset, [0.0, 0.0]);
         assert_eq!(uniform.detail_uv_offset, [0.163, 0.037]);
         assert_eq!(uniform.macro_uv_offset, [0.170, 0.390]);
         assert_eq!(uniform.ar_scale_offset[0], 1.370);
@@ -5998,8 +5998,8 @@ mod terrain_material_uniform_tests {
 
         let decoded: TerrainMaterialUniform = *bytemuck::from_bytes(bytemuck::bytes_of(&uniform));
         assert_eq!(decoded.metallic, 0.0);
-        assert_eq!(decoded.roughness, 0.9);
-        assert_eq!(decoded.normal_uv_offset, [0.271, 0.137]);
+        assert_eq!(decoded.roughness, 1.0);
+        assert_eq!(decoded.normal_uv_offset, [0.0, 0.0]);
         assert_eq!(decoded.debug_mode, 0);
         assert_eq!(decoded.ar_scale_offset, uniform.ar_scale_offset);
         assert!(decoded.roughness.is_finite());

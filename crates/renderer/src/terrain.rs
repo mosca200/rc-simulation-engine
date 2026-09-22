@@ -156,6 +156,61 @@ pub fn rotated_secondary_uv(
     ]
 }
 
+/// Reorient a tangent-space normal sampled through a rotated UV transform.
+///
+/// `rotated_secondary_uv` applies `R(angle)` to the world-anchored base UV.
+/// The sampled normal is therefore expressed in that rotated texture basis;
+/// returning it to the primary terrain tangent frame requires `R(-angle)` on
+/// XY. The scale is isotropic and positive, so it does not change orientation.
+/// A degenerate input falls back to the flat OpenGL tangent normal.
+#[must_use]
+pub fn reorient_rotated_tangent_normal(normal: [f32; 3], angle_degrees: f32) -> [f32; 3] {
+    let radians = angle_degrees * PI / 180.0;
+    let (sin, cos) = radians.sin_cos();
+    let reoriented = [
+        cos * normal[0] + sin * normal[1],
+        -sin * normal[0] + cos * normal[1],
+        normal[2],
+    ];
+    normalize_tangent_normal(reoriented)
+}
+
+/// Normalized linear blend for two normals already expressed in the same
+/// tangent frame. This is the ENV1-B0 anti-repetition blend, not a general
+/// normal-layer composition operator.
+#[must_use]
+pub fn blend_registered_tangent_normals(
+    primary: [f32; 3],
+    secondary: [f32; 3],
+    secondary_weight: f32,
+) -> [f32; 3] {
+    let weight = secondary_weight.clamp(0.0, 1.0);
+    normalize_tangent_normal([
+        primary[0] + (secondary[0] - primary[0]) * weight,
+        primary[1] + (secondary[1] - primary[1]) * weight,
+        primary[2] + (secondary[2] - primary[2]) * weight,
+    ])
+}
+
+/// Linear-data blend used by the registered A/B roughness samples.
+#[must_use]
+pub fn blend_linear_roughness(primary: f32, secondary: f32, secondary_weight: f32) -> f32 {
+    let weight = secondary_weight.clamp(0.0, 1.0);
+    primary + (secondary - primary) * weight
+}
+
+fn normalize_tangent_normal(normal: [f32; 3]) -> [f32; 3] {
+    let length_squared = normal
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>();
+    if !length_squared.is_finite() || length_squared <= 1.0e-12 {
+        return [0.0, 0.0, 1.0];
+    }
+    let inverse_length = length_squared.sqrt().recip();
+    normal.map(|component| component * inverse_length)
+}
+
 /// Default chunk size in cells.
 ///
 /// 32x32 cells per chunk balances:
@@ -304,19 +359,23 @@ pub struct TerrainMaterial {
     /// G3A: PBR metallic factor (glTF metallic workflow). Terrain is a
     /// dielectric; the default is 0.0.
     pub metallic: f32,
-    /// G3A: base perceptual roughness. The sampled roughness map is multiplied
-    /// by this factor before the shader's MIN_ROUGHNESS floor.
+    /// G3A: perceptual roughness factor. The sampled roughness map is multiplied
+    /// by this factor before the shader's MIN_ROUGHNESS floor. ENV1 defaults to
+    /// 1.0 so the photographed roughness remains authoritative.
     pub roughness: f32,
     /// G3A: tangent-space normal strength in [0, 1] applied to the sampled
     /// normal map (1.0 = the committed asset amplitude).
     pub normal_strength: f32,
     /// Presentation-only debug channel selector (FINAL by default).
     pub debug_mode: crate::TerrainDebugMode,
-    /// G3A: albedo map UV anchor (in tile units) added to the world-space UV.
+    /// Legacy field name for the common registered base-PBR UV anchor. ENV1-B0
+    /// applies it to albedo, normal, and roughness together.
     pub albedo_uv_offset: [f32; 2],
-    /// G3A: normal map UV anchor (in tile units) added to the world-space UV.
+    /// Reserved legacy per-channel anchor. The production ENV1 path ignores it
+    /// so a photographic PBR set cannot become spatially misregistered.
     pub normal_uv_offset: [f32; 2],
-    /// G3A: roughness map UV anchor (in tile units) added to the world-space UV.
+    /// Reserved legacy per-channel anchor. The production ENV1 path ignores it
+    /// so a photographic PBR set cannot become spatially misregistered.
     pub roughness_uv_offset: [f32; 2],
     /// G3A-R: macro layer tile scale in metres (order 30-80 m).
     pub macro_scale_m: f32,
@@ -349,14 +408,15 @@ impl Default for TerrainMaterial {
             base_color_factor: [1.0, 1.0, 1.0, 1.0],
             texture_scale_m: DEFAULT_TERRAIN_TEXTURE_SCALE_M,
             metallic: 0.0,
-            roughness: 0.9,
+            roughness: 1.0,
             normal_strength: 1.0,
             debug_mode: crate::TerrainDebugMode::Final,
-            // Deliberately non-integer anchors (in tile units) so the three
-            // maps' tile borders never align, breaking perceived repetition.
+            // ENV1-B0: a photographic PBR triplet is one registered scan. The
+            // legacy per-channel fields remain in the stable uniform layout but
+            // default to zero and are ignored by production sampling.
             albedo_uv_offset: [0.0, 0.0],
-            normal_uv_offset: [0.271, 0.137],
-            roughness_uv_offset: [0.413, 0.303],
+            normal_uv_offset: [0.0, 0.0],
+            roughness_uv_offset: [0.0, 0.0],
             // G3A-R: three-frequency stack defaults (see the constants above).
             macro_scale_m: DEFAULT_TERRAIN_MACRO_SCALE_M,
             detail_scale_m: DEFAULT_TERRAIN_DETAIL_SCALE_M,
@@ -1715,7 +1775,7 @@ mod tests {
     #[test]
     fn g2d_texture_scale_does_not_scale_surface_variation() {
         let terrain = generate_flat_terrain(80, 80, 1.0, 0.0);
-        let small_scale = TerrainMaterial::default(); // 4 m
+        let small_scale = TerrainMaterial::default(); // ENV1 production: 2 m
         let large_scale = TerrainMaterial {
             texture_scale_m: 17.0,
             ..Default::default()
@@ -1919,12 +1979,13 @@ mod tests {
     #[test]
     fn g3a_material_configuration_is_deterministic_and_finite() {
         // Pinned production defaults: dielectric, matte, full-strength normal,
-        // world-space tiling at 4 m, white baked base carrying G2D variation.
+        // world-space tiling at the physical 2 m scan span, with a white baked
+        // base carrying G2D variation.
         let material = TerrainMaterial::default();
         assert_eq!(material.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(material.texture_scale_m, DEFAULT_TERRAIN_TEXTURE_SCALE_M);
         assert_eq!(material.metallic, 0.0);
-        assert_eq!(material.roughness, 0.9);
+        assert_eq!(material.roughness, 1.0);
         assert_eq!(material.normal_strength, 1.0);
         for offset in [
             material.albedo_uv_offset,

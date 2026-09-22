@@ -65,9 +65,10 @@ pub use surfaces::{
     GlbPrimitivePart, SurfaceBindingTable, SurfaceHinge, SurfaceId, VISUAL_SLOT_COUNT,
 };
 pub use terrain::{
-    TerrainChunk, TerrainHeightField, TerrainMaterial, detail_normal_fade_weight,
-    generate_centered_terrain_chunks, generate_flat_terrain, generate_rolling_terrain,
-    generate_terrain_chunks, rotated_secondary_uv,
+    TerrainChunk, TerrainHeightField, TerrainMaterial, blend_linear_roughness,
+    blend_registered_tangent_normals, detail_normal_fade_weight, generate_centered_terrain_chunks,
+    generate_flat_terrain, generate_rolling_terrain, generate_terrain_chunks,
+    reorient_rotated_tangent_normal, rotated_secondary_uv,
 };
 pub use texture::{
     DecodedTexture, SamplerConfig, SamplerFilter, SamplerMipmapFilter, SamplerWrap,
