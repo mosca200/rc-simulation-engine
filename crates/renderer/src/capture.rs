@@ -188,7 +188,7 @@ mod tests {
             .split_once("pub fn render_and_capture(")
             .unwrap()
             .0;
-        assert!(normal_render.contains("render_scheduled(frame, None, None, None, false)"));
+        assert!(normal_render.contains("render_scheduled(frame, None, None, None, None, false)"));
         assert!(!normal_render.contains("create_capture_frame_resources"));
 
         let scheduled_render = source

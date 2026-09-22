@@ -532,7 +532,7 @@ mod tests {
             .find("temporal.commit_presented(prepared);")
             .unwrap();
         assert!(acquire < prepare && prepare < submit && submit < present && present < commit);
-        assert!(source.contains("self.render_scheduled(frame, None, None, None, false)"));
+        assert!(source.contains("self.render_scheduled(frame, None, None, None, None, false)"));
     }
 
     #[test]
