@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.1.0",
+  "scene_id": "c2d_terrain_macro",
+  "description": "C2D diagnostic: canonical reference scene with the existing terrain macro debug channel.",
+  "renderer": { "version": "v2", "terrain_debug": "macro", "vegetation_debug": "final" },
+  "scenery": { "preset": "flying-field" },
+  "camera": { "mode": "pilot", "vertical_fov_deg": 55, "pilot_position_render_m": [0.0, 1.8, 20.0] },
+  "resolution": { "width": 1920, "height": 1080 },
+  "exposure_ev": 0,
+  "aircraft": { "model": "models/acro_electric_01/model.json", "throttle": 0.0, "start_on_ground": true },
+  "warmup": 10,
+  "capture": { "filename": "c2d_terrain_macro_1920x1080.png", "format": "png", "frame": 10 },
+  "tags": ["c2d", "diagnostic", "terrain", "macro"]
+}

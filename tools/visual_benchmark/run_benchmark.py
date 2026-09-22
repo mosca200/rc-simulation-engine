@@ -86,6 +86,12 @@ try:  # Imported as part of the tools.visual_benchmark namespace package.
         load_receipt,
         verify_captured_png,
     )
+    from tools.visual_benchmark.runtime_visual_audit import (
+        AUDIT_KIND,
+        AUDIT_SCHEMA_VERSION,
+        check_audit_expectations,
+        load_runtime_visual_audit,
+    )
     from tools.visual_benchmark.validate_capture_evidence import (
         EVIDENCE_KIND,
         EVIDENCE_SCHEMA_PATH,
@@ -108,6 +114,12 @@ except ImportError:  # Direct script execution: script directory is sys.path[0].
         load_receipt,
         verify_captured_png,
     )
+    from runtime_visual_audit import (
+        AUDIT_KIND,
+        AUDIT_SCHEMA_VERSION,
+        check_audit_expectations,
+        load_runtime_visual_audit,
+    )
     from validate_capture_evidence import (
         EVIDENCE_KIND,
         EVIDENCE_SCHEMA_PATH,
@@ -120,8 +132,8 @@ except ImportError:  # Direct script execution: script directory is sys.path[0].
 
 
 RUNNER_NAME = "rv2-vis0-benchmark-runner"
-RUNNER_VERSION = "1.2.0"
-PLAN_VERSION = "1.2.0"
+RUNNER_VERSION = "1.3.0"
+PLAN_VERSION = "1.3.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION_FAILED = 1
@@ -143,6 +155,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # Artifact names inside <output_dir>/<scene_id>/. The capture image name comes
 # from the manifest (capture.filename); these three are tooling-owned.
 RUNTIME_RECEIPT_FILENAME = "runtime_capture_receipt.json"
+RUNTIME_VISUAL_AUDIT_FILENAME = "runtime_visual_audit.json"
 CAPTURE_EVIDENCE_FILENAME = "capture_evidence.json"
 RUN_METADATA_FILENAME = "run.json"
 STDOUT_FILENAME = "stdout.txt"
@@ -184,6 +197,7 @@ KNOWN_RENDER_FLAGS = (
     "--capture-out",
     "--capture-format",
     "--capture-receipt-out",
+    "--visual-audit-out",
     "--exit-after-frame",
 )
 
@@ -222,6 +236,7 @@ EMITTABLE_FLAGS = (
     "--capture-out",
     "--capture-format",
     "--capture-receipt-out",
+    "--visual-audit-out",
     "--exit-after-frame",
 )
 
@@ -231,7 +246,11 @@ MANIFEST_CAPTURE_FLAGS = ("--capture-out", "--capture-format", "--capture-frame"
 # Runner-derived flags, in emission order. Always emitted after the
 # manifest-driven ones so the argv split between "the manifest asked for this"
 # and "the runner decided this" is visible in the command itself.
-DERIVED_CAPTURE_FLAGS = ("--capture-receipt-out", "--exit-after-frame")
+DERIVED_CAPTURE_FLAGS = (
+    "--capture-receipt-out",
+    "--visual-audit-out",
+    "--exit-after-frame",
+)
 
 # --- Runtime capabilities (verified against the runtime source) --------------
 
@@ -735,6 +754,7 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
 
     image_path = scene_output_dir / filename if filename else None
     receipt_path = scene_output_dir / RUNTIME_RECEIPT_FILENAME
+    audit_path = scene_output_dir / RUNTIME_VISUAL_AUDIT_FILENAME
     evidence_path = scene_output_dir / CAPTURE_EVIDENCE_FILENAME
 
     blocking_reasons = []
@@ -797,6 +817,16 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
                 ),
             },
             {
+                "flag": "--visual-audit-out",
+                "value": str(audit_path),
+                "manifest_field": None,
+                "provenance": "runner-derived",
+                "derived_from": (
+                    "C2D runtime visual audit handshake: the runner owns the "
+                    "artifact path; GoldenSceneManifest remains unchanged."
+                ),
+            },
+            {
                 "flag": "--exit-after-frame",
                 "value": frame_text,
                 "manifest_field": "capture.frame",
@@ -836,10 +866,14 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
         ),
         "receipt_path": str(receipt_path),
         "receipt_path_display": display_path(receipt_path, REPO_ROOT),
+        "audit_path": str(audit_path),
+        "audit_path_display": display_path(audit_path, REPO_ROOT),
         "evidence_path": str(evidence_path),
         "evidence_path_display": display_path(evidence_path, REPO_ROOT),
         "receipt_kind": RECEIPT_KIND,
         "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+        "audit_kind": AUDIT_KIND,
+        "audit_schema_version": AUDIT_SCHEMA_VERSION,
         "manifest_arguments": manifest_arguments,
         "derived_arguments": derived_arguments,
         # Absolute paths are handed to the app so the receipt's image_path echo
@@ -849,7 +883,8 @@ def build_capture_plan(manifest: dict, scene_output_dir: Path) -> dict:
         ),
         "stale_artifact_policy": (
             "before a real execution the runner removes a pre-existing capture "
-            "image, runtime_capture_receipt.json, capture_evidence.json and their "
+            "image, runtime_capture_receipt.json, runtime_visual_audit.json, "
+            "capture_evidence.json and their "
             "'.tmp' siblings, failing closed if any removal is refused. This "
             "covers the cases the runtime's own stale-output policy cannot: the "
             "process never starting, or crashing before its cleanup ran. Nothing "
@@ -1464,6 +1499,7 @@ def build_plan(
             "stderr": str(scene_output_dir / STDERR_FILENAME),
             "capture_image": capture_plan["image_path"],
             "runtime_capture_receipt": capture_plan["receipt_path"],
+            "runtime_visual_audit": capture_plan["audit_path"],
             "capture_evidence": capture_plan["evidence_path"],
         },
         "command_argv": argv,
@@ -1487,6 +1523,7 @@ def build_plan(
             "success_requires": [
                 "process exit code 0",
                 f"trusted {RECEIPT_KIND} {RECEIPT_SCHEMA_VERSION}",
+                f"valid {AUDIT_KIND} {AUDIT_SCHEMA_VERSION} matching receipt frame/extent",
                 "PNG independently verified (bytes, SHA-256, IHDR, RGBA8)",
                 f"{EVIDENCE_KIND} {EVIDENCE_SCHEMA_VERSION} accepted by its validator",
             ],
@@ -1721,7 +1758,7 @@ def stale_artifact_paths(plan: dict) -> list:
     capture_plan = plan.get("capture_plan") or {}
     scene_output_dir = Path(plan["scene_output_dir"])
     candidates = []
-    for key in ("image_path", "receipt_path", "evidence_path"):
+    for key in ("image_path", "receipt_path", "audit_path", "evidence_path"):
         raw = capture_plan.get(key)
         if not raw:
             continue
@@ -1822,6 +1859,7 @@ def execute_plan(
         "stale_artifacts_removed": stale_removed,
         "capture_image_path": capture_plan.get("image_path"),
         "runtime_receipt_path": capture_plan.get("receipt_path"),
+        "runtime_visual_audit_path": capture_plan.get("audit_path"),
         "capture_evidence_path": capture_plan.get("evidence_path"),
         "artifacts_written": [
             str(stdout_path),
@@ -1937,18 +1975,96 @@ def verify_capture(plan: dict, execution: dict) -> dict:
     return verification
 
 
+def verify_runtime_visual_audit(
+    plan: dict,
+    execution: dict,
+    capture_verification: dict,
+) -> dict:
+    """Validate the separate C2D audit and bind it to the trusted receipt."""
+    capture_plan = plan.get("capture_plan") or {}
+    audit_path = Path(capture_plan["audit_path"])
+    checks = []
+
+    def record(name: str, passed: bool, detail: str) -> bool:
+        checks.append({"check": name, "passed": bool(passed), "detail": detail})
+        return bool(passed)
+
+    result = {
+        "attempted": True,
+        "valid": False,
+        "path": str(audit_path),
+        "audit": None,
+        "parse_errors": [],
+        "expectation_errors": [],
+        "checks": checks,
+        "failure_reason": None,
+    }
+    process_ok = execution.get("failure_kind") is None and execution.get("exit_code") == 0
+    if not record("process_exit_code_is_zero", process_ok, f"exit code {execution.get('exit_code')}"):
+        result["failure_reason"] = "process did not exit successfully; audit is not trusted"
+        return result
+
+    audit, parse_errors = load_runtime_visual_audit(audit_path)
+    result["parse_errors"] = parse_errors
+    parsed = record(
+        "runtime_visual_audit_parses_as_1_0_0",
+        audit is not None,
+        "; ".join(parse_errors) if parse_errors else f"{audit_path} parsed",
+    )
+    if audit is not None:
+        result["audit"] = audit.to_json()
+
+    receipt = capture_verification.get("receipt") or {}
+    expectation_errors = []
+    if audit is not None and capture_verification.get("trusted"):
+        expectation_errors = check_audit_expectations(
+            audit,
+            expected_frame=receipt.get("presentation_frame_index"),
+            expected_width=receipt.get("framebuffer_width"),
+            expected_height=receipt.get("framebuffer_height"),
+            expected_renderer="v2",
+        )
+    elif audit is not None:
+        expectation_errors = [
+            "runtime capture receipt is not trusted, so audit frame/extent cannot be verified"
+        ]
+    result["expectation_errors"] = expectation_errors
+    matches = record(
+        "audit_matches_trusted_receipt_and_renderer_v2",
+        audit is not None and capture_verification.get("trusted") and not expectation_errors,
+        "; ".join(expectation_errors)
+        if expectation_errors
+        else "frame, framebuffer extent and renderer v2 agree",
+    )
+    result["valid"] = bool(parsed and matches)
+    if not result["valid"]:
+        result["failure_reason"] = "; ".join(parse_errors + expectation_errors) or (
+            "runtime visual audit validation failed"
+        )
+    return result
+
+
 def build_run_metadata(
     plan: dict,
     execution: dict,
     verification: Optional[dict] = None,
     capture_evidence: Optional[dict] = None,
     evidence_validation: Optional[dict] = None,
+    audit_validation: Optional[dict] = None,
 ) -> dict:
     """Assemble run.json. `visual_pass` is always null - never auto-approved."""
     if capture_evidence is None:
         capture_evidence = build_capture_evidence(plan, execution, verification)
     if evidence_validation is None:
         evidence_validation = validate_evidence_document(capture_evidence)
+    if audit_validation is None:
+        audit_validation = {
+            "attempted": False,
+            "valid": False,
+            "path": (plan.get("capture_plan") or {}).get("audit_path"),
+            "audit": None,
+            "failure_reason": "runtime visual audit was not verified",
+        }
     capture_plan = plan.get("capture_plan") or {}
     capture_success = bool(
         capture_evidence.get("execution", {}).get("capture_success")
@@ -1983,6 +2099,8 @@ def build_run_metadata(
         "capture_verification": verification,
         "capture_evidence": capture_evidence,
         "capture_evidence_validation": evidence_validation,
+        "runtime_visual_audit": audit_validation.get("audit"),
+        "runtime_visual_audit_validation": audit_validation,
         "capture_evidence_artifact": {
             "path": capture_plan.get("evidence_path"),
             "path_display": capture_plan.get("evidence_path_display"),
@@ -2011,6 +2129,9 @@ def build_run_metadata(
                 capture_plan.get("receipt_path")
                 if (verification or {}).get("receipt") else None
             ),
+            "runtime_visual_audit": (
+                capture_plan.get("audit_path") if audit_validation.get("valid") else None
+            ),
             "capture_evidence": (
                 capture_plan.get("evidence_path")
                 if evidence_validation.get("valid") else None
@@ -2023,6 +2144,7 @@ def build_run_metadata(
                 execution.get("execution_success")
                 and capture_success
                 and evidence_validation.get("valid")
+                and audit_validation.get("valid")
             ),
             "visual_pass": None,
             "visual_pass_reason": (
@@ -2152,6 +2274,7 @@ def format_plan_human(plan: dict) -> str:
     lines.append(_kv("scene dir", plan["scene_output_dir"]))
     lines.append(_kv("capture image", capture_plan["image_path"]))
     lines.append(_kv("runtime receipt", capture_plan["receipt_path"]))
+    lines.append(_kv("runtime visual audit", capture_plan["audit_path"]))
     lines.append(_kv("capture evidence", capture_plan["evidence_path"]))
     lines.append(_kv("run.json", plan["artifact_paths"]["run_json"]))
     lines.append(_kv("stdout.txt", plan["artifact_paths"]["stdout"]))
@@ -2397,6 +2520,7 @@ def _run(args: argparse.Namespace) -> int:
     #    the receipt must parse, match the request plan, and the PNG must be
     #    re-measured on disk before any of it is believed.
     verification = verify_capture(plan, execution)
+    audit_validation = verify_runtime_visual_audit(plan, execution, verification)
     evidence = build_capture_evidence(plan, execution, verification)
     evidence_validation = validate_evidence_document(evidence)
 
@@ -2411,7 +2535,12 @@ def _run(args: argparse.Namespace) -> int:
     run_json_path = Path(plan["artifact_paths"]["run_json"])
     execution["artifacts_written"].append(str(run_json_path))
     metadata = build_run_metadata(
-        plan, execution, verification, evidence, evidence_validation
+        plan,
+        execution,
+        verification,
+        evidence,
+        evidence_validation,
+        audit_validation,
     )
     write_json(run_json_path, metadata)
 
@@ -2425,6 +2554,7 @@ def _run(args: argparse.Namespace) -> int:
     print(f"capture_success:   {capture_success}")
     print(f"receipt_trusted:   {bool(verification['trusted'])}")
     print(f"evidence_valid:    {evidence_validation['valid']}")
+    print(f"visual_audit_valid:{audit_validation['valid']}")
     print(f"runner_success:    {runner_success}")
     if capture_success:
         print(f"capture image:     {evidence['capture']['image']['path']}")
@@ -2465,6 +2595,12 @@ def _run(args: argparse.Namespace) -> int:
         )
         for error in evidence_validation["errors"]:
             print(f"    - {error}", file=sys.stderr)
+    if not audit_validation["valid"]:
+        print(
+            "error: RuntimeVisualAudit validation failed: "
+            f"{audit_validation['failure_reason']}",
+            file=sys.stderr,
+        )
     if execution["failure_kind"] is not None:
         print(
             f"error: {execution['failure_kind']}: {execution['failure_message']}",

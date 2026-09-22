@@ -26,6 +26,7 @@ from pathlib import Path
 
 from tools.visual_benchmark import run_benchmark as rb
 from tools.visual_benchmark import runtime_capture_receipt as rcr
+from tools.visual_benchmark import runtime_visual_audit as rva
 from tools.visual_benchmark.validate_capture_evidence import (
     ALL_LEAF_FIELDS,
     RUNTIME_SUPPLIED_FIELDS,
@@ -166,6 +167,82 @@ def receipt_for(image_path, png_bytes: bytes, width: int, height: int,
     }
 
 
+def audit_for(frame: int = 10, width: int = 320, height: int = 240) -> dict:
+    passes = [{
+        "pass_id": pass_id,
+        "label": pass_id,
+        "cpu_duration_ns": 1,
+        "gpu_duration_ns": None,
+    } for pass_id in rva.PASS_IDS]
+    return {
+        "schema_version": "1.0.0",
+        "identity": {
+            "presentation_frame_index": frame,
+            "framebuffer_width": width,
+            "framebuffer_height": height,
+            "renderer_version": "v2",
+        },
+        "device": {
+            "adapter_name": "NVIDIA GeForce RTX 3090",
+            "backend": "vulkan",
+            "driver": "NVIDIA",
+            "driver_info": "test",
+        },
+        "environment": {
+            "environment_mode": "physical",
+            "physical_atmosphere_active": True,
+            "physical_ibl_active": True,
+            "aerial_perspective_active": True,
+        },
+        "image_pipeline": {
+            "hdr_scene_format": "Rgba16Float",
+            "exposure_ev": 0.0,
+            "tone_mapper": "Khronos PBR Neutral",
+            "temporal_resolve_active": True,
+        },
+        "shadows": {
+            "path_active": True,
+            "cascade_count": 3,
+            "map_resolution": 2048,
+            "split_distances_m": [32.0, 128.0, 512.0],
+            "filtering": "PCF",
+            "filter_tap_count": None,
+            "filter_tap_count_unavailable_reason": "not runtime state",
+        },
+        "terrain": {
+            "render_mode": "flat",
+            "debug_mode": "final",
+            "material_path_active": True,
+            "sampler_anisotropy": 16,
+            "material_scale": None,
+            "material_scale_unavailable_reason": "multi-frequency material",
+        },
+        "vegetation": {
+            "vegetation_present": True,
+            "debug_mode": "final",
+            "stats": {
+                "total": 10,
+                "visible": 6,
+                "culled_frustum": 3,
+                "culled_distance": 1,
+                "lod_counts": [1, 2, 3],
+                "scene_draw_calls": 4,
+                "shadow_draw_calls": 9,
+                "uploaded_instance_bytes": 288,
+            },
+        },
+        "profiling": {
+            "presentation_frame_index": frame,
+            "cpu_frame_duration_ns": 100,
+            "gpu_timing_status": "timestamp_query_unsupported",
+            "gpu_timing_source_presentation_frame_index": None,
+            "gpu_timing_frame_age": None,
+            "gpu_timing_unavailable_reason": "timestamp queries unsupported",
+            "passes": passes,
+        },
+    }
+
+
 # A stand-in for `rcsim-app render` that reproduces the VIS0-C2A artifact
 # contract: it writes a real RGBA8 PNG to --capture-out and a byte-accurate
 # RuntimeCaptureReceipt to --capture-receipt-out. Behaviour knobs are baked in
@@ -191,6 +268,7 @@ RECEIPT_SHA = __RECEIPT_SHA__
 RECEIPT_SIZE = __RECEIPT_SIZE__
 EXIT_CODE = __EXIT_CODE__
 SKIP_RECEIPT = __SKIP_RECEIPT__
+SKIP_AUDIT = __SKIP_AUDIT__
 CORRUPT_PNG = __CORRUPT_PNG__
 
 
@@ -219,6 +297,7 @@ def build_png(width, height):
 def main():
     out = option("--capture-out")
     receipt_out = option("--capture-receipt-out")
+    audit_out = option("--visual-audit-out")
     if out is None:
         print("fake runtime: no --capture-out", file=sys.stderr)
         return 2
@@ -249,6 +328,74 @@ def main():
     with open(receipt_out, "w", encoding="utf-8") as handle:
         json.dump(receipt, handle, indent=2)
         handle.write("\\n")
+    if not SKIP_AUDIT and audit_out is not None:
+        passes = [{
+            "pass_id": pass_id,
+            "label": pass_id,
+            "cpu_duration_ns": 1,
+            "gpu_duration_ns": None,
+        } for pass_id in (
+            "shadow_near", "shadow_mid", "shadow_far", "scene",
+            "temporal_resolve", "postprocess",
+        )]
+        audit = {
+            "schema_version": "1.0.0",
+            "identity": {
+                "presentation_frame_index": receipt["presentation_frame_index"],
+                "framebuffer_width": receipt["framebuffer_width"],
+                "framebuffer_height": receipt["framebuffer_height"],
+                "renderer_version": "v2",
+            },
+            "device": {
+                "adapter_name": "test adapter", "backend": "test backend",
+                "driver": "test driver", "driver_info": "test driver info",
+            },
+            "environment": {
+                "environment_mode": "physical",
+                "physical_atmosphere_active": True,
+                "physical_ibl_active": True,
+                "aerial_perspective_active": True,
+            },
+            "image_pipeline": {
+                "hdr_scene_format": "Rgba16Float", "exposure_ev": 0.0,
+                "tone_mapper": "Khronos PBR Neutral",
+                "temporal_resolve_active": True,
+            },
+            "shadows": {
+                "path_active": True, "cascade_count": 3,
+                "map_resolution": 2048,
+                "split_distances_m": [32.0, 128.0, 512.0],
+                "filtering": "PCF", "filter_tap_count": None,
+                "filter_tap_count_unavailable_reason": "not runtime state",
+            },
+            "terrain": {
+                "render_mode": "flat", "debug_mode": "final",
+                "material_path_active": True, "sampler_anisotropy": 16,
+                "material_scale": None,
+                "material_scale_unavailable_reason": "multi-frequency material",
+            },
+            "vegetation": {
+                "vegetation_present": True, "debug_mode": "final",
+                "stats": {
+                    "total": 1, "visible": 1, "culled_frustum": 0,
+                    "culled_distance": 0, "lod_counts": [1, 0, 0],
+                    "scene_draw_calls": 1, "shadow_draw_calls": 3,
+                    "uploaded_instance_bytes": 48,
+                },
+            },
+            "profiling": {
+                "presentation_frame_index": receipt["presentation_frame_index"],
+                "cpu_frame_duration_ns": 1,
+                "gpu_timing_status": "timestamp_query_unsupported",
+                "gpu_timing_source_presentation_frame_index": None,
+                "gpu_timing_frame_age": None,
+                "gpu_timing_unavailable_reason": "unsupported in test adapter",
+                "passes": passes,
+            },
+        }
+        with open(audit_out, "w", encoding="utf-8") as handle:
+            json.dump(audit, handle, indent=2)
+            handle.write("\\n")
     return EXIT_CODE
 
 
@@ -267,6 +414,7 @@ FAKE_RUNTIME_DEFAULTS = {
     "RECEIPT_SIZE": None,
     "EXIT_CODE": 0,
     "SKIP_RECEIPT": False,
+    "SKIP_AUDIT": False,
     "CORRUPT_PNG": False,
 }
 
@@ -1232,6 +1380,8 @@ class TestVisualVerdictPolicy(RunnerTestCase):
             "validate_capture_evidence",
             # The VIS0-C2B runtime receipt reader, also a sibling module.
             "runtime_capture_receipt",
+            # The separate C2D runtime visual audit reader.
+            "runtime_visual_audit",
         }
         self.assert_stdlib_only(RUNNER_SOURCE, allowed)
 
@@ -1251,6 +1401,11 @@ class TestVisualVerdictPolicy(RunnerTestCase):
             "hashlib", "json", "os", "re", "dataclasses", "pathlib", "typing",
             "validate_manifest", "tools",
         }
+        self.assert_stdlib_only(source, allowed)
+
+    def test_visual_audit_module_is_also_standard_library_only(self):
+        source = RUNNER_SOURCE.with_name("runtime_visual_audit.py")
+        allowed = {"json", "math", "dataclasses", "pathlib", "typing"}
         self.assert_stdlib_only(source, allowed)
 
     def assert_stdlib_only(self, source: Path, allowed: set):
@@ -1968,12 +2123,12 @@ class TestCaptureCliMapping(RunnerTestCase):
 
     def test_known_flags_include_the_real_capture_group(self):
         for flag in ("--capture-frame", "--capture-out", "--capture-format",
-                     "--capture-receipt-out"):
+                     "--capture-receipt-out", "--visual-audit-out"):
             self.assertIn(flag, rb.KNOWN_RENDER_FLAGS, flag)
 
     def test_emittable_flags_include_the_real_capture_group(self):
         for flag in ("--capture-frame", "--capture-out", "--capture-format",
-                     "--capture-receipt-out"):
+                     "--capture-receipt-out", "--visual-audit-out"):
             self.assertIn(flag, rb.EMITTABLE_FLAGS, flag)
 
     def test_capture_group_and_exit_after_frame_stay_separate(self):
@@ -1986,7 +2141,7 @@ class TestCaptureCliMapping(RunnerTestCase):
         )
         self.assertEqual(
             list(rb.DERIVED_CAPTURE_FLAGS),
-            ["--capture-receipt-out", "--exit-after-frame"],
+            ["--capture-receipt-out", "--visual-audit-out", "--exit-after-frame"],
         )
 
     def test_reference_manifest_emits_capture_frame_ten(self):
@@ -2010,6 +2165,7 @@ class TestCaptureCliMapping(RunnerTestCase):
         plan = self.build_plan()
         self.assertTrue(Path(self.argv_value(plan, "--capture-out")).is_absolute())
         self.assertTrue(Path(self.argv_value(plan, "--capture-receipt-out")).is_absolute())
+        self.assertTrue(Path(self.argv_value(plan, "--visual-audit-out")).is_absolute())
         self.assertTrue(plan["capture_plan"]["paths_are_absolute"])
 
     def test_emits_capture_format_png(self):
@@ -2021,6 +2177,12 @@ class TestCaptureCliMapping(RunnerTestCase):
         receipt = self.argv_value(plan, "--capture-receipt-out")
         self.assertEqual(Path(receipt).name, "runtime_capture_receipt.json")
         self.assertEqual(Path(receipt).parent, Path(plan["scene_output_dir"]))
+
+    def test_emits_runner_derived_visual_audit_out(self):
+        plan = self.build_plan()
+        audit = self.argv_value(plan, "--visual-audit-out")
+        self.assertEqual(Path(audit).name, "runtime_visual_audit.json")
+        self.assertEqual(Path(audit).parent, Path(plan["scene_output_dir"]))
 
     def test_emits_runner_derived_exit_after_frame(self):
         plan = self.build_plan()
@@ -2035,6 +2197,7 @@ class TestCaptureCliMapping(RunnerTestCase):
             self.assertEqual(item["provenance"], "runner-derived", flag)
             self.assertTrue(item["derived_from"], flag)
         self.assertIsNone(by_flag["--capture-receipt-out"]["manifest_field"])
+        self.assertIsNone(by_flag["--visual-audit-out"]["manifest_field"])
         self.assertEqual(by_flag["--exit-after-frame"]["manifest_field"], "capture.frame")
 
     def test_manifest_driven_flags_are_labelled_manifest_in_the_plan(self):
@@ -2108,6 +2271,7 @@ class TestCaptureCliMapping(RunnerTestCase):
             "--capture-format", "png",
             "--capture-frame", "10",
             "--capture-receipt-out", str(scene_dir / "runtime_capture_receipt.json"),
+            "--visual-audit-out", str(scene_dir / "runtime_visual_audit.json"),
             "--exit-after-frame", "10",
         ])
 
@@ -2251,7 +2415,7 @@ class TestCaptureExecutabilityPolicy(RunnerTestCase):
         plan = self.build_plan()
         self.assertTrue(plan["execution_policy"]["capture_executable"])
         self.assertFalse(plan["execution_policy"]["process_exit_zero_is_sufficient"])
-        self.assertEqual(len(plan["execution_policy"]["success_requires"]), 4)
+        self.assertEqual(len(plan["execution_policy"]["success_requires"]), 5)
 
     def test_enforce_capture_executability_raises_for_a_blocked_plan(self):
         plan = self.build_plan(small_manifest(frame=10, warmup=3))
@@ -2278,6 +2442,7 @@ class TestDryRunSideEffects(RunnerTestCase):
         self.assertFalse(output.exists())
         self.assertEqual(list(self.tmp.rglob("*.png")), [])
         self.assertEqual(list(self.tmp.rglob("runtime_capture_receipt.json")), [])
+        self.assertEqual(list(self.tmp.rglob("runtime_visual_audit.json")), [])
         self.assertEqual(list(self.tmp.rglob("capture_evidence.json")), [])
 
     def test_dry_run_starts_no_process(self):
@@ -2350,6 +2515,7 @@ class TestStaleArtifactSafety(RunnerTestCase):
         capture_plan = plan["capture_plan"]
         planted = []
         for raw in (capture_plan["image_path"], capture_plan["receipt_path"],
+                    capture_plan["audit_path"],
                     capture_plan["evidence_path"]):
             path = Path(raw)
             path.write_bytes(b"stale from a previous run")
@@ -2967,6 +3133,81 @@ class TestEvidenceFromRuntimeReceipt(RunnerTestCase):
         self.assertIsNone(evidence["capture"]["image"]["sha256"])
 
 
+class TestRuntimeVisualAuditContract(RunnerTestCase):
+    def test_valid_audit_is_accepted_with_required_groups(self):
+        audit, errors = rva.parse_runtime_visual_audit(audit_for())
+        self.assertIsNotNone(audit, errors)
+        self.assertEqual(audit.to_json()["schema_version"], "1.0.0")
+        self.assertEqual(set(audit.to_json()), rva.ROOT_FIELDS)
+
+    def test_missing_audit_is_rejected(self):
+        audit, errors = rva.load_runtime_visual_audit(self.tmp / "absent.json")
+        self.assertIsNone(audit)
+        self.assertTrue(any("not found" in error for error in errors), errors)
+
+    def test_malformed_audit_is_rejected(self):
+        path = self.tmp / "runtime_visual_audit.json"
+        path.write_text("{broken", encoding="utf-8")
+        audit, errors = rva.load_runtime_visual_audit(path)
+        self.assertIsNone(audit)
+        self.assertTrue(any("not valid JSON" in error for error in errors), errors)
+
+    def test_frame_mismatch_is_rejected(self):
+        audit, errors = rva.parse_runtime_visual_audit(audit_for(frame=9))
+        self.assertFalse(errors)
+        mismatches = rva.check_audit_expectations(audit, 10, 320, 240)
+        self.assertTrue(any("presentation_frame_index" in error for error in mismatches))
+
+    def test_extent_mismatch_is_rejected(self):
+        audit, errors = rva.parse_runtime_visual_audit(audit_for(width=640))
+        self.assertFalse(errors)
+        mismatches = rva.check_audit_expectations(audit, 10, 320, 240)
+        self.assertTrue(any("framebuffer_width" in error for error in mismatches))
+
+    def test_gpu_timing_unavailable_is_null_not_zero(self):
+        audit, errors = rva.parse_runtime_visual_audit(audit_for())
+        self.assertFalse(errors)
+        profiling = audit.to_json()["profiling"]
+        self.assertEqual(profiling["gpu_timing_status"], "timestamp_query_unsupported")
+        self.assertTrue(all(item["gpu_duration_ns"] is None for item in profiling["passes"]))
+        broken = audit_for()
+        broken["profiling"]["passes"][0]["gpu_duration_ns"] = 0
+        parsed, errors = rva.parse_runtime_visual_audit(broken)
+        self.assertIsNone(parsed)
+        self.assertTrue(any("must be null" in error for error in errors), errors)
+
+    def test_previous_gpu_sample_has_explicit_frame_association(self):
+        payload = audit_for(frame=10)
+        profiling = payload["profiling"]
+        profiling["gpu_timing_status"] = "previous_frame_sample"
+        profiling["gpu_timing_source_presentation_frame_index"] = 8
+        profiling["gpu_timing_frame_age"] = 2
+        profiling["gpu_timing_unavailable_reason"] = None
+        for item in profiling["passes"]:
+            item["gpu_duration_ns"] = 5.0
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNotNone(audit, errors)
+
+    def test_vegetation_absent_requires_null_stats(self):
+        payload = audit_for()
+        payload["vegetation"] = {
+            "vegetation_present": False,
+            "debug_mode": "final",
+            "stats": None,
+        }
+        audit, errors = rva.parse_runtime_visual_audit(payload)
+        self.assertIsNotNone(audit, errors)
+
+    def test_execute_fails_closed_when_audit_is_missing(self):
+        code, _out, _err, out_dir = self.execute_with_fake_runtime(
+            manifest=small_manifest(), SKIP_AUDIT=True
+        )
+        self.assertEqual(code, rb.EXIT_EXECUTION_FAILED)
+        metadata = self.read_json(self.scene_dir(out_dir) / "run.json")
+        self.assertFalse(metadata["runtime_visual_audit_validation"]["valid"])
+        self.assertIsNone(metadata["verdict"]["visual_pass"])
+
+
 class TestEndToEndCaptureExecution(RunnerTestCase):
     """C2B tasks 13-15 and 18, exercised against the real runner entry point."""
 
@@ -3204,12 +3445,12 @@ class TestEndToEndCaptureExecution(RunnerTestCase):
         self.assertIn("RuntimeCaptureReceipt 1.0.0 carries no adapter",
                       hardware["notes"])
 
-    def test_runner_and_plan_versions_are_1_2_0(self):
-        self.assertEqual(rb.RUNNER_VERSION, "1.2.0")
-        self.assertEqual(rb.PLAN_VERSION, "1.2.0")
+    def test_runner_and_plan_versions_are_1_3_0(self):
+        self.assertEqual(rb.RUNNER_VERSION, "1.3.0")
+        self.assertEqual(rb.PLAN_VERSION, "1.3.0")
         plan = self.build_plan()
-        self.assertEqual(plan["plan_version"], "1.2.0")
-        self.assertEqual(plan["runner"]["version"], "1.2.0")
+        self.assertEqual(plan["plan_version"], "1.3.0")
+        self.assertEqual(plan["runner"]["version"], "1.3.0")
 
     def test_contract_versions_are_untouched(self):
         self.assertEqual(SUPPORTED_SCHEMA_VERSION, "1.1.0")
