@@ -59,10 +59,22 @@ use std::f32::consts::PI;
 
 /// Default terrain texture scale in metres.
 ///
-/// ENV1-A: 2.0 m per base tile. The photographic Poly Haven `sparse_grass`
-/// material replaces the procedural maps and is tiled at its own scanned
-/// extent rather than at the previous 4 m, so one 2048x2048 tile covers a 2 m
-/// square of ground (1024 texels/m).
+/// ENV1-A: 2.0 m per base tile — the measured physical span of the source
+/// asset, not a free tuning choice.
+///
+/// The Poly Haven public API's OpenAPI schema defines a texture asset's
+/// `dimensions` as the size on each axis **in millimetres**, and `sparse_grass`
+/// reports `[2000, 2000]`, i.e. a 2.0 m x 2.0 m scanned area. One base texture
+/// tile therefore covers exactly the scanned area, so the photograph is
+/// reproduced at true size: 2048 texels over 2.0 m = 1024 texels/m.
+///
+/// The authoritative record is `docs/assets/env1/env1_open_assets.json`
+/// (`api.dimensions`, `api.dimensions_unit`, `api.physical_dimensions_m` and
+/// `runtime_binding`). The link is enforced by
+/// `env1_runtime_material_uses_the_documented_physical_tile_span` in
+/// `crates/renderer/tests/env1_a_sparse_grass_material.rs` and re-checked
+/// against this constant by `tools/env1_asset_pipeline/verify_env1_assets.py`;
+/// nothing parses JSON at render time.
 ///
 /// Only the base layer's tiling frequency changes. The macro and detail layers
 /// are derived in the shader as `uv * (base_scale / layer_scale)`, where `uv`

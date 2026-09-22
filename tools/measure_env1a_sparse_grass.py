@@ -22,6 +22,8 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import pathlib
 import shutil
@@ -198,13 +200,63 @@ def audit_summary(audit: dict) -> dict:
     }
 
 
-def main() -> int:
+CANDIDATE_NOTE = (
+    "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are "
+    "referenced here by path and SHA-256. A PNG is committed only when it is "
+    "explicitly promoted to an approved golden/beauty baseline; ENV1-A has no "
+    "such promotion (visual_pass is null), so committed_png is null."
+)
+
+
+def artifact_entry(local: pathlib.Path, promoted_name: str, promote: bool) -> dict:
+    """Record a capture artifact without ever implying a committed PNG exists."""
+    return {
+        "committed_png": (
+            f"docs/validation/env1_a_sparse_grass/png/{promoted_name}" if promote else None
+        ),
+        "committed_png_note": (
+            "Explicitly promoted to a committed baseline." if promote else CANDIDATE_NOTE
+        ),
+        "local_png": str(local.relative_to(ROOT)).replace("\\", "/"),
+        "local_png_sha256": sha256_file(local),
+    }
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="measure_env1a_sparse_grass.py",
+        description="Measure and collect the ENV1-A BEFORE/AFTER capture evidence.",
+    )
+    parser.add_argument(
+        "--promote-png",
+        action="store_true",
+        help=(
+            "copy the capture PNGs into docs/validation/env1_a_sparse_grass/png/ "
+            "and record committed paths. Off by default: candidate captures stay "
+            "under tmp/ and are referenced by digest only."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
     if not BEFORE_ROOT.is_dir() or not AFTER_ROOT.is_dir():
         raise SystemExit(
             f"expected BEFORE runs under {BEFORE_ROOT} and AFTER runs under {AFTER_ROOT}"
         )
 
-    PNG_DIR.mkdir(parents=True, exist_ok=True)
+    promote = bool(args.promote_png)
+    if promote:
+        PNG_DIR.mkdir(parents=True, exist_ok=True)
     resolutions = []
 
     for resolution, scene_id, manifest in RESOLUTIONS:
@@ -221,8 +273,9 @@ def main() -> int:
 
         before_name = f"BEFORE_{resolution}.png"
         after_name = f"AFTER_{resolution}.png"
-        shutil.copyfile(before["png"], PNG_DIR / before_name)
-        shutil.copyfile(after["png"], PNG_DIR / after_name)
+        if promote:
+            shutil.copyfile(before["png"], PNG_DIR / before_name)
+            shutil.copyfile(after["png"], PNG_DIR / after_name)
 
         resolutions.append(
             {
@@ -230,8 +283,7 @@ def main() -> int:
                 "scene_id": scene_id,
                 "manifest": manifest,
                 "before": {
-                    "png": f"docs/validation/env1_a_sparse_grass/png/{before_name}",
-                    "source_png": str(before["png"].relative_to(ROOT)).replace("\\", "/"),
+                    **artifact_entry(before["png"], before_name, promote),
                     "image_sha256": before["receipt"]["image_sha256"],
                     "image_byte_size": before["receipt"]["image_byte_size"],
                     "framebuffer": [
@@ -247,8 +299,7 @@ def main() -> int:
                     "audit": audit_summary(before["audit"]),
                 },
                 "after": {
-                    "png": f"docs/validation/env1_a_sparse_grass/png/{after_name}",
-                    "source_png": str(after["png"].relative_to(ROOT)).replace("\\", "/"),
+                    **artifact_entry(after["png"], after_name, promote),
                     "image_sha256": after["receipt"]["image_sha256"],
                     "image_byte_size": after["receipt"]["image_byte_size"],
                     "framebuffer": [
@@ -287,7 +338,8 @@ def main() -> int:
         audit = load_json(scene / "runtime_visual_audit.json")
         run = load_json(scene / "run.json")
         name = f"AFTER_c2d_terrain_{channel}.png"
-        shutil.copyfile(pngs[0], PNG_DIR / name)
+        if promote:
+            shutil.copyfile(pngs[0], PNG_DIR / name)
         reported = audit["terrain"]["debug_mode"]
         if reported != channel:
             raise SystemExit(
@@ -298,7 +350,7 @@ def main() -> int:
             {
                 "terrain_debug": channel,
                 "manifest": f"docs/validation/visual_benchmark/c2d_terrain_{channel}.json",
-                "png": f"docs/validation/env1_a_sparse_grass/png/{name}",
+                **artifact_entry(pngs[0], name, promote),
                 "image_sha256": receipt["image_sha256"],
                 "image_byte_size": receipt["image_byte_size"],
                 "framebuffer": [receipt["framebuffer_width"], receipt["framebuffer_height"]],
@@ -350,7 +402,10 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     EVIDENCE_PATH.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     print(f"\nwrote {EVIDENCE_PATH}")
-    print(f"png artifacts in {PNG_DIR}")
+    if promote:
+        print(f"png artifacts promoted into {PNG_DIR}")
+    else:
+        print("png artifacts left under tmp/ (candidate); evidence records digests only")
     return 0
 
 

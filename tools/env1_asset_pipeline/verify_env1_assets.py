@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -227,6 +228,53 @@ def verify_reprocess(root: pathlib.Path, report: Reporter) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
+TERRAIN_SCALE_PATTERN = re.compile(
+    r"pub const DEFAULT_TERRAIN_TEXTURE_SCALE_M: f32 = ([0-9.]+);"
+)
+
+
+def verify_tile_scale_binding(root: pathlib.Path, asset: dict, report: Reporter) -> None:
+    """Prove the manifest's tile scale is the one the renderer actually compiles.
+
+    The link is checked here and by a Rust regression test, never by parsing
+    JSON at render time.
+    """
+    print("\nterrain tile scale binding:")
+    binding = asset.get("runtime_binding") or {}
+    declared = binding.get("terrain_base_tile_scale_m")
+    api = asset.get("api") or {}
+    physical = api.get("physical_dimensions_m")
+    source = root / "crates/renderer/src/terrain.rs"
+    if not source.is_file():
+        report.fail(f"{source} is missing; the tile scale cannot be verified")
+        return
+    match = TERRAIN_SCALE_PATTERN.search(source.read_text(encoding="utf-8"))
+    if match is None:
+        report.fail("DEFAULT_TERRAIN_TEXTURE_SCALE_M was not found in terrain.rs")
+        return
+    compiled = float(match.group(1))
+    if declared is None or abs(compiled - float(declared)) > 1e-9:
+        report.fail(
+            f"terrain.rs compiles DEFAULT_TERRAIN_TEXTURE_SCALE_M = {compiled} m but the "
+            f"manifest declares {declared} m"
+        )
+        return
+    if not (isinstance(physical, list) and len(physical) == 2):
+        report.fail("api.physical_dimensions_m is missing; the binding cannot be checked")
+        return
+    for axis, span in enumerate(physical):
+        if abs(compiled - float(span)) > 1e-9:
+            report.fail(
+                f"tile scale {compiled} m does not equal the asset's physical span "
+                f"{span} m on axis {axis}"
+            )
+            return
+    report.ok(
+        f"DEFAULT_TERRAIN_TEXTURE_SCALE_M = {compiled} m == the asset's physical span "
+        f"{api.get('dimensions')} {api.get('dimensions_unit')} == {physical} m"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_streams()
     parser = argparse.ArgumentParser(
@@ -276,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     for asset in manifest.get("assets", []) if isinstance(manifest.get("assets"), list) else []:
         print(f"\nasset {asset.get('asset_id')} ({asset.get('slug')}, {asset.get('license')})")
         verify_runtime_outputs(root, asset, report)
+        verify_tile_scale_binding(root, asset, report)
         verify_sources(root, asset, report)
         if args.reprocess:
             verify_reprocess(root, report)

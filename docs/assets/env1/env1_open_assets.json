@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "slice": "ENV1-A",
-  "generated_at_utc": "2026-09-22T17:57:06Z",
+  "generated_at_utc": "2026-09-22T19:13:28Z",
   "attribution": "Powered by Poly Haven (https://polyhaven.com)",
   "api_terms_note": "The Poly Haven public API was used for all metadata and download URLs; no HTML was scraped. The API terms require the attribution recorded in `attribution`.",
   "assets": [
@@ -32,8 +32,12 @@
           2000,
           2000
         ],
-        "dimensions_unit": null,
-        "dimensions_unit_note": "The Poly Haven /info API reports `dimensions` as a bare pair with no unit. The value is recorded verbatim and the unit is left null rather than guessed. ENV1-A therefore does not derive any physical tiling scale from it; the terrain base tile scale is an explicit, documented material parameter instead.",
+        "dimensions_unit": "mm",
+        "physical_dimensions_m": [
+          2.0,
+          2.0
+        ],
+        "dimensions_unit_note": "The Poly Haven public API's OpenAPI schema defines a texture asset's `dimensions` as an array with the dimensions of the asset on each axis in millimetres. `dimensions` is therefore recorded verbatim in mm, `dimensions_unit` carries the provider-documented unit, and `physical_dimensions_m` is the explicit derived value (mm / 1000). ENV1-A ties the terrain base tile scale to this measurement: one texture tile covers exactly the scanned area.",
         "category": "Ground & Terrain/Grass & Vegetation/Dry & Sparse Grass",
         "description": "Free 8K texture of sparse grass: thin green tufts and visible roots over rough, damp soil, with subtle height detail and organic, earthy brown-green tones.",
         "fetched_utc": "2026-09-22T17:56:59Z",
@@ -172,7 +176,17 @@
           "png_interlace": 0,
           "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
         }
-      ]
+      ],
+      "runtime_binding": {
+        "terrain_base_tile_scale_m": 2.0,
+        "constant": "DEFAULT_TERRAIN_TEXTURE_SCALE_M",
+        "defined_in": "crates/renderer/src/terrain.rs",
+        "relationship": "One terrain base texture tile covers exactly the asset's full physical span, so the photograph is reproduced at true size: sparse_grass is a 2.0 m x 2.0 m scan (2000 mm per axis) and the ENV1 terrain base tile scale is 2.0 m. The macro (48 m) and detail (0.40 m) layers resolve to absolute world metres in the shader and are invariant to it; the anti-repetition rotation and offsets are unchanged.",
+        "enforced_by": [
+          "tools/env1_asset_pipeline/env1_assets.py::_validate_runtime_binding",
+          "crates/renderer/tests/env1_a_sparse_grass_material.rs::env1_runtime_material_uses_the_documented_physical_tile_span"
+        ]
+      }
     }
   ]
 }

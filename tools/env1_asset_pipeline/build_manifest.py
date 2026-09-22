@@ -33,6 +33,7 @@ from env1_assets import (  # noqa: E402
     MANIFEST_VERSION,
     NOT_APPLIED,
     PROVIDER,
+    DIMENSIONS_UNIT,
     RECIPE_VERSION,
     RUNTIME_DIR_RELATIVE,
     RUNTIME_EDGE,
@@ -48,6 +49,7 @@ from env1_assets import (  # noqa: E402
     describe_file,
     load_manifest,
     manifest_path,
+    physical_dimensions_m,
     runtime_dir,
     source_cache_dir,
     validate_manifest,
@@ -56,14 +58,19 @@ from env1_assets import (  # noqa: E402
 RECEIPT_NAME = f"fetch_receipt_{SOURCE_RESOLUTION}_{SOURCE_FORMAT}.json"
 PROCESSOR_COMMAND = "cargo run -p renderer --bin process_env1_terrain_material"
 
-#: The API does not state a unit for `dimensions`; recording one would be
-#: invention, so the manifest keeps the value verbatim and the unit null.
+#: The Poly Haven public API's OpenAPI schema defines a texture asset's
+#: `dimensions` as "an array with the dimensions of this asset on each axis in
+#: millimeters". The unit is documented by the provider, so it is recorded as
+#: such and the metre equivalent is derived explicitly - never guessed, never
+#: converted silently.
 DIMENSIONS_UNIT_NOTE = (
-    "The Poly Haven /info API reports `dimensions` as a bare pair with no unit. "
-    "The value is recorded verbatim and the unit is left null rather than "
-    "guessed. ENV1-A therefore does not derive any physical tiling scale from "
-    "it; the terrain base tile scale is an explicit, documented material "
-    "parameter instead."
+    "The Poly Haven public API's OpenAPI schema defines a texture asset's "
+    "`dimensions` as an array with the dimensions of the asset on each axis in "
+    "millimetres. `dimensions` is therefore recorded verbatim in mm, "
+    "`dimensions_unit` carries the provider-documented unit, and "
+    "`physical_dimensions_m` is the explicit derived value "
+    "(mm / 1000). ENV1-A ties the terrain base tile scale to this measurement: "
+    "one texture tile covers exactly the scanned area."
 )
 
 LICENSE_NOTE = (
@@ -198,7 +205,10 @@ def build_manifest_document(root: pathlib.Path, cache: pathlib.Path) -> dict:
                     "date_published_unix": info.get("date_published"),
                     "max_resolution": info.get("max_resolution"),
                     "dimensions": info.get("dimensions"),
-                    "dimensions_unit": None,
+                    "dimensions_unit": DIMENSIONS_UNIT,
+                    "physical_dimensions_m": physical_dimensions_m(
+                        info.get("dimensions") or []
+                    ),
                     "dimensions_unit_note": DIMENSIONS_UNIT_NOTE,
                     "category": info.get("category"),
                     "description": info.get("description"),
@@ -248,6 +258,28 @@ def build_manifest_document(root: pathlib.Path, cache: pathlib.Path) -> dict:
                     ),
                 },
                 "runtime_outputs": build_runtime_outputs(root),
+                "runtime_binding": {
+                    "terrain_base_tile_scale_m": physical_dimensions_m(
+                        info.get("dimensions") or []
+                    )[0],
+                    "constant": "DEFAULT_TERRAIN_TEXTURE_SCALE_M",
+                    "defined_in": "crates/renderer/src/terrain.rs",
+                    "relationship": (
+                        "One terrain base texture tile covers exactly the "
+                        "asset's full physical span, so the photograph is "
+                        "reproduced at true size: sparse_grass is a 2.0 m x "
+                        "2.0 m scan (2000 mm per axis) and the ENV1 terrain "
+                        "base tile scale is 2.0 m. The macro (48 m) and detail "
+                        "(0.40 m) layers resolve to absolute world metres in "
+                        "the shader and are invariant to it; the "
+                        "anti-repetition rotation and offsets are unchanged."
+                    ),
+                    "enforced_by": [
+                        "tools/env1_asset_pipeline/env1_assets.py::_validate_runtime_binding",
+                        "crates/renderer/tests/env1_a_sparse_grass_material.rs::"
+                        "env1_runtime_material_uses_the_documented_physical_tile_span",
+                    ],
+                },
             }
         ],
     }

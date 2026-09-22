@@ -70,6 +70,14 @@ MANIFEST_RELATIVE = "docs/assets/env1/env1_open_assets.json"
 EXPECTED_COLOR_TYPE = {"base_color": 6, "normal": 6, "roughness": 0}
 EXPECTED_BIT_DEPTH = {"source": 16, "runtime": 8}
 
+#: The Poly Haven public API's OpenAPI schema defines a texture asset's
+#: `dimensions` as "an array with the dimensions of this asset on each axis in
+#: millimeters". The unit is therefore documented by the provider, not inferred
+#: and not absent: `sparse_grass` reports [2000, 2000], i.e. a 2.0 m x 2.0 m
+#: scanned area.
+DIMENSIONS_UNIT = "mm"
+MILLIMETRES_PER_METRE = 1000.0
+
 #: Things the recipe deliberately never does. Recorded in the manifest so a
 #: future reviewer can see the absence was a decision, not an oversight.
 NOT_APPLIED = (
@@ -212,6 +220,7 @@ REQUIRED_ASSET_FIELDS = (
     "source_files",
     "processing",
     "runtime_outputs",
+    "runtime_binding",
 )
 
 REQUIRED_SOURCE_FILE_FIELDS = (
@@ -252,6 +261,20 @@ REQUIRED_PROCESSING_FIELDS = (
     "color_space_handling",
     "not_applied",
 )
+
+
+def physical_dimensions_m(dimensions: list, unit: str = DIMENSIONS_UNIT) -> list[float]:
+    """Convert the API's millimetre dimensions to metres, failing closed.
+
+    The conversion is explicit and lives in exactly one place, so a manifest can
+    never carry a derived value that disagrees with the raw one.
+    """
+    if unit != DIMENSIONS_UNIT:
+        raise Env1AssetError(
+            f"the Poly Haven OpenAPI schema defines `dimensions` in {DIMENSIONS_UNIT}; "
+            f"refusing to convert from {unit!r}"
+        )
+    return [float(axis) / MILLIMETRES_PER_METRE for axis in dimensions]
 
 
 def load_manifest(path: pathlib.Path) -> dict[str, Any]:
@@ -304,6 +327,9 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         errors.extend(_validate_source_files(asset.get("source_files"), where))
         errors.extend(_validate_processing(asset.get("processing"), where))
         errors.extend(_validate_runtime_outputs(asset.get("runtime_outputs"), where))
+        errors.extend(
+            _validate_runtime_binding(asset.get("runtime_binding"), asset.get("api"), where)
+        )
     return errors
 
 
@@ -321,17 +347,91 @@ def _validate_api_block(api: Any, where: str) -> list[str]:
     ):
         if field not in api:
             errors.append(f"{where}.api.{field}: required field missing")
-    # `dimensions_unit` must be present, and must be null unless the API ever
-    # starts stating a unit: recording a guessed unit would be invention.
-    if "dimensions_unit" not in api:
-        errors.append(f"{where}.api.dimensions_unit: required field missing")
-    elif api["dimensions_unit"] is not None:
-        errors.append(
-            f"{where}.api.dimensions_unit: the Poly Haven API does not state a "
-            "unit for `dimensions`; it must stay null"
-        )
+    errors.extend(_validate_dimensions(api, where))
+    return errors
+
+
+def _validate_dimensions(api: dict, where: str) -> list[str]:
+    """Enforce the raw value, the API-documented unit and the derived metres.
+
+    All three must be present and mutually consistent, so neither a guessed
+    unit nor a hidden conversion can slip through.
+    """
+    errors: list[str] = []
+    for field in ("dimensions", "dimensions_unit", "physical_dimensions_m"):
+        if field not in api:
+            errors.append(f"{where}.api.{field}: required field missing")
     if not api.get("dimensions_unit_note"):
-        errors.append(f"{where}.api.dimensions_unit_note: must explain the null")
+        errors.append(
+            f"{where}.api.dimensions_unit_note: must cite the provider schema "
+            "that defines the unit"
+        )
+    if errors:
+        return errors
+
+    unit = api["dimensions_unit"]
+    if unit != DIMENSIONS_UNIT:
+        errors.append(
+            f"{where}.api.dimensions_unit: the Poly Haven OpenAPI schema defines "
+            f"`dimensions` in millimetres, so it must be {DIMENSIONS_UNIT!r}, got {unit!r}"
+        )
+    dimensions = api["dimensions"]
+    physical = api["physical_dimensions_m"]
+    if not (isinstance(dimensions, list) and len(dimensions) == 2):
+        errors.append(f"{where}.api.dimensions must be a two-element array")
+        return errors
+    if not (isinstance(physical, list) and len(physical) == 2):
+        errors.append(f"{where}.api.physical_dimensions_m must be a two-element array")
+        return errors
+    for axis in range(2):
+        raw, derived = dimensions[axis], physical[axis]
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            errors.append(f"{where}.api.dimensions[{axis}] must be a number")
+            continue
+        if not isinstance(derived, (int, float)) or isinstance(derived, bool):
+            errors.append(f"{where}.api.physical_dimensions_m[{axis}] must be a number")
+            continue
+        expected = raw / MILLIMETRES_PER_METRE
+        if abs(derived - expected) > 1e-9:
+            errors.append(
+                f"{where}.api.physical_dimensions_m[{axis}]: {raw} mm is {expected} m, "
+                f"but the manifest records {derived} m"
+            )
+    return errors
+
+
+def _validate_runtime_binding(binding: Any, api: Any, where: str) -> list[str]:
+    """Tie the terrain base tile scale to the asset's physical span."""
+    errors: list[str] = []
+    if not isinstance(binding, dict):
+        errors.append(f"{where}.runtime_binding must be an object")
+        return errors
+    for field in (
+        "terrain_base_tile_scale_m",
+        "constant",
+        "defined_in",
+        "relationship",
+    ):
+        if field not in binding:
+            errors.append(f"{where}.runtime_binding.{field}: required field missing")
+    scale = binding.get("terrain_base_tile_scale_m")
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool):
+        errors.append(f"{where}.runtime_binding.terrain_base_tile_scale_m must be a number")
+        return errors
+    physical = (api or {}).get("physical_dimensions_m")
+    if not (isinstance(physical, list) and len(physical) == 2):
+        errors.append(
+            f"{where}.runtime_binding: cannot check the tile scale without "
+            "api.physical_dimensions_m"
+        )
+        return errors
+    for axis in range(2):
+        if abs(float(scale) - float(physical[axis])) > 1e-9:
+            errors.append(
+                f"{where}.runtime_binding.terrain_base_tile_scale_m is {scale} m but the "
+                f"asset's physical span on axis {axis} is {physical[axis]} m: one texture "
+                "tile must cover exactly the scanned area"
+            )
     return errors
 
 

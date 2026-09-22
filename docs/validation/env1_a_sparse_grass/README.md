@@ -12,8 +12,33 @@ material is the only intended variable.
 | --- | --- |
 | `env1a_evidence.json` | All measurements, verbatim runtime facts, and every unavailable metric with its reason. The authority. |
 | `env1a_reference_1440p.json`, `env1a_reference_2160p.json` | Resolution variants of the canonical scene (only `resolution`, `scene_id`, `capture.filename` and `description` differ). 1920x1080 uses `docs/validation/visual_benchmark/vis0_reference_scene.json` unchanged. |
-| `png/BEFORE_<res>.png`, `png/AFTER_<res>.png` | The captured frames. |
-| `png/AFTER_c2d_terrain_<channel>.png` | The five terrain debug channels, proving they stay capturable with the new material. |
+
+## Candidate captures are not committed
+
+These captures carry `visual_pass = null` and are **not** an approved golden or
+beauty baseline, so the raw PNGs are transient validation artifacts and are kept
+out of git history. The canonical rule is:
+
+- raw captures stay under the gitignored `tmp/` tree while they are candidates;
+- hashes, measurements, receipts, audits and capture evidence **are** committed;
+- a PNG becomes permanent only when it is explicitly promoted to an approved
+  golden/beauty baseline.
+
+ENV1-A has no such promotion. Each artifact in `env1a_evidence.json` therefore
+records `committed_png: null` with a note, plus `local_png` (the `tmp/` path),
+`local_png_sha256`, the runtime receipt digest and byte size — so a capture is
+fully identified and re-producible without inflating the repository. No broad
+`.gitignore` rule was added, so a future explicitly approved baseline can still
+be committed.
+
+To regenerate the evidence from the existing `tmp/` runs (no re-capture needed):
+
+```bash
+python -X utf8 tools/measure_env1a_sparse_grass.py
+```
+
+Pass `--promote-png` only when a capture has actually been approved as a
+baseline; it then copies the PNGs into `png/` and records committed paths.
 
 ## Reproducing
 

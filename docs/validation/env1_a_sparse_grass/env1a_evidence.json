@@ -14,8 +14,10 @@
       "scene_id": "aircraft_acro_static_front",
       "manifest": "docs/validation/visual_benchmark/vis0_reference_scene.json",
       "before": {
-        "png": "docs/validation/env1_a_sparse_grass/png/BEFORE_1920x1080.png",
-        "source_png": "tmp/env1a_before/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_before/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "local_png_sha256": "be68c06022781b842ee99b85f6a526cef65b32ab11f72f4f5307d11e77359551",
         "image_sha256": "be68c06022781b842ee99b85f6a526cef65b32ab11f72f4f5307d11e77359551",
         "image_byte_size": 2208249,
         "framebuffer": [
@@ -135,8 +137,10 @@
         }
       },
       "after": {
-        "png": "docs/validation/env1_a_sparse_grass/png/AFTER_1920x1080.png",
-        "source_png": "tmp/env1a_after/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_after/1920x1080/aircraft_acro_static_front/aircraft_acro_static_front_1920x1080.png",
+        "local_png_sha256": "5efd09858e326183ffdd832f7abf97dbc9161e58dc4ffcbeae22314a18665243",
         "image_sha256": "5efd09858e326183ffdd832f7abf97dbc9161e58dc4ffcbeae22314a18665243",
         "image_byte_size": 2791039,
         "framebuffer": [
@@ -335,8 +339,10 @@
       "scene_id": "env1a_reference_1440p",
       "manifest": "docs/validation/env1_a_sparse_grass/env1a_reference_1440p.json",
       "before": {
-        "png": "docs/validation/env1_a_sparse_grass/png/BEFORE_2560x1440.png",
-        "source_png": "tmp/env1a_before/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_before/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "local_png_sha256": "79d5ea9b710a6fb8f90433f40b8be8bbd235be98de6c07f37d53b02a0f266e54",
         "image_sha256": "79d5ea9b710a6fb8f90433f40b8be8bbd235be98de6c07f37d53b02a0f266e54",
         "image_byte_size": 3799423,
         "framebuffer": [
@@ -456,8 +462,10 @@
         }
       },
       "after": {
-        "png": "docs/validation/env1_a_sparse_grass/png/AFTER_2560x1440.png",
-        "source_png": "tmp/env1a_after/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_after/2560x1440/env1a_reference_1440p/env1a_reference_1440p_2560x1440.png",
+        "local_png_sha256": "719b3a3e5dd61f6d4d9b8ccd661b64bc2a053ec55db8d76f5d813518fbebe8d5",
         "image_sha256": "719b3a3e5dd61f6d4d9b8ccd661b64bc2a053ec55db8d76f5d813518fbebe8d5",
         "image_byte_size": 5147290,
         "framebuffer": [
@@ -656,8 +664,10 @@
       "scene_id": "env1a_reference_2160p",
       "manifest": "docs/validation/env1_a_sparse_grass/env1a_reference_2160p.json",
       "before": {
-        "png": "docs/validation/env1_a_sparse_grass/png/BEFORE_3840x2160.png",
-        "source_png": "tmp/env1a_before/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_before/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "local_png_sha256": "70dbcbdbd4a62e21441e97c59580ad4baf93e6cd6bd27e8c699fe7eaafb49e5e",
         "image_sha256": "70dbcbdbd4a62e21441e97c59580ad4baf93e6cd6bd27e8c699fe7eaafb49e5e",
         "image_byte_size": 8171862,
         "framebuffer": [
@@ -777,8 +787,10 @@
         }
       },
       "after": {
-        "png": "docs/validation/env1_a_sparse_grass/png/AFTER_3840x2160.png",
-        "source_png": "tmp/env1a_after/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "committed_png": null,
+        "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+        "local_png": "tmp/env1a_after/3840x2160/env1a_reference_2160p/env1a_reference_2160p_3840x2160.png",
+        "local_png_sha256": "e020fcc30b7d22b53aa6f86586d76b72dfaa64e5907f328a1181a5f2a4477cda",
         "image_sha256": "e020fcc30b7d22b53aa6f86586d76b72dfaa64e5907f328a1181a5f2a4477cda",
         "image_byte_size": 12192117,
         "framebuffer": [
@@ -977,7 +989,10 @@
     {
       "terrain_debug": "albedo",
       "manifest": "docs/validation/visual_benchmark/c2d_terrain_albedo.json",
-      "png": "docs/validation/env1_a_sparse_grass/png/AFTER_c2d_terrain_albedo.png",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1a_after_c2d/albedo/c2d_terrain_albedo/c2d_terrain_albedo_1920x1080.png",
+      "local_png_sha256": "0c3ad2208af0a5e2d9edd41018c266d6088a8e78bdd49bfe0be520786e7eb716",
       "image_sha256": "0c3ad2208af0a5e2d9edd41018c266d6088a8e78bdd49bfe0be520786e7eb716",
       "image_byte_size": 2099602,
       "framebuffer": [
@@ -993,7 +1008,10 @@
     {
       "terrain_debug": "normal",
       "manifest": "docs/validation/visual_benchmark/c2d_terrain_normal.json",
-      "png": "docs/validation/env1_a_sparse_grass/png/AFTER_c2d_terrain_normal.png",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1a_after_c2d/normal/c2d_terrain_normal/c2d_terrain_normal_1920x1080.png",
+      "local_png_sha256": "7ed9098b2efb3ffbf97f73dfbb0f21ca3e80efe6d06df54c7c56f17d4eb58d3c",
       "image_sha256": "7ed9098b2efb3ffbf97f73dfbb0f21ca3e80efe6d06df54c7c56f17d4eb58d3c",
       "image_byte_size": 2641325,
       "framebuffer": [
@@ -1009,7 +1027,10 @@
     {
       "terrain_debug": "roughness",
       "manifest": "docs/validation/visual_benchmark/c2d_terrain_roughness.json",
-      "png": "docs/validation/env1_a_sparse_grass/png/AFTER_c2d_terrain_roughness.png",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1a_after_c2d/roughness/c2d_terrain_roughness/c2d_terrain_roughness_1920x1080.png",
+      "local_png_sha256": "baeb6483e813d18078f7c865956206537e04f697a574169cb22034f3000623ec",
       "image_sha256": "baeb6483e813d18078f7c865956206537e04f697a574169cb22034f3000623ec",
       "image_byte_size": 1277289,
       "framebuffer": [
@@ -1025,7 +1046,10 @@
     {
       "terrain_debug": "macro",
       "manifest": "docs/validation/visual_benchmark/c2d_terrain_macro.json",
-      "png": "docs/validation/env1_a_sparse_grass/png/AFTER_c2d_terrain_macro.png",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1a_after_c2d/macro/c2d_terrain_macro/c2d_terrain_macro_1920x1080.png",
+      "local_png_sha256": "0f15cb9b9ccd961e8d6f502e779e67a5ef427eba58f546d390c1eb5be66c4ac9",
       "image_sha256": "0f15cb9b9ccd961e8d6f502e779e67a5ef427eba58f546d390c1eb5be66c4ac9",
       "image_byte_size": 2190213,
       "framebuffer": [
@@ -1041,7 +1065,10 @@
     {
       "terrain_debug": "detail",
       "manifest": "docs/validation/visual_benchmark/c2d_terrain_detail.json",
-      "png": "docs/validation/env1_a_sparse_grass/png/AFTER_c2d_terrain_detail.png",
+      "committed_png": null,
+      "committed_png_note": "Candidate capture: raw PNGs stay under the gitignored tmp/ tree and are referenced here by path and SHA-256. A PNG is committed only when it is explicitly promoted to an approved golden/beauty baseline; ENV1-A has no such promotion (visual_pass is null), so committed_png is null.",
+      "local_png": "tmp/env1a_after_c2d/detail/c2d_terrain_detail/c2d_terrain_detail_1920x1080.png",
+      "local_png_sha256": "081c413361d2c08be1670c4941b3434474d5ad8b90643137867ef98862c5d17a",
       "image_sha256": "081c413361d2c08be1670c4941b3434474d5ad8b90643137867ef98862c5d17a",
       "image_byte_size": 2186149,
       "framebuffer": [

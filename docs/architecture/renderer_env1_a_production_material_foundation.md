@@ -48,12 +48,19 @@ MD5 pubblicati dall'API; lo SHA-256 locale è registrato. I sorgenti 4k (16-bit
 PNG, ~212 MB) restano nella cache gitignored `tmp/env1_source_cache/`; nel
 repository sono impegnati solo i loro digest.
 
-**Null deliberati.** L'API non restituisce un campo `license`: CC0 è registrato
+**Unità fisica.** Lo schema OpenAPI dell'API pubblica di Poly Haven definisce
+`dimensions` come la dimensione su ciascun asse **in millimetri**. `sparse_grass`
+dichiara `[2000, 2000]`, cioè un'area scansionata di 2.0 m × 2.0 m. Il manifest
+registra quindi il valore grezzo (`dimensions`), l'unità documentata dal
+provider (`dimensions_unit = "mm"`) e il valore derivato esplicito
+(`physical_dimensions_m = [2.0, 2.0]`); la conversione vive in un solo punto
+(`env1_assets.physical_dimensions_m`) e il validator rifiuta ogni combinazione
+incoerente — `[2000, 2000]` con `"cm"`, oppure `physical_dimensions_m`
+`[20, 20]`. Nessuna unità ipotizzata, nessuna conversione nascosta.
+
+**Null deliberato.** L'API non restituisce un campo `license`: CC0 è registrato
 da <https://polyhaven.com/license> (stessa citazione già usata in
-`tools/vegetation_processing/PROVENANCE.md`) e la base è documentata. L'API
-restituisce `dimensions: [2000, 2000]` **senza unità**: il valore è registrato
-verbatim, `dimensions_unit` resta `null` con nota, e nessuna scala fisica viene
-dedotta da esso.
+`tools/vegetation_processing/PROVENANCE.md`) e la base è documentata.
 
 Autorità: `docs/assets/env1/env1_open_assets.json`. Verifica fail-closed:
 `tools/env1_asset_pipeline/verify_env1_assets.py`.
@@ -101,8 +108,16 @@ Tre modifiche minime, nessuna riscrittura:
 2. `create_terrain_material` usa `ENV1_RUNTIME_EDGE` (2048) invece di
    `TERRAIN_TEXTURE_SIZE` (1024). La mip chain passa a **12 livelli** 2048→1.
    Formati, sampler, bind group, uniform e shader restano identici.
-3. `DEFAULT_TERRAIN_TEXTURE_SCALE_M`: 4.0 → **2.0 m** per tile (decisione
-   esplicita). Solo la frequenza del layer base cambia: nello shader
+3. `DEFAULT_TERRAIN_TEXTURE_SCALE_M`: 4.0 → **2.0 m** per tile. Non è una
+   scelta di tuning libera: è la misura fisica dell'asset. `sparse_grass`
+   dichiara `dimensions = [2000, 2000]` mm, cioè 2.0 m per asse, quindi un tile
+   di base copre esattamente l'area scansionata (2048 texel su 2.0 m =
+   1024 texel/m). Il legame è registrato in `runtime_binding` nel manifest,
+   verificato dal test Rust
+   `env1_runtime_material_uses_the_documented_physical_tile_span` e
+   ricontrollato contro la costante compilata da `verify_env1_assets.py`;
+   nessun JSON viene letto a render time. Solo la frequenza del layer base
+   cambia: nello shader
    `macro_uv = uv * (base_scale / macro_scale)` con `uv = world / base_scale`,
    quindi macro (48 m) e detail (0.40 m) si risolvono in metri assoluti e sono
    **invarianti** a questa costante. Il companion anti-repetition deriva dallo

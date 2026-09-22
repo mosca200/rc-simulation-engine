@@ -130,12 +130,41 @@ class TestCommittedManifest(unittest.TestCase):
         self.assertEqual(by_role["roughness"]["color_space"], "linear")
         self.assertEqual(by_role["roughness"]["channels"], "r8")
 
-    def test_the_api_dimensions_unit_is_left_null_rather_than_guessed(self) -> None:
+    def test_the_api_dimensions_carry_the_documented_millimetre_unit(self) -> None:
         api = self.manifest["assets"][0]["api"]
+        # Raw API value preserved verbatim, provider-documented unit preserved,
+        # derived metres explicit. No guessed unit and no hidden conversion.
         self.assertEqual(api["dimensions"], [2000, 2000], "recorded verbatim from the API")
-        self.assertIsNone(api["dimensions_unit"])
-        self.assertIn("no unit", api["dimensions_unit_note"].lower())
+        self.assertEqual(api["dimensions_unit"], "mm")
+        self.assertEqual(api["physical_dimensions_m"], [2.0, 2.0])
+        self.assertIn("millimetre", api["dimensions_unit_note"].lower())
         self.assertEqual(api["files_hash"], "1293431c7316b89282b883ff760be963802f9000")
+
+    def test_the_terrain_tile_scale_is_bound_to_the_physical_span(self) -> None:
+        asset = self.manifest["assets"][0]
+        binding = asset["runtime_binding"]
+        self.assertEqual(binding["terrain_base_tile_scale_m"], 2.0)
+        self.assertEqual(binding["constant"], "DEFAULT_TERRAIN_TEXTURE_SCALE_M")
+        self.assertEqual(binding["defined_in"], "crates/renderer/src/terrain.rs")
+        self.assertEqual(
+            binding["terrain_base_tile_scale_m"],
+            asset["api"]["physical_dimensions_m"][0],
+            "one texture tile must cover exactly the scanned area",
+        )
+
+    def test_the_compiled_tile_scale_matches_the_manifest(self) -> None:
+        source = (REPO_ROOT / "crates/renderer/src/terrain.rs").read_text(encoding="utf-8")
+        match = verify_env1_assets.TERRAIN_SCALE_PATTERN.search(source)
+        self.assertIsNotNone(match, "DEFAULT_TERRAIN_TEXTURE_SCALE_M must exist")
+        self.assertEqual(float(match.group(1)), 2.0)
+
+    def test_the_physical_metre_conversion_is_explicit_and_fail_closed(self) -> None:
+        self.assertEqual(env1_assets.physical_dimensions_m([2000, 2000]), [2.0, 2.0])
+        self.assertEqual(env1_assets.physical_dimensions_m([8192, 4096]), [8.192, 4.096])
+        with self.assertRaises(env1_assets.Env1AssetError):
+            env1_assets.physical_dimensions_m([2000, 2000], "cm")
+        with self.assertRaises(env1_assets.Env1AssetError):
+            env1_assets.physical_dimensions_m([2000, 2000], "")
 
     def test_attribution_required_by_the_api_terms_is_recorded(self) -> None:
         self.assertIn("Poly Haven", self.manifest["attribution"])
@@ -211,11 +240,71 @@ class TestManifestContractEnforcement(unittest.TestCase):
             "license",
         )
 
-    def test_a_guessed_dimensions_unit_is_rejected(self) -> None:
-        self.assertInvalid(
-            self.mutate(lambda m: m["assets"][0]["api"].__setitem__("dimensions_unit", "mm")),
-            "dimensions_unit",
+    def test_a_unit_other_than_millimetres_is_rejected(self) -> None:
+        for unit in ("cm", "m", "inches", "", None):
+            with self.subTest(unit=unit):
+                self.assertInvalid(
+                    self.mutate(
+                        lambda m, u=unit: m["assets"][0]["api"].__setitem__(
+                            "dimensions_unit", u
+                        )
+                    ),
+                    "dimensions_unit",
+                )
+
+    def test_an_inconsistent_unit_and_raw_value_pair_is_rejected(self) -> None:
+        # [2000, 2000] with "cm" would silently claim a 20 m scan.
+        mutated = self.mutate(
+            lambda m: m["assets"][0]["api"].__setitem__("dimensions_unit", "cm")
         )
+        errors = env1_assets.validate_manifest(mutated)
+        self.assertTrue(any("dimensions_unit" in e for e in errors), errors)
+
+    def test_a_wrong_derived_metre_value_is_rejected(self) -> None:
+        for bad in ([20.0, 20.0], [2.0, 3.0], [0.2, 0.2], [2000.0, 2000.0]):
+            with self.subTest(physical=bad):
+                self.assertInvalid(
+                    self.mutate(
+                        lambda m, b=bad: m["assets"][0]["api"].__setitem__(
+                            "physical_dimensions_m", b
+                        )
+                    ),
+                    "physical_dimensions_m",
+                )
+
+    def test_a_missing_derived_metre_value_is_rejected(self) -> None:
+        self.assertInvalid(
+            self.mutate(lambda m: m["assets"][0]["api"].pop("physical_dimensions_m")),
+            "physical_dimensions_m",
+        )
+
+    def test_a_tile_scale_that_disagrees_with_the_physical_span_is_rejected(self) -> None:
+        for bad in (4.0, 1.0, 20.0, 0.0):
+            with self.subTest(scale=bad):
+                self.assertInvalid(
+                    self.mutate(
+                        lambda m, b=bad: m["assets"][0]["runtime_binding"].__setitem__(
+                            "terrain_base_tile_scale_m", b
+                        )
+                    ),
+                    "runtime_binding",
+                )
+
+    def test_a_missing_runtime_binding_is_rejected(self) -> None:
+        self.assertInvalid(
+            self.mutate(lambda m: m["assets"][0].pop("runtime_binding")),
+            "runtime_binding",
+        )
+
+    def test_an_incomplete_runtime_binding_is_rejected(self) -> None:
+        for field in ("constant", "defined_in", "relationship"):
+            with self.subTest(field=field):
+                self.assertInvalid(
+                    self.mutate(
+                        lambda m, f=field: m["assets"][0]["runtime_binding"].pop(f)
+                    ),
+                    f"runtime_binding.{field}",
+                )
 
     def test_an_asset_id_outside_the_scheme_is_rejected(self) -> None:
         for bad in ("GROUND-01", "env1-gnd-01", "ENV1-GND-1", "ENV1-GROUND-01"):

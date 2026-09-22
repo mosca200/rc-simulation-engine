@@ -704,3 +704,58 @@ fn committed_glb_assets_use_no_normal_or_metallic_roughness_slots() {
         "one aircraft GLB plus twelve vegetation LOD GLBs"
     );
 }
+/// The Poly Haven public API's OpenAPI schema defines a texture asset's
+/// `dimensions` as the size on each axis in millimetres. `sparse_grass` reports
+/// `[2000, 2000]`, i.e. a 2.0 m x 2.0 m scan, and the ENV1 terrain base tile
+/// scale must equal that span so one tile covers exactly the scanned area.
+///
+/// The authoritative record is `docs/assets/env1/env1_open_assets.json`
+/// (`api.dimensions` / `api.dimensions_unit` / `api.physical_dimensions_m` /
+/// `runtime_binding`); `tools/env1_asset_pipeline/verify_env1_assets.py`
+/// re-checks that record against this constant. Nothing parses JSON at render
+/// time — the relationship is a compile-time constant plus this test.
+#[test]
+fn env1_runtime_material_uses_the_documented_physical_tile_span() {
+    /// API `dimensions` for `sparse_grass`, verbatim, in millimetres.
+    const SOURCE_DIMENSIONS_MM: [f64; 2] = [2000.0, 2000.0];
+    /// Millimetres in one metre, the provider-documented unit of `dimensions`.
+    const MILLIMETRES_PER_METRE: f64 = 1000.0;
+
+    let physical_span_m = SOURCE_DIMENSIONS_MM.map(|axis| axis / MILLIMETRES_PER_METRE);
+    assert_eq!(
+        physical_span_m,
+        [2.0, 2.0],
+        "2000 mm per axis is a 2.0 m scan"
+    );
+
+    // One base texture tile == the full physical span of the scan.
+    let scale = renderer::terrain::DEFAULT_TERRAIN_TEXTURE_SCALE_M;
+    for axis in physical_span_m {
+        assert!(
+            (f64::from(scale) - axis).abs() < 1e-9,
+            "DEFAULT_TERRAIN_TEXTURE_SCALE_M must equal the asset's physical span              ({axis} m), got {scale} m"
+        );
+    }
+    assert_eq!(
+        renderer::TerrainMaterial::default().texture_scale_m,
+        scale,
+        "the default material must carry the documented span"
+    );
+
+    // Texel density implied by the committed runtime edge.
+    let texels_per_metre = f64::from(ENV1_RUNTIME_EDGE) / f64::from(scale);
+    assert_eq!(texels_per_metre, 1024.0);
+
+    // The other frequencies are absolute-world quantities and must not move:
+    // the shader derives them as `uv * (base_scale / layer_scale)`, so they are
+    // invariant to the base tile scale.
+    let material = renderer::TerrainMaterial::default();
+    assert_eq!(material.macro_scale_m, 48.0);
+    assert_eq!(material.detail_scale_m, 0.40);
+    assert_eq!(material.macro_uv_offset, [0.170, 0.390]);
+    assert_eq!(material.detail_uv_offset, [0.163, 0.037]);
+    assert_eq!(material.ar_scale, 1.370);
+    assert_eq!(material.ar_angle_degrees, 27.0);
+    assert_eq!(material.ar_offset, [0.315, 0.571]);
+    assert_eq!(material.metallic, 0.0, "terrain stays dielectric");
+}

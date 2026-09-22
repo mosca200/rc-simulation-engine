@@ -38,14 +38,30 @@ nothing invented:
 - runtime outputs: for each of the three committed maps, the repository path,
   colour-space semantic, channel layout, byte size, **SHA-256** and PNG header.
 
-### Deliberate nulls
+### Physical dimensions and the tile-scale binding
 
-`api.dimensions_unit` is `null`. The Poly Haven `/info` endpoint reports
-`dimensions: [2000, 2000]` with **no unit**, so the value is recorded verbatim
-and the unit is left null rather than guessed; `dimensions_unit_note` states
-this. ENV1-A therefore does not derive any physical tiling scale from that
-field — the terrain base tile scale is an explicit, documented material
-parameter in `crates/renderer/src/terrain.rs`.
+`api.dimensions` is recorded verbatim as `[2000, 2000]`, `api.dimensions_unit`
+as `"mm"`, and `api.physical_dimensions_m` as `[2.0, 2.0]`. The Poly Haven
+public API's OpenAPI schema defines a texture asset's `dimensions` as the size
+on each axis **in millimetres**, so the unit is provider-documented rather than
+inferred, and `dimensions_unit_note` cites that schema.
+
+The metre value is derived in exactly one place
+(`env1_assets.physical_dimensions_m`), and the manifest validator rejects any
+raw / unit / derived combination that disagrees — `[2000, 2000]` with `"cm"`, or
+`physical_dimensions_m` of `[20, 20]`, both fail closed. No guessed unit, no
+hidden conversion.
+
+`runtime_binding` then ties that measurement to the renderer: one base texture
+tile covers exactly the scanned area, so
+`DEFAULT_TERRAIN_TEXTURE_SCALE_M = 2.0` in `crates/renderer/src/terrain.rs`
+equals `physical_dimensions_m` (2048 texels over 2.0 m = 1024 texels/m). The
+binding is enforced by the Rust regression test
+`env1_runtime_material_uses_the_documented_physical_tile_span` and re-checked
+against the compiled constant by `verify_env1_assets.py`. Nothing parses JSON at
+render time.
+
+### Deliberate null
 
 `license` is `CC0`, sourced from <https://polyhaven.com/license> rather than
 from the API: the `/info` payload carries no licence field. `license_note`
