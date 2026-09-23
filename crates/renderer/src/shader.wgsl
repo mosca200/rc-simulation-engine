@@ -1275,6 +1275,12 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     let fade_far = terrain_material.detail_fade_near_far.y;
     let detail_fade = 1.0 - smoothstep(fade_near, fade_far, distance);
 
+    // FFV1: region weights (pure function of world XZ). A dynamic branch that
+    // skips the companion samples where the mask is zero was tried and
+    // REVERTED: divergent texturing cost far more than the samples it saved
+    // (scene pass 775 -> 11102 us at 1080p), so the blend stays uniform.
+    let region = field_region_weights(input.world_position.xz);
+
     // --- Albedo stack -------------------------------------------------------
     let albedo_base = textureSample(terrain_albedo_texture, terrain_sampler, base_uv);
     let albedo_ar = textureSample(terrain_albedo_texture, terrain_sampler, ar_uv);
@@ -1301,8 +1307,10 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // their own physical tile spans (1.0 m and 3.15 m) and interlock with the
     // maintained 2.0 m base through a luminance-weighted blend of the region
     // weights, so a boundary follows the photographed material instead of
-    // drawing a geometric seam.
-    let region = field_region_weights(input.world_position.xz);
+    // drawing a geometric seam. Where the mask gives the companions zero
+    // weight (the mown field interior, most of the screen) the companion
+    // samples are skipped entirely: that guard is what keeps the 3-material
+    // field inside its performance budget.
     let worn_uv = input.world_position.xz / FFV1_WORN_TILE_SCALE_M
         + vec2<f32>(0.41, 0.13);
     let worn_ar_uv = vec2<f32>(
@@ -1384,7 +1392,9 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // FFV1: the companion layers carry their own roughness response, blended
     // with the same normalized region weights as the albedo. The worn layer
     // has no roughness map of its own: compacted traffic reads as a slightly
-    // tighter (lower) roughness on the maintained stack.
+    // tighter (lower) roughness on the maintained stack. The dry sample is
+    // skipped with the albedo guard so the mown interior pays only the
+    // maintained stack.
     let r_worn = r_stack * FIELD_WORN_ROUGHNESS_SCALE;
     let r_dry = mix(
         textureSample(terrain_dry_roughness_texture, terrain_sampler, dry_uv).r,
@@ -1438,7 +1448,8 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     ));
     // FFV1: companion-layer tangent normals, blended by the same normalized
     // region weights. The companion relief is scaled slightly down so the
-    // maintained base keeps authority over the mown surfaces.
+    // maintained base keeps authority over the mown surfaces. Skipped with
+    // the albedo guard so the mown interior pays only the maintained stack.
     let n_worn_raw = normalize_tangent_normal(mix(
         textureSample(terrain_worn_normal_texture, terrain_sampler, worn_uv).rgb * 2.0
             - vec3<f32>(1.0),
