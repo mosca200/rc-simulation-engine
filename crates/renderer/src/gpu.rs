@@ -110,8 +110,24 @@ const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const CAPTURE_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SKY_CLEAR_COLOR: [f64; 4] = [0.42, 0.68, 0.92, 1.0];
 
-const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, -0.3];
+const DEFAULT_LIGHT_DIRECTION: [f32; 3] = [0.37, 0.85, 0.37];
 const DEFAULT_LIGHT_INTENSITY: f32 = 0.80;
+
+// Flying Field v1: scene-referred sun irradiance scale of the V2 physical
+// environment (the legacy V1 analytic path keeps `DEFAULT_LIGHT_INTENSITY`).
+//
+// Calibrated against the Poly Haven `meadow` HDRI measurement (CC0, midday,
+// partly cloudy, low contrast): sky mean radiance 1.26, zenith 2.0-2.5,
+// photographed ground radiance 0.19. With the continental-summer aerosol and
+// Rayleigh load of `AtmosphereParameters::continental_summer_haze`, an
+// irradiance of PI * 4.6 puts sunlit mown grass (albedo ~0.22) at ~0.34
+// scene-referred and the scattered sky at ~0.6-0.9, i.e. the same bright-sky-
+// over-lit-ground relationship as the reference instead of the inverted ratio
+// the clear-air preset produced, while the Khronos PBR Neutral knee (0.76)
+// starts to roll the sky off photographically. Exposure stays at its
+// established 0.0 default: the look is corrected at the light/atmosphere
+// level, not by a post-process gain.
+const V2_FIELD_SUN_INTENSITY: f32 = 2.6;
 
 // G3B: deterministic analytic sky response parameters.
 // Sky diffuse: hemispherical irradiance scale applied to the procedural
@@ -1199,18 +1215,19 @@ impl WgpuRenderer {
         // device-legal Rgba16Float render-target/binding/filtering capability,
         // and physically valid parameters. The adapter-reported snapshot is
         // only logged (with the capability capture) and never decides alone.
-        let atmosphere_parameters = AtmosphereParameters::earth();
+        let atmosphere_parameters = AtmosphereParameters::continental_summer_haze();
         // One SunState drives the sky, the sun disk, direct PBR, the shadow
         // cascades and the environment generation. Its irradiance keeps the
         // established engine scale (`PI * intensity`), so the direct PBR energy
         // is preserved while the disk radiance stays physically far above the
-        // sky radiance.
+        // sky radiance. The Flying Field look uses the calibrated field
+        // intensity; see `V2_FIELD_SUN_INTENSITY`.
         let sun_state = SunState::from_irradiance(
             DEFAULT_LIGHT_DIRECTION,
             [
-                DEFAULT_SUN_COLOR_RGB[0] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
-                DEFAULT_SUN_COLOR_RGB[1] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
-                DEFAULT_SUN_COLOR_RGB[2] * std::f32::consts::PI * DEFAULT_LIGHT_INTENSITY,
+                DEFAULT_SUN_COLOR_RGB[0] * std::f32::consts::PI * V2_FIELD_SUN_INTENSITY,
+                DEFAULT_SUN_COLOR_RGB[1] * std::f32::consts::PI * V2_FIELD_SUN_INTENSITY,
+                DEFAULT_SUN_COLOR_RGB[2] * std::f32::consts::PI * V2_FIELD_SUN_INTENSITY,
             ],
             SunState::EARTH_ANGULAR_RADIUS_RADIANS,
         )

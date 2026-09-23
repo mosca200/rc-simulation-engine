@@ -228,6 +228,11 @@ impl AtmosphereParameters {
     /// Earth-like outdoor preset: Rayleigh/Mie/ozone coefficients in per metre
     /// and the standard scale heights (Rayleigh 8 km, Mie 1.2 km, ozone tent
     /// centred on 25 km) over a 60 km shell.
+    ///
+    /// Retained as the clear-air reference the production look is measured
+    /// against (tests and look-development comparisons); the Flying Field
+    /// presentation runs [`Self::continental_summer_haze`].
+    #[allow(dead_code)]
     pub(crate) const fn earth() -> Self {
         Self {
             planet_radius_m: 6_360_000.0,
@@ -240,6 +245,45 @@ impl AtmosphereParameters {
             mie_anisotropy: 0.76,
             ozone_absorption: [0.000_000_65, 0.000_001_88, 0.000_000_08],
             ground_albedo: [0.20, 0.22, 0.18],
+        }
+    }
+
+    /// Continental-summer haze preset: the Earth Rayleigh/ozone baseline plus
+    /// an aerosol load of optical depth ~0.14 at the surface.
+    ///
+    /// Flying Field v1 look development measured the Poly Haven `meadow` HDRI
+    /// (CC0, midday, partly cloudy, low contrast): sky mean radiance 1.26 and
+    /// zenith 2.0-2.5 against a photographed ground radiance of 0.19, i.e. the
+    /// sky is several times brighter than the lit ground and shadows carry a
+    /// strong diffuse fill. A pristine Rayleigh-only atmosphere (optical depth
+    /// ~0.05) cannot produce that ratio at any sun irradiance: raising the sun
+    /// to lift the sky also lifts the direct term by the same factor, so the
+    /// sky/ground ratio stays inverted and shadows stay black. Adding a
+    /// physically ordinary summer aerosol layer (continental AOD 0.1-0.3 is
+    /// the measured norm for humid mid-latitude summer) raises the scattered
+    /// sky radiance relative to the direct beam, which is exactly the
+    /// soft-but-directional character of the reference. The single-scattering
+    /// albedo 0.875 keeps the aerosol absorbing enough to stay plausible.
+    pub(crate) const fn continental_summer_haze() -> Self {
+        Self {
+            planet_radius_m: 6_360_000.0,
+            atmosphere_height_m: 60_000.0,
+            // Rayleigh lifted 1.5x over the clear-air baseline: the measured
+            // reference sky (Poly Haven `meadow`, zenith radiance 2.0-2.5,
+            // blue-dominant) cannot be reached at the clear-air optical depth
+            // without pushing the direct sun into blown highlights.
+            rayleigh_scattering: [8.703e-6, 20.337e-6, 49.650e-6],
+            rayleigh_scale_height_m: 8_000.0,
+            mie_scattering: [0.550e-4; 3],
+            mie_extinction: [0.700e-4; 3],
+            mie_scale_height_m: 1_200.0,
+            mie_anisotropy: 0.76,
+            ozone_absorption: [0.000_000_65, 0.000_001_88, 0.000_000_08],
+            // Ground bounce albedo of the sky/IBL closure. Kept low and only
+            // faintly green: the bounce re-enters the multiple-scattering
+            // closure isotropically, and a saturated grass albedo here tints
+            // the whole sky cyan-green instead of reading as field bounce.
+            ground_albedo: [0.12, 0.13, 0.11],
         }
     }
 
