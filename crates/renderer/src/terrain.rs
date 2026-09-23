@@ -105,9 +105,11 @@ pub const DEFAULT_TERRAIN_MACRO_UV_OFFSET: [f32; 2] = [0.170, 0.390];
 /// base tile grid.
 pub const DEFAULT_TERRAIN_DETAIL_UV_OFFSET: [f32; 2] = [0.163, 0.037];
 
-/// Anti-repetition second-sample scale factor: the rotated sample tiles at
-/// `base_scale * ar_scale` metres, so its tile borders run at a different
-/// frequency and angle from the base grid.
+/// Anti-repetition second-sample UV frequency multiplier. Its physical tile
+/// period along each rotated lattice basis vector is `base_scale / ar_scale`:
+/// with the defaults, `2.0 / 1.370` is about 1.46 m. Rotation changes the
+/// lattice orientation, not this basis-vector period. This is a presentation
+/// transform, not a second calibrated physical scan.
 pub const DEFAULT_TERRAIN_AR_SCALE: f32 = 1.370;
 
 /// Anti-repetition second-sample rotation (degrees). Non-axis-aligned so the
@@ -2047,6 +2049,12 @@ mod tests {
         assert_eq!(material.ar_offset, [0.315, 0.571]);
         assert_eq!(material.detail_normal_fade_near_m, 20.0);
         assert_eq!(material.detail_normal_fade_far_m, 80.0);
+    }
+
+    #[test]
+    fn g3ar_secondary_physical_period_matches_uv_frequency() {
+        let secondary_period_m = DEFAULT_TERRAIN_TEXTURE_SCALE_M / DEFAULT_TERRAIN_AR_SCALE;
+        assert!((secondary_period_m - 1.459_854).abs() < 1e-6);
     }
 
     #[test]

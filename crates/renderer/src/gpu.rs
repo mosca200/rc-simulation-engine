@@ -588,7 +588,9 @@ impl TerrainDebugMode {
 /// G3A-R: terrain material uniform matching the WGSL `TerrainMaterialUniform`
 /// struct (eight 16-byte vec4 slots, 128 bytes total).
 ///
-/// G3A slots carry the PBR factors and per-map world-space UV anchors. G3A-R
+/// G3A slots carry the PBR factors and UV offset slots. ENV1-B0 uses
+/// `albedo_uv_offset` as the common registered base-PBR anchor and reserves
+/// `normal_uv_offset` and `roughness_uv_offset` as legacy slots. G3A-R
 /// adds: the three-frequency stack (base/detail/macro scales and per-layer
 /// anchors), the anti-repetition rotated second-sample transform
 /// (cos/sin angle, scale, offset), the detail-normal distance fade range, and
@@ -608,10 +610,10 @@ struct TerrainMaterialUniform {
     detail_scale_m: f32,
     macro_scale_m: f32,
     _padding1: f32,
-    // Slot 2: base albedo + base normal anchors.
+    // Slot 2: common registered base-PBR anchor + reserved legacy normal slot.
     albedo_uv_offset: [f32; 2],
     normal_uv_offset: [f32; 2],
-    // Slot 3: base roughness anchor + detail layer anchor.
+    // Slot 3: reserved legacy roughness slot + detail layer anchor.
     roughness_uv_offset: [f32; 2],
     detail_uv_offset: [f32; 2],
     // Slot 4: macro layer anchor + anti-repetition angle (cos, sin).
