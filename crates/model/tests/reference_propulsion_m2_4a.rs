@@ -14,6 +14,47 @@ use model::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[test]
+fn ra1_a_specific_installation_must_match_requested_airframe_and_configuration() {
+    use model::{
+        PhysicalConfigurationIdentity, ReadinessDomain, ReadinessReason, ReferenceReadinessInput,
+        evaluate_reference_aircraft_readiness,
+    };
+    let evidence = load(&synthetic_identified_fixture(
+        "specific_installed_configuration",
+    ))
+    .unwrap();
+    let aircraft = AircraftModelLoader::from_json_str(include_str!(
+        "../../../tests/fixtures/synthetic_non_reference_propulsion_v4.json"
+    ))
+    .unwrap();
+    let report = evaluate_reference_aircraft_readiness(ReferenceReadinessInput {
+        model: &aircraft,
+        physical_configuration: PhysicalConfigurationIdentity {
+            airframe_id: "other-airframe",
+            operational_configuration_id: "synthetic-operational-configuration",
+            propulsion_configuration_id: Some("synthetic-propulsion-configuration"),
+        },
+        survey: None,
+        mass_campaign: None,
+        aerodynamic_evidence: None,
+        propulsion_evidence: Some(&evidence),
+        required_alpha_rad: None,
+    });
+    let propulsion = report.domain(ReadinessDomain::Propulsion);
+    assert!(
+        propulsion
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::PhysicalInstallationMismatch)
+    );
+    assert!(
+        !propulsion
+            .present
+            .contains(&model::ReadinessEvidence::PhysicalInstallation)
+    );
+}
+
 const COMMITTED_EVIDENCE: &str = include_str!(
     "../../../docs/reference_aircraft/data/sig_kadet_lt40_egv_propulsion_evidence_v0.json"
 );

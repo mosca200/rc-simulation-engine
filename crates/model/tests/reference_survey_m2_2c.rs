@@ -4,6 +4,49 @@ use common::{load_value, valid_v2_reference_model_value};
 use model::{CrossVariantStatus, PhysicalSurveyLoader, ReferenceSurveyError, SurveyClassification};
 use serde_json::{Value, json};
 
+#[test]
+fn ra1_a_complete_test_geometry_does_not_supply_missing_mass() {
+    use model::{
+        PhysicalConfigurationIdentity, ReadinessDomain, ReadinessEvidence, ReadinessReason,
+        ReferenceReadinessInput, evaluate_reference_aircraft_readiness,
+    };
+
+    let survey = load(&complete_synthetic_campaign()).unwrap();
+    assert!(survey.evaluation().geometry_ready());
+    let mut value = valid_v2_reference_model_value();
+    value["reference_aircraft"]["physical_specification"]["aerodynamic_reference_chord_m"] = json!({
+        "value": 0.3, "status": "manufacturer_spec", "source_ids": ["manufacturer-sheet"]
+    });
+    let aircraft = load_value(&value).unwrap();
+    let report = evaluate_reference_aircraft_readiness(ReferenceReadinessInput {
+        model: &aircraft,
+        physical_configuration: PhysicalConfigurationIdentity {
+            airframe_id: "synthetic-airframe",
+            operational_configuration_id: "synthetic-config-a",
+            propulsion_configuration_id: None,
+        },
+        survey: Some(&survey),
+        mass_campaign: None,
+        aerodynamic_evidence: None,
+        propulsion_evidence: None,
+        required_alpha_rad: None,
+    });
+    assert!(
+        report
+            .domain(ReadinessDomain::Geometry)
+            .present
+            .contains(&ReadinessEvidence::TailGeometry)
+    );
+    assert!(
+        report
+            .domain(ReadinessDomain::MassProperties)
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::MassCampaignMissing)
+    );
+    assert_ne!(report.overall_status, model::ReadinessStatus::Ready);
+}
+
 const EMPTY_CAMPAIGN: &str = include_str!(
     "../../../docs/reference_aircraft/data/sig_kadet_lt40_egv_physical_survey_v0.json"
 );

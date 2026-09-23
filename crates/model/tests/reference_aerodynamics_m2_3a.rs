@@ -7,6 +7,134 @@ use model::{
 };
 use serde_json::{Value, json};
 
+fn ra1_report(value: &Value) -> model::ReferenceAircraftReadiness {
+    use model::{
+        PhysicalConfigurationIdentity, ReferenceReadinessInput,
+        evaluate_reference_aircraft_readiness,
+    };
+    let evidence = load(value).unwrap();
+    let aircraft = load_value(&valid_v2_reference_model_value()).unwrap();
+    evaluate_reference_aircraft_readiness(ReferenceReadinessInput {
+        model: &aircraft,
+        physical_configuration: PhysicalConfigurationIdentity {
+            airframe_id: "synthetic-airframe",
+            operational_configuration_id: "synthetic-config-a",
+            propulsion_configuration_id: None,
+        },
+        survey: None,
+        mass_campaign: None,
+        aerodynamic_evidence: Some(&evidence),
+        propulsion_evidence: None,
+        required_alpha_rad: Some((-0.5, 0.5)),
+    })
+}
+
+#[test]
+fn ra1_a_unresolved_generated_polar_is_blocked() {
+    use model::{ReadinessDomain, ReadinessReason, ReadinessStatus};
+    let mut value = synthetic_campaign();
+    value["polar_datasets"] = json!([dataset(
+        "synthetic-unresolved",
+        "generated_solver",
+        100_000.0,
+        0.0,
+        "xfoil",
+        "unresolved"
+    )]);
+    set_complete_envelope(&mut value, &[(100_000.0, 0.0)]);
+    let report = ra1_report(&value);
+    let domain = report.domain(ReadinessDomain::Aerodynamics);
+    assert_eq!(domain.status, ReadinessStatus::Blocked);
+    assert!(
+        domain
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::PolarEvidenceUnresolved)
+    );
+}
+
+#[test]
+fn ra1_a_missing_airfoil_source_is_not_promoted() {
+    use model::{ReadinessDomain, ReadinessReason};
+    let mut value = synthetic_campaign();
+    value["airfoil_identity"]["source_ids"] = json!([]);
+    let report = ra1_report(&value);
+    assert!(
+        report
+            .domain(ReadinessDomain::Aerodynamics)
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::AirfoilProvenanceUnresolved)
+    );
+}
+
+#[test]
+fn ra1_a_alpha_interval_outside_qualified_polar_is_incomplete() {
+    use model::{ReadinessDomain, ReadinessReason};
+    let mut value = synthetic_campaign();
+    value["polar_datasets"] = json!([dataset(
+        "synthetic-polar",
+        "published",
+        100_000.0,
+        0.0,
+        "published-method",
+        "not_applicable_published"
+    )]);
+    set_complete_envelope(&mut value, &[(100_000.0, 0.0)]);
+    let evidence = load(&value).unwrap();
+    let aircraft = load_value(&valid_v2_reference_model_value()).unwrap();
+    let report = model::evaluate_reference_aircraft_readiness(model::ReferenceReadinessInput {
+        model: &aircraft,
+        physical_configuration: model::PhysicalConfigurationIdentity {
+            airframe_id: "synthetic-airframe",
+            operational_configuration_id: "synthetic-config-a",
+            propulsion_configuration_id: None,
+        },
+        survey: None,
+        mass_campaign: None,
+        aerodynamic_evidence: Some(&evidence),
+        propulsion_evidence: None,
+        required_alpha_rad: Some((-2.0, 2.0)),
+    });
+    assert!(
+        report
+            .domain(ReadinessDomain::Aerodynamics)
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::AlphaCoverageInsufficient)
+    );
+}
+
+#[test]
+fn ra1_a_missing_reynolds_and_alpha_coverage_are_distinct() {
+    use model::{ReadinessDomain, ReadinessReason};
+    let mut value = synthetic_campaign();
+    value["polar_datasets"] = json!([dataset(
+        "synthetic-polar",
+        "published",
+        100_000.0,
+        0.0,
+        "published-method",
+        "not_applicable_published"
+    )]);
+    set_complete_envelope(&mut value, &[(100_000.0, 0.0), (200_000.0, 0.0)]);
+    let report = ra1_report(&value);
+    let domain = report.domain(ReadinessDomain::Aerodynamics);
+    assert!(
+        domain
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::ReynoldsCoverageInsufficient)
+    );
+    // The synthetic polar spans [-1, 1], so the separate alpha interval is covered.
+    assert!(
+        !domain
+            .findings
+            .iter()
+            .any(|f| f.reason == ReadinessReason::AlphaCoverageInsufficient)
+    );
+}
+
 const COMMITTED_EVIDENCE: &str = include_str!(
     "../../../docs/reference_aircraft/data/sig_kadet_lt40_egv_aerodynamic_evidence_v0.json"
 );
