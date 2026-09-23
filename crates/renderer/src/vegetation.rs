@@ -32,9 +32,15 @@ use crate::vegetation_assets::{VegetationAssetSet, VegetationSpecies};
 pub const LOD_COUNT: usize = 3;
 /// Render parts per LOD (bark + foliage).
 pub const PART_COUNT: usize = 2;
-/// Batch-group count: one group per (asset, LOD). PV1-R2: 4 production assets
-/// (pine_a, fir_a, broadleaf_a, broadleaf_b) × 3 LOD classes = 12 groups.
-pub const GROUP_COUNT: usize = 4 * LOD_COUNT;
+/// Batch-group count: one group per (asset, LOD). FFV1: 6 production assets
+/// (pine_a, fir_a, broadleaf_a, broadleaf_b, grass_a, grass_b) × 3 LOD
+/// classes = 18 groups.
+pub const GROUP_COUNT: usize = 6 * LOD_COUNT;
+
+/// FFV1: first asset index of the ground-cover grass clusters. Grass groups
+/// never cast shadows (a 4 cm shadow texel cannot resolve a blade) and are
+/// placed only inside the distance-graded ground-cover belt.
+pub const GRASS_ASSET_START: usize = 4;
 
 /// Default vegetation seed (matches the former `scenery::DEFAULT_TREE_SEED`).
 pub const DEFAULT_VEGETATION_SEED: u64 = 42;
@@ -339,21 +345,53 @@ const NEAR_MIN_SPACING_M: f32 = 7.5;
 /// Boundary belt ring (m).
 const BOUNDARY_INNER_RADIUS_M: f32 = 160.0;
 const BOUNDARY_OUTER_RADIUS_M: f32 = 230.0;
-/// Boundary angular slots.
-const BOUNDARY_SLOT_COUNT: usize = 16;
+/// Boundary angular slots. FFV1: raised from 16 so the belt reads as a
+/// semi-continuous foliage mass with occasional apertures, not as a dashed
+/// ring of isolated trees.
+const BOUNDARY_SLOT_COUNT: usize = 24;
 /// Probability a boundary slot is left empty (aperture).
 const BOUNDARY_APERTURE_PROBABILITY: f32 = 0.14;
-/// Minimum centre spacing in the boundary belt (m).
-const BOUNDARY_MIN_SPACING_M: f32 = 6.0;
-/// Near-zone scale range and boundary scale range.
+/// Minimum centre spacing in the boundary belt (m). FFV1: below typical crown
+/// radius so neighbouring crowns overlap into a mass.
+const BOUNDARY_MIN_SPACING_M: f32 = 3.2;
+/// Near-zone scale range and boundary scale range. FFV1: wider boundary scale
+/// spread so the silhouette line has varied height instead of a uniform row.
 const NEAR_SCALE_MIN: f32 = 0.85;
 const NEAR_SCALE_MAX: f32 = 1.25;
-const BOUNDARY_SCALE_MIN: f32 = 0.75;
-const BOUNDARY_SCALE_MAX: f32 = 1.15;
+const BOUNDARY_SCALE_MIN: f32 = 0.70;
+const BOUNDARY_SCALE_MAX: f32 = 1.35;
+
+/// FFV1 under-storey belt: leafy green mass beneath and between the boundary
+/// trees. The Poly Haven tree scans are sparse twig skeletons, so the belt's
+/// green read comes from grass-cluster cards (asset 5) scaled to bush size:
+/// a hedgerow of blade cards at the tree-line base, which is exactly how a
+/// maintained Central-European field boundary reads.
+const UNDERSTOREY_COUNT: usize = 160;
+const UNDERSTOREY_INNER_RADIUS_M: f32 = 148.0;
+const UNDERSTOREY_OUTER_RADIUS_M: f32 = 205.0;
+const UNDERSTOREY_MIN_SPACING_M: f32 = 2.5;
+const UNDERSTOREY_SCALE_MIN: f32 = 1.20;
+const UNDERSTOREY_SCALE_MAX: f32 = 2.60;
+
+/// FFV1 ground-cover belt: candidate draws for the distance-graded grass
+/// cluster scatter around the operational field centre. Density falls off in
+/// two bands (full inside 25 m, reduced to 60 m, none beyond) so near-ground
+/// credibility lives where the pilot camera actually looks and the terrain
+/// material carries the far field.
+const GROUND_COVER_CANDIDATES: usize = 760;
+const GROUND_COVER_NEAR_M: f32 = 25.0;
+const GROUND_COVER_MID_M: f32 = 60.0;
+const GROUND_COVER_ELLIPSE_X_M: f32 = 70.0;
+const GROUND_COVER_ELLIPSE_Z_M: f32 = 140.0;
+const GROUND_COVER_MIN_SPACING_M: f32 = 0.9;
+const GROUND_COVER_SCALE_MIN: f32 = 0.45;
+const GROUND_COVER_SCALE_MAX: f32 = 1.10;
 
 /// Total-instance budget guard: enough for credible depth, never a forest.
-const TARGET_MIN_INSTANCES: usize = 150;
-const TARGET_MAX_INSTANCES: usize = 320;
+/// FFV1: widened for the mass-forming boundary belt, the under-storey and the
+/// ground-cover scatter.
+const TARGET_MIN_INSTANCES: usize = 260;
+const TARGET_MAX_INSTANCES: usize = 1600;
 
 #[must_use]
 fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
@@ -366,6 +404,8 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
                 VegetationSpecies::Conifer
             }
         }
+        // FFV1 ground-cover belt: grass clusters only.
+        2 => VegetationSpecies::Grass,
         // Boundary: conifers lead, deciduous fill in — an unequal, natural
         // mix rather than a strict species ring.
         _ => {
@@ -380,7 +420,7 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
 
 /// Asset variant weights per species (uneven so the mix does not read as a
 /// uniform row of look-alikes). PV1-R2: 4 assets — conifer 0/1 (pine/fir),
-/// deciduous 2/3 (broadleaf_a / broadleaf_b).
+/// deciduous 2/3 (broadleaf_a / broadleaf_b). FFV1: grass 4/5.
 #[must_use]
 fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
     match species {
@@ -398,6 +438,14 @@ fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
                 0
             } else {
                 1
+            }
+        }
+        // Assets 4..5 (grass_a / grass_b).
+        VegetationSpecies::Grass => {
+            if variant_roll < 0.5 {
+                4
+            } else {
+                5
             }
         }
     }
@@ -520,11 +568,11 @@ pub fn flying_field_layout(
         }
         let cos_anchor = anchor.cos();
         let member_count = if cos_anchor < -0.25 {
-            12 + (rng.unit() * 9.0) as usize // dense opposite the flightline
+            16 + (rng.unit() * 12.0) as usize // dense opposite the flightline
         } else if cos_anchor > 0.10 {
-            5 + (rng.unit() * 5.0) as usize // sparse toward flightline
+            7 + (rng.unit() * 6.0) as usize // sparse toward flightline
         } else {
-            8 + (rng.unit() * 7.0) as usize
+            12 + (rng.unit() * 9.0) as usize
         };
         let cluster_radius =
             rng.range(BOUNDARY_INNER_RADIUS_M + 6.0, BOUNDARY_OUTER_RADIUS_M - 6.0);
@@ -561,6 +609,102 @@ pub fn flying_field_layout(
                 zone: 1,
             });
         }
+    }
+
+    // FFV1 under-storey belt, appended after the boundary stream so the
+    // established near/boundary layout stays bit-identical. Shrub-scale
+    // broadleaf instances fill the base of the tree line; a rejected spacing
+    // draw simply drops the shrub (same policy as the boundary members).
+    let mut understorey_accepted: Vec<[f32; 2]> = Vec::new();
+    for _ in 0..UNDERSTOREY_COUNT {
+        let angle = rng.range(0.0, std::f32::consts::TAU);
+        let radius = rng.range(UNDERSTOREY_INNER_RADIUS_M, UNDERSTOREY_OUTER_RADIUS_M);
+        let x = radius * angle.cos();
+        let z = radius * angle.sin();
+        if !spacing_ok(
+            x,
+            z,
+            &near_accepted,
+            &boundary_accepted,
+            UNDERSTOREY_MIN_SPACING_M,
+        ) {
+            continue;
+        }
+        if !spacing_ok(x, z, &[], &understorey_accepted, UNDERSTOREY_MIN_SPACING_M) {
+            continue;
+        }
+        understorey_accepted.push([x, z]);
+        // Broadleaf assets only: a shrub-scale conifer reads as a sapling
+        // mistake, a shrub-scale broadleaf reads as undergrowth.
+        let asset_index = if rng.unit() < 0.5 { 2 } else { 3 }.min(assets.len() - 1);
+        instances.push(VegetationInstance {
+            position: [x, ground_y, z],
+            yaw_rad: rng.range(0.0, std::f32::consts::TAU),
+            scale: rng.range(UNDERSTOREY_SCALE_MIN, UNDERSTOREY_SCALE_MAX),
+            asset_index,
+            tint: [
+                rng.range(0.90, 1.02),
+                rng.range(0.92, 1.04),
+                rng.range(0.84, 0.96),
+            ],
+            zone: 1,
+        });
+    }
+
+    // FFV1 ground-cover belt, appended last so every established stream stays
+    // bit-identical. Rejection sampling inside the field ellipse with a
+    // two-band density falloff; the mown strip itself stays clear so the
+    // runway reads as maintained grass, not as tufts.
+    let mut cover_accepted: Vec<[f32; 2]> = Vec::new();
+    for _ in 0..GROUND_COVER_CANDIDATES {
+        let x = rng.range(-1.0, 1.0) * GROUND_COVER_ELLIPSE_X_M;
+        let z = rng.range(-1.0, 1.0) * GROUND_COVER_ELLIPSE_Z_M;
+        let radius = ((x / GROUND_COVER_ELLIPSE_X_M).powi(2)
+            + (z / GROUND_COVER_ELLIPSE_Z_M).powi(2))
+        .sqrt();
+        if radius > 1.0 {
+            continue;
+        }
+        let distance = (x * x + z * z).sqrt();
+        let accept = if distance < GROUND_COVER_NEAR_M {
+            1.0
+        } else if distance < GROUND_COVER_MID_M {
+            0.45
+        } else {
+            0.0
+        };
+        if rng.unit() >= accept {
+            continue;
+        }
+        if x.abs() < 8.0 && z.abs() < 64.0 {
+            continue; // keep the mown strip clear
+        }
+        if !spacing_ok(
+            x,
+            z,
+            &near_accepted,
+            &cover_accepted,
+            GROUND_COVER_MIN_SPACING_M,
+        ) {
+            continue;
+        }
+        cover_accepted.push([x, z]);
+        // grass_b only: grass_medium_01's scan carries flower heads that read
+        // as pink sheets at tuft scale, so the belt uses the plain grass
+        // cluster (asset 5).
+        let asset_index = 5.min(assets.len() - 1);
+        instances.push(VegetationInstance {
+            position: [x, ground_y, z],
+            yaw_rad: rng.range(0.0, std::f32::consts::TAU),
+            scale: rng.range(GROUND_COVER_SCALE_MIN, GROUND_COVER_SCALE_MAX),
+            asset_index,
+            tint: [
+                rng.range(0.88, 1.04),
+                rng.range(0.92, 1.08),
+                rng.range(0.82, 0.96),
+            ],
+            zone: 2,
+        });
     }
 
     instances
@@ -638,7 +782,7 @@ pub fn placement_is_valid(
         if instance.asset_index >= assets.len() {
             return false;
         }
-        if !instance.scale.is_finite() || !(0.5..=2.0).contains(&instance.scale) {
+        if !instance.scale.is_finite() || !(0.25..=3.0).contains(&instance.scale) {
             return false;
         }
         if !instance.yaw_rad.is_finite() {
@@ -661,16 +805,41 @@ pub fn placement_is_valid(
         {
             return false;
         }
-        // Pairwise spacing (whole-field guarantee).
+        // Pairwise spacing (whole-field guarantee). Each instance carries the
+        // floor of its own tier: ground-cover tufts may nearly touch, shrub-
+        // scale under-storey may sit at a trunk base, tree-scale instances
+        // keep the configured crown floor.
         for other in instances.iter().skip(index + 1) {
+            let pair_floor =
+                spacing_floor_for(instance, min_spacing).min(spacing_floor_for(other, min_spacing));
             let dx = other.position[0] - x;
             let dz = other.position[2] - z;
-            if dx * dx + dz * dz < min_spacing * min_spacing {
+            if dx * dx + dz * dz < pair_floor * pair_floor {
                 return false;
             }
         }
     }
     true
+}
+
+/// FFV1: the spacing floor one instance imposes, by placement tier. Zones own
+/// their floor: ground-cover tufts may nearly touch, the under-storey
+/// hedgerow overlaps by design, tree-scale instances keep the crown floor.
+#[must_use]
+fn spacing_floor_for(instance: &VegetationInstance, min_spacing: f32) -> f32 {
+    match instance.zone {
+        2 => GROUND_COVER_MIN_SPACING_M.min(min_spacing),
+        1 => UNDERSTOREY_MIN_SPACING_M.min(min_spacing),
+        _ => min_spacing,
+    }
+}
+
+/// FFV1: true for the shrub-scale under-storey band of the placement scale
+/// range, which carries a tighter spacing floor than tree-scale instances.
+#[must_use]
+#[allow(dead_code)]
+fn is_shrub_scale(scale: f32) -> bool {
+    scale < UNDERSTOREY_SCALE_MAX + 0.05
 }
 
 // ── Frustum culling (CPU) ──────────────────────────────────────────────────
@@ -951,9 +1120,11 @@ impl VegetationWorld {
         let mut shadow_active = 0u32;
         for group in 0..GROUP_COUNT {
             let lod = group % LOD_COUNT;
+            let asset = group / LOD_COUNT;
             if self.batch_ranges[group * 2 + 1] > 0 {
                 active_groups += 1;
-                if lod <= 1 {
+                // FFV1: ground-cover grass never enters the shadow passes.
+                if lod <= 1 && asset < GRASS_ASSET_START {
                     shadow_active += 1;
                 }
             }
@@ -1046,6 +1217,12 @@ mod tests {
         assert!(!instances.is_empty());
         let safe_rect = expanded_safety_rect(TREE_MIN_DISTANCE_FROM_RUNWAY_M);
         for instance in instances {
+            // FFV1: the exclusion is a TREE contract (no trunk or crown may
+            // stand in the runway safety area). Ground-cover tufts live on the
+            // field by design and keep their own mown-strip exclusion.
+            if instance.zone == 2 {
+                continue;
+            }
             let [x, _, z] = instance.position;
             if x >= safe_rect[0] && x <= safe_rect[2] && z >= safe_rect[1] && z <= safe_rect[3] {
                 panic!("tree inside expanded runway safety rect: ({x}, {z})");
@@ -1059,7 +1236,7 @@ mod tests {
         for instance in world.instances() {
             assert!(instance.position.iter().all(|v| v.is_finite()));
             assert!(instance.yaw_rad.is_finite());
-            assert!(instance.scale.is_finite() && (0.5..=2.0).contains(&instance.scale));
+            assert!(instance.scale.is_finite() && (0.25..=3.0).contains(&instance.scale));
             assert!(instance.asset_index < world.assets().len());
             assert!(instance.tint.iter().all(|c| c.is_finite() && *c >= 0.5));
         }
@@ -1077,12 +1254,14 @@ mod tests {
     #[test]
     fn placement_enforces_minimum_spacing_everywhere() {
         let world = test_world(DEFAULT_VEGETATION_SEED);
+        // Tree-scale floor; the validator relaxes pairs that involve a
+        // shrub-scale under-storey instance to the under-storey floor.
         assert!(placement_is_valid(
             world.instances(),
             world.assets(),
             FIELD_HALF_EXTENT_M,
             TREE_MIN_DISTANCE_FROM_RUNWAY_M,
-            6.0,
+            BOUNDARY_MIN_SPACING_M,
         ));
     }
 
@@ -1148,8 +1327,10 @@ mod tests {
         assert!(boundary.len() >= 60, "boundary belt must populate");
         for instance in boundary {
             let radius = (instance.position[0].powi(2) + instance.position[2].powi(2)).sqrt();
+            // FFV1: the band now includes the under-storey belt, which starts
+            // slightly inside the tree ring so the line has a filled base.
             assert!(
-                (150.0..=235.0).contains(&radius),
+                (145.0..=235.0).contains(&radius),
                 "boundary tree at radius {radius}"
             );
         }

@@ -53,6 +53,9 @@ type V3 = [f32; 3];
 pub enum VegetationSpecies {
     Deciduous,
     Conifer,
+    /// FFV1 ground-cover grass clusters (not trees): instanced in the
+    /// distance-graded ground-cover belt only.
+    Grass,
 }
 
 /// One render part of a tree LOD. Parts are drawn with distinct materials.
@@ -280,9 +283,13 @@ struct CommittedGlbEntry {
 /// Asset provenance:
 ///   pine_a      — Poly Haven pine_tree_01 source model + textures (CC0)
 ///   fir_a       — Poly Haven fir_tree_01 source model + textures (CC0)
-///   broadleaf_a — Poly Haven tree_small_02 source model + textures (CC0)
+///   broadleaf_a — Poly Haven tree_small_02 source model + textures (CC0),
+///                 FFV1 re-bake: densified crown + area-filtered 1k leaf atlas
 ///   broadleaf_b — Poly Haven jacaranda_tree source model + textures (CC0)
-static COMMITTED_GLB: [CommittedGlbEntry; 4] = [
+///   grass_a     — Poly Haven grass_medium_01 ground-cover cluster (CC0, FFV1;
+///                 baked but not placed: its flower heads read as pink sheets)
+///   grass_b     — Poly Haven grass_medium_02 ground-cover cluster (CC0, FFV1)
+static COMMITTED_GLB: [CommittedGlbEntry; 6] = [
     CommittedGlbEntry {
         name: "field_pine_a",
         species: VegetationSpecies::Conifer,
@@ -314,6 +321,22 @@ static COMMITTED_GLB: [CommittedGlbEntry; 4] = [
         lod0: include_bytes!("../assets/vegetation/field_broadleaf_b_lod0.glb"),
         lod1: include_bytes!("../assets/vegetation/field_broadleaf_b_lod1.glb"),
         lod2: include_bytes!("../assets/vegetation/field_broadleaf_b_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_grass_a",
+        species: VegetationSpecies::Grass,
+        variant: 0,
+        lod0: include_bytes!("../assets/vegetation/field_grass_a_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_grass_a_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_grass_a_lod2.glb"),
+    },
+    CommittedGlbEntry {
+        name: "field_grass_b",
+        species: VegetationSpecies::Grass,
+        variant: 1,
+        lod0: include_bytes!("../assets/vegetation/field_grass_b_lod0.glb"),
+        lod1: include_bytes!("../assets/vegetation/field_grass_b_lod1.glb"),
+        lod2: include_bytes!("../assets/vegetation/field_grass_b_lod2.glb"),
     },
 ];
 
@@ -1688,16 +1711,20 @@ mod tests {
     }
 
     #[test]
-    fn production_set_has_two_species_and_three_variants_each() {
+    fn production_set_has_tree_species_and_ground_cover() {
         // PV1-R: production set is now 2 conifers (pine_a, fir_a) + 1 broadleaf
         // (broadleaf_a) from Blender, not the old 3-variant-per-species layout.
+        // FFV1 adds a second broadleaf variant plus two ground-cover grass
+        // clusters (grass_a, grass_b).
         let set = production_asset_set();
         let mut deciduous = 0;
         let mut conifer = 0;
+        let mut grass = 0;
         for asset in set.assets() {
             match asset.species {
                 VegetationSpecies::Deciduous => deciduous += 1,
                 VegetationSpecies::Conifer => conifer += 1,
+                VegetationSpecies::Grass => grass += 1,
             }
         }
         assert!(
@@ -1705,12 +1732,16 @@ mod tests {
             "expected at least 2 conifer variants, got {conifer}"
         );
         assert!(
-            deciduous >= 1,
-            "expected at least 1 deciduous variant, got {deciduous}"
+            deciduous >= 2,
+            "expected at least 2 deciduous variants, got {deciduous}"
         );
         assert!(
-            set.len() >= 3,
-            "expected at least 3 total assets, got {}",
+            grass >= 2,
+            "expected at least 2 ground-cover variants, got {grass}"
+        );
+        assert!(
+            set.len() >= 6,
+            "expected at least 6 total assets, got {}",
             set.len()
         );
     }
@@ -1824,6 +1855,12 @@ mod tests {
     #[test]
     fn trunk_and_canopy_materials_are_distinct() {
         for asset in production_asset_set().assets() {
+            // FFV1: ground-cover clusters are a single alpha-card material
+            // split by height into the two render parts; bark/canopy material
+            // distinctness is a tree contract and does not apply to them.
+            if asset.species == VegetationSpecies::Grass {
+                continue;
+            }
             for class in 0..3_u8 {
                 let lod = asset.lods.lod(class).unwrap();
                 let bark = &lod.bark;
@@ -2074,6 +2111,24 @@ mod tests {
             for v in lod0.foliage.vertices() {
                 foliage_min_y = foliage_min_y.min(v.position[1]);
             }
+            if asset.species == VegetationSpecies::Grass {
+                // FFV1 ground cover: the cluster as a whole must sit ON the
+                // ground plane (the stem part touches it; the blade part may
+                // start slightly above). The tree trunk-rise contract does
+                // not apply to a tuft.
+                let cluster_min_y = bark_min_y.min(foliage_min_y);
+                assert!(
+                    cluster_min_y.abs() < 0.05,
+                    "{}: ground cover must start at ground level (min y {cluster_min_y})",
+                    asset.name
+                );
+                assert!(
+                    bark_min_y > -0.05 && foliage_min_y > -0.05,
+                    "{}: ground cover must not sink below ground",
+                    asset.name
+                );
+                continue;
+            }
             // PV1-R2: Poly Haven models may have trunk base above origin
             // (jacaranda trunk starts at y > 2m). Allow up to 5m.
             assert!(
@@ -2098,6 +2153,19 @@ mod tests {
     #[test]
     fn tree_heights_are_plausible_and_bounds_are_finite() {
         for asset in production_asset_set().assets() {
+            if asset.species == VegetationSpecies::Grass {
+                // FFV1 ground cover: tufts are ~1-1.5 m tall with a ~1-2 m
+                // radius; the tree height/bounds bands do not apply.
+                assert!(
+                    (0.4..=2.0).contains(&asset.height_m),
+                    "{} ground-cover height {}",
+                    asset.name,
+                    asset.height_m
+                );
+                assert!(asset.bounds_radius.is_finite() && asset.bounds_radius > 0.3);
+                assert!(asset.bounds_center.iter().all(|v| v.is_finite()));
+                continue;
+            }
             // PV1-R: pine_a is 18.9m from Blender; raise max to 25m.
             // PV1-R2: tree_small_02 is only 3.66m; lower min to 2.0
             assert!(

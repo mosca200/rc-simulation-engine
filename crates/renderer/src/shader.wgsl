@@ -1340,9 +1340,9 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // linear R/G ~ 0.5-1.1, i.e. clearly green. The maintained regions
     // therefore carry a documented mown-grass white-balance, worn traffic
     // stays grassy-but-paler, and the vegetation edge dries out toward soil.
-    let tint_maint = vec3<f32>(0.68, 1.70, 0.95);
-    let tint_worn = vec3<f32>(0.80, 1.35, 0.85);
-    let tint_dry = vec3<f32>(0.95, 0.95, 0.75);
+    let tint_maint = vec3<f32>(0.70, 1.35, 0.78);
+    let tint_worn = vec3<f32>(0.80, 1.12, 0.78);
+    let tint_dry = vec3<f32>(0.55, 0.52, 0.40);
     let region_tint = (tint_maint * (region.x + region.z)
         + tint_worn * region.y
         + tint_dry * region.w)
@@ -1351,9 +1351,9 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // so the ground never reads as one repeated texture.
     let health = field_fbm(input.world_position.xz * 0.022);
     let health_tint = vec3<f32>(
-        1.06 - 0.10 * health,
-        0.90 + 0.20 * health,
-        1.02 - 0.06 * health,
+        1.05 - 0.10 * health,
+        0.93 + 0.14 * health,
+        1.00 - 0.05 * health,
     );
     // Mown laps modulate the maintained regions only.
     let mow = field_mow_stripe(input.world_position.xz);
@@ -1830,13 +1830,39 @@ fn fs_vegetation_shadow(input: VegetationShadowOutput) {
     }
 }
 
+// FFV1: foliage leaf-card sampling bias. The leaf clusters are small, so the
+// hardware-selected mip at tree-line distance averages alpha below the cutoff
+// and the crown evaporates; a negative bias keeps coverage alive (mild
+// shimmer is preferable to a bare skeleton).
+const FOLIAGE_MIP_BIAS: f32 = -1.5;
+
+// FFV1: foliage alpha cutoff with distance compensation. Mipmapped leaf
+// atlases average coverage down at the edges, so a constant cutoff would
+// erode distant crowns into specks; easing the threshold down with distance
+// keeps the silhouette mass stable (no shimmer, no popping) while near-field
+// leaves keep the crisp 0.45 cut.
+fn vegetation_alpha_cutoff(world_position: vec3<f32>) -> f32 {
+    let distance = length(world_position - camera.camera_position.xyz);
+    return mix(0.45, 0.35, smoothstep(40.0, 120.0, distance));
+}
+
+// FFV1: leaf cards are two-sided; shade the face the viewer actually sees so
+// back faces of a card are not lit with a normal pointing away.
+fn vegetation_shading_normal(world_normal: vec3<f32>, front_facing: bool) -> vec3<f32> {
+    let n = safe_normalize(world_normal);
+    return select(-n, n, front_facing);
+}
+
 // Lit vegetation fragment: the exact fs_lit chain (texture * vertex color,
 // metallic/roughness PBR, G2B shadow visibility, distance fog) so trees join
 // the same linear HDR Rgba16Float scene — no independent tone mapping, no
 // LDR clamp, no gamma. The presentation-only debug selector (0 FINAL, 1 LOD
 // colors) is resolved first; production output is untouched by it.
 @fragment
-fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
+fn fs_vegetation(
+    input: VegetationVertexOutput,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
     let mode = vegetation_state.debug_mode;
     if (mode == 1u) {
         // Deterministic LOD debug colors: LOD0 green, LOD1 yellow, LOD2 orange.
@@ -1852,21 +1878,26 @@ fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(debug_color, 1.0);
     }
 
-    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let texture_rgba = textureSampleBias(
+        base_color_texture,
+        base_color_sampler,
+        input.uv,
+        FOLIAGE_MIP_BIAS,
+    );
     let base_rgba = input.color * texture_rgba;
 
     // PV1-R: alpha-mask cutoff for foliage leaf cards. Fragments below the
     // threshold are discarded so the card silhouette reads as individual
     // leaves rather than a textured quad. The bark primitive uses an opaque
     // texture (alpha = 1) so this never clips bark geometry.
-    if (base_rgba.a < 0.45) {
+    if (base_rgba.a < vegetation_alpha_cutoff(input.world_position)) {
         discard;
     }
 
     let metallic = clamp(material.metallic, 0.0, 1.0);
     let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
 
-    let n = safe_normalize(input.world_normal);
+    let n = vegetation_shading_normal(input.world_normal, front_facing);
     let lit_rgb = lit_pbr_response(base_rgba, n, input.world_position, metallic, roughness);
     let final_rgb = apply_distance_fog(lit_rgb, input.world_position);
 
@@ -1876,7 +1907,10 @@ fn fs_vegetation(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
 // RV2-5 physical vegetation counterpart: identical material, alpha-mask and
 // debug LOD path, with the physical split-sum IBL lighting.
 @fragment
-fn fs_vegetation_v2(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
+fn fs_vegetation_v2(
+    input: VegetationVertexOutput,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
     let mode = vegetation_state.debug_mode;
     if (mode == 1u) {
         let lod = u32(input.lod_class + 0.5);
@@ -1891,17 +1925,22 @@ fn fs_vegetation_v2(input: VegetationVertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(debug_color, 1.0);
     }
 
-    let texture_rgba = textureSample(base_color_texture, base_color_sampler, input.uv);
+    let texture_rgba = textureSampleBias(
+        base_color_texture,
+        base_color_sampler,
+        input.uv,
+        FOLIAGE_MIP_BIAS,
+    );
     let base_rgba = input.color * texture_rgba;
 
-    if (base_rgba.a < 0.45) {
+    if (base_rgba.a < vegetation_alpha_cutoff(input.world_position)) {
         discard;
     }
 
     let metallic = clamp(material.metallic, 0.0, 1.0);
     let roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
 
-    let n = safe_normalize(input.world_normal);
+    let n = vegetation_shading_normal(input.world_normal, front_facing);
     let lit_rgb = lit_pbr_response_physical(base_rgba, n, input.world_position, metallic, roughness);
     let final_rgb = apply_physical_aerial_perspective(lit_rgb, input.world_position);
 

@@ -428,6 +428,51 @@ pub fn mip_level_count_for_size(size: u32) -> u32 {
     size.trailing_zeros() + 1
 }
 
+/// Deterministic mip chain for a single RGBA8 sRGB-intent map.
+///
+/// Used by alpha-tested foliage atlases: level 0 is the input and each
+/// following level halves both dimensions with the same colour-space-correct,
+/// alpha-preserving 2x2 box filter as the terrain albedo chain, so leaf-card
+/// coverage survives minification instead of aliasing into shimmer.
+///
+/// A pure function of the input pixels: the same bytes always yield the same
+/// chain, bitwise, on every build and platform.
+///
+/// # Panics
+///
+/// Panics if `size` is not a positive power of two or the buffer length does
+/// not match `size * size * 4`.
+#[must_use]
+pub fn generate_rgba8_srgb_mip_chain(albedo_rgba8: &[u8], size: u32) -> Vec<MipImage> {
+    assert_eq!(
+        albedo_rgba8.len(),
+        (size as usize) * (size as usize) * 4,
+        "rgba8 mip chain input must be size*size*4 bytes"
+    );
+    let levels = mip_level_count_for_size(size);
+    let mut chain = Vec::with_capacity(levels as usize);
+    chain.push(MipImage {
+        width: size,
+        height: size,
+        bytes: albedo_rgba8.to_vec(),
+    });
+    let mut width = size;
+    let mut height = size;
+    let mut current = albedo_rgba8.to_vec();
+    for _ in 1..levels {
+        let (next_width, next_height, bytes) = downsample_rgba8_srgb(width, height, &current);
+        width = next_width;
+        height = next_height;
+        current = bytes;
+        chain.push(MipImage {
+            width,
+            height,
+            bytes: current.clone(),
+        });
+    }
+    chain
+}
+
 /// Assemble the base texture set from decoded committed assets.
 ///
 /// `albedo_rgba8` and `normal_rgba8` are the direct RGBA8 decodes of the

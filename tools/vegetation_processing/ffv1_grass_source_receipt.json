@@ -1,0 +1,68 @@
+[
+  {
+    "slug": "grass_medium_01",
+    "map": "blend",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/blend/1k/grass_medium_01/grass_medium_01_1k.blend",
+    "api_size": 1832028,
+    "api_md5": "e37f4fa4c90ddeb807ce6b4c09e3033d",
+    "local_size": 1832028,
+    "local_md5": "e37f4fa4c90ddeb807ce6b4c09e3033d",
+    "local_sha256": "5bbeaf7161508c1de66f137e7fcaec6fdea9c4ac0faa134c384c89c97271bec2",
+    "verified": true
+  },
+  {
+    "slug": "grass_medium_01",
+    "map": "diff",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/png/2k/grass_medium_01/grass_medium_01_diff_2k.png",
+    "api_size": 7090951,
+    "api_md5": "7a12aa81dfb2fb9527ef2456a50bfe11",
+    "local_size": 7090951,
+    "local_md5": "7a12aa81dfb2fb9527ef2456a50bfe11",
+    "local_sha256": "eecee74e1e8a0c200dd7cba2bbce767d9729f5cc25c234ac40a1e36fd2684c1d",
+    "verified": true
+  },
+  {
+    "slug": "grass_medium_01",
+    "map": "alpha",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/png/2k/grass_medium_01/grass_medium_01_alpha_2k.png",
+    "api_size": 1580653,
+    "api_md5": "0810166131307c1094d37e73a8490542",
+    "local_size": 1580653,
+    "local_md5": "0810166131307c1094d37e73a8490542",
+    "local_sha256": "4af2c3d5ebf167764ad3746f8c925dc4fbe28f0df023656599123cb593b793dd",
+    "verified": true
+  },
+  {
+    "slug": "grass_medium_02",
+    "map": "blend",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/blend/1k/grass_medium_02/grass_medium_02_1k.blend",
+    "api_size": 318842,
+    "api_md5": "14cffdc414f42565302df84c4652938c",
+    "local_size": 318842,
+    "local_md5": "14cffdc414f42565302df84c4652938c",
+    "local_sha256": "fd53aafc0650f0e7d9a10bc95f669d396ea7eb746bf2ca5a14497e331410eff1",
+    "verified": true
+  },
+  {
+    "slug": "grass_medium_02",
+    "map": "diff",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/png/2k/grass_medium_02/grass_medium_02_diff_2k.png",
+    "api_size": 3105016,
+    "api_md5": "446552aadc7ad9749468fd3b052d25a7",
+    "local_size": 3105016,
+    "local_md5": "446552aadc7ad9749468fd3b052d25a7",
+    "local_sha256": "04f7de9ee8e3fccbda48c6ef715b8bd30aa707c1605add5eb679fc6e7acb7d38",
+    "verified": true
+  },
+  {
+    "slug": "grass_medium_02",
+    "map": "alpha",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/png/2k/grass_medium_02/grass_medium_02_alpha_2k.png",
+    "api_size": 303260,
+    "api_md5": "3b2ba296de3cffad18e8119e6ca693e5",
+    "local_size": 303260,
+    "local_md5": "3b2ba296de3cffad18e8119e6ca693e5",
+    "local_sha256": "c96abf8da86aa750ff6425b8ded78aa98cf61858834e3557ad2dcc5348359337",
+    "verified": true
+  }
+]

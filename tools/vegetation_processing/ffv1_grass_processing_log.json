@@ -1,0 +1,17 @@
+[
+  "FFV1 ground-cover bake (grass_medium_01/02, CC0)",
+  "\n============================================================\ngrass_medium_01 -> grass_a",
+  "  grass_medium_01 atlas coverage(alpha>0.45) = 0.134",
+  "  recentered bbox z=[0.000, 0.700] x=[-3.500, 3.500]",
+  "  source tris=43792",
+  "  lod0: stem=67 blades=17081 total=17148",
+  "  lod1: stem=48 blades=7880 total=7928",
+  "  lod2: stem=29 blades=3342 total=3371",
+  "\n============================================================\ngrass_medium_02 -> grass_b",
+  "  grass_medium_02 atlas coverage(alpha>0.45) = 0.100",
+  "  recentered bbox z=[0.000, 0.753] x=[-1.597, 1.597]",
+  "  source tris=8540",
+  "  lod0: stem=159 blades=5510 total=5669",
+  "  lod1: stem=81 blades=2611 total=2692",
+  "  lod2: stem=45 blades=1185 total=1230"
+]

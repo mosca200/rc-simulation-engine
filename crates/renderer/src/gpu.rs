@@ -73,8 +73,8 @@ use crate::texture::{
     padded_bytes_per_row_checked_for_bytes_per_pixel,
 };
 use crate::vegetation::{
-    DEFAULT_VEGETATION_SEED, GROUP_COUNT, LOD_COUNT, PART_COUNT, VegetationDebugMode,
-    VegetationFrameStats, VegetationGpuInstance, VegetationWorld,
+    DEFAULT_VEGETATION_SEED, GRASS_ASSET_START, GROUP_COUNT, LOD_COUNT, PART_COUNT,
+    VegetationDebugMode, VegetationFrameStats, VegetationGpuInstance, VegetationWorld,
 };
 use crate::vegetation_assets::{VegetationPart, part_metallic, part_roughness};
 use crate::visual_audit::{
@@ -1800,6 +1800,7 @@ impl WgpuRenderer {
                 foliage_material_index,
                 VegetationDebugMode::default(),
                 vegetation_fragment_entry,
+                terrain_sampler_anisotropy,
             );
             (Some(world), Some(gpu))
         } else {
@@ -2706,6 +2707,12 @@ impl WgpuRenderer {
                                 continue;
                             }
                             let asset = group / LOD_COUNT;
+                            // FFV1: ground-cover grass never casts shadows; a
+                            // 4 cm shadow texel cannot resolve a blade and the
+                            // aliasing would only add noise to the field.
+                            if asset >= GRASS_ASSET_START {
+                                continue;
+                            }
                             let lod = (group % LOD_COUNT) as u8;
                             for part in [VegetationPart::Bark, VegetationPart::Foliage] {
                                 // PV1-R2: switch shadow pipeline for foliage (two-sided
@@ -2922,8 +2929,19 @@ impl WgpuRenderer {
                                         }
                                         current_is_foliage = is_foliage;
                                     }
-                                    let mesh =
-                                        &vegetation.meshes[vegetation_mesh_index(asset, lod, part)];
+                                    let mesh = &vegetation.meshes[vegetation_mesh_index(
+                                        asset,
+                                        // FFV1 crown-preserving LOD: the source
+                                        // leaf-card sets are already sparse, and
+                                        // decimating them (LOD1/LOD2 ratios)
+                                        // dissolves the crown into bare branches
+                                        // at exactly the distances where the tree
+                                        // line must read as a foliage mass. Bark
+                                        // keeps its decimated LOD; the crown keeps
+                                        // the LOD0 card set at every distance.
+                                        if is_foliage { 0 } else { lod },
+                                        part,
+                                    )];
                                     let material = &self.materials[mesh.material_index];
                                     render_pass.set_bind_group(3, &material.bind_group, &[]);
                                     render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -3525,6 +3543,8 @@ fn create_glb_gpu_material(
             &primitive.material.sampler_config,
             upload.metallic,
             upload.roughness,
+            false,
+            1,
         )
     }
 }
@@ -3687,6 +3707,8 @@ fn create_gpu_material(
     sampler_config: &SamplerConfig,
     metallic: f32,
     roughness: f32,
+    mipmapped: bool,
+    anisotropy: u16,
 ) -> Result<GpuMaterial, RendererError> {
     let size = wgpu::Extent3d {
         width: texture_data.width,
@@ -3694,10 +3716,30 @@ fn create_gpu_material(
         depth_or_array_layers: 1,
     };
 
+    // FFV1: alpha-tested foliage needs a real mip chain or the leaf coverage
+    // aliases into shimmer at distance. The chain is the same colour-space-
+    // correct, alpha-preserving reduction the terrain albedo uses. Non-square
+    // or non-power-of-two sources keep the historic single-mip path.
+    let square_pow2 =
+        texture_data.width == texture_data.height && texture_data.width.is_power_of_two();
+    let mip_chain = if mipmapped && square_pow2 {
+        crate::terrain_textures::generate_rgba8_srgb_mip_chain(
+            &texture_data.rgba8,
+            texture_data.width,
+        )
+    } else {
+        Vec::new()
+    };
+    let mip_levels = if mip_chain.is_empty() {
+        1
+    } else {
+        mip_chain.len() as u32
+    };
+
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("base color texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -3707,25 +3749,39 @@ fn create_gpu_material(
 
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // FIX 5: create_staging_buffer now returns Result.
-    let (staged_data, bytes_per_row) =
-        create_staging_buffer(texture_data).map_err(RendererError::TextureUpload)?;
+    if !mip_chain.is_empty() {
+        for (level, mip) in mip_chain.iter().enumerate() {
+            upload_terrain_mip_level(
+                queue,
+                &texture,
+                level as u32,
+                mip.width,
+                mip.height,
+                &mip.bytes,
+                4,
+            )?;
+        }
+    } else {
+        // FIX 5: create_staging_buffer now returns Result.
+        let (staged_data, bytes_per_row) =
+            create_staging_buffer(texture_data).map_err(RendererError::TextureUpload)?;
 
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &staged_data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(bytes_per_row),
-            rows_per_image: Some(texture_data.height),
-        },
-        size,
-    );
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &staged_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(texture_data.height),
+            },
+            size,
+        );
+    }
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("material sampler"),
@@ -3735,15 +3791,18 @@ fn create_gpu_material(
         mag_filter: sampler_config.mag_filter.to_wgpu(),
         min_filter: sampler_config.min_filter.to_wgpu(),
         // ENV1-A: honour the glTF min filter's mipmap-selection axis instead of
-        // hard-coding trilinear. GLB textures are still created with
-        // `mip_level_count: 1` (a deliberate ENV1-A scope decision, so no
-        // existing aircraft or vegetation pixel changes), which makes this
-        // mapping inert for them; it is the seam a later tranche uses to give
-        // GLB maps a real mip chain without touching the sampler again.
-        mipmap_filter: sampler_config.mipmap_filter.map_or(
-            wgpu::MipmapFilterMode::Nearest,
-            SamplerMipmapFilter::to_wgpu,
-        ),
+        // hard-coding trilinear. FFV1: materials that carry a real mip chain
+        // (foliage) sample trilinear with anisotropy so minified leaf coverage
+        // stays stable; single-mip materials keep the historic nearest mapping.
+        mipmap_filter: if !mip_chain.is_empty() {
+            wgpu::MipmapFilterMode::Linear
+        } else {
+            sampler_config.mipmap_filter.map_or(
+                wgpu::MipmapFilterMode::Nearest,
+                SamplerMipmapFilter::to_wgpu,
+            )
+        },
+        anisotropy_clamp: anisotropy,
         ..Default::default()
     });
 
@@ -4291,6 +4350,7 @@ fn build_gpu_vegetation(
     foliage_material_index: usize,
     debug_mode: VegetationDebugMode,
     fragment_entry_point: &'static str,
+    sampler_anisotropy: u16,
 ) -> GpuVegetation {
     // Static meshes: one buffer pair per (asset, LOD, part). The Vec index is
     // positional: (asset * LOD_COUNT + lod) * PART_COUNT + part, matching
@@ -4313,6 +4373,8 @@ fn build_gpu_vegetation(
                 &SamplerConfig::default_sampler(),
                 crate::vegetation_assets::part_metallic(VegetationPart::Bark),
                 crate::vegetation_assets::part_roughness(VegetationPart::Bark),
+                true,
+                sampler_anisotropy,
             )
             .expect("vegetation bark texture uploads");
             let foliage_mat = create_gpu_material(
@@ -4323,6 +4385,8 @@ fn build_gpu_vegetation(
                 &SamplerConfig::default_sampler(),
                 crate::vegetation_assets::part_metallic(VegetationPart::Foliage),
                 crate::vegetation_assets::part_roughness(VegetationPart::Foliage),
+                true,
+                sampler_anisotropy,
             )
             .expect("vegetation foliage texture uploads");
             let bi = materials.len();
@@ -7639,6 +7703,7 @@ mod vegetation_tests {
             1,
             debug_mode,
             "fs_vegetation",
+            1,
         );
         // NOTE: bark/foliage material indexes in the test are 0/1 (they are the
         // only materials pushed here — the fallback is deliberately absent).
@@ -8291,6 +8356,7 @@ mod vegetation_tests {
             1,
             VegetationDebugMode::Final,
             "fs_vegetation",
+            1,
         );
         queue.write_buffer(
             &gpu_veg.instance_buffer,
@@ -8770,6 +8836,7 @@ mod vegetation_tests {
             1,
             VegetationDebugMode::Final,
             "fs_vegetation",
+            1,
         );
         queue.write_buffer(
             &gpu_veg.instance_buffer,

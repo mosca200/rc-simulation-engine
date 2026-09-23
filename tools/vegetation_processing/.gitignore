@@ -1,3 +1,7 @@
 # Source textures are large (17MB) and can be re-downloaded from Poly Haven.
 # See PROVENANCE.md for download URLs.
 textures/
+# FFV1: the Poly Haven source .blend files (tens of MB each) are re-downloadable
+# and must never be committed; only the derived runtime GLBs are.
+source_models/
+ffv1_tree_source_receipt.json

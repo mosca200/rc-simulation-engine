@@ -703,8 +703,8 @@ fn committed_glb_assets_use_no_normal_or_metallic_roughness_slots() {
         checked += 1;
     }
     assert_eq!(
-        checked, 13,
-        "one aircraft GLB plus twelve vegetation LOD GLBs"
+        checked, 19,
+        "one aircraft GLB plus eighteen vegetation LOD GLBs (six assets x three LODs)"
     );
 }
 /// The Poly Haven public API's OpenAPI schema defines a texture asset's
