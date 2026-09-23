@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.1.0",
+  "scene_id": "ffv1_hero_1080p",
+  "description": "FFV1 Flying Field v1 authoritative pilot-view hero scene at 1920x1080: standing pilot eye at 1.8 m, 20 m behind the parked Acro Electric 01, looking down the mown grass runway toward the tree line.",
+  "renderer": {
+    "version": "v2",
+    "terrain_debug": "final",
+    "vegetation_debug": "final"
+  },
+  "scenery": {
+    "preset": "flying-field"
+  },
+  "camera": {
+    "mode": "pilot",
+    "vertical_fov_deg": 55,
+    "pilot_position_render_m": [0.0, 1.8, 20.0]
+  },
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "exposure_ev": 0.0,
+  "aircraft": {
+    "model": "models/acro_electric_01/model.json",
+    "throttle": 0.0,
+    "start_on_ground": true
+  },
+  "warmup": 10,
+  "capture": {
+    "filename": "ffv1_hero_1080p.png",
+    "format": "png",
+    "frame": 10
+  },
+  "tags": ["ffv1", "hero", "flying-field", "pilot-view"]
+}
