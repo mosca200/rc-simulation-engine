@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "slice": "ENV1-A",
-  "generated_at_utc": "2026-09-22T19:13:28Z",
+  "generated_at_utc": "2026-09-23T20:27:25Z",
   "attribution": "Powered by Poly Haven (https://polyhaven.com)",
   "api_terms_note": "The Poly Haven public API was used for all metadata and download URLs; no HTML was scraped. The API terms require the attribution recorded in `attribution`.",
   "assets": [
@@ -185,6 +185,373 @@
         "enforced_by": [
           "tools/env1_asset_pipeline/env1_assets.py::_validate_runtime_binding",
           "crates/renderer/tests/env1_a_sparse_grass_material.rs::env1_runtime_material_uses_the_documented_physical_tile_span"
+        ]
+      }
+    },
+    {
+      "asset_id": "ENV1-GND-02",
+      "provider": "Poly Haven",
+      "slug": "grass_path_3",
+      "name": "Grass Path 3",
+      "source_page": "https://polyhaven.com/a/grass_path_3",
+      "license": "CC0",
+      "license_url": "https://polyhaven.com/license",
+      "license_note": "The Poly Haven /info API payload carries no license field. CC0 is recorded from https://polyhaven.com/license, the same citation the repository already uses in tools/vegetation_processing/PROVENANCE.md.",
+      "authors": {
+        "Rob Tuytel": "All"
+      },
+      "api": {
+        "info_url": "https://api.polyhaven.com/info/grass_path_3",
+        "files_url": "https://api.polyhaven.com/files/grass_path_3",
+        "info_payload_sha256": "733af97129c55ee954d4648562939dc641842a7054138428c541c17e55af2123",
+        "files_payload_sha256": "724e6797cb0e3b00c3f3f4af13abe818ce7bdef51df3596fa2804a7ed41d4d21",
+        "files_hash": "4d369edce79d890934bdf5f1b1d41411a44df5e0",
+        "date_published_unix": 1529359200,
+        "max_resolution": [
+          8192,
+          8192
+        ],
+        "dimensions": [
+          1000,
+          1000
+        ],
+        "dimensions_unit": "mm",
+        "physical_dimensions_m": [
+          1.0,
+          1.0
+        ],
+        "dimensions_unit_note": "The Poly Haven public API's OpenAPI schema defines a texture asset's `dimensions` as an array with the dimensions of the asset on each axis in millimetres. `dimensions` is therefore recorded verbatim in mm, `dimensions_unit` carries the provider-documented unit, and `physical_dimensions_m` is the explicit derived value (mm / 1000). ENV1-A ties the terrain base tile scale to this measurement: one texture tile covers exactly the scanned area.",
+        "category": "Ground & Terrain/Rocky Ground/Rocky Paths & Trails",
+        "description": "Free 8K texture of a compacted dirt and gravel grass path with small stones, patchy grass tufts and subtle wear, rough, slightly glossy soil surface.",
+        "fetched_utc": "2026-09-23T20:15:23Z",
+        "user_agent": "rc-simulation-engine/ENV1-A (CC0 asset provenance; repo mosca200/rc-simulation-engine)"
+      },
+      "source_resolution": "4k",
+      "source_format": "png",
+      "source_files": [
+        {
+          "map_type": "Diffuse",
+          "role": "base_color",
+          "file_name": "grass_path_3_diff_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/grass_path_3/grass_path_3_diff_4k.png",
+          "api_size": 34816324,
+          "api_md5": "6b459cc9ba1197037281a0ddbd1de261",
+          "local_size": 34816324,
+          "local_md5": "6b459cc9ba1197037281a0ddbd1de261",
+          "local_sha256": "7c981e77871853a7dd54808429d4848e71fca635487fe92fcacb25a3a8aa50bc",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/grass_path_3/4k/grass_path_3_diff_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "nor_gl",
+          "role": "normal",
+          "file_name": "grass_path_3_nor_gl_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/grass_path_3/grass_path_3_nor_gl_4k.png",
+          "api_size": 22517367,
+          "api_md5": "f6c3a7278c673596213c652117103fe8",
+          "local_size": 22517367,
+          "local_md5": "f6c3a7278c673596213c652117103fe8",
+          "local_sha256": "616460cc36b01991a308e61abb2fd5f1c267bd193bff527daf236434f69ec93d",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/grass_path_3/4k/grass_path_3_nor_gl_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 2,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "Rough",
+          "role": "roughness",
+          "file_name": "grass_path_3_rough_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/grass_path_3/grass_path_3_rough_4k.png",
+          "api_size": 9966737,
+          "api_md5": "11b2125ec908c2ef082efcd5a3053fae",
+          "local_size": 9966737,
+          "local_md5": "11b2125ec908c2ef082efcd5a3053fae",
+          "local_sha256": "23ea9d096c1e39d2c5264282999958a13ddcf3b595192ac5c98d7b9e9627d943",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/grass_path_3/4k/grass_path_3_rough_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 0,
+          "png_interlace": 0
+        }
+      ],
+      "processing": {
+        "recipe_version": 1,
+        "processor": "cargo run -p renderer --bin process_env1_terrain_material --asset grass_path_3",
+        "processor_module": "crates/renderer/src/env1_material.rs",
+        "source_edge": 4096,
+        "runtime_edge": 2048,
+        "reduction": "single exact 2x2 box filter, 4096 -> 2048; a source that is not exactly 4096x4096 is rejected rather than resampled with a different filter",
+        "color_space_handling": {
+          "base_color": "sRGB source texels decoded to linear, averaged, re-encoded to sRGB, quantized once to 8 bits",
+          "normal": "linear tangent-space vectors decoded to [-1, 1], summed and renormalized, then re-encoded; OpenGL (+Y) orientation preserved from the nor_gl source",
+          "roughness": "linear 16-bit grayscale reduced with exact u32 integer arithmetic and an exact 65535 -> 255 rescale"
+        },
+        "alpha": "Runtime base color and normal maps are opaque RGBA8 with alpha = 255. Where a diffuse source carries an alpha lane (PNG color type 6) it is not transferred: ground materials are opaque by recipe. Alpha preservation through the mip chain is implemented and tested for future foliage sources.",
+        "not_applied": [
+          "saturation_or_contrast_boost",
+          "baked_shadow",
+          "ambient_occlusion_multiplied_into_base_color",
+          "cosmetic_sharpening",
+          "colour_lut",
+          "displacement"
+        ],
+        "determinism": "pure function of the source bytes; re-running the processor produces byte-identical PNGs"
+      },
+      "runtime_outputs": [
+        {
+          "role": "base_color",
+          "file_name": "grass_path_3_base_color.png",
+          "path": "crates/renderer/assets/env1/terrain/grass_path_3/grass_path_3_base_color.png",
+          "color_space": "srgb",
+          "channels": "rgba8",
+          "byte_size": 11236270,
+          "sha256": "57cd30213b7ccc83b32107a756fc5a9874cb63444cecc2f8f58c6df4263131d0",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "normal",
+          "file_name": "grass_path_3_normal.png",
+          "path": "crates/renderer/assets/env1/terrain/grass_path_3/grass_path_3_normal.png",
+          "color_space": "linear",
+          "channels": "rgba8",
+          "byte_size": 7392249,
+          "sha256": "c16e733ec057775ff2ab9dc509ee7e2f876285ceffdb75933168b591cc57fafe",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "roughness",
+          "file_name": "grass_path_3_roughness.png",
+          "path": "crates/renderer/assets/env1/terrain/grass_path_3/grass_path_3_roughness.png",
+          "color_space": "linear",
+          "channels": "r8",
+          "byte_size": 3268256,
+          "sha256": "794f69f1916b0db813ad2abcb707b3f3cca8bb7777eb1a2e419ec73a22a8176f",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 0,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        }
+      ],
+      "runtime_binding": {
+        "terrain_base_tile_scale_m": 1.0,
+        "constant": "FFV1_TERRAIN_WORN_TILE_SCALE_M",
+        "defined_in": "crates/renderer/src/terrain.rs",
+        "relationship": "One tile of this material layer covers exactly the asset's full physical span, so the photograph is reproduced at true size: grass_path_3 is a 1.0 m x 1.0 m scan ([1000, 1000] mm per axis) and the renderer compiles FFV1_TERRAIN_WORN_TILE_SCALE_M = 1.0 m for this layer. The macro (48 m) and detail (0.40 m) frequencies of the maintained base layer resolve to absolute world metres in the shader and are invariant to it.",
+        "enforced_by": [
+          "tools/env1_asset_pipeline/env1_assets.py::_validate_runtime_binding",
+          "tools/env1_asset_pipeline/verify_env1_assets.py::verify_tile_scale_binding"
+        ]
+      }
+    },
+    {
+      "asset_id": "ENV1-GND-03",
+      "provider": "Poly Haven",
+      "slug": "forest_ground_04",
+      "name": "Forest Ground 04",
+      "source_page": "https://polyhaven.com/a/forest_ground_04",
+      "license": "CC0",
+      "license_url": "https://polyhaven.com/license",
+      "license_note": "The Poly Haven /info API payload carries no license field. CC0 is recorded from https://polyhaven.com/license, the same citation the repository already uses in tools/vegetation_processing/PROVENANCE.md.",
+      "authors": {
+        "Rob Tuytel": "Photography, Processing",
+        "Rico Cilliers": "Minor adjustment"
+      },
+      "api": {
+        "info_url": "https://api.polyhaven.com/info/forest_ground_04",
+        "files_url": "https://api.polyhaven.com/files/forest_ground_04",
+        "info_payload_sha256": "2f690984f953757c05ff352c039c3a6efb49462bf9c8e05da7fc035e173e5f74",
+        "files_payload_sha256": "2d591a0413dbbff2d2aa87d7a4fae00bd5c353edb4923aedd443efbc4c691156",
+        "files_hash": "60e454ab149c058f8514ae29d4ce8b16f6f3bce5",
+        "date_published_unix": 1647907200,
+        "max_resolution": [
+          8192,
+          8192
+        ],
+        "dimensions": [
+          3150.0000953674316,
+          3150.0000953674316
+        ],
+        "dimensions_unit": "mm",
+        "physical_dimensions_m": [
+          3.1500000953674316,
+          3.1500000953674316
+        ],
+        "dimensions_unit_note": "The Poly Haven public API's OpenAPI schema defines a texture asset's `dimensions` as an array with the dimensions of the asset on each axis in millimetres. `dimensions` is therefore recorded verbatim in mm, `dimensions_unit` carries the provider-documented unit, and `physical_dimensions_m` is the explicit derived value (mm / 1000). ENV1-A ties the terrain base tile scale to this measurement: one texture tile covers exactly the scanned area.",
+        "category": "Ground & Terrain/Forest Floor/Forest Soil",
+        "description": "Free 8K texture of dry brown forest ground - rough, uneven dirt with scattered stones and gravel, high-detail rocky surface.",
+        "fetched_utc": "2026-09-23T20:15:23Z",
+        "user_agent": "rc-simulation-engine/ENV1-A (CC0 asset provenance; repo mosca200/rc-simulation-engine)"
+      },
+      "source_resolution": "4k",
+      "source_format": "png",
+      "source_files": [
+        {
+          "map_type": "Diffuse",
+          "role": "base_color",
+          "file_name": "forest_ground_04_diff_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/forest_ground_04/forest_ground_04_diff_4k.png",
+          "api_size": 34352704,
+          "api_md5": "8ef79e766dcaed16fafdf6676ede9a5a",
+          "local_size": 34352704,
+          "local_md5": "8ef79e766dcaed16fafdf6676ede9a5a",
+          "local_sha256": "513e883ddbc02560a3c1f14bc371b4bf08bfde1c7359c80acae585484b53306a",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/forest_ground_04/4k/forest_ground_04_diff_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 2,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "nor_gl",
+          "role": "normal",
+          "file_name": "forest_ground_04_nor_gl_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/forest_ground_04/forest_ground_04_nor_gl_4k.png",
+          "api_size": 37822518,
+          "api_md5": "0dbcfa2a379e0b10dbc01151099764b2",
+          "local_size": 37822518,
+          "local_md5": "0dbcfa2a379e0b10dbc01151099764b2",
+          "local_sha256": "ae4eabed90f201ce809df53cc534b0539a7bbba51c5253cd9ec3f5b5df274a2c",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/forest_ground_04/4k/forest_ground_04_nor_gl_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 2,
+          "png_interlace": 0
+        },
+        {
+          "map_type": "Rough",
+          "role": "roughness",
+          "file_name": "forest_ground_04_rough_4k.png",
+          "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/forest_ground_04/forest_ground_04_rough_4k.png",
+          "api_size": 9552055,
+          "api_md5": "44ded6d079237fd8782c50057f5928b7",
+          "local_size": 9552055,
+          "local_md5": "44ded6d079237fd8782c50057f5928b7",
+          "local_sha256": "0374e3d76340097e66e6579f513329a5e183775a5b1376d4b773ac9a0c097213",
+          "size_verified": true,
+          "md5_verified": true,
+          "local_path": "tmp/env1_source_cache/polyhaven/forest_ground_04/4k/forest_ground_04_rough_4k.png",
+          "local_path_note": "Under the gitignored source cache; not committed. Re-acquire with fetch_polyhaven_asset.py and re-verify against local_sha256.",
+          "width": 4096,
+          "height": 4096,
+          "png_bit_depth": 8,
+          "png_color_type": 0,
+          "png_interlace": 0
+        }
+      ],
+      "processing": {
+        "recipe_version": 1,
+        "processor": "cargo run -p renderer --bin process_env1_terrain_material --asset forest_ground_04",
+        "processor_module": "crates/renderer/src/env1_material.rs",
+        "source_edge": 4096,
+        "runtime_edge": 2048,
+        "reduction": "single exact 2x2 box filter, 4096 -> 2048; a source that is not exactly 4096x4096 is rejected rather than resampled with a different filter",
+        "color_space_handling": {
+          "base_color": "sRGB source texels decoded to linear, averaged, re-encoded to sRGB, quantized once to 8 bits",
+          "normal": "linear tangent-space vectors decoded to [-1, 1], summed and renormalized, then re-encoded; OpenGL (+Y) orientation preserved from the nor_gl source",
+          "roughness": "linear 16-bit grayscale reduced with exact u32 integer arithmetic and an exact 65535 -> 255 rescale"
+        },
+        "alpha": "Runtime base color and normal maps are opaque RGBA8 with alpha = 255. Where a diffuse source carries an alpha lane (PNG color type 6) it is not transferred: ground materials are opaque by recipe. Alpha preservation through the mip chain is implemented and tested for future foliage sources.",
+        "not_applied": [
+          "saturation_or_contrast_boost",
+          "baked_shadow",
+          "ambient_occlusion_multiplied_into_base_color",
+          "cosmetic_sharpening",
+          "colour_lut",
+          "displacement"
+        ],
+        "determinism": "pure function of the source bytes; re-running the processor produces byte-identical PNGs"
+      },
+      "runtime_outputs": [
+        {
+          "role": "base_color",
+          "file_name": "forest_ground_04_base_color.png",
+          "path": "crates/renderer/assets/env1/terrain/forest_ground_04/forest_ground_04_base_color.png",
+          "color_space": "srgb",
+          "channels": "rgba8",
+          "byte_size": 12188407,
+          "sha256": "b61a1742da709d2543ccf807ee0f471398e512f01c9d5ea7ef1631b828434278",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "normal",
+          "file_name": "forest_ground_04_normal.png",
+          "path": "crates/renderer/assets/env1/terrain/forest_ground_04/forest_ground_04_normal.png",
+          "color_space": "linear",
+          "channels": "rgba8",
+          "byte_size": 12234262,
+          "sha256": "27fa5652ae5b5ff36c173c20c53c468e2e238b611ee22efbb1044442f9d72eb3",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 6,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        },
+        {
+          "role": "roughness",
+          "file_name": "forest_ground_04_roughness.png",
+          "path": "crates/renderer/assets/env1/terrain/forest_ground_04/forest_ground_04_roughness.png",
+          "color_space": "linear",
+          "channels": "r8",
+          "byte_size": 2575893,
+          "sha256": "efcd59d0e6ebd8bca46707bf229193517b83537714c43efab8010454d1766cfd",
+          "width": 2048,
+          "height": 2048,
+          "png_bit_depth": 8,
+          "png_color_type": 0,
+          "png_interlace": 0,
+          "embedded_by": "crates/renderer/src/env1_material.rs (include_bytes!)"
+        }
+      ],
+      "runtime_binding": {
+        "terrain_base_tile_scale_m": 3.1500000953674316,
+        "constant": "FFV1_TERRAIN_DRY_TILE_SCALE_M",
+        "defined_in": "crates/renderer/src/terrain.rs",
+        "relationship": "One tile of this material layer covers exactly the asset's full physical span, so the photograph is reproduced at true size: forest_ground_04 is a 3.1500000953674316 m x 3.1500000953674316 m scan ([3150.0000953674316, 3150.0000953674316] mm per axis) and the renderer compiles FFV1_TERRAIN_DRY_TILE_SCALE_M = 3.1500000953674316 m for this layer. The macro (48 m) and detail (0.40 m) frequencies of the maintained base layer resolve to absolute world metres in the shader and are invariant to it.",
+        "enforced_by": [
+          "tools/env1_asset_pipeline/env1_assets.py::_validate_runtime_binding",
+          "tools/env1_asset_pipeline/verify_env1_assets.py::verify_tile_scale_binding"
         ]
       }
     }

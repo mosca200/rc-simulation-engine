@@ -93,6 +93,136 @@ _CHUNK = 1 << 22
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
+# ---------------------------------------------------------------------------
+# Open-asset registry
+# ---------------------------------------------------------------------------
+#
+# ENV1-A shipped a single asset (``sparse_grass``) through module-level
+# constants. Flying Field v1 adds two further CC0 ground materials, so every
+# per-asset fact now lives in one descriptor table; the module-level constants
+# above remain the ``sparse_grass`` descriptor's values and are kept as the
+# backwards-compatible aliases every existing tool and test imports.
+
+
+class OpenAssetDescriptor:
+    """The per-asset facts the acquisition/manifest/verification chain needs."""
+
+    __slots__ = (
+        "slug",
+        "asset_id",
+        "source_maps",
+        "runtime_outputs",
+        "runtime_dir_relative",
+        "source_cache_relative",
+        "binding_constant",
+        "binding_defined_in",
+    )
+
+    def __init__(
+        self,
+        slug: str,
+        asset_id: str,
+        source_maps: tuple,
+        runtime_outputs: tuple,
+        runtime_dir_relative: str,
+        source_cache_relative: str,
+        binding_constant: str,
+        binding_defined_in: str,
+    ) -> None:
+        self.slug = slug
+        self.asset_id = asset_id
+        self.source_maps = source_maps
+        self.runtime_outputs = runtime_outputs
+        self.runtime_dir_relative = runtime_dir_relative
+        self.source_cache_relative = source_cache_relative
+        self.binding_constant = binding_constant
+        self.binding_defined_in = binding_defined_in
+
+    @property
+    def info_url(self) -> str:
+        return f"https://api.polyhaven.com/info/{self.slug}"
+
+    @property
+    def files_url(self) -> str:
+        return f"https://api.polyhaven.com/files/{self.slug}"
+
+    @property
+    def source_page(self) -> str:
+        return f"https://polyhaven.com/a/{self.slug}"
+
+
+OPEN_ASSETS: tuple[OpenAssetDescriptor, ...] = (
+    OpenAssetDescriptor(
+        slug=SLUG,
+        asset_id=ASSET_ID_SPARSE_GRASS,
+        source_maps=SOURCE_MAPS,
+        runtime_outputs=RUNTIME_OUTPUTS,
+        runtime_dir_relative=RUNTIME_DIR_RELATIVE,
+        source_cache_relative=SOURCE_CACHE_RELATIVE,
+        binding_constant="DEFAULT_TERRAIN_TEXTURE_SCALE_M",
+        binding_defined_in="crates/renderer/src/terrain.rs",
+    ),
+    OpenAssetDescriptor(
+        slug="grass_path_3",
+        asset_id="ENV1-GND-02",
+        source_maps=(
+            ("Diffuse", "base_color", "grass_path_3_diff_4k.png"),
+            ("nor_gl", "normal", "grass_path_3_nor_gl_4k.png"),
+            ("Rough", "roughness", "grass_path_3_rough_4k.png"),
+        ),
+        runtime_outputs=(
+            ("base_color", "grass_path_3_base_color.png", "srgb", "rgba8"),
+            ("normal", "grass_path_3_normal.png", "linear", "rgba8"),
+            ("roughness", "grass_path_3_roughness.png", "linear", "r8"),
+        ),
+        runtime_dir_relative="crates/renderer/assets/env1/terrain/grass_path_3",
+        source_cache_relative="tmp/env1_source_cache/polyhaven/grass_path_3",
+        binding_constant="FFV1_TERRAIN_WORN_TILE_SCALE_M",
+        binding_defined_in="crates/renderer/src/terrain.rs",
+    ),
+    OpenAssetDescriptor(
+        slug="forest_ground_04",
+        asset_id="ENV1-GND-03",
+        source_maps=(
+            ("Diffuse", "base_color", "forest_ground_04_diff_4k.png"),
+            ("nor_gl", "normal", "forest_ground_04_nor_gl_4k.png"),
+            ("Rough", "roughness", "forest_ground_04_rough_4k.png"),
+        ),
+        runtime_outputs=(
+            ("base_color", "forest_ground_04_base_color.png", "srgb", "rgba8"),
+            ("normal", "forest_ground_04_normal.png", "linear", "rgba8"),
+            ("roughness", "forest_ground_04_roughness.png", "linear", "r8"),
+        ),
+        runtime_dir_relative="crates/renderer/assets/env1/terrain/forest_ground_04",
+        source_cache_relative="tmp/env1_source_cache/polyhaven/forest_ground_04",
+        binding_constant="FFV1_TERRAIN_DRY_TILE_SCALE_M",
+        binding_defined_in="crates/renderer/src/terrain.rs",
+    ),
+)
+
+
+def descriptor_for_slug(slug: str) -> OpenAssetDescriptor:
+    """The descriptor of one registered open asset, failing closed."""
+    for descriptor in OPEN_ASSETS:
+        if descriptor.slug == slug:
+            return descriptor
+    raise Env1AssetError(
+        f"unknown open asset {slug!r}; registered slugs are "
+        f"{[d.slug for d in OPEN_ASSETS]}",
+        exit_code=2,
+    )
+
+
+def source_cache_dir_for(root: Optional[pathlib.Path] = None, slug: str = SLUG) -> pathlib.Path:
+    """Gitignored Poly Haven source cache of one registered asset."""
+    return (root or repo_root()) / descriptor_for_slug(slug).source_cache_relative
+
+
+def runtime_dir_for(root: Optional[pathlib.Path] = None, slug: str = SLUG) -> pathlib.Path:
+    """Committed runtime asset directory of one registered asset."""
+    return (root or repo_root()) / descriptor_for_slug(slug).runtime_dir_relative
+
+
 class Env1AssetError(Exception):
     """Raised for every fail-closed condition in the ENV1 asset tooling."""
 

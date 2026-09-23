@@ -243,6 +243,25 @@ var terrain_roughness_texture: texture_2d<f32>;
 @group(4) @binding(4)
 var<uniform> terrain_material: TerrainMaterialUniform;
 
+// FFV1: the companion ground materials of the field composition, bound in the
+// same terrain group so the region blend needs no extra bind group. The worn
+// layer (Poly Haven grass_path_3, compacted/worn grass, 1.0 m scan) carries
+// albedo + normal only: compacted traffic reads through a roughness offset on
+// the maintained stack, which keeps the terrain fragment stage inside the
+// 16-sampled-texture per-stage limit. `dry` is Poly Haven forest_ground_04
+// (dry exposed soil, 3.15 m scan); the maintained base layer stays Poly Haven
+// sparse_grass (2.0 m scan).
+@group(4) @binding(5)
+var terrain_worn_albedo_texture: texture_2d<f32>;
+@group(4) @binding(6)
+var terrain_worn_normal_texture: texture_2d<f32>;
+@group(4) @binding(7)
+var terrain_dry_albedo_texture: texture_2d<f32>;
+@group(4) @binding(8)
+var terrain_dry_normal_texture: texture_2d<f32>;
+@group(4) @binding(9)
+var terrain_dry_roughness_texture: texture_2d<f32>;
+
 // G3B: HDR scene target + postprocess state. This group belongs to the
 // dedicated fullscreen postprocess pipeline (its own layout); the scene
 // passes never bind it, so the HDR texture/state stay out of the lighting
@@ -1061,6 +1080,7 @@ struct TerrainSurface {
     roughness: f32,
     albedo_macro_s: vec4<f32>,
     albedo_detail_s: vec4<f32>,
+    region_weights: vec4<f32>,
 };
 
 fn normalize_tangent_normal(normal: vec3<f32>) -> vec3<f32> {
@@ -1084,6 +1104,106 @@ fn reorient_secondary_tangent_normal(
         -angle_sin * normal.x + angle_cos * normal.y,
         normal.z,
     ));
+}
+
+// ---------------------------------------------------------------------------
+// FFV1: deterministic field region composition
+// ---------------------------------------------------------------------------
+//
+// The field is composed from four spatial regions evaluated analytically from
+// the world-anchored fragment position: the mown grass runway, a worn /
+// compacted collar plus meso wear paths, the maintained mown field, and a
+// drier rougher band under the vegetation boundary. Every boundary is a
+// signed-distance band perturbed by two octaves of value noise, so the
+// transitions are irregular and never geometric bands, and the whole mask is a
+// pure function of world XZ: chunk-independent, frame-independent and
+// reproducible bit-for-bit (mirrored in Rust by
+// `terrain::field_region_weights`).
+//
+// Layout constants are world metres and mirror `terrain.rs`.
+
+const FIELD_RUNWAY_HALF: vec2<f32> = vec2<f32>(6.0, 60.0);
+const FIELD_RUNWAY_RADIUS: f32 = 6.0;
+const FIELD_WORN_COLLAR_M: f32 = 5.0;
+const FIELD_WORN_COLLAR_BAND_M: f32 = 2.0;
+const FIELD_MOWN_HALF: vec2<f32> = vec2<f32>(34.0, 118.0);
+const FIELD_MOWN_RADIUS: f32 = 30.0;
+const FIELD_EDGE_BOX_HALF: vec2<f32> = vec2<f32>(150.0, 150.0);
+const FIELD_EDGE_BOX_RADIUS: f32 = 60.0;
+const FIELD_EDGE_INNER_M: f32 = 30.0;
+const FIELD_EDGE_OUTER_M: f32 = 26.0;
+const FIELD_MOW_LAP_M: f32 = 2.4;
+
+fn field_sd_round_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(p) - half + vec2<f32>(radius);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+fn field_hash21(p: vec2<f32>) -> f32 {
+    let q = fract(p * vec2<f32>(0.1031, 0.1030));
+    let h = q * (q.yx + vec2<f32>(33.71, 19.63));
+    return fract((h.x + h.y) * 37.91);
+}
+
+fn field_value_noise(p: vec2<f32>) -> f32 {
+    let cell = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = field_hash21(cell);
+    let b = field_hash21(cell + vec2<f32>(1.0, 0.0));
+    let c = field_hash21(cell + vec2<f32>(0.0, 1.0));
+    let d = field_hash21(cell + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn field_fbm(p: vec2<f32>) -> f32 {
+    return 0.65 * field_value_noise(p)
+        + 0.35 * field_value_noise(p * 2.7 + vec2<f32>(17.3, 9.1));
+}
+
+/// Region weights (mown runway, worn, maintained field, dry edge). They form a
+/// partition of unity up to the clamps; the material blend normalizes anyway.
+fn field_region_weights(p: vec2<f32>) -> vec4<f32> {
+    let n = field_fbm(p * 0.11);
+    let n_fine = field_value_noise(p * 0.32 + vec2<f32>(4.7, 11.3));
+    let jitter = (n - 0.5) * 2.0;
+    let d_runway = field_sd_round_box(p, FIELD_RUNWAY_HALF, FIELD_RUNWAY_RADIUS)
+        + jitter * 2.5 + (n_fine - 0.5) * 1.6;
+    let mown_strip = 1.0 - smoothstep(-1.2, 1.8, d_runway);
+    let worn_collar = 1.0 - smoothstep(
+        FIELD_WORN_COLLAR_M - FIELD_WORN_COLLAR_BAND_M,
+        FIELD_WORN_COLLAR_M + FIELD_WORN_COLLAR_BAND_M,
+        d_runway + jitter * 3.0,
+    );
+    let d_mown = field_sd_round_box(p, FIELD_MOWN_HALF, FIELD_MOWN_RADIUS) + jitter * 7.0;
+    let mown_field = 1.0 - smoothstep(-6.0, 8.0, d_mown);
+    let d_edge = field_sd_round_box(p, FIELD_EDGE_BOX_HALF, FIELD_EDGE_BOX_RADIUS)
+        + jitter * 26.0;
+    let edge = smoothstep(-FIELD_EDGE_INNER_M, FIELD_EDGE_OUTER_M, d_edge);
+    // Meso wear paths inside the mown field: a rare gated noise ridge, never
+    // on the mown strip, so foot/maintenance traffic reads at 1-10 m scale.
+    let path_gate = smoothstep(
+        0.75,
+        0.82,
+        field_value_noise(p * 0.16 + vec2<f32>(61.7, 23.9)),
+    );
+    let runway = clamp(mown_strip, 0.0, 1.0);
+    // Wear paths may only fill the headroom the runway leaves, so the four
+    // weights stay a partition of unity (the blend normalizes regardless).
+    let worn = min(
+        clamp(worn_collar - mown_strip, 0.0, 1.0)
+            + path_gate * mown_field * (1.0 - mown_strip) * 0.45,
+        1.0 - runway,
+    );
+    let dry = clamp(edge, 0.0, 1.0);
+    let field = clamp(1.0 - runway - worn - dry, 0.0, 1.0);
+    return vec4<f32>(runway, worn, field, dry);
+}
+
+/// Mown-lap modulation across the runway axis: real mown grass shows parallel
+/// laps a couple of metres apart, brightest on the maintained strip.
+fn field_mow_stripe(p: vec2<f32>) -> f32 {
+    return 0.5 + 0.5 * sin(p.x * (6.2831853 / FIELD_MOW_LAP_M));
 }
 
 @fragment
@@ -1177,6 +1297,70 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // Fine near-field grain, mean-preserving, distance-faded.
     albedo = mix(albedo, albedo_detail_s, TERRAIN_DETAIL_ALBEDO_BLEND * detail_fade);
 
+    // FFV1: region composition. The worn and dry companion materials sample at
+    // their own physical tile spans (1.0 m and 3.15 m) and interlock with the
+    // maintained 2.0 m base through a luminance-weighted blend of the region
+    // weights, so a boundary follows the photographed material instead of
+    // drawing a geometric seam.
+    let region = field_region_weights(input.world_position.xz);
+    let worn_uv = input.world_position.xz / FFV1_WORN_TILE_SCALE_M
+        + vec2<f32>(0.41, 0.13);
+    let worn_ar_uv = vec2<f32>(
+            ar_cos * worn_uv.x - ar_sin * worn_uv.y,
+            ar_sin * worn_uv.x + ar_cos * worn_uv.y,
+        ) * ar_scale + ar_offset;
+    let dry_uv = input.world_position.xz / FFV1_DRY_TILE_SCALE_M
+        + vec2<f32>(0.27, 0.61);
+    let dry_ar_uv = vec2<f32>(
+            ar_cos * dry_uv.x - ar_sin * dry_uv.y,
+            ar_sin * dry_uv.x + ar_cos * dry_uv.y,
+        ) * ar_scale + ar_offset;
+    let albedo_worn = mix(
+        textureSample(terrain_worn_albedo_texture, terrain_sampler, worn_uv),
+        textureSample(terrain_worn_albedo_texture, terrain_sampler, worn_ar_uv),
+        TERRAIN_BASE_AR_BLEND,
+    );
+    let albedo_dry = mix(
+        textureSample(terrain_dry_albedo_texture, terrain_sampler, dry_uv),
+        textureSample(terrain_dry_albedo_texture, terrain_sampler, dry_ar_uv),
+        TERRAIN_BASE_AR_BLEND,
+    );
+    let luminance_weights = vec3<f32>(0.299, 0.587, 0.114);
+    let w_maint = (region.x + region.z)
+        * (dot(albedo.rgb, luminance_weights) + FIELD_BLEND_BIAS);
+    let w_worn = region.y * (dot(albedo_worn.rgb, luminance_weights) + FIELD_BLEND_BIAS);
+    let w_dry = region.w * (dot(albedo_dry.rgb, luminance_weights) + FIELD_BLEND_BIAS);
+    let w_sum = max(w_maint + w_worn + w_dry, 1e-4);
+    var composed = (albedo.rgb * w_maint
+        + albedo_worn.rgb * w_worn
+        + albedo_dry.rgb * w_dry) / w_sum;
+    // Regional tone. The maintained scan (sparse_grass) photographs as dry
+    // warm turf (linear R/G ~ 1.4); the Wikimedia RC-field reference and the
+    // Poly Haven meadow backplates both show a maintained mown field at
+    // linear R/G ~ 0.5-1.1, i.e. clearly green. The maintained regions
+    // therefore carry a documented mown-grass white-balance, worn traffic
+    // stays grassy-but-paler, and the vegetation edge dries out toward soil.
+    let tint_maint = vec3<f32>(0.68, 1.70, 0.95);
+    let tint_worn = vec3<f32>(0.80, 1.35, 0.85);
+    let tint_dry = vec3<f32>(0.95, 0.95, 0.75);
+    let region_tint = (tint_maint * (region.x + region.z)
+        + tint_worn * region.y
+        + tint_dry * region.w)
+        / max(region.x + region.y + region.z + region.w, 1e-4);
+    // MACRO scale (tens of metres): healthy vs dry patches across the field,
+    // so the ground never reads as one repeated texture.
+    let health = field_fbm(input.world_position.xz * 0.022);
+    let health_tint = vec3<f32>(
+        1.06 - 0.10 * health,
+        0.90 + 0.20 * health,
+        1.02 - 0.06 * health,
+    );
+    // Mown laps modulate the maintained regions only.
+    let mow = field_mow_stripe(input.world_position.xz);
+    let mow_gain = 1.0 + (mow - 0.5) * (region.x * 0.14 + region.z * 0.07);
+    composed = composed * region_tint * health_tint * mow_gain;
+    albedo = vec4<f32>(composed, albedo.a);
+
     let base_rgba = input.color * vec4<f32>(albedo.rgb, 1.0);
 
     let metallic = clamp(terrain_material.metallic, 0.0, 1.0);
@@ -1197,8 +1381,19 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
         + r_macro_s * TERRAIN_ROUGHNESS_MACRO_WEIGHT
         + r_detail_s * detail_weight)
         / (TERRAIN_ROUGHNESS_BASE_WEIGHT + TERRAIN_ROUGHNESS_MACRO_WEIGHT + detail_weight);
+    // FFV1: the companion layers carry their own roughness response, blended
+    // with the same normalized region weights as the albedo. The worn layer
+    // has no roughness map of its own: compacted traffic reads as a slightly
+    // tighter (lower) roughness on the maintained stack.
+    let r_worn = r_stack * FIELD_WORN_ROUGHNESS_SCALE;
+    let r_dry = mix(
+        textureSample(terrain_dry_roughness_texture, terrain_sampler, dry_uv).r,
+        textureSample(terrain_dry_roughness_texture, terrain_sampler, dry_ar_uv).r,
+        TERRAIN_BASE_AR_BLEND,
+    );
+    let r_maintained = terrain_material.roughness * r_stack;
     let roughness = clamp(
-        terrain_material.roughness * r_stack,
+        (r_maintained * w_maint + r_worn * w_worn + r_dry * w_dry) / w_sum,
         MIN_ROUGHNESS,
         1.0,
     );
@@ -1235,11 +1430,43 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
         * 2.0
         - vec3<f32>(1.0);
     let strength = clamp(terrain_material.normal_strength, 0.0, 1.0);
-    let n_ts_xy = normal_base_raw.xy * strength
+    let n_ts_base_xy = normal_base_raw.xy * strength
         + normal_detail_raw.xy * (strength * TERRAIN_DETAIL_NORMAL_BLEND * detail_fade);
+    let n_ts_base = normalize_tangent_normal(vec3<f32>(
+        n_ts_base_xy,
+        sqrt(max(1.0 - dot(n_ts_base_xy, n_ts_base_xy), 0.0)),
+    ));
+    // FFV1: companion-layer tangent normals, blended by the same normalized
+    // region weights. The companion relief is scaled slightly down so the
+    // maintained base keeps authority over the mown surfaces.
+    let n_worn_raw = normalize_tangent_normal(mix(
+        textureSample(terrain_worn_normal_texture, terrain_sampler, worn_uv).rgb * 2.0
+            - vec3<f32>(1.0),
+        reorient_secondary_tangent_normal(
+            textureSample(terrain_worn_normal_texture, terrain_sampler, worn_ar_uv).rgb * 2.0
+                - vec3<f32>(1.0),
+            ar_cos,
+            ar_sin,
+        ),
+        TERRAIN_BASE_AR_BLEND,
+    ));
+    let n_dry_raw = normalize_tangent_normal(mix(
+        textureSample(terrain_dry_normal_texture, terrain_sampler, dry_uv).rgb * 2.0
+            - vec3<f32>(1.0),
+        reorient_secondary_tangent_normal(
+            textureSample(terrain_dry_normal_texture, terrain_sampler, dry_ar_uv).rgb * 2.0
+                - vec3<f32>(1.0),
+            ar_cos,
+            ar_sin,
+        ),
+        TERRAIN_BASE_AR_BLEND,
+    ));
+    let n_region_xy = n_ts_base.xy * (w_maint / w_sum)
+        + n_worn_raw.xy * (w_worn / w_sum) * FIELD_COMPANION_NORMAL_SCALE
+        + n_dry_raw.xy * (w_dry / w_sum) * FIELD_COMPANION_NORMAL_SCALE;
     let n_ts = normalize_tangent_normal(vec3<f32>(
-        n_ts_xy,
-        sqrt(max(1.0 - dot(n_ts_xy, n_ts_xy), 0.0)),
+        n_region_xy,
+        sqrt(max(1.0 - dot(n_region_xy, n_region_xy), 0.0)),
     ));
 
     // G3A: fragment TBN from screen-space derivatives of the interpolated
@@ -1275,6 +1502,7 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
         roughness,
         albedo_macro_s,
         albedo_detail_s,
+        region,
     );
 }
 
@@ -1301,6 +1529,15 @@ fn terrain_fragment_output(
         output_rgb = surface.albedo_macro_s.rgb;
     } else if (mode == 5u) {
         output_rgb = surface.albedo_detail_s.rgb;
+    } else if (mode == 6u) {
+        // FFV1 region mask: runway = R, worn = G, dry edge = B, maintained
+        // field as a neutral floor so empty regions read dark grey.
+        let floor_tone = 0.35 * surface.region_weights.z;
+        output_rgb = vec3<f32>(
+            floor_tone + surface.region_weights.x,
+            floor_tone + surface.region_weights.y,
+            floor_tone + surface.region_weights.w,
+        );
     }
     return vec4<f32>(output_rgb, surface.base_rgba.a);
 }
@@ -1321,6 +1558,22 @@ const TERRAIN_MACRO_AR_COS: f32 = 0.6156615;
 const TERRAIN_MACRO_AR_SIN: f32 = -0.7880108;
 const TERRAIN_MACRO_AR_OFFSET: vec2<f32> = vec2<f32>(0.419, 0.173);
 const TERRAIN_MACRO_AR_BLEND: f32 = 0.43;
+
+// FFV1: physical tile spans of the companion ground materials, in metres.
+// They mirror `terrain.rs` and are the measured Poly Haven scan spans
+// (grass_path_3 = 1.0 m, forest_ground_04 = 3.15 m), so each photograph is
+// reproduced at true size exactly like the 2.0 m maintained base.
+const FFV1_WORN_TILE_SCALE_M: f32 = 1.0;
+const FFV1_DRY_TILE_SCALE_M: f32 = 3.15;
+// FFV1: luminance bias of the height-blend that interlocks the region
+// weights; small enough to keep region authority, large enough that the
+// photographed material grain breaks the boundary line.
+const FIELD_BLEND_BIAS: f32 = 0.12;
+// FFV1: companion-layer tangent-normal contribution scale.
+const FIELD_COMPANION_NORMAL_SCALE: f32 = 0.9;
+// FFV1: worn/compacted traffic roughness scale on the maintained stack (no
+// dedicated worn roughness map; see the binding comment above).
+const FIELD_WORN_ROUGHNESS_SCALE: f32 = 0.92;
 
 // ---------------------------------------------------------------------------
 // Unlit fragment: pass-through vertex color for debug geometry (grid, axes).

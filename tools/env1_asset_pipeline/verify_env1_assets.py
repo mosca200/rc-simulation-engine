@@ -24,6 +24,7 @@ import argparse
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -42,9 +43,8 @@ from env1_assets import (  # noqa: E402
     manifest_path,
     md5_file,
     repo_root,
-    runtime_dir,
     sha256_file,
-    source_cache_dir,
+    source_cache_dir_for,
     validate_manifest,
 )
 
@@ -121,7 +121,8 @@ def verify_runtime_outputs(root: pathlib.Path, asset: dict, report: Reporter) ->
 
 def verify_sources(root: pathlib.Path, asset: dict, report: Reporter) -> None:
     print("\nsource maps (gitignored cache):")
-    cache = source_cache_dir(root)
+    slug = asset.get("slug") or "sparse_grass"
+    cache = source_cache_dir_for(root, slug)
     present = [
         (cache / SOURCE_RESOLUTION / entry["file_name"]).is_file()
         for entry in asset.get("source_files", [])
@@ -168,10 +169,11 @@ def verify_sources(root: pathlib.Path, asset: dict, report: Reporter) -> None:
         )
 
 
-def verify_reprocess(root: pathlib.Path, report: Reporter) -> None:
+def verify_reprocess(root: pathlib.Path, asset: dict, report: Reporter) -> None:
     """Re-run the Rust processor and require byte-identical output."""
     print("\nreprocessing determinism:")
-    cache = source_cache_dir(root) / SOURCE_RESOLUTION
+    slug = asset.get("slug") or "sparse_grass"
+    cache = source_cache_dir_for(root, slug) / SOURCE_RESOLUTION
     if not cache.is_dir():
         report.skip(f"source cache absent at {cache}; cannot reprocess")
         return
@@ -190,6 +192,8 @@ def verify_reprocess(root: pathlib.Path, report: Reporter) -> None:
             "--bin",
             "process_env1_terrain_material",
             "--",
+            "--asset",
+            slug,
             "--out-dir",
             str(temporary),
         ]
@@ -207,7 +211,9 @@ def verify_reprocess(root: pathlib.Path, report: Reporter) -> None:
             )
             return
 
-        expected_dir = runtime_dir(root)
+        expected_dir = root / (
+            asset.get("runtime_outputs") or [{}]
+        )[0].get("path", "").replace("\\", "/").rsplit("/", 1)[0]
         reproduced = sorted(temporary.glob("*.png"))
         if not reproduced:
             report.fail("the processor wrote no PNGs")
@@ -244,18 +250,29 @@ def verify_tile_scale_binding(root: pathlib.Path, asset: dict, report: Reporter)
     declared = binding.get("terrain_base_tile_scale_m")
     api = asset.get("api") or {}
     physical = api.get("physical_dimensions_m")
-    source = root / "crates/renderer/src/terrain.rs"
+    constant = binding.get("constant") or "DEFAULT_TERRAIN_TEXTURE_SCALE_M"
+    defined_in = binding.get("defined_in") or "crates/renderer/src/terrain.rs"
+    source = root / defined_in
     if not source.is_file():
         report.fail(f"{source} is missing; the tile scale cannot be verified")
         return
-    match = TERRAIN_SCALE_PATTERN.search(source.read_text(encoding="utf-8"))
+    pattern = re.compile(rf"pub const {re.escape(constant)}: f32 = ([0-9.]+);")
+    match = pattern.search(source.read_text(encoding="utf-8"))
     if match is None:
-        report.fail("DEFAULT_TERRAIN_TEXTURE_SCALE_M was not found in terrain.rs")
+        report.fail(f"{constant} was not found in {defined_in}")
         return
     compiled = float(match.group(1))
-    if declared is None or abs(compiled - float(declared)) > 1e-9:
+    # The renderer compiles an f32 tile scale; the manifest records the exact
+    # f64 derivation of the provider's millimetre dimensions. Compare at f32
+    # precision on BOTH sides: the Rust literal `3.15` becomes the f32 image
+    # 3.1500000953674316, and a span such as 3150.0000095 mm has no exact f32
+    # image either. The sub-micrometre residue is meaningless at tile scale.
+    to_f32 = lambda value: struct.unpack("<f", struct.pack("<f", value))[0]
+    compiled_f32 = to_f32(compiled)
+    declared_f32 = to_f32(float(declared or 0.0))
+    if declared is None or abs(compiled_f32 - declared_f32) > 1e-9:
         report.fail(
-            f"terrain.rs compiles DEFAULT_TERRAIN_TEXTURE_SCALE_M = {compiled} m but the "
+            f"{defined_in} compiles {constant} = {compiled} m but the "
             f"manifest declares {declared} m"
         )
         return
@@ -263,14 +280,15 @@ def verify_tile_scale_binding(root: pathlib.Path, asset: dict, report: Reporter)
         report.fail("api.physical_dimensions_m is missing; the binding cannot be checked")
         return
     for axis, span in enumerate(physical):
-        if abs(compiled - float(span)) > 1e-9:
+        span_f32 = to_f32(float(span))
+        if abs(compiled_f32 - span_f32) > 1e-9:
             report.fail(
                 f"tile scale {compiled} m does not equal the asset's physical span "
                 f"{span} m on axis {axis}"
             )
             return
     report.ok(
-        f"DEFAULT_TERRAIN_TEXTURE_SCALE_M = {compiled} m == the asset's physical span "
+        f"{constant} = {compiled} m == the asset's physical span "
         f"{api.get('dimensions')} {api.get('dimensions_unit')} == {physical} m"
     )
 
@@ -327,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         verify_tile_scale_binding(root, asset, report)
         verify_sources(root, asset, report)
         if args.reprocess:
-            verify_reprocess(root, report)
+            verify_reprocess(root, asset, report)
 
     print()
     if report.skipped:

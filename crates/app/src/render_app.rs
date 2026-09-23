@@ -3479,6 +3479,7 @@ mod tests {
             ("roughness", TerrainDebugMode::Roughness),
             ("macro", TerrainDebugMode::Macro),
             ("detail", TerrainDebugMode::Detail),
+            ("region", TerrainDebugMode::Region),
         ] {
             let options =
                 RenderOptions::parse(["--terrain-debug", label].map(str::to_owned).into_iter())

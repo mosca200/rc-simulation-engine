@@ -190,9 +190,9 @@ fn debug_mode_config_mapping_is_total_over_the_uniform_selector() {
     // exactly one mode and back, and the FINAL default keeps production
     // untouched.
     assert_eq!(TerrainDebugMode::default(), TerrainDebugMode::Final);
-    for value in 0..=5 {
+    for value in 0..=6 {
         let mode = TerrainDebugMode::from_u32(value).expect("selector {value} must map");
         assert_eq!(mode.as_u32(), value);
     }
-    assert!(TerrainDebugMode::from_u32(6).is_none());
+    assert!(TerrainDebugMode::from_u32(7).is_none());
 }

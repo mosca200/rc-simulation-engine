@@ -28,17 +28,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from env1_assets import (  # noqa: E402
     ATTRIBUTION,
-    FILES_URL,
-    INFO_URL,
     SOURCE_FORMAT,
-    SOURCE_MAPS,
     SOURCE_RESOLUTION,
     USER_AGENT,
     Env1AssetError,
     configure_streams,
+    descriptor_for_slug,
     md5_file,
     sha256_file,
-    source_cache_dir,
+    source_cache_dir_for,
 )
 
 RECEIPT_NAME = f"fetch_receipt_{SOURCE_RESOLUTION}_{SOURCE_FORMAT}.json"
@@ -78,12 +76,12 @@ def download(url: str, destination: pathlib.Path) -> int:
     return written
 
 
-def load_api_payloads(cache: pathlib.Path, offline: bool) -> dict[str, dict]:
+def load_api_payloads(cache: pathlib.Path, offline: bool, urls: dict) -> dict[str, dict]:
     """Load (or fetch) the verbatim info/files API payloads."""
     api_dir = cache / "api"
     api_dir.mkdir(parents=True, exist_ok=True)
     payloads: dict[str, dict] = {}
-    for name, url in (("info", INFO_URL), ("files", FILES_URL)):
+    for name, url in urls.items():
         target = api_dir / f"{name}.json"
         if offline:
             if not target.is_file():
@@ -112,9 +110,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fetch_polyhaven_asset.py",
         description=(
-            "Acquire and verify the Poly Haven sparse_grass source maps into the "
-            "gitignored ENV1 source cache."
+            "Acquire and verify the Poly Haven source maps of one registered "
+            "open asset into the gitignored ENV1 source cache."
         ),
+    )
+    parser.add_argument(
+        "--slug",
+        metavar="SLUG",
+        default="sparse_grass",
+        help="registered open asset to acquire (default sparse_grass)",
     )
     parser.add_argument(
         "--offline",
@@ -125,20 +129,23 @@ def main(argv: list[str] | None = None) -> int:
         "--cache-dir",
         metavar="PATH",
         default=None,
-        help=f"source cache root (default {source_cache_dir()})",
+        help="source cache root (default: the registered cache of --slug)",
     )
     args = parser.parse_args(argv)
+
+    descriptor = descriptor_for_slug(args.slug)
+    api_urls = {"info": descriptor.info_url, "files": descriptor.files_url}
 
     cache = (
         pathlib.Path(args.cache_dir).resolve()
         if args.cache_dir
-        else source_cache_dir()
+        else source_cache_dir_for(slug=descriptor.slug)
     )
-    print(f"ENV1-A source acquisition ({ATTRIBUTION})")
+    print(f"ENV1 source acquisition: {descriptor.slug} ({ATTRIBUTION})")
     print(f"  cache: {cache}")
 
     try:
-        payloads = load_api_payloads(cache, args.offline)
+        payloads = load_api_payloads(cache, args.offline, api_urls)
         files = payloads["files"]["json"]
         info = payloads["info"]["json"]
 
@@ -147,13 +154,14 @@ def main(argv: list[str] | None = None) -> int:
 
         receipt: dict[str, object] = {
             "provider": "Poly Haven",
-            "slug": "sparse_grass",
+            "slug": descriptor.slug,
+            "asset_id": descriptor.asset_id,
             "attribution": ATTRIBUTION,
             "resolution": SOURCE_RESOLUTION,
             "format": SOURCE_FORMAT,
             "user_agent": USER_AGENT,
-            "info_url": INFO_URL,
-            "files_url": FILES_URL,
+            "info_url": descriptor.info_url,
+            "files_url": descriptor.files_url,
             "info_payload_sha256": payloads["info"]["sha256"],
             "files_payload_sha256": payloads["files"]["sha256"],
             "api_files_hash": info.get("files_hash"),
@@ -164,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         }
 
         failures = 0
-        for map_type, role, file_name in SOURCE_MAPS:
+        for map_type, role, file_name in descriptor.source_maps:
             print(f"\n=== {map_type} ({role}) -> {file_name} ===")
             try:
                 leaf = files[map_type][SOURCE_RESOLUTION][SOURCE_FORMAT]
@@ -229,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "sha256": payloads[name]["sha256"],
             }
-            for name, url in (("info", INFO_URL), ("files", FILES_URL))
+            for name, url in api_urls.items()
         }
 
         receipt_path = cache / RECEIPT_NAME

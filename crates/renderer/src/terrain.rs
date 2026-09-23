@@ -126,6 +126,146 @@ pub const DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_NEAR_M: f32 = 20.0;
 /// beyond this only base/macro structure remains.
 pub const DEFAULT_TERRAIN_DETAIL_NORMAL_FADE_FAR_M: f32 = 80.0;
 
+// ---------------------------------------------------------------------------
+// FFV1: field region composition (mirrors `shader.wgsl` exactly)
+// ---------------------------------------------------------------------------
+
+/// Physical tile span of the worn-grass companion layer in metres: the
+/// measured Poly Haven `grass_path_3` scan (1000 mm per axis), so one tile
+/// reproduces the photograph at true size. Recorded in
+/// `docs/assets/env1/env1_open_assets.json` (ENV1-GND-02) and re-checked by
+/// `tools/env1_asset_pipeline/verify_env1_assets.py`.
+pub const FFV1_TERRAIN_WORN_TILE_SCALE_M: f32 = 1.0;
+
+/// Physical tile span of the dry-soil companion layer in metres: the measured
+/// Poly Haven `forest_ground_04` scan (3150 mm per axis). Recorded in
+/// `docs/assets/env1/env1_open_assets.json` (ENV1-GND-03).
+pub const FFV1_TERRAIN_DRY_TILE_SCALE_M: f32 = 3.15;
+
+/// Luminance bias of the height-blend that interlocks the region weights.
+pub const FIELD_BLEND_BIAS: f32 = 0.12;
+
+/// Companion-layer tangent-normal contribution scale.
+pub const FIELD_COMPANION_NORMAL_SCALE: f32 = 0.9;
+
+/// Mown grass runway strip half extents in world metres (X, Z).
+pub const FIELD_RUNWAY_HALF_M: [f32; 2] = [6.0, 60.0];
+/// Mown grass runway strip corner radius in metres.
+pub const FIELD_RUNWAY_RADIUS_M: f32 = 6.0;
+/// Worn/compacted collar centre outside the mown strip, in metres.
+pub const FIELD_WORN_COLLAR_M: f32 = 5.0;
+/// Worn/compacted collar half-band width, in metres.
+pub const FIELD_WORN_COLLAR_BAND_M: f32 = 2.0;
+/// Maintained mown field half extents in world metres (X, Z).
+pub const FIELD_MOWN_HALF_M: [f32; 2] = [34.0, 118.0];
+/// Maintained mown field corner radius in metres.
+pub const FIELD_MOWN_RADIUS_M: f32 = 30.0;
+/// Vegetation-edge dry band: rounded box half extents in metres.
+pub const FIELD_EDGE_BOX_HALF_M: [f32; 2] = [150.0, 150.0];
+/// Vegetation-edge dry band corner radius in metres.
+pub const FIELD_EDGE_BOX_RADIUS_M: f32 = 60.0;
+/// Inner smoothstep edge of the dry band (metres, signed distance).
+pub const FIELD_EDGE_INNER_M: f32 = 30.0;
+/// Outer smoothstep edge of the dry band (metres, signed distance).
+pub const FIELD_EDGE_OUTER_M: f32 = 26.0;
+/// Mown-lap period across the runway axis, in metres.
+pub const FIELD_MOW_LAP_M: f32 = 2.4;
+
+fn field_sd_round_box(p: [f32; 2], half: [f32; 2], radius: f32) -> f32 {
+    let qx = (p[0].abs() - half[0] + radius).max(0.0);
+    let qy = (p[1].abs() - half[1] + radius).max(0.0);
+    let outside = (qx * qx + qy * qy).sqrt();
+    let inside = ((p[0].abs() - half[0] + radius).max(p[1].abs() - half[1] + radius)).min(0.0);
+    outside + inside - radius
+}
+
+fn field_fract(value: f32) -> f32 {
+    value - value.floor()
+}
+
+/// CPU mirror of the WGSL `field_hash21` value-noise lattice hash.
+fn field_hash21(p: [f32; 2]) -> f32 {
+    let qx = field_fract(p[0] * 0.1031);
+    let qy = field_fract(p[1] * 0.1030);
+    let hx = qx * (qy + 33.71);
+    let hy = qy * (qx + 19.63);
+    field_fract((hx + hy) * 37.91)
+}
+
+fn field_smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn field_value_noise(p: [f32; 2]) -> f32 {
+    let cx = p[0].floor();
+    let cy = p[1].floor();
+    let fx = p[0] - cx;
+    let fy = p[1] - cy;
+    let ux = fx * fx * (3.0 - 2.0 * fx);
+    let uy = fy * fy * (3.0 - 2.0 * fy);
+    let a = field_hash21([cx, cy]);
+    let b = field_hash21([cx + 1.0, cy]);
+    let c = field_hash21([cx, cy + 1.0]);
+    let d = field_hash21([cx + 1.0, cy + 1.0]);
+    let top = a + (b - a) * ux;
+    let bottom = c + (d - c) * ux;
+    top + (bottom - top) * uy
+}
+
+fn field_fbm(p: [f32; 2]) -> f32 {
+    0.65 * field_value_noise(p) + 0.35 * field_value_noise([p[0] * 2.7 + 17.3, p[1] * 2.7 + 9.1])
+}
+
+/// CPU mirror of the WGSL `field_region_weights`: (mown runway, worn,
+/// maintained field, dry vegetation edge) at a world (X, Z) position.
+///
+/// The shader is the rendering authority; this mirror exists so the layout is
+/// testable on CPU-only CI (bounds, partition of unity, determinism and the
+/// region identity of known points) without a GPU.
+#[must_use]
+pub fn field_region_weights(x: f32, z: f32) -> [f32; 4] {
+    let p = [x, z];
+    let n = field_fbm([p[0] * 0.11, p[1] * 0.11]);
+    let n_fine = field_value_noise([p[0] * 0.32 + 4.7, p[1] * 0.32 + 11.3]);
+    let jitter = (n - 0.5) * 2.0;
+    let d_runway = field_sd_round_box(p, FIELD_RUNWAY_HALF_M, FIELD_RUNWAY_RADIUS_M)
+        + jitter * 2.5
+        + (n_fine - 0.5) * 1.6;
+    let mown_strip = 1.0 - field_smoothstep(-1.2, 1.8, d_runway);
+    let worn_collar = 1.0
+        - field_smoothstep(
+            FIELD_WORN_COLLAR_M - FIELD_WORN_COLLAR_BAND_M,
+            FIELD_WORN_COLLAR_M + FIELD_WORN_COLLAR_BAND_M,
+            d_runway + jitter * 3.0,
+        );
+    let d_mown = field_sd_round_box(p, FIELD_MOWN_HALF_M, FIELD_MOWN_RADIUS_M) + jitter * 7.0;
+    let mown_field = 1.0 - field_smoothstep(-6.0, 8.0, d_mown);
+    let d_edge =
+        field_sd_round_box(p, FIELD_EDGE_BOX_HALF_M, FIELD_EDGE_BOX_RADIUS_M) + jitter * 26.0;
+    let edge = field_smoothstep(-FIELD_EDGE_INNER_M, FIELD_EDGE_OUTER_M, d_edge);
+    let path_gate = field_smoothstep(
+        0.75,
+        0.82,
+        field_value_noise([p[0] * 0.16 + 61.7, p[1] * 0.16 + 23.9]),
+    );
+    let runway = mown_strip.clamp(0.0, 1.0);
+    // Wear paths may only fill the headroom the runway leaves, so the four
+    // weights stay a partition of unity (the blend normalizes regardless).
+    let worn = ((worn_collar - mown_strip).clamp(0.0, 1.0)
+        + path_gate * mown_field * (1.0 - mown_strip) * 0.45)
+        .min(1.0 - runway);
+    let dry = edge.clamp(0.0, 1.0);
+    let field = (1.0 - runway - worn - dry).clamp(0.0, 1.0);
+    [runway, worn, field, dry]
+}
+
+/// CPU mirror of the WGSL mown-lap modulation.
+#[must_use]
+pub fn field_mow_stripe(x: f32) -> f32 {
+    0.5 + 0.5 * (x * (std::f32::consts::TAU / FIELD_MOW_LAP_M)).sin()
+}
+
 /// CPU mirror of the WGSL detail fade: 1.0 at/near `near_m`, 0.0 at/beyond
 /// `far_m`, with a smoothstep (zero-derivative) falloff so no popping can
 /// occur. Shared documentation authority for the shader's smoothstep.
@@ -2034,6 +2174,121 @@ mod tests {
     // -----------------------------------------------------------------------
     // G3A-R: three-frequency stack / anti-repetition / distance-fade tests
     // -----------------------------------------------------------------------
+
+    // FFV1: the field region mask is a pure function of world XZ, so it is
+    // fully testable on CPU-only CI.
+
+    #[test]
+    fn ffv1_companion_tile_scales_match_the_documented_physical_spans() {
+        // grass_path_3 is a 1000 mm scan, forest_ground_04 a 3150 mm scan; the
+        // compiled constants must equal the manifest's runtime_binding.
+        assert_eq!(FFV1_TERRAIN_WORN_TILE_SCALE_M, 1.0);
+        assert_eq!(FFV1_TERRAIN_DRY_TILE_SCALE_M, 3.15);
+    }
+
+    #[test]
+    fn ffv1_region_weights_are_bounded_and_finite_everywhere() {
+        for step in 0..400 {
+            let x = -240.0 + step as f32 * 1.203;
+            for step_z in 0..40 {
+                let z = -240.0 + step_z as f32 * 12.7;
+                let weights = field_region_weights(x, z);
+                for weight in weights {
+                    assert!(weight.is_finite());
+                    assert!((0.0..=1.0).contains(&weight));
+                }
+                let sum: f32 = weights.iter().sum();
+                assert!(
+                    sum <= 1.0 + 1e-4,
+                    "region weights must not over-cover at ({x}, {z}): {sum}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ffv1_runway_centre_is_fully_mown_and_far_field_is_dry_edge() {
+        // The mown strip interior is far from every perturbed boundary, so the
+        // runway weight must saturate along the centreline.
+        for z in [-40.0, -20.0, 0.0, 20.0, 40.0] {
+            let weights = field_region_weights(0.0, z);
+            assert!(
+                weights[0] > 0.99,
+                "runway centre at z={z} must be mown, got {weights:?}"
+            );
+            assert!(weights[3] < 1e-3, "runway centre must not be dry edge");
+        }
+        // Well outside the vegetation-edge band onset the dry layer owns the
+        // surface completely.
+        for point in [[230.0, 0.0], [0.0, 235.0], [-228.0, 120.0]] {
+            let weights = field_region_weights(point[0], point[1]);
+            assert!(
+                weights[3] > 0.99,
+                "({}, {}) must be dry vegetation edge, got {weights:?}",
+                point[0],
+                point[1]
+            );
+        }
+    }
+
+    #[test]
+    fn ffv1_region_weights_are_deterministic_and_world_anchored() {
+        for point in [[3.5, -17.25], [88.0, 41.5], [-142.0, -96.0]] {
+            let first = field_region_weights(point[0], point[1]);
+            let second = field_region_weights(point[0], point[1]);
+            assert_eq!(
+                first.map(f32::to_bits),
+                second.map(f32::to_bits),
+                "the mask must be bitwise reproducible"
+            );
+        }
+        // Adjacent world positions differ smoothly, never teleport: the mask
+        // has no per-chunk state.
+        let a = field_region_weights(30.0, 30.0);
+        let b = field_region_weights(30.5, 30.0);
+        for (left, right) in a.iter().zip(b.iter()) {
+            assert!((left - right).abs() < 0.25, "mask must vary smoothly");
+        }
+    }
+
+    #[test]
+    fn ffv1_region_boundaries_are_not_geometric_bands() {
+        // Sampling a circle at a fixed radius must produce varying weights:
+        // a pure geometric band would be constant along it.
+        let radius = 20.0;
+        let mut worn_seen = 0usize;
+        let mut field_seen = 0usize;
+        for step in 0..64 {
+            let angle = step as f32 / 64.0 * std::f32::consts::TAU;
+            let weights = field_region_weights(radius * angle.cos(), radius * angle.sin());
+            if weights[1] > 0.05 {
+                worn_seen += 1;
+            }
+            if weights[2] > 0.5 {
+                field_seen += 1;
+            }
+        }
+        assert!(
+            worn_seen > 0,
+            "wear paths must appear inside the mown field"
+        );
+        assert!(field_seen > 0, "maintained field must dominate at 20 m");
+        assert!(
+            worn_seen < 64,
+            "the worn region must not cover the whole ring"
+        );
+    }
+
+    #[test]
+    fn ffv1_mow_stripe_is_periodic_and_bounded() {
+        let period = FIELD_MOW_LAP_M;
+        for x in [0.0, 7.3, -19.4] {
+            let value = field_mow_stripe(x);
+            let shifted = field_mow_stripe(x + period);
+            assert!((0.0..=1.0).contains(&value));
+            assert!((value - shifted).abs() < 1e-4, "mow laps must be periodic");
+        }
+    }
 
     #[test]
     fn g3ar_material_defaults_are_pinned() {

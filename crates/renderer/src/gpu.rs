@@ -63,6 +63,8 @@ use crate::terrain::{DEFAULT_CHUNK_CELLS, TerrainMaterial, generate_centered_ter
 // unchanged; only this import moves.
 use crate::env1_material::ENV1_RUNTIME_EDGE;
 use crate::env1_material::runtime_assets as terrain_assets;
+use crate::env1_material::runtime_assets_dry as terrain_assets_dry;
+use crate::env1_material::runtime_assets_worn as terrain_assets_worn;
 use crate::terrain_textures::{
     generate_terrain_mip_chain, mip_level_count_for_size, terrain_texture_set_from_decoded,
 };
@@ -550,6 +552,8 @@ pub enum TerrainDebugMode {
     Macro = 4,
     /// Detail layer albedo sample.
     Detail = 5,
+    /// FFV1 field region mask (runway/worn/dry as RGB over a field floor).
+    Region = 6,
 }
 
 impl TerrainDebugMode {
@@ -569,6 +573,7 @@ impl TerrainDebugMode {
             3 => Some(Self::Roughness),
             4 => Some(Self::Macro),
             5 => Some(Self::Detail),
+            6 => Some(Self::Region),
             _ => None,
         }
     }
@@ -583,6 +588,7 @@ impl TerrainDebugMode {
             Self::Roughness => "roughness",
             Self::Macro => "macro",
             Self::Detail => "detail",
+            Self::Region => "region",
         }
     }
 
@@ -596,6 +602,7 @@ impl TerrainDebugMode {
             "roughness" => Some(Self::Roughness),
             "macro" => Some(Self::Macro),
             "detail" => Some(Self::Detail),
+            "region" => Some(Self::Region),
             _ => None,
         }
     }
@@ -762,6 +769,11 @@ struct GpuTerrainMaterial {
     _normal_texture_view: wgpu::TextureView,
     _roughness_texture: wgpu::Texture,
     _roughness_texture_view: wgpu::TextureView,
+    /// FFV1 companion layers (worn albedo/normal, dry albedo/normal/roughness):
+    /// five mipmapped maps bound at group 4 bindings 5..=9 and blended by the
+    /// region mask.
+    _companion_textures: [wgpu::Texture; 5],
+    _companion_views: [wgpu::TextureView; 5],
     _sampler: wgpu::Sampler,
     /// Effective sampler anisotropy on this device (1 or 16).
     sampler_anisotropy: u32,
@@ -3832,6 +3844,134 @@ fn upload_terrain_mip_level(
     Ok(())
 }
 
+/// FFV1: one companion ground material's uploaded maps. `roughness` is
+/// optional: the worn layer reuses the maintained roughness stack with a
+/// compaction offset, which keeps the terrain fragment stage inside the
+/// 16-sampled-texture per-stage limit.
+struct CompanionMaps {
+    albedo: (wgpu::Texture, wgpu::TextureView),
+    normal: (wgpu::Texture, wgpu::TextureView),
+    roughness: Option<(wgpu::Texture, wgpu::TextureView)>,
+}
+
+/// FFV1: upload one companion ground material (albedo sRGB, normal linear,
+/// roughness linear) with the same deterministic mip chain and colour space
+/// contract as the maintained base layer. `bind_roughness = false` still runs
+/// the roughness through the chain (the generator requires all three maps)
+/// but skips creating/binding the R8 texture: the worn layer reuses the
+/// maintained roughness stack with a compaction offset, which keeps the
+/// terrain fragment stage inside the 16-sampled-texture per-stage limit.
+fn create_terrain_companion_maps(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    albedo_png: &[u8],
+    normal_png: &[u8],
+    roughness_png: &[u8],
+    bind_roughness: bool,
+) -> Result<CompanionMaps, RendererError> {
+    let albedo = decode_image(albedo_png).map_err(RendererError::TextureUpload)?;
+    let normal = decode_image(normal_png).map_err(RendererError::TextureUpload)?;
+    let roughness_decoded = decode_image(roughness_png).map_err(RendererError::TextureUpload)?;
+
+    let base_set =
+        terrain_texture_set_from_decoded(&albedo.rgba8, &normal.rgba8, &roughness_decoded.rgba8);
+    let mip_chain = generate_terrain_mip_chain(&base_set, ENV1_RUNTIME_EDGE);
+    let mip_levels = mip_chain.albedo.len() as u32;
+    assert_eq!(
+        mip_levels,
+        mip_level_count_for_size(ENV1_RUNTIME_EDGE),
+        "{label} companion textures must carry the full mip chain"
+    );
+
+    let size = wgpu::Extent3d {
+        width: albedo.width,
+        height: albedo.height,
+        depth_or_array_layers: 1,
+    };
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+
+    let albedo_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("FFV1 {label} companion albedo texture")),
+        size,
+        mip_level_count: mip_levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage,
+        view_formats: &[],
+    });
+    let albedo_view = albedo_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    for (level, mip) in mip_chain.albedo.iter().enumerate() {
+        upload_terrain_mip_level(
+            queue,
+            &albedo_texture,
+            level as u32,
+            mip.width,
+            mip.height,
+            &mip.bytes,
+            4,
+        )?;
+    }
+
+    let normal_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("FFV1 {label} companion normal texture")),
+        size,
+        mip_level_count: mip_levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage,
+        view_formats: &[],
+    });
+    let normal_view = normal_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    for (level, mip) in mip_chain.normal.iter().enumerate() {
+        upload_terrain_mip_level(
+            queue,
+            &normal_texture,
+            level as u32,
+            mip.width,
+            mip.height,
+            &mip.bytes,
+            4,
+        )?;
+    }
+
+    let roughness = if bind_roughness {
+        let roughness_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("FFV1 {label} companion roughness texture")),
+            size,
+            mip_level_count: mip_levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage,
+            view_formats: &[],
+        });
+        let roughness_view = roughness_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        for (level, mip) in mip_chain.roughness.iter().enumerate() {
+            upload_terrain_mip_level(
+                queue,
+                &roughness_texture,
+                level as u32,
+                mip.width,
+                mip.height,
+                &mip.bytes,
+                1,
+            )?;
+        }
+        Some((roughness_texture, roughness_view))
+    } else {
+        None
+    };
+
+    Ok(CompanionMaps {
+        albedo: (albedo_texture, albedo_view),
+        normal: (normal_texture, normal_view),
+        roughness,
+    })
+}
+
 /// Create the textured, mipmapped terrain material from the embedded maps.
 ///
 /// Decodes the committed PNGs once at initialization, builds the full
@@ -3974,6 +4114,44 @@ fn create_terrain_material(
         ..Default::default()
     });
 
+    // FFV1: the two companion ground materials of the field composition,
+    // uploaded with the same mip chain and colour-space contract as the base.
+    let worn = create_terrain_companion_maps(
+        device,
+        queue,
+        "worn",
+        terrain_assets_worn::TERRAIN_ALBEDO_PNG,
+        terrain_assets_worn::TERRAIN_NORMAL_PNG,
+        terrain_assets_worn::TERRAIN_ROUGHNESS_PNG,
+        false,
+    )?;
+    let dry = create_terrain_companion_maps(
+        device,
+        queue,
+        "dry",
+        terrain_assets_dry::TERRAIN_ALBEDO_PNG,
+        terrain_assets_dry::TERRAIN_NORMAL_PNG,
+        terrain_assets_dry::TERRAIN_ROUGHNESS_PNG,
+        true,
+    )?;
+    let (dry_roughness_texture, dry_roughness_view) = dry
+        .roughness
+        .expect("dry companion carries a roughness map");
+    let companion_textures = [
+        worn.albedo.0,
+        worn.normal.0,
+        dry.albedo.0,
+        dry.normal.0,
+        dry_roughness_texture,
+    ];
+    let companion_views = [
+        worn.albedo.1,
+        worn.normal.1,
+        dry.albedo.1,
+        dry.normal.1,
+        dry_roughness_view,
+    ];
+
     // G3A-R: PBR factors + the full visual stack configuration. Written once
     // at load time; only `debug_mode` is rewritten later (in place, via
     // `update_debug_mode`) when the presentation debug channel changes.
@@ -4009,6 +4187,26 @@ fn create_terrain_material(
                 binding: 4,
                 resource: material_uniform_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&companion_views[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&companion_views[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&companion_views[2]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&companion_views[3]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&companion_views[4]),
+            },
         ],
     });
 
@@ -4019,6 +4217,8 @@ fn create_terrain_material(
         _normal_texture_view: normal_texture_view,
         _roughness_texture: roughness_texture,
         _roughness_texture_view: roughness_texture_view,
+        _companion_textures: companion_textures,
+        _companion_views: companion_views,
         _sampler: sampler,
         sampler_anisotropy: u32::from(sampler_anisotropy),
         material_uniform: material_uniform_buffer,
@@ -4514,11 +4714,25 @@ fn material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindG
     })
 }
 
-/// G3A: terrain material bind group layout (group 4, bindings 0..4).
+/// G3A: terrain material bind group layout (group 4, bindings 0..4 plus the
+/// FFV1 companion layers at 5..=10).
 ///
-/// One filtering sampler serves all three maps; the uniform carries the PBR
+/// One filtering sampler serves all maps; the uniform carries the PBR
 /// factors and per-map world-space UV anchors. Distinct from the shared
 /// material layout so the aircraft/scenery pipeline is untouched.
+fn companion_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn terrain_material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -4576,6 +4790,12 @@ fn terrain_material_bind_group_layout(device: &wgpu::Device, label: &str) -> wgp
                 },
                 count: None,
             },
+            // FFV1 companion layers: worn albedo/normal, dry albedo/normal/rough.
+            companion_texture_entry(5),
+            companion_texture_entry(6),
+            companion_texture_entry(7),
+            companion_texture_entry(8),
+            companion_texture_entry(9),
         ],
     })
 }
@@ -6094,10 +6314,11 @@ mod terrain_debug_mode_tests {
             TerrainDebugMode::Roughness,
             TerrainDebugMode::Macro,
             TerrainDebugMode::Detail,
+            TerrainDebugMode::Region,
         ] {
             assert_eq!(TerrainDebugMode::from_u32(mode.as_u32()), Some(mode));
         }
-        assert_eq!(TerrainDebugMode::from_u32(6), None);
+        assert_eq!(TerrainDebugMode::from_u32(7), None);
         assert_eq!(TerrainDebugMode::from_u32(255), None);
     }
 
@@ -6110,6 +6331,7 @@ mod terrain_debug_mode_tests {
             TerrainDebugMode::Roughness,
             TerrainDebugMode::Macro,
             TerrainDebugMode::Detail,
+            TerrainDebugMode::Region,
         ] {
             assert_eq!(
                 TerrainDebugMode::from_label(mode.label()),

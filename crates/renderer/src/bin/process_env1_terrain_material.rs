@@ -22,38 +22,92 @@
 //! ```
 
 use renderer::env1_material::{
-    ENV1_RUNTIME_EDGE, Env1MaterialError, load_luma16, load_rgb16, process_sparse_grass,
-    write_runtime_maps,
+    ENV1_RUNTIME_EDGE, Env1MaterialError, load_luma_source, load_rgb_source, process_sparse_grass,
+    write_runtime_maps_with_names,
 };
 use std::path::{Path, PathBuf};
 
-/// Source file names as published by the Poly Haven files API for the `4k` PNG
-/// variant of `sparse_grass`.
-const SOURCE_BASE_COLOR: &str = "sparse_grass_diff_4k.png";
-const SOURCE_NORMAL: &str = "sparse_grass_nor_gl_4k.png";
-const SOURCE_ROUGHNESS: &str = "sparse_grass_rough_4k.png";
+/// One registered ground material: source file names as published by the Poly
+/// Haven files API for the `4k` PNG variant, the committed runtime file names,
+/// and the default cache/output locations. Mirrors the Python registry in
+/// `tools/env1_asset_pipeline/env1_assets.py::OPEN_ASSETS`.
+struct GroundAssetSpec {
+    slug: &'static str,
+    source_base_color: &'static str,
+    source_normal: &'static str,
+    source_roughness: &'static str,
+    runtime_base_color: &'static str,
+    runtime_normal: &'static str,
+    runtime_roughness: &'static str,
+    default_source_dir: &'static str,
+    default_out_dir: &'static str,
+}
 
-/// Default source cache location, relative to the workspace root. `tmp/` is
-/// gitignored: the sources are re-downloadable and are never committed.
-const DEFAULT_SOURCE_DIR: &str = "tmp/env1_source_cache/polyhaven/sparse_grass/4k";
-/// Default committed runtime asset location, relative to the renderer crate.
-const DEFAULT_OUT_DIR: &str = "assets/env1/terrain/sparse_grass";
+const GROUND_ASSETS: &[GroundAssetSpec] = &[
+    GroundAssetSpec {
+        slug: "sparse_grass",
+        source_base_color: "sparse_grass_diff_4k.png",
+        source_normal: "sparse_grass_nor_gl_4k.png",
+        source_roughness: "sparse_grass_rough_4k.png",
+        runtime_base_color: "sparse_grass_base_color.png",
+        runtime_normal: "sparse_grass_normal.png",
+        runtime_roughness: "sparse_grass_roughness.png",
+        default_source_dir: "tmp/env1_source_cache/polyhaven/sparse_grass/4k",
+        default_out_dir: "assets/env1/terrain/sparse_grass",
+    },
+    GroundAssetSpec {
+        slug: "grass_path_3",
+        source_base_color: "grass_path_3_diff_4k.png",
+        source_normal: "grass_path_3_nor_gl_4k.png",
+        source_roughness: "grass_path_3_rough_4k.png",
+        runtime_base_color: "grass_path_3_base_color.png",
+        runtime_normal: "grass_path_3_normal.png",
+        runtime_roughness: "grass_path_3_roughness.png",
+        default_source_dir: "tmp/env1_source_cache/polyhaven/grass_path_3/4k",
+        default_out_dir: "assets/env1/terrain/grass_path_3",
+    },
+    GroundAssetSpec {
+        slug: "forest_ground_04",
+        source_base_color: "forest_ground_04_diff_4k.png",
+        source_normal: "forest_ground_04_nor_gl_4k.png",
+        source_roughness: "forest_ground_04_rough_4k.png",
+        runtime_base_color: "forest_ground_04_base_color.png",
+        runtime_normal: "forest_ground_04_normal.png",
+        runtime_roughness: "forest_ground_04_roughness.png",
+        default_source_dir: "tmp/env1_source_cache/polyhaven/forest_ground_04/4k",
+        default_out_dir: "assets/env1/terrain/forest_ground_04",
+    },
+];
+
+fn spec_for_slug(slug: &str) -> Result<&'static GroundAssetSpec, Box<dyn std::error::Error>> {
+    GROUND_ASSETS
+        .iter()
+        .find(|spec| spec.slug == slug)
+        .ok_or_else(|| {
+            format!(
+                "unknown asset {slug:?} (registered: sparse_grass, grass_path_3, forest_ground_04)"
+            )
+            .into()
+        })
+}
 
 struct Options {
+    spec: &'static GroundAssetSpec,
     source_dir: PathBuf,
     out_dir: PathBuf,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_arguments()?;
+    let spec = options.spec;
 
-    println!("ENV1-A sparse_grass material processor");
+    println!("ENV1 {} material processor", spec.slug);
     println!("  source dir: {}", options.source_dir.display());
     println!("  output dir: {}", options.out_dir.display());
 
-    let base_color = load_rgb16(&options.source_dir.join(SOURCE_BASE_COLOR))?;
-    let normal = load_rgb16(&options.source_dir.join(SOURCE_NORMAL))?;
-    let roughness = load_luma16(&options.source_dir.join(SOURCE_ROUGHNESS))?;
+    let base_color = load_rgb_source(&options.source_dir.join(spec.source_base_color))?;
+    let normal = load_rgb_source(&options.source_dir.join(spec.source_normal))?;
+    let roughness = load_luma_source(&options.source_dir.join(spec.source_roughness))?;
     report_source("Diffuse", &base_color);
     report_source("nor_gl", &normal);
     println!(
@@ -71,7 +125,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report_rgb8("runtime normal", &maps.normal_rgba8);
     report_gray8("runtime roughness", &maps.roughness_r8);
 
-    let paths = write_runtime_maps(&maps, &options.out_dir)?;
+    let paths = write_runtime_maps_with_names(
+        &maps,
+        &options.out_dir,
+        &(
+            spec.runtime_base_color,
+            spec.runtime_normal,
+            spec.runtime_roughness,
+        ),
+    )?;
     println!("\nwrote {}px runtime maps:", maps.edge);
     for (label, path) in [
         ("base color (RGBA8, sRGB)", &paths.base_color),
@@ -85,16 +147,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_arguments() -> Result<Options, Box<dyn std::error::Error>> {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut options = Options {
-        source_dir: crate_dir.join("..").join("..").join(DEFAULT_SOURCE_DIR),
-        out_dir: crate_dir.join(DEFAULT_OUT_DIR),
-    };
+    let mut slug = String::from("sparse_grass");
+    let mut source_dir: Option<PathBuf> = None;
+    let mut out_dir: Option<PathBuf> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--source-dir" => options.source_dir = require_value(&mut arguments, "--source-dir")?,
-            "--out-dir" => options.out_dir = require_value(&mut arguments, "--out-dir")?,
+            "--asset" => {
+                slug = require_value(&mut arguments, "--asset")?
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            "--source-dir" => source_dir = Some(require_value(&mut arguments, "--source-dir")?),
+            "--out-dir" => out_dir = Some(require_value(&mut arguments, "--out-dir")?),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -102,22 +168,34 @@ fn parse_arguments() -> Result<Options, Box<dyn std::error::Error>> {
             other => {
                 return Err(Box::new(Env1MaterialError::Decode {
                     path: other.to_owned(),
-                    reason: "unknown argument (expected --source-dir, --out-dir or --help)"
-                        .to_owned(),
+                    reason:
+                        "unknown argument (expected --asset, --source-dir, --out-dir or --help)"
+                            .to_owned(),
                 }));
             }
         }
     }
-    Ok(options)
+
+    let spec = spec_for_slug(&slug)?;
+    Ok(Options {
+        spec,
+        source_dir: source_dir.unwrap_or_else(|| {
+            crate_dir
+                .join("..")
+                .join("..")
+                .join(spec.default_source_dir)
+        }),
+        out_dir: out_dir.unwrap_or_else(|| crate_dir.join(spec.default_out_dir)),
+    })
 }
 
 fn print_usage() {
     println!(
-        "usage: process_env1_terrain_material [--source-dir PATH] [--out-dir PATH]\n\
+        "usage: process_env1_terrain_material [--asset SLUG] [--source-dir PATH] [--out-dir PATH]\n\
          \n\
-         defaults:\n  \
-         --source-dir {DEFAULT_SOURCE_DIR}   (relative to the workspace root)\n  \
-         --out-dir    {DEFAULT_OUT_DIR} (relative to crates/renderer)"
+         registered assets: sparse_grass (default), grass_path_3, forest_ground_04\n\
+         each asset defaults its --source-dir to its gitignored Poly Haven cache\n\
+         and its --out-dir to its committed runtime asset directory"
     );
 }
 

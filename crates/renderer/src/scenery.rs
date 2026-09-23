@@ -100,23 +100,6 @@ const BOUNDARY_CLUSTER_COUNT: usize = 18;
 /// additions.
 pub const MAX_FLYING_FIELD_TRIANGLES: u32 = 8_000;
 
-/// Vertical offset of runway markings above the surface (z-fighting guard).
-const RUNWAY_MARKING_OFFSET_M: f32 = 0.005;
-
-/// Centreline dash length and gap along Z; 10 dashes in total.
-const CENTERLINE_DASH_LENGTH_M: f32 = 6.0;
-const CENTERLINE_DASH_GAP_M: f32 = 6.0;
-const CENTERLINE_DASH_COUNT: u32 = 10;
-
-/// Centreline dash half-width along X.
-const CENTERLINE_DASH_HALF_WIDTH_M: f32 = 0.3;
-
-/// Edge marking width along X (solid line inside each runway edge).
-const EDGE_MARKING_WIDTH_M: f32 = 0.4;
-
-/// Threshold marking depth along Z (full-width bar between the edge lines).
-const THRESHOLD_DEPTH_M: f32 = 1.5;
-
 /// Flightline: fence offset from runway centre, outside the safety rectangle.
 const FLIGHTLINE_X_M: f32 = 12.0;
 
@@ -135,10 +118,7 @@ const PILOT_MARKER_Z_M: [f32; 4] = [-30.0, -10.0, 10.0, 30.0];
 const WINDSOCK_POLE_HEIGHT_M: f32 = 6.0;
 const WINDSOCK_SOCK_LENGTH_M: f32 = 2.2;
 
-/// Presentation colors. Markings are high-contrast but never emissive.
-const MARKING_CENTER: [f32; 4] = [0.90, 0.90, 0.88, 1.0];
-const MARKING_EDGE: [f32; 4] = [0.88, 0.88, 0.86, 1.0];
-const MARKING_THRESHOLD: [f32; 4] = [0.92, 0.90, 0.88, 1.0];
+/// Presentation colors. High-contrast but never emissive.
 const FENCE_WHITE: [f32; 4] = [0.86, 0.86, 0.84, 1.0];
 const PILOT_ORANGE: [f32; 4] = [0.85, 0.25, 0.10, 1.0];
 const WINDSOCK_ORANGE: [f32; 4] = [0.92, 0.44, 0.08, 1.0];
@@ -289,14 +269,12 @@ pub fn generate_flying_field(params: &FlyingFieldParams) -> SceneryScene {
     // Grass field: for FlyingField the visual terrain is flat at ground_y
     // (option A), so no redundant coplanar grass plane is generated here.
 
-    // Runway.
-    let runway = generate_runway(params.ground_y);
-    merge_mesh(
-        &mut all_vertices,
-        &mut all_indices,
-        &runway.vertices,
-        &runway.indices,
-    );
+    // FFV1: the runway is no longer a scenery object. The old uniform grey
+    // slab plus coplanar paint quads read as an asphalt road; the mown grass
+    // runway, its worn collar and the vegetation-edge dry band are now
+    // regions of the terrain material (see `terrain::field_region_weights`),
+    // which keeps the visual surface separable from the physical contact
+    // plane and lets the strip carry photographed grass instead of paint.
 
     // Legacy G2A/G2E placeholder trees — REACHABLE ONLY VIA
     // `legacy_tree_placeholders`. The production preset keeps this off:
@@ -450,79 +428,7 @@ pub fn runway_safety_rect() -> [f32; 4] {
     ]
 }
 
-// ── Runway ─────────────────────────────────────────────────────────────────
-
-#[must_use]
-fn generate_runway(ground_y: f32) -> SceneryMesh {
-    // Long axis along Z (NED North), short axis along X.
-    let lz = RUNWAY_HALF_LENGTH_M;
-    let lx = RUNWAY_HALF_WIDTH_M;
-    let surface_y = ground_y + 0.02;
-    let marking_y = surface_y + RUNWAY_MARKING_OFFSET_M;
-    let runway_color = [0.35, 0.33, 0.30, 1.0];
-
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    // Main runway surface (readable asphalt, vertex colors only).
-    append_runway_marking(
-        &mut vertices,
-        &mut indices,
-        [-lx, lx],
-        [-lz, lz],
-        surface_y,
-        runway_color,
-    );
-
-    // Edge markings: solid high-contrast lines just inside both edges.
-    for &x_sign in &[-1.0_f32, 1.0] {
-        let outer = x_sign * lx;
-        let inner = x_sign * (lx - EDGE_MARKING_WIDTH_M);
-        append_runway_marking(
-            &mut vertices,
-            &mut indices,
-            [outer.min(inner), outer.max(inner)],
-            [-lz, lz],
-            marking_y,
-            MARKING_EDGE,
-        );
-    }
-
-    // Threshold markings: full-width bars at both ends, inside the edge lines.
-    for &z_sign in &[-1.0_f32, 1.0] {
-        let outer = z_sign * lz;
-        let inner = z_sign * (lz - THRESHOLD_DEPTH_M);
-        append_runway_marking(
-            &mut vertices,
-            &mut indices,
-            [-(lx - EDGE_MARKING_WIDTH_M), lx - EDGE_MARKING_WIDTH_M],
-            [outer.min(inner), outer.max(inner)],
-            marking_y,
-            MARKING_THRESHOLD,
-        );
-    }
-
-    // Segmented centreline: 10 dashes between the threshold bars, symmetric
-    // about the runway origin.
-    let dash_period = CENTERLINE_DASH_LENGTH_M + CENTERLINE_DASH_GAP_M;
-    let dash_span = CENTERLINE_DASH_COUNT as f32 * dash_period;
-    let first_dash_z = -(dash_span * 0.5 - CENTERLINE_DASH_GAP_M * 0.5);
-    for dash in 0..CENTERLINE_DASH_COUNT {
-        let z_lo = first_dash_z + dash as f32 * dash_period;
-        append_runway_marking(
-            &mut vertices,
-            &mut indices,
-            [-CENTERLINE_DASH_HALF_WIDTH_M, CENTERLINE_DASH_HALF_WIDTH_M],
-            [z_lo, z_lo + CENTERLINE_DASH_LENGTH_M],
-            marking_y,
-            MARKING_CENTER,
-        );
-    }
-
-    SceneryMesh { vertices, indices }
-}
-
-// ── Tree ───────────────────────────────────────────────────────────────────
+// ── Tree ──────────────────────────────────────────────────────────────────
 
 /// Deterministic per-tree variation, a pure function of `(seed, index)`.
 ///
@@ -1307,29 +1213,6 @@ fn append_quad(
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// Append one horizontal runway marking quad at height `y`.
-fn append_runway_marking(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    x_bounds: [f32; 2],
-    z_bounds: [f32; 2],
-    y: f32,
-    color: [f32; 4],
-) {
-    append_quad(
-        vertices,
-        indices,
-        [
-            [x_bounds[0], y, z_bounds[0]],
-            [x_bounds[1], y, z_bounds[0]],
-            [x_bounds[1], y, z_bounds[1]],
-            [x_bounds[0], y, z_bounds[1]],
-        ],
-        color,
-        SAFE_NORMAL,
-    );
-}
-
 /// Append an axis-aligned box with per-face normals.
 fn append_box(
     vertices: &mut Vec<Vertex>,
@@ -1485,83 +1368,42 @@ mod tests {
     }
 
     #[test]
-    fn runway_is_centered_at_origin() {
+    fn ffv1_production_scenery_has_no_asphalt_runway_slab() {
+        // FFV1: the runway is a mown-grass region of the terrain material, not
+        // a painted slab. The old uniform grey rectangle (and its coplanar
+        // paint quads) is exactly what made the field read as a road, so the
+        // production scenery must not contain any of its colours.
         let scene = default_scene();
-        let runway_verts: Vec<_> = scene
-            .mesh
-            .vertices
-            .iter()
-            .filter(|v| v.color == [0.35, 0.33, 0.30, 1.0])
-            .collect();
-        assert!(!runway_verts.is_empty(), "runway vertices must exist");
-
-        let min_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::INFINITY, f32::min);
-        let max_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        let centre_x = (min_x + max_x) / 2.0;
-        let centre_z = (min_z + max_z) / 2.0;
-        assert!(
-            centre_x.abs() < 0.1,
-            "runway centre X should be ~0, got {centre_x}"
-        );
-        assert!(
-            centre_z.abs() < 0.1,
-            "runway centre Z should be ~0, got {centre_z}"
-        );
+        let retired_colours = [
+            [0.35, 0.33, 0.30, 1.0],
+            [0.90, 0.90, 0.88, 1.0],
+            [0.88, 0.88, 0.86, 1.0],
+            [0.92, 0.90, 0.88, 1.0],
+        ];
+        for vertex in &scene.mesh.vertices {
+            assert!(
+                !retired_colours.contains(&vertex.color),
+                "retired runway/paint colour {:?} still in production scenery",
+                vertex.color
+            );
+        }
     }
 
     #[test]
-    fn runway_dimensions_match_spec() {
-        let scene = default_scene();
-        let runway_verts: Vec<_> = scene
-            .mesh
-            .vertices
-            .iter()
-            .filter(|v| v.color == [0.35, 0.33, 0.30, 1.0])
-            .collect();
-
-        let min_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::INFINITY, f32::min);
-        let max_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        // Long axis along Z (NED North), short axis along X.
-        let length = max_z - min_z;
-        let width = max_x - min_x;
-        assert!(
-            (length - 120.0).abs() < 0.1,
-            "runway length should be 120 m, got {length}"
-        );
-        assert!(
-            (width - 12.0).abs() < 0.1,
-            "runway width should be 12 m, got {width}"
-        );
+    fn ffv1_runway_extent_is_carried_by_the_terrain_mask() {
+        // The mown strip the scenery no longer draws is owned by the terrain
+        // region mask: saturated along the centreline, absent off the strip.
+        for z in [-50.0, -25.0, 0.0, 25.0, 50.0] {
+            let weights = crate::terrain::field_region_weights(0.0, z);
+            assert!(weights[0] > 0.99, "centreline at z={z} must be mown");
+        }
+        for x in [20.0, -20.0, 45.0] {
+            let weights = crate::terrain::field_region_weights(x, 0.0);
+            assert!(
+                weights[0] < 0.01,
+                "x={x} is off the mown strip and must not be runway"
+            );
+        }
     }
 
     #[test]
@@ -1695,52 +1537,21 @@ mod tests {
     }
 
     #[test]
-    fn runway_long_axis_is_parallel_to_render_z() {
-        // Regression test: NED North -> render -Z, identity aircraft forward
-        // is render -Z. The runway long axis must be parallel to Z.
-        let scene = default_scene();
-        let runway_verts: Vec<_> = scene
-            .mesh
-            .vertices
-            .iter()
-            .filter(|v| v.color == [0.35, 0.33, 0.30, 1.0])
-            .collect();
+    fn ffv1_mown_strip_long_axis_is_parallel_to_render_z() {
+        // Regression test: NED North -> render -Z. The mown strip carried by
+        // the terrain mask must keep its long axis along Z with the specified
+        // 120 m x 12 m extents (half extents 60 m x 6 m).
+        let on_axis = crate::terrain::field_region_weights(0.0, 55.0);
+        let off_axis = crate::terrain::field_region_weights(0.0, 70.0);
+        let lateral = crate::terrain::field_region_weights(9.0, 0.0);
+        assert!(on_axis[0] > 0.99, "the strip must reach z=55 m");
         assert!(
-            !runway_verts.is_empty(),
-            "runway vertices must exist for axis check"
-        );
-
-        let min_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::INFINITY, f32::min);
-        let max_z = runway_verts
-            .iter()
-            .map(|v| v.position[2])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = runway_verts
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        let z_extent = max_z - min_z;
-        let x_extent = max_x - min_x;
-
-        assert!(
-            z_extent > x_extent,
-            "runway long axis must be along Z (NED North), got Z={z_extent} X={x_extent}"
+            off_axis[0] < 0.01,
+            "the strip must end before z=70 m (half length 60 m)"
         );
         assert!(
-            (z_extent - 120.0).abs() < 0.1,
-            "runway long extent should be 120 m, got {z_extent}"
-        );
-        assert!(
-            (x_extent - 12.0).abs() < 0.1,
-            "runway short extent should be 12 m, got {x_extent}"
+            lateral[0] < 0.5,
+            "x=9 m must be outside the mown strip (half width 6 m)"
         );
     }
 
@@ -1844,18 +1655,18 @@ mod tests {
     }
 
     #[test]
-    fn runway_surface_is_above_grass() {
+    fn ffv1_scenery_stays_at_or_above_the_ground_plane() {
+        // With the runway slab retired nothing may dip below the shared
+        // ground reference: the visual field must stay coplanar-safe with the
+        // physical contact plane.
         let scene = default_scene();
         let grass_y = DEFAULT_GROUND_Y;
-        let runway_verts: Vec<_> = scene
-            .mesh
-            .vertices
-            .iter()
-            .filter(|v| v.color == [0.35, 0.33, 0.30, 1.0])
-            .collect();
-        assert!(!runway_verts.is_empty());
-        for v in &runway_verts {
-            assert!(v.position[1] >= grass_y, "runway vertex below grass level");
+        for v in &scene.mesh.vertices {
+            assert!(
+                v.position[1] >= grass_y - 1e-3,
+                "scenery vertex below grass level: {:?}",
+                v.position
+            );
         }
     }
 
@@ -1924,68 +1735,30 @@ mod tests {
     }
 
     #[test]
-    fn centerline_markings_are_segmented_dashes() {
+    fn ffv1_marker_poles_flank_the_mown_strip() {
+        // The runway's only remaining physical presentation is its edge
+        // marker poles: six pairs flanking the mown strip at the safety
+        // margin, which is how a grass RC runway reads in the field.
         let scene = default_scene();
-        let mut dash_edges: Vec<f32> = scene
-            .mesh
-            .vertices
+        let pole_x = RUNWAY_HALF_WIDTH_M + RUNWAY_SAFETY_MARGIN_M;
+        let poles: Vec<&SceneryObject> = scene
+            .objects
             .iter()
-            .filter(|v| v.color == MARKING_CENTER)
-            .map(|v| v.position[2])
+            .filter(|obj| matches!(obj.kind, SceneryVisualKind::Pole))
             .collect();
-        assert_eq!(
-            dash_edges.len() % 4,
-            0,
-            "each dash quad contributes 4 corners"
-        );
-        dash_edges.sort_by(|a, b| a.total_cmp(b));
-        dash_edges.dedup();
-        // CENTERLINE_DASH_COUNT dashes ⇒ 2 * count distinct parallel edges.
-        assert_eq!(
-            dash_edges.len(),
-            (CENTERLINE_DASH_COUNT * 2) as usize,
-            "expected the configured number of dash edges"
-        );
-        // Dashes must not form one continuous strip: consecutive distinct
-        // edges sit exactly one dash length apart (6 m), never closer.
-        let max_gap = dash_edges
-            .windows(2)
-            .map(|pair| pair[1] - pair[0])
-            .fold(0.0_f32, f32::max);
-        assert!(
-            max_gap + 0.01 >= CENTERLINE_DASH_LENGTH_M
-                && max_gap <= CENTERLINE_DASH_LENGTH_M + CENTERLINE_DASH_GAP_M + 0.01,
-            "centreline spacing mismatch: max gap {max_gap}"
-        );
-    }
-
-    #[test]
-    fn threshold_markings_are_present_at_both_runway_ends() {
-        let scene = default_scene();
-        let threshold_z: Vec<f32> = scene
-            .mesh
-            .vertices
-            .iter()
-            .filter(|v| v.color == MARKING_THRESHOLD)
-            .map(|v| v.position[2])
-            .collect();
-        assert!(
-            threshold_z.len() >= 8,
-            "threshold bars must exist (got {} vertices)",
-            threshold_z.len()
-        );
-        let min_z = threshold_z.iter().fold(f32::INFINITY, |min, &z| min.min(z));
-        let max_z = threshold_z
-            .iter()
-            .fold(f32::NEG_INFINITY, |max, &z| max.max(z));
-        assert!(
-            min_z <= -(RUNWAY_HALF_LENGTH_M - 0.5),
-            "missing threshold at the -Z end"
-        );
-        assert!(
-            max_z >= RUNWAY_HALF_LENGTH_M - 0.5,
-            "missing threshold at the +Z end"
-        );
+        assert_eq!(poles.len(), 12, "six pole pairs must flank the strip");
+        for pole in &poles {
+            assert!(
+                (pole.position[0].abs() - pole_x).abs() < 1e-3,
+                "pole at x={} must sit on the safety margin",
+                pole.position[0]
+            );
+            assert!(
+                pole.position[2].abs() <= RUNWAY_HALF_LENGTH_M,
+                "pole at z={} must sit inside the strip length",
+                pole.position[2]
+            );
+        }
     }
 
     #[test]

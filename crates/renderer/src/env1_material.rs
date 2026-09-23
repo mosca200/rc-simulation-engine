@@ -230,6 +230,109 @@ pub fn load_luma16(path: &Path) -> Result<Luma16Map, Env1MaterialError> {
     }
 }
 
+/// Load an RGB source map at 16-bit precision, accepting either a 16-bit
+/// truecolor PNG or an 8-bit truecolor/RGBA PNG.
+///
+/// Poly Haven publishes 16-bit PNGs for some assets only (`sparse_grass` is
+/// 16-bit, `grass_path_3` and `forest_ground_04` are 8-bit). An 8-bit source is
+/// expanded to 16 bits by exact code-value replication (`v * 257`), so the
+/// decoded linear value of every texel is identical to decoding the 8-bit
+/// sample directly: the single 2x2 reduction below stays the only place
+/// quantization happens, and one recipe serves every registered asset.
+///
+/// # Errors
+///
+/// Fails if the file cannot be read or decoded, or if it is not truecolor.
+pub fn load_rgb_source(path: &Path) -> Result<Rgb16Map, Env1MaterialError> {
+    let displayed = path.display().to_string();
+    let image = open_image(path, &displayed)?;
+    match image {
+        DynamicImage::ImageRgb16(rgb) => {
+            let (width, height) = (rgb.width(), rgb.height());
+            Ok(Rgb16Map {
+                width,
+                height,
+                samples: rgb.into_raw(),
+            })
+        }
+        DynamicImage::ImageRgb8(rgb) => {
+            let (width, height) = (rgb.width(), rgb.height());
+            let samples = rgb
+                .into_raw()
+                .into_iter()
+                .map(|v| u16::from(v) * 257)
+                .collect();
+            Ok(Rgb16Map {
+                width,
+                height,
+                samples,
+            })
+        }
+        DynamicImage::ImageRgba8(rgba) => {
+            let (width, height) = (rgba.width(), rgba.height());
+            let raw = rgba.into_raw();
+            // Drop the alpha lane: the diffuse source alpha is not transferred
+            // (runtime base color is opaque by recipe).
+            let samples = raw
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| (index & 3) != 3)
+                .map(|(_, &value)| u16::from(value) * 257)
+                .collect();
+            Ok(Rgb16Map {
+                width,
+                height,
+                samples,
+            })
+        }
+        other => Err(Env1MaterialError::UnexpectedPixelFormat {
+            path: displayed,
+            expected: "16-bit or 8-bit truecolor RGB (PNG color_type 2 or 6)",
+            found: describe(&other),
+        }),
+    }
+}
+
+/// Load a grayscale source map at 16-bit precision, accepting 16-bit or 8-bit.
+///
+/// See [`load_rgb_source`] for why an 8-bit source is expanded by `v * 257`.
+///
+/// # Errors
+///
+/// Fails if the file cannot be read or decoded, or if it is not grayscale.
+pub fn load_luma_source(path: &Path) -> Result<Luma16Map, Env1MaterialError> {
+    let displayed = path.display().to_string();
+    let image = open_image(path, &displayed)?;
+    match image {
+        DynamicImage::ImageLuma16(luma) => {
+            let (width, height) = (luma.width(), luma.height());
+            Ok(Luma16Map {
+                width,
+                height,
+                samples: luma.into_raw(),
+            })
+        }
+        DynamicImage::ImageLuma8(luma) => {
+            let (width, height) = (luma.width(), luma.height());
+            let samples = luma
+                .into_raw()
+                .into_iter()
+                .map(|v| u16::from(v) * 257)
+                .collect();
+            Ok(Luma16Map {
+                width,
+                height,
+                samples,
+            })
+        }
+        other => Err(Env1MaterialError::UnexpectedPixelFormat {
+            path: displayed,
+            expected: "16-bit or 8-bit grayscale (PNG color_type 0)",
+            found: describe(&other),
+        }),
+    }
+}
+
 fn open_image(path: &Path, displayed: &str) -> Result<DynamicImage, Env1MaterialError> {
     match image::open(path) {
         Ok(image) => Ok(image),
@@ -412,15 +515,34 @@ pub fn write_runtime_maps(
     maps: &Env1RuntimeMaps,
     directory: &Path,
 ) -> Result<Env1RuntimePaths, Env1MaterialError> {
+    write_runtime_maps_with_names(
+        maps,
+        directory,
+        &(BASE_COLOR_FILE_NAME, NORMAL_FILE_NAME, ROUGHNESS_FILE_NAME),
+    )
+}
+
+/// [`write_runtime_maps`] with explicit runtime file names, so one recipe can
+/// serve every registered ground material (Flying Field v1 adds the worn-grass
+/// and dry-soil layers alongside the maintained `sparse_grass` base).
+///
+/// # Errors
+///
+/// Fails if the directory cannot be created or a PNG cannot be encoded.
+pub fn write_runtime_maps_with_names(
+    maps: &Env1RuntimeMaps,
+    directory: &Path,
+    names: &(&str, &str, &str),
+) -> Result<Env1RuntimePaths, Env1MaterialError> {
     std::fs::create_dir_all(directory).map_err(|error| Env1MaterialError::Io {
         path: directory.display().to_string(),
         reason: error.to_string(),
     })?;
 
     let edge = maps.edge;
-    let base_color = directory.join(BASE_COLOR_FILE_NAME);
-    let normal = directory.join(NORMAL_FILE_NAME);
-    let roughness = directory.join(ROUGHNESS_FILE_NAME);
+    let base_color = directory.join(names.0);
+    let normal = directory.join(names.1);
+    let roughness = directory.join(names.2);
 
     save_rgba8(&base_color, edge, &maps.base_color_rgba8)?;
     save_rgba8(&normal, edge, &maps.normal_rgba8)?;
@@ -521,6 +643,38 @@ pub mod runtime_assets {
     /// Roughness, 8-bit grayscale, linear R channel (uploaded as `R8Unorm`).
     pub const TERRAIN_ROUGHNESS_PNG: &[u8] =
         include_bytes!("../assets/env1/terrain/sparse_grass/sparse_grass_roughness.png");
+}
+
+/// Committed FFV1 worn-grass companion maps (Poly Haven `grass_path_3`, CC0,
+/// ENV1-GND-02), embedded at compile time. Written by
+/// `src/bin/process_env1_terrain_material.rs --asset grass_path_3`; provenance
+/// in `docs/assets/env1/env1_open_assets.json`.
+pub mod runtime_assets_worn {
+    /// Base color, RGBA8, sRGB intent (sampled as `Rgba8UnormSrgb`).
+    pub const TERRAIN_ALBEDO_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/grass_path_3/grass_path_3_base_color.png");
+    /// Tangent-space normal, RGBA8, linear, OpenGL (+Y) orientation.
+    pub const TERRAIN_NORMAL_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/grass_path_3/grass_path_3_normal.png");
+    /// Roughness, 8-bit grayscale, linear R channel (uploaded as `R8Unorm`).
+    pub const TERRAIN_ROUGHNESS_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/grass_path_3/grass_path_3_roughness.png");
+}
+
+/// Committed FFV1 dry-soil companion maps (Poly Haven `forest_ground_04`, CC0,
+/// ENV1-GND-03), embedded at compile time. Written by
+/// `src/bin/process_env1_terrain_material.rs --asset forest_ground_04`;
+/// provenance in `docs/assets/env1/env1_open_assets.json`.
+pub mod runtime_assets_dry {
+    /// Base color, RGBA8, sRGB intent (sampled as `Rgba8UnormSrgb`).
+    pub const TERRAIN_ALBEDO_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/forest_ground_04/forest_ground_04_base_color.png");
+    /// Tangent-space normal, RGBA8, linear, OpenGL (+Y) orientation.
+    pub const TERRAIN_NORMAL_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/forest_ground_04/forest_ground_04_normal.png");
+    /// Roughness, 8-bit grayscale, linear R channel (uploaded as `R8Unorm`).
+    pub const TERRAIN_ROUGHNESS_PNG: &[u8] =
+        include_bytes!("../assets/env1/terrain/forest_ground_04/forest_ground_04_roughness.png");
 }
 
 #[cfg(test)]
