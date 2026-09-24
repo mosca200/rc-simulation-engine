@@ -195,8 +195,8 @@ class ManifestValidator:
             self.error("scenery.preset", "required field missing")
         elif not isinstance(scenery["preset"], str):
             self.error("scenery.preset", f"must be a string, got {type(scenery['preset']).__name__}")
-        elif scenery["preset"] not in ["none", "flying-field"]:
-            self.error("scenery.preset", f"must be 'none' or 'flying-field', got '{scenery['preset']}'")
+        elif scenery["preset"] not in ["none", "flying-field", "photo-field"]:
+            self.error("scenery.preset", f"must be 'none', 'flying-field' or 'photo-field', got '{scenery['preset']}'")
 
     def _validate_camera(self):
         camera = self.manifest.get("camera")

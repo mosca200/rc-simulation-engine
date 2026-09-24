@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.1.0",
+  "scene_id": "pf1_hero_1080p",
+  "description": "PF1 Photo Field v1 authoritative pilot-view hero scene at 1920x1080: the fixed photographic eye 20 m behind the parked Acro Electric 01, looking along the brick garage azimuth (150.87 deg) at the real Poly Haven meadow panorama with invisible depth proxies.",
+  "renderer": {
+    "version": "v2",
+    "terrain_debug": "final",
+    "vegetation_debug": "final"
+  },
+  "scenery": {
+    "preset": "photo-field"
+  },
+  "camera": {
+    "mode": "pilot",
+    "vertical_fov_deg": 55,
+    "pilot_position_render_m": [15.321, 1.6, -12.856]
+  },
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "exposure_ev": 0.0,
+  "aircraft": {
+    "model": "models/acro_electric_01/model.json",
+    "throttle": 0.0,
+    "start_on_ground": true
+  },
+  "warmup": 30,
+  "capture": {
+    "filename": "pf1_hero_1080p_1920x1080.png",
+    "format": "png",
+    "frame": 30
+  },
+  "tags": ["pf1", "hero", "photo-field", "pilot-view"]
+}

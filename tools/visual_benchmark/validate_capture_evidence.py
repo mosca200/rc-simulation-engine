@@ -211,7 +211,7 @@ class CaptureEvidenceValidator:
 
     RENDERER_VERSIONS = {"v1", "v2"}
     CAMERA_MODES = {"pilot", "chase"}
-    SCENERY_PRESETS = {"none", "flying-field"}
+    SCENERY_PRESETS = {"none", "flying-field", "photo-field"}
     IMAGE_FORMATS = {"png", "jpg", "exr"}
 
     # Mirrors the VIS0-A manifest contract so the two artifacts stay aligned.

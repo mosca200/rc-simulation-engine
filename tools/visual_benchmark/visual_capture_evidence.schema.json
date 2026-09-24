@@ -128,7 +128,7 @@
         },
         "scenery_preset": {
           "type": ["string", "null"],
-          "enum": ["none", "flying-field", null],
+          "enum": ["none", "flying-field", "photo-field", null],
           "description": "Scenery preset actually in effect."
         }
       },

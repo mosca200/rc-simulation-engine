@@ -70,8 +70,8 @@
       "properties": {
         "preset": {
           "type": "string",
-          "enum": ["none", "flying-field"],
-          "description": "Scenery preset. Maps to --scenery CLI flag. 'none' = empty, 'flying-field' = RC airfield with runway, markings, fence, windsock. Values verified from SceneryPreset enum in crates/renderer/src/scenery.rs."
+          "enum": ["none", "flying-field", "photo-field"],
+          "description": "Scenery preset. Maps to --scenery CLI flag. 'none' = empty, 'flying-field' = RC airfield with runway, markings, fence, windsock, 'photo-field' = PF1 presentation-only photographic field (real CC0 equirectangular panorama plus invisible depth proxies; requires the pilot camera). Values verified from SceneryPreset enum in crates/renderer/src/scenery.rs."
         }
       },
       "description": "Scenery environment configuration. Only runtime-configurable parameters."

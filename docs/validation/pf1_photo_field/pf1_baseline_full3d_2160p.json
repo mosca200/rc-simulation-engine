@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.1.0",
+  "scene_id": "pf1_baseline_full3d_2160p",
+  "description": "PF1 4K sanity cost baseline at 3840x2160: the SAME pilot eye and FOV as the PF1 hero, rendered through the dense Full3D FlyingField presentation, so the PhotoField frame cost can be compared against an equivalent pilot-camera frame.",
+  "renderer": {
+    "version": "v2",
+    "terrain_debug": "final",
+    "vegetation_debug": "final"
+  },
+  "scenery": {
+    "preset": "flying-field"
+  },
+  "camera": {
+    "mode": "pilot",
+    "vertical_fov_deg": 55,
+    "pilot_position_render_m": [15.321, 1.6, -12.856]
+  },
+  "resolution": {
+    "width": 3840,
+    "height": 2160
+  },
+  "exposure_ev": 0.0,
+  "aircraft": {
+    "model": "models/acro_electric_01/model.json",
+    "throttle": 0.0,
+    "start_on_ground": true
+  },
+  "warmup": 30,
+  "capture": {
+    "filename": "pf1_baseline_full3d_2160p_3840x2160.png",
+    "format": "png",
+    "frame": 30
+  },
+  "tags": ["pf1", "baseline", "full3d", "pilot-view", "sanity-4k"]
+}
