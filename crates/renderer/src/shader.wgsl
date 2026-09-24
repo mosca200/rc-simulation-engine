@@ -1716,6 +1716,143 @@ fn fs_postprocess(input: SkyVertexOutput) -> @location(0) vec4<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// PF1: Photo Field presentation (panorama composite, depth proxies, photo shadow)
+// ---------------------------------------------------------------------------
+
+// Presentation-only Photo Field state. shadow_strength is consumed by the
+// photographic ground-shadow receiver; the yaw/pitch calibration by the final
+// composite. Exposure is deliberately NOT duplicated here: the composite reads
+// the same PostProcessUniform as the 3D path, so the photograph and the
+// tone-mapped aircraft share exactly one exposure relationship.
+struct PhotoFieldUniform {
+    panorama_yaw_rad: f32,
+    panorama_pitch_rad: f32,
+    shadow_strength: f32,
+    padding_0: f32,
+};
+
+// Group 6 is the first free bind group (0 camera, 1 object, 2 environment +
+// shadows, 3 material, 4 terrain/vegetation, 5 postprocess). The panorama is
+// an sRGB texture, so sampling yields linear display values and the sRGB
+// surface re-encodes them: the photograph round-trips untouched by any tone
+// mapper. The two depth textures are read 1:1 with textureLoad (no sampler, no
+// cross-texel blur); the mask likewise.
+@group(6) @binding(0)
+var photo_panorama_texture: texture_2d<f32>;
+@group(6) @binding(1)
+var photo_panorama_sampler: sampler;
+@group(6) @binding(2)
+var photo_scene_depth: texture_depth_2d;
+@group(6) @binding(3)
+var photo_proxy_depth: texture_depth_2d;
+@group(6) @binding(4)
+var photo_shadow_mask: texture_2d<f32>;
+@group(6) @binding(5)
+var<uniform> photo_field: PhotoFieldUniform;
+
+// Equirectangular UV of a world direction under the PF1 convention: the zenith
+// lives on the panorama's FIRST row (v = 0), u wraps seamlessly with azimuth,
+// and the calibration is a rigid rotation (yaw about +Y, then pitch about the
+// rotated +X) of the world direction into panorama space. Mirrors
+// crates/renderer/src/photo_field.rs::equirect_uv_from_direction exactly.
+fn photo_field_equirect_uv(direction: vec3<f32>) -> vec2<f32> {
+    let dir = normalize(direction);
+    // The yaw is SUBTRACTED, mirroring photo_field.rs: a calibration of +yaw
+    // puts panorama longitude 0 on world azimuth +yaw.
+    let sy = sin(photo_field.panorama_yaw_rad);
+    let cy = cos(photo_field.panorama_yaw_rad);
+    let x1 = dir.x * cy + dir.z * sy;
+    let z1 = -dir.x * sy + dir.z * cy;
+    let sp = sin(photo_field.panorama_pitch_rad);
+    let cp = cos(photo_field.panorama_pitch_rad);
+    let y2 = dir.y * cp + z1 * sp;
+    let z2 = -dir.y * sp + z1 * cp;
+    let azimuth = atan2(z2, x1);
+    var u = fract(azimuth / (2.0 * PI));
+    if (u < 0.0) {
+        u = u + 1.0;
+    }
+    let elevation = asin(clamp(y2, -1.0, 1.0));
+    let v = clamp(0.5 - elevation / PI, 0.0, 1.0);
+    return vec2<f32>(u, v);
+}
+
+struct PhotoProxyVertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+// Invisible depth-proxy rasterization. The pipeline attaches ONLY a depth
+// target and has no fragment stage at all, so the proxies can never contribute
+// colour to any target; they exist purely as camera-space depth.
+@vertex
+fn vs_photo_proxy(input: PhotoProxyVertexInput) -> @builtin(position) vec4<f32> {
+    return camera.view_projection * object.model * vec4<f32>(input.position, 1.0);
+}
+
+struct PhotoMaskVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+};
+
+@vertex
+fn vs_photo_shadow_mask(input: PhotoProxyVertexInput) -> PhotoMaskVertexOutput {
+    let world = object.model * vec4<f32>(input.position, 1.0);
+    var out: PhotoMaskVertexOutput;
+    out.clip_position = camera.view_projection * world;
+    out.world_position = world.xyz;
+    return out;
+}
+
+// Photographic ground-shadow receiver: writes ONLY an attenuation factor into
+// the presentation-only mask target. The photograph already carries its own
+// static environmental shadows; this adds the dynamic aircraft shadow on top of
+// the photographed grass using the existing cascaded aircraft shadow data,
+// without exposing any visible ground geometry and without replacing the grass
+// with a rendered PBR plane. The pass depth-tests against the proxy depth with
+// writes disabled, so a nearer proxy (a photographed tree) suppresses the
+// ground shadow behind it.
+@fragment
+fn fs_photo_shadow_mask(input: PhotoMaskVertexOutput) -> @location(0) vec4<f32> {
+    let visibility = directional_shadow_visibility(input.world_position);
+    let attenuation = 1.0 - photo_field.shadow_strength * (1.0 - visibility);
+    return vec4<f32>(attenuation, attenuation, attenuation, 1.0);
+}
+
+// PF1 final composite: photographic panorama + tone-mapped 3D aircraft +
+// photographic shadow mask -> linear display values (the sRGB surface encodes).
+//
+// Coverage comes from a depth comparison, never from alpha: the scene depth
+// holds only real 3D geometry (the aircraft), the proxy depth holds only the
+// invisible photographic stand-ins. The aircraft is visible exactly where it is
+// nearer than whatever the photograph depicts at that pixel, which is what
+// makes a photographed obstacle occlude it and lets it fly in front of one.
+@fragment
+fn fs_postprocess_photo(input: SkyVertexOutput) -> @location(0) vec4<f32> {
+    let uv = vec2<f32>(
+        input.clip_xy.x * 0.5 + 0.5,
+        0.5 - input.clip_xy.y * 0.5,
+    );
+    let dims = vec2<f32>(textureDimensions(photo_scene_depth));
+    let texel = vec2<i32>(floor(uv * dims));
+    let scene_depth = textureLoad(photo_scene_depth, texel, 0);
+    let proxy_depth = textureLoad(photo_proxy_depth, texel, 0);
+    let shadow_mask = textureLoad(photo_shadow_mask, texel, 0).r;
+
+    let view_dir = view_direction_from_clip(input.clip_xy);
+    let photo = textureSample(
+        photo_panorama_texture,
+        photo_panorama_sampler,
+        photo_field_equirect_uv(view_dir),
+    ).rgb * shadow_mask;
+
+    let hdr_rgb = textureSample(hdr_scene_texture, hdr_scene_sampler, uv).rgb;
+    let aircraft = khronos_pbr_neutral(hdr_rgb * exp2(postprocess.exposure_ev));
+
+    let coverage = select(0.0, 1.0, scene_depth < 1.0 && scene_depth < proxy_depth);
+    return vec4<f32>(mix(photo, aircraft, coverage), 1.0);
+}
+
+// ---------------------------------------------------------------------------
 // G3D: production vegetation (instanced trees)
 // ---------------------------------------------------------------------------
 

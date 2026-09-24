@@ -25,10 +25,11 @@ use renderer::{
     AircraftMesh, CameraConfig, CaptureRenderOutcome, CapturedFrame, DEFAULT_EXPOSURE_EV,
     DesktopRenderer, ExposureError, FixedStepAccumulator, FixedStepAccumulatorError,
     FrameCaptureError, GlbArticulationError, GlbArticulationPlan, GlbAsset, GlbLoadError,
-    PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode, RendererError,
-    RendererVersion, RuntimeVisualAudit, SurfaceError, SurfaceHinge, SurfaceId, TerrainDebugMode,
-    VegetationDebugMode, aircraft_mesh, load_glb_asset, rv2_6_validation_target_mesh,
-    scenery::SceneryPreset, validate_exposure_ev,
+    PhotoFieldManifestError, PresentationAsset, RenderDataError, RenderOutcome, RenderTerrainMode,
+    RendererError, RendererVersion, RuntimeVisualAudit, SurfaceError, SurfaceHinge, SurfaceId,
+    TerrainDebugMode, VegetationDebugMode, aircraft_mesh, load_glb_asset,
+    photo_field_default_pilot_position, rv2_6_validation_target_mesh, scenery::SceneryPreset,
+    validate_exposure_ev,
 };
 use replay::{AircraftReplayError, AircraftReplayRecorder};
 use serde::Serialize;
@@ -792,6 +793,7 @@ impl RenderOptions {
                     options.scenery = match value.as_str() {
                         "none" => SceneryPreset::None,
                         "flying-field" => SceneryPreset::FlyingField,
+                        "photo-field" => SceneryPreset::PhotoField,
                         _ => return Err(RenderAppError::InvalidScenery(value)),
                     };
                 }
@@ -919,6 +921,9 @@ impl RenderOptions {
                 capture_frame: capture.presentation_frame_index,
             });
         }
+        // Read before `resolve` consumes the pending options: PF1 needs to know
+        // whether the operator chose the pilot eye explicitly.
+        let pending_camera_explicit_pilot_position = pending_camera.pilot_position_render_m;
         options.camera = pending_camera.resolve(options.camera)?;
         if let Some(case) = rv2_6_validation_case {
             if options.renderer != RendererVersion::V2 {
@@ -938,6 +943,26 @@ impl RenderOptions {
         } else if rv2_6_validation_ap_explicit {
             return Err(RenderAppError::Rv26ValidationApRequiresScene);
         }
+        // PF1: a photographic field is only valid from the surveyed eye, so the
+        // CLI defaults to the manifest pilot position instead of the generic
+        // pilot default. An explicit `--pilot-position` wins and is then checked
+        // against the manifest by the renderer's `fixed_pilot_eye`, which
+        // rejects a mismatch cleanly rather than silently re-anchoring the
+        // photograph. A Chase camera is deliberately left for the renderer to
+        // reject too (`RendererError::PhotoFieldCamera`): this layer stays a
+        // parser and never encodes the fixed-eye rule twice.
+        if options.scenery == SceneryPreset::PhotoField
+            && pending_camera_explicit_pilot_position.is_none()
+            && let CameraSelection::Pilot {
+                vertical_fov_deg, ..
+            } = options.camera
+        {
+            options.camera = CameraSelection::Pilot {
+                position_render_m: photo_field_default_pilot_position()
+                    .map_err(RenderAppError::PhotoFieldManifest)?,
+                vertical_fov_deg,
+            };
+        }
         Ok(options)
     }
 }
@@ -954,8 +979,10 @@ pub enum RenderAppError {
     InvalidAirspeed(String),
     #[error("unknown render argument: {0}")]
     UnknownArgument(String),
-    #[error("invalid scenery preset `{0}`; expected `none` or `flying-field`")]
+    #[error("invalid scenery preset `{0}`; expected `none`, `flying-field`, or `photo-field`")]
     InvalidScenery(String),
+    #[error("the photo field manifest was rejected: {0}")]
+    PhotoFieldManifest(#[from] PhotoFieldManifestError),
     #[error(
         "invalid terrain debug mode `{0}`; expected `final`, `albedo`, `normal`, `roughness`, `macro`, or `detail`"
     )]
@@ -4418,6 +4445,125 @@ mod tests {
     fn scenery_default_is_none() {
         let options = RenderOptions::parse(std::iter::empty()).unwrap();
         assert_eq!(options.scenery, SceneryPreset::None);
+    }
+
+    // ── PF1 photo field CLI ────────────────────────────────────────────────
+    //
+    // Enforcement layer: the CLI is a pure parser. It supplies the surveyed
+    // pilot eye as a DEFAULT so the photograph is not silently rendered from
+    // the wrong place, but the fixed-eye rule itself lives in
+    // `renderer::fixed_pilot_eye`, which the renderer applies when it builds
+    // the Photo Field. Every test below therefore asserts both halves.
+
+    fn parse(arguments: &[&str]) -> Result<RenderOptions, RenderAppError> {
+        RenderOptions::parse(arguments.iter().map(|value| (*value).to_owned()))
+    }
+
+    #[test]
+    fn photo_field_defaults_to_the_manifest_pilot_eye() {
+        let options = parse(&["--scenery", "photo-field"]).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::PhotoField);
+        let manifest_eye = renderer::photo_field_default_pilot_position().unwrap();
+        match options.camera {
+            CameraSelection::Pilot {
+                position_render_m, ..
+            } => {
+                assert_eq!(position_render_m, manifest_eye);
+                // Neither the explicit-pilot default nor the generic default
+                // pilot eye may leak into a photographic field.
+                assert_ne!(position_render_m, EXPLICIT_PILOT_POSITION_RENDER_M);
+            }
+            other => panic!("photo-field must stay a pilot camera, got {other:?}"),
+        }
+        // The renderer accepts the eye the CLI just chose.
+        let config = renderer::embedded_photo_field_config().unwrap();
+        assert_eq!(
+            renderer::fixed_pilot_eye(&options.camera.into_camera_config(), &config),
+            Ok(manifest_eye)
+        );
+    }
+
+    #[test]
+    fn photo_field_keeps_an_explicit_pilot_camera_mode_and_fov() {
+        let options = parse(&[
+            "--scenery",
+            "photo-field",
+            "--camera",
+            "pilot",
+            "--camera-fov",
+            "55",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.camera,
+            CameraSelection::Pilot {
+                position_render_m: renderer::photo_field_default_pilot_position().unwrap(),
+                vertical_fov_deg: 55.0,
+            }
+        );
+    }
+
+    #[test]
+    fn an_explicit_pilot_position_wins_and_the_renderer_rejects_a_mismatch() {
+        // The CLI must not silently re-anchor an operator-supplied eye onto the
+        // manifest position; the renderer rejects the mismatch instead.
+        let options = parse(&[
+            "--scenery",
+            "photo-field",
+            "--camera",
+            "pilot",
+            "--pilot-position",
+            "1.0,2.0,3.0",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.camera,
+            CameraSelection::Pilot {
+                position_render_m: [1.0, 2.0, 3.0],
+                vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+            }
+        );
+        let config = renderer::embedded_photo_field_config().unwrap();
+        assert_eq!(
+            renderer::fixed_pilot_eye(&options.camera.into_camera_config(), &config),
+            Err(renderer::PhotoFieldCameraError::PilotPositionMismatch {
+                expected: config.pilot_position_render_m,
+                actual: [1.0, 2.0, 3.0],
+            })
+        );
+    }
+
+    #[test]
+    fn photo_field_with_a_chase_camera_parses_and_the_renderer_rejects_it() {
+        // A Chase eye translates with the aircraft, which would make the
+        // panorama swim. The CLI still parses it — rejecting it here would
+        // duplicate the fixed-eye rule in a second layer — and the renderer
+        // turns it into `RendererError::PhotoFieldCamera`.
+        let options = parse(&["--scenery", "photo-field", "--camera", "chase"]).unwrap();
+        assert_eq!(options.scenery, SceneryPreset::PhotoField);
+        assert!(matches!(options.camera, CameraSelection::Chase { .. }));
+        let config = renderer::embedded_photo_field_config().unwrap();
+        assert_eq!(
+            renderer::fixed_pilot_eye(&options.camera.into_camera_config(), &config),
+            Err(renderer::PhotoFieldCameraError::ChaseRejected)
+        );
+    }
+
+    #[test]
+    fn the_manifest_pilot_eye_default_never_applies_to_another_preset() {
+        // FlyingField and `none` keep their historical pilot defaults, so the
+        // PF1 default cannot change any existing look.
+        for preset in ["flying-field", "none"] {
+            let options = parse(&["--scenery", preset, "--camera", "pilot"]).unwrap();
+            assert_eq!(
+                options.camera,
+                CameraSelection::Pilot {
+                    position_render_m: EXPLICIT_PILOT_POSITION_RENDER_M,
+                    vertical_fov_deg: EXPLICIT_CAMERA_FOV_DEG,
+                },
+                "preset {preset}"
+            );
+        }
     }
 
     // ── Integration tests ──────────────────────────────────────────────────

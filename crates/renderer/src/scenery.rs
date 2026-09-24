@@ -166,6 +166,11 @@ pub enum BoundarySilhouette {
 pub enum SceneryPreset {
     None,
     FlyingField,
+    /// PF1: presentation-only photographic field. The distant world is a real
+    /// CC0 equirectangular panorama with invisible depth proxies; no terrain,
+    /// scenery mesh or vegetation is generated for it, and nothing here is
+    /// visible to the physics crates.
+    PhotoField,
 }
 
 /// Parameters controlling flying-field generation.

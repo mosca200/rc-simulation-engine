@@ -21,6 +21,8 @@ mod glb;
 mod gpu;
 mod math;
 mod mesh;
+mod photo_field;
+mod photo_field_gpu;
 mod pose;
 mod profiling;
 mod render_graph;
@@ -58,6 +60,14 @@ pub use mesh::{
     aircraft_mesh, articulated_aircraft_mesh, articulated_binding_table, ground_plane,
     ground_plane_at, reference_grid_and_axes, reference_grid_and_axes_at,
     rv2_6_validation_target_mesh,
+};
+pub use photo_field::{
+    PHOTO_FIELD_DEPTH_PROXY_FILE_NAME, PHOTO_FIELD_DEPTH_PROXY_GLB, PHOTO_FIELD_GROUND_NODE_NAME,
+    PHOTO_FIELD_MANIFEST_JSON, PHOTO_FIELD_MANIFEST_SCHEMA_VERSION, PHOTO_FIELD_PANORAMA_FILE_NAME,
+    PHOTO_FIELD_PANORAMA_HEIGHT, PHOTO_FIELD_PANORAMA_JPEG, PHOTO_FIELD_PANORAMA_WIDTH,
+    PhotoFieldCameraError, PhotoFieldConfig, PhotoFieldManifest, PhotoFieldManifestError,
+    embedded_photo_field_config, equirect_uv_from_direction, fixed_pilot_eye,
+    photo_field_default_pilot_position,
 };
 pub use pose::{RenderDataError, RenderFrame, RenderPose, world_ned_pose_to_render};
 pub use surfaces::{

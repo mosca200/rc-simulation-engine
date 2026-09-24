@@ -36,6 +36,12 @@ use crate::capture::{
     FrameCaptureError, capture_row_layout, unpad_capture_rows,
 };
 use crate::device::{DeviceContext, DeviceFeaturePolicy};
+// PF1: every Photo Field GPU resource lives behind one optional value so this
+// file's frame path stays readable; only the pass recording happens here.
+use crate::photo_field_gpu::{
+    PhotoFieldGpu, PhotoPostprocessLayouts, build_photo_field_gpu,
+    create_photo_postprocess_pipeline,
+};
 use crate::profiling::Profiler;
 use crate::render_graph::{CompiledGraph, PassId};
 use crate::renderer_v2::aerial_perspective::AerialPerspectiveUniformRaw;
@@ -228,6 +234,31 @@ pub enum RendererError {
     InvalidGroundReference,
     #[error("failed to upload texture to GPU: {0}")]
     TextureUpload(#[source] TextureLoadError),
+    // PF1: Photo Field presentation. Every variant fails closed during renderer
+    // initialization, before any resource is retained, so a rejected photograph
+    // can never leave a half-built renderer behind or silently fall back to a
+    // procedural field.
+    #[error("the camera is incompatible with the photo field: {0}")]
+    PhotoFieldCamera(#[from] crate::photo_field::PhotoFieldCameraError),
+    #[error("the photo field manifest was rejected: {0}")]
+    PhotoFieldManifest(#[from] crate::photo_field::PhotoFieldManifestError),
+    #[error("failed to decode the photo field panorama: {0}")]
+    PhotoFieldTexture(#[from] TextureLoadError),
+    #[error("failed to load the photo field depth proxy: {0}")]
+    PhotoFieldGlb(#[from] crate::glb::GlbLoadError),
+    #[error(
+        "photo field panorama must be exactly {expected_width}x{expected_height}, got {width}x{height}"
+    )]
+    PhotoFieldPanoramaExtent {
+        width: u32,
+        height: u32,
+        expected_width: u32,
+        expected_height: u32,
+    },
+    #[error(
+        "photo field depth proxy contains no `{partition}` geometry; the photographic field must fail closed rather than drop its occlusion or its ground shadow"
+    )]
+    PhotoFieldProxyPartitionEmpty { partition: &'static str },
 }
 
 /// Presentation failures normalized from wgpu 30's `CurrentSurfaceTexture` API.
@@ -1139,6 +1170,10 @@ pub struct WgpuRenderer {
     vegetation_debug_mode: VegetationDebugMode,
     /// Frame counter for the periodic Culling-mode counter log.
     vegetation_frame_counter: u64,
+    // PF1: photographic field presentation (PhotoField preset only). `None` for
+    // every other preset, which therefore owns no panorama, no depth proxy, no
+    // shadow mask and no group-6 bind group at all.
+    photo_field: Option<PhotoFieldGpu>,
 }
 
 impl WgpuRenderer {
@@ -1650,14 +1685,14 @@ impl WgpuRenderer {
         // Ground-start (RenderTerrainMode::Flat) also forces flat terrain.
         let terrain_cells = (DEFAULT_TERRAIN_EXTENT_M / DEFAULT_TERRAIN_CELL_SPACING_M) as u32;
         let terrain_height_field = match (terrain_mode, scenery_preset) {
-            (RenderTerrainMode::Flat, _) | (_, Some(SceneryPreset::FlyingField)) => {
-                crate::terrain::generate_flat_terrain(
-                    terrain_cells,
-                    terrain_cells,
-                    DEFAULT_TERRAIN_CELL_SPACING_M,
-                    -ground_below_render_origin_m,
-                )
-            }
+            (RenderTerrainMode::Flat, _)
+            | (_, Some(SceneryPreset::FlyingField))
+            | (_, Some(SceneryPreset::PhotoField)) => crate::terrain::generate_flat_terrain(
+                terrain_cells,
+                terrain_cells,
+                DEFAULT_TERRAIN_CELL_SPACING_M,
+                -ground_below_render_origin_m,
+            ),
             _ => crate::terrain::generate_rolling_terrain(
                 terrain_cells,
                 terrain_cells,
@@ -1712,6 +1747,9 @@ impl WgpuRenderer {
         let scenery_material_index = fallback_material_index;
         let scenery = scenery_preset.and_then(|preset| match preset {
             SceneryPreset::None => None,
+            // PF1: the photograph IS the scenery; a PhotoField must never grow
+            // FlyingField poles/fences/markers over it.
+            SceneryPreset::PhotoField => None,
             SceneryPreset::FlyingField => {
                 let params = crate::scenery::FlyingFieldParams {
                     ground_y: -ground_below_render_origin_m,
@@ -1728,84 +1766,90 @@ impl WgpuRenderer {
         // uniform and pipeline ONCE here. The per-frame loop only rewrites the
         // instance buffer contents and records instanced draws. Nothing in this
         // block runs per frame.
-        let (vegetation_world, vegetation) = if scenery_preset == Some(SceneryPreset::FlyingField) {
-            let world = VegetationWorld::flying_field(
-                DEFAULT_VEGETATION_SEED,
-                -ground_below_render_origin_m,
-            );
-            // Dedicated bark/foliage PBR materials (dielectric, rough bark,
-            // slightly glossier foliage — distinct response per part).
-            let bark_material = create_white_texture_material(
-                &device,
-                &material_bind_group_layout,
-                &queue,
-                part_metallic(VegetationPart::Bark),
-                part_roughness(VegetationPart::Bark),
-            );
-            let bark_material_index = materials.len();
-            materials.push(bark_material);
-            let foliage_material = create_white_texture_material(
-                &device,
-                &material_bind_group_layout,
-                &queue,
-                part_metallic(VegetationPart::Foliage),
-                part_roughness(VegetationPart::Foliage),
-            );
-            let foliage_material_index = materials.len();
-            materials.push(foliage_material);
+        //
+        // PF1: the gate is spelled out rather than left as an `==` comparison so
+        // a future preset cannot silently inherit FlyingField vegetation. A
+        // PhotoField's trees and hedges are photographic; generating 3D
+        // instances over them would double the foliage and break the look.
+        let (vegetation_world, vegetation) =
+            if matches!(scenery_preset, Some(SceneryPreset::FlyingField)) {
+                let world = VegetationWorld::flying_field(
+                    DEFAULT_VEGETATION_SEED,
+                    -ground_below_render_origin_m,
+                );
+                // Dedicated bark/foliage PBR materials (dielectric, rough bark,
+                // slightly glossier foliage — distinct response per part).
+                let bark_material = create_white_texture_material(
+                    &device,
+                    &material_bind_group_layout,
+                    &queue,
+                    part_metallic(VegetationPart::Bark),
+                    part_roughness(VegetationPart::Bark),
+                );
+                let bark_material_index = materials.len();
+                materials.push(bark_material);
+                let foliage_material = create_white_texture_material(
+                    &device,
+                    &material_bind_group_layout,
+                    &queue,
+                    part_metallic(VegetationPart::Foliage),
+                    part_roughness(VegetationPart::Foliage),
+                );
+                let foliage_material_index = materials.len();
+                materials.push(foliage_material);
 
-            // Group 4 of the vegetation scene pipeline carries the
-            // presentation-only debug uniform (camera/object/environment/
-            // material keep the shared lit slots 0-3).
-            let vegetation_state_bind_group_layout =
-                vegetation_state_bind_group_layout(&device, "G3D vegetation state layout");
-            let vegetation_pipeline_layout =
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("G3D vegetation pipeline layout"),
-                    bind_group_layouts: &[
-                        Some(&camera_bind_group_layout),
-                        Some(&object_bind_group_layout),
-                        Some(&environment_bind_group_layout),
-                        Some(&material_bind_group_layout),
-                        Some(&vegetation_state_bind_group_layout),
-                    ],
-                    immediate_size: 0,
-                });
-            // Depth-only instanced caster layout: camera + identity object +
-            // shadow matrix + material (PV1-R2: material group added for
-            // alpha-masked foliage shadow discard).
-            let vegetation_shadow_pipeline_layout =
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("G3D vegetation shadow pipeline layout"),
-                    bind_group_layouts: &[
-                        Some(&camera_bind_group_layout),
-                        Some(&object_bind_group_layout),
-                        Some(&shadow_pass_bind_group_layout),
-                        Some(&material_bind_group_layout),
-                    ],
-                    immediate_size: 0,
-                });
+                // Group 4 of the vegetation scene pipeline carries the
+                // presentation-only debug uniform (camera/object/environment/
+                // material keep the shared lit slots 0-3).
+                let vegetation_state_bind_group_layout =
+                    vegetation_state_bind_group_layout(&device, "G3D vegetation state layout");
+                let vegetation_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("G3D vegetation pipeline layout"),
+                        bind_group_layouts: &[
+                            Some(&camera_bind_group_layout),
+                            Some(&object_bind_group_layout),
+                            Some(&environment_bind_group_layout),
+                            Some(&material_bind_group_layout),
+                            Some(&vegetation_state_bind_group_layout),
+                        ],
+                        immediate_size: 0,
+                    });
+                // Depth-only instanced caster layout: camera + identity object +
+                // shadow matrix + material (PV1-R2: material group added for
+                // alpha-masked foliage shadow discard).
+                let vegetation_shadow_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("G3D vegetation shadow pipeline layout"),
+                        bind_group_layouts: &[
+                            Some(&camera_bind_group_layout),
+                            Some(&object_bind_group_layout),
+                            Some(&shadow_pass_bind_group_layout),
+                            Some(&material_bind_group_layout),
+                        ],
+                        immediate_size: 0,
+                    });
 
-            let gpu = build_gpu_vegetation(
-                &device,
-                &queue,
-                &shader,
-                &world,
-                &vegetation_state_bind_group_layout,
-                &vegetation_pipeline_layout,
-                &vegetation_shadow_pipeline_layout,
-                &material_bind_group_layout,
-                &mut materials,
-                bark_material_index,
-                foliage_material_index,
-                VegetationDebugMode::default(),
-                vegetation_fragment_entry,
-                terrain_sampler_anisotropy,
-            );
-            (Some(world), Some(gpu))
-        } else {
-            (None, None)
-        };
+                let gpu = build_gpu_vegetation(
+                    &device,
+                    &queue,
+                    &shader,
+                    &world,
+                    &vegetation_state_bind_group_layout,
+                    &vegetation_pipeline_layout,
+                    &vegetation_shadow_pipeline_layout,
+                    &material_bind_group_layout,
+                    &mut materials,
+                    bark_material_index,
+                    foliage_material_index,
+                    VegetationDebugMode::default(),
+                    vegetation_fragment_entry,
+                    terrain_sampler_anisotropy,
+                );
+                (Some(world), Some(gpu))
+            } else {
+                (None, None)
+            };
 
         // Debug overlays.
         let references = reference_grid_and_axes_at(-ground_below_render_origin_m);
@@ -1970,7 +2014,12 @@ impl WgpuRenderer {
                 )
             });
 
-        let depth_usage = if initialization_policy.uses_temporal_resources() {
+        let depth_usage = if initialization_policy.uses_temporal_resources()
+            || scenery_preset == Some(SceneryPreset::PhotoField)
+        {
+            // PF1: the photo composite reads the scene depth 1:1 to decide where
+            // the 3D aircraft covers the panorama, so the depth target needs
+            // TEXTURE_BINDING even under the V1 policy. Full3D V1 is unaffected.
             DepthTargetUsage::V2Sampleable
         } else {
             DepthTargetUsage::V1AttachmentOnly
@@ -2032,6 +2081,33 @@ impl WgpuRenderer {
             });
         let postprocess_pipeline =
             create_postprocess_pipeline(&device, &shader, &postprocess_pipeline_layout, format);
+
+        // PF1: the photographic field is built here, once, and only for the
+        // PhotoField preset. `fixed_pilot_eye` runs BEFORE any photo resource
+        // exists, so an incompatible camera or a rejected manifest is a clean
+        // typed error rather than a half-built renderer holding an 8K panorama.
+        let photo_field = if scenery_preset == Some(SceneryPreset::PhotoField) {
+            let photo_config = crate::photo_field::embedded_photo_field_config()?;
+            crate::photo_field::fixed_pilot_eye(&camera_config, &photo_config)
+                .map_err(RendererError::PhotoFieldCamera)?;
+            Some(build_photo_field_gpu(
+                &device,
+                &queue,
+                &shader,
+                &camera_bind_group_layout,
+                &object_bind_group_layout,
+                &environment_bind_group_layout,
+                &postprocess_bind_group_layout,
+                format,
+                &depth_target.view,
+                surface_width,
+                surface_height,
+                terrain_sampler_anisotropy,
+            )?)
+        } else {
+            None
+        };
+
         let temporal_gpu = initialization_policy.uses_temporal_resources().then(|| {
             TemporalGpuResources::new(
                 &device,
@@ -2109,6 +2185,7 @@ impl WgpuRenderer {
             vegetation,
             vegetation_debug_mode: VegetationDebugMode::default(),
             vegetation_frame_counter: 0,
+            photo_field,
         })
     }
 
@@ -2306,7 +2383,9 @@ impl WgpuRenderer {
             return;
         }
         self.camera.resize(width, height);
-        let depth_usage = if self.temporal_gpu.is_some() {
+        let depth_usage = if self.temporal_gpu.is_some() || self.photo_field.is_some() {
+            // PF1 keeps the scene depth sampleable across a resize for the same
+            // reason as at initialization: the photo composite reads it 1:1.
             DepthTargetUsage::V2Sampleable
         } else {
             DepthTargetUsage::V1AttachmentOnly
@@ -2318,6 +2397,19 @@ impl WgpuRenderer {
             DEPTH_FORMAT,
             depth_usage,
         );
+        // PF1: the photo depth-proxy and shadow-mask targets track the surface
+        // extent, so the group-6 bind group must be rebuilt against them and the
+        // new scene depth view. Runs after the new depth target exists. The
+        // panorama, the baked proxies and all three pipelines are
+        // resolution-independent and are deliberately NOT recreated here.
+        if let Some(photo) = self.photo_field.as_mut() {
+            photo.resize(
+                self.device_context.device(),
+                &self.depth_target.view,
+                width,
+                height,
+            );
+        }
         // G3B: the linear HDR scene target tracks the surface size; the
         // postprocess bind group is re-created to reference the new view.
         // Pipelines, sampler and uniform buffer are NOT recreated here.
@@ -2622,6 +2714,15 @@ impl WgpuRenderer {
                     self.device_context.surface_width(),
                     self.device_context.surface_height(),
                     &self._postprocess_bind_group_layout,
+                    // PF1: only a Photo Field renderer supplies the extra group
+                    // layouts, so the capture path builds no photo pipeline for
+                    // any other preset.
+                    self.photo_field
+                        .as_ref()
+                        .map(|photo| PhotoPostprocessLayouts {
+                            camera: &self._camera_bind_group_layout,
+                            photo: &photo.bind_group_layout,
+                        }),
                 )
             })
             .transpose()?;
@@ -2814,6 +2915,16 @@ impl WgpuRenderer {
                 pass_id,
                 &mut encoder,
                 |encoder, timestamp_writes| {
+                    // PF1: a Photo Field replaces the procedural sky AND the
+                    // generated terrain with the photograph, which is composited
+                    // in the postprocess pass. Both are skipped here; everything
+                    // else (scenery, vegetation, aircraft, articulated surfaces,
+                    // debug overlays) is left exactly as the Full3D path records
+                    // it, and scenery/vegetation are already `None` for this
+                    // preset. When `photo_field_active` is false the two guards
+                    // below are no-ops, so Full3D issues an identical command
+                    // stream.
+                    let photo_field_active = self.photo_field.is_some();
                     // G3B: the scene pass now renders to the linear HDR target. The
                     // surface receives only the resolved postprocess output below.
                     let color_attachment = wgpu::RenderPassColorAttachment {
@@ -2823,6 +2934,9 @@ impl WgpuRenderer {
                         ops: wgpu::Operations {
                             // Scene-referred HDR clear: the procedural sky pass covers
                             // the full viewport, so this is only a safety fill.
+                            // PF1: with no sky pass this clear IS the uncovered
+                            // background, and `fs_postprocess_photo` paints the
+                            // panorama over every pixel the depth test rejects.
                             load: wgpu::LoadOp::Clear(wgpu::Color {
                                 r: 0.0,
                                 g: 0.0,
@@ -2850,12 +2964,14 @@ impl WgpuRenderer {
                     });
 
                     // --- Sky pass (background) ---
-                    render_pass.set_pipeline(&self.sky_pipeline);
-                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    // Sky uses identity object (group 1) â€” sky is at infinity.
-                    render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-                    render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
-                    render_pass.draw(0..3, 0..1);
+                    if !photo_field_active {
+                        render_pass.set_pipeline(&self.sky_pipeline);
+                        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        // Sky uses identity object (group 1) — sky is at infinity.
+                        render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                        render_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+                        render_pass.draw(0..3, 0..1);
+                    }
 
                     // --- Scene geometry ---
                     render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -2865,15 +2981,17 @@ impl WgpuRenderer {
                     // G3A: terrain chunks use the dedicated terrain pipeline and its own
                     // bind group (identity object transform, world-local).
                     render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
-                    render_pass.set_pipeline(&self.terrain_pipeline);
-                    render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
-                    for chunk in &self.terrain_chunks {
-                        render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(
-                            chunk.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+                    if !photo_field_active {
+                        render_pass.set_pipeline(&self.terrain_pipeline);
+                        render_pass.set_bind_group(4, &self.terrain_material.bind_group, &[]);
+                        for chunk in &self.terrain_chunks {
+                            render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                            render_pass.set_index_buffer(
+                                chunk.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            render_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+                        }
                     }
 
                     // G2A: Scenery (flying field, markers). Drawn with the
@@ -3030,6 +3148,113 @@ impl WgpuRenderer {
                         );
                         render_pass.draw_indexed(0..batch.index_count, 0, 0..1);
                     }
+                    drop(render_pass);
+
+                    // PF1: two extra wgpu render passes, recorded INSIDE this
+                    // Scene closure and therefore ATTRIBUTED TO THE SCENE PASS.
+                    // They deliberately get no `PassId` of their own: the frozen
+                    // V1/V2 schedule, the `[3, 4, 1]` resource-class counts and
+                    // `EXPECTED_ORDER` all stay untouched, and the Scene pass
+                    // keeps exactly one pair of GPU timestamp writes. A Full3D
+                    // renderer never enters this block, so it records no extra
+                    // pass at all.
+                    if let Some(photo) = self.photo_field.as_ref() {
+                        // (a) Invisible photographic depth proxies. Colour-less
+                        // by construction: the pipeline has no fragment stage
+                        // and this pass attaches no colour target whatsoever, so
+                        // the proxies can only ever write camera-space depth.
+                        {
+                            let mut proxy_pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("PF1 photo depth-proxy pass"),
+                                    color_attachments: &[],
+                                    depth_stencil_attachment: Some(
+                                        wgpu::RenderPassDepthStencilAttachment {
+                                            view: &photo.proxy_depth_view,
+                                            depth_ops: Some(wgpu::Operations {
+                                                load: wgpu::LoadOp::Clear(1.0),
+                                                store: wgpu::StoreOp::Store,
+                                            }),
+                                            stencil_ops: None,
+                                        },
+                                    ),
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                    multiview_mask: None,
+                                });
+                            proxy_pass.set_pipeline(&photo.proxy_pipeline);
+                            proxy_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            proxy_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                            // Occluders first, ground second: both write depth
+                            // with `Less`, so the order only matters for the
+                            // depth values that survive where they overlap.
+                            for batch in [&photo.occluders, &photo.ground] {
+                                proxy_pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
+                                proxy_pass.set_index_buffer(
+                                    batch.index_buffer.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                proxy_pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                            }
+                        }
+                        // (b) Photographic ground shadow. Only the ground batch
+                        // receives the aircraft shadow, and the pipeline keeps
+                        // depth WRITES disabled so the proxy depth the final
+                        // composite compares against is bit-for-bit the depth
+                        // recorded in (a) — a nearer photographed tree therefore
+                        // suppresses the ground shadow behind it.
+                        {
+                            let mut mask_pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("PF1 photo shadow mask pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &photo.mask_view,
+                                        depth_slice: None,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            // 1.0 is "no attenuation": wherever
+                                            // the ground proxy does not cover,
+                                            // the panorama shows at full
+                                            // brightness.
+                                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                                r: 1.0,
+                                                g: 1.0,
+                                                b: 1.0,
+                                                a: 1.0,
+                                            }),
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: Some(
+                                        wgpu::RenderPassDepthStencilAttachment {
+                                            view: &photo.proxy_depth_view,
+                                            depth_ops: Some(wgpu::Operations {
+                                                load: wgpu::LoadOp::Load,
+                                                store: wgpu::StoreOp::Store,
+                                            }),
+                                            stencil_ops: None,
+                                        },
+                                    ),
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                    multiview_mask: None,
+                                });
+                            mask_pass.set_pipeline(&photo.mask_pipeline);
+                            mask_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            mask_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);
+                            mask_pass.set_bind_group(2, &self.environment_bind_group, &[]);
+                            // The uniform-only group 6: this pass attaches the
+                            // proxy depth as its depth target, so it must not
+                            // also sample it through the photographic group.
+                            mask_pass.set_bind_group(6, &photo.uniform_bind_group, &[]);
+                            mask_pass.set_vertex_buffer(0, photo.ground.vertex_buffer.slice(..));
+                            mask_pass.set_index_buffer(
+                                photo.ground.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            mask_pass.draw_indexed(0..photo.ground.index_count, 0, 0..1);
+                        }
+                    }
                 },
             );
         }
@@ -3108,11 +3333,20 @@ impl WgpuRenderer {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
-                    let pipeline = capture_resources
-                        .as_ref()
-                        .map_or(&self.postprocess_pipeline, |capture| {
-                            &capture.postprocess_pipeline
-                        });
+                    // PF1: the photographic composite replaces `fs_postprocess`
+                    // only when a Photo Field is active. A capture uses the
+                    // pipeline built for `CAPTURE_FORMAT` so the presented frame
+                    // and the captured frame come from the same composite.
+                    let photo = self.photo_field.as_ref();
+                    let pipeline = match (photo, capture_resources.as_ref()) {
+                        (Some(_), Some(capture)) => capture
+                            .photo_postprocess_pipeline
+                            .as_ref()
+                            .expect("a PhotoField capture always builds its photo pipeline"),
+                        (Some(photo), None) => &photo.postprocess_pipeline,
+                        (None, Some(capture)) => &capture.postprocess_pipeline,
+                        (None, None) => &self.postprocess_pipeline,
+                    };
                     postprocess_pass.set_pipeline(pipeline);
                     let bind_group =
                         temporal_write_slot.map_or(&self.postprocess_bind_group, |slot| {
@@ -3122,6 +3356,13 @@ impl WgpuRenderer {
                                 .postprocess_bind_group(slot)
                         });
                     postprocess_pass.set_bind_group(5, bind_group, &[]);
+                    // PF1 only: the photo composite also reads the camera (to
+                    // rebuild each pixel's view direction) and group 6. Full3D
+                    // binds nothing beyond group 5, exactly as before.
+                    if let Some(photo) = photo {
+                        postprocess_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        postprocess_pass.set_bind_group(6, &photo.bind_group, &[]);
+                    }
                     postprocess_pass.draw(0..3, 0..1);
                 },
             );
@@ -3227,6 +3468,10 @@ struct CaptureFrameResources {
     target_texture: wgpu::Texture,
     target_view: wgpu::TextureView,
     postprocess_pipeline: wgpu::RenderPipeline,
+    /// PF1: the photographic composite for `CAPTURE_FORMAT`, present exactly
+    /// when the renderer owns a Photo Field. Built here rather than reused from
+    /// `PhotoFieldGpu` because that one targets the surface format.
+    photo_postprocess_pipeline: Option<wgpu::RenderPipeline>,
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group: wgpu::BindGroup,
     readback_buffer: wgpu::Buffer,
@@ -3272,6 +3517,7 @@ fn create_capture_frame_resources(
     width: u32,
     height: u32,
     postprocess_bind_group_layout: &wgpu::BindGroupLayout,
+    photo_postprocess_layouts: Option<PhotoPostprocessLayouts<'_>>,
 ) -> Result<CaptureFrameResources, FrameCaptureError> {
     if !surface_format.is_srgb() {
         return Err(FrameCaptureError::UnsupportedSurfaceColorEncoding);
@@ -3326,6 +3572,20 @@ fn create_capture_frame_resources(
         &postprocess_pipeline_layout,
         CAPTURE_FORMAT,
     );
+    // PF1: the same composite the surface path uses, rebuilt for the capture
+    // colour format so the captured PNG and the presented frame can never be
+    // produced by two different fragment stages. `None` for every non-PhotoField
+    // renderer, which therefore pays nothing here.
+    let photo_postprocess_pipeline = photo_postprocess_layouts.map(|layouts| {
+        create_photo_postprocess_pipeline(
+            device,
+            &postprocess_shader,
+            layouts,
+            postprocess_bind_group_layout,
+            CAPTURE_FORMAT,
+            "PF1 photo postprocess pipeline (capture)",
+        )
+    });
 
     let blit_bind_group_layout =
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3412,6 +3672,7 @@ fn create_capture_frame_resources(
         target_texture,
         target_view,
         postprocess_pipeline,
+        photo_postprocess_pipeline,
         blit_pipeline,
         blit_bind_group,
         readback_buffer,
@@ -3855,8 +4116,9 @@ fn effective_sampler_anisotropy(anisotropic_supported: bool) -> u16 {
 ///
 /// Pads each row to `COPY_BYTES_PER_ROW_ALIGNMENT` into a temporary staging
 /// buffer. Called once per level at initialization; the frame path never
-/// allocates or uploads.
-fn upload_terrain_mip_level(
+/// allocates or uploads. PF1's panorama chain reuses it so every mip upload in
+/// the crate shares one row-padding implementation.
+pub(crate) fn upload_terrain_mip_level(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     level: u32,
@@ -6605,6 +6867,298 @@ mod terrain_gpu_integration_guards {
                 "frame path must never touch the mip chain: {needle}"
             );
         }
+    }
+}
+
+/// PF1 source-text guards.
+///
+/// The Photo Field is presentation-only and must stay that way structurally:
+/// these tests read `gpu.rs`/`render_graph.rs` as text so a future edit that
+/// moves a photo resource onto the frame path, gives the invisible depth
+/// proxies a colour target, adds a `PassId`, or changes what the Full3D presets
+/// bind fails here rather than only in a golden-image comparison.
+#[cfg(test)]
+mod photo_field_integration_guards {
+    /// The frame path of `gpu.rs`: everything from `pub fn render` up to the
+    /// asynchronous-error helper, i.e. `render_scheduled` and nothing else.
+    fn gpu_frame_path(source: &str) -> &str {
+        source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path")
+            .1
+            .split_once("fn check_asynchronous_gpu_error")
+            .expect("frame path must end before asynchronous error handling")
+            .0
+    }
+
+    #[test]
+    fn photo_field_resources_are_created_at_initialization_and_resize_only() {
+        let source = include_str!("gpu.rs");
+        let initialization_path = source
+            .split_once("pub fn render(&mut self, frame: &RenderFrame)")
+            .expect("renderer source must expose the frame path")
+            .0;
+        let frame_path = gpu_frame_path(source);
+
+        assert!(
+            initialization_path.contains("build_photo_field_gpu("),
+            "the whole photo field must be constructed once during initialization"
+        );
+        assert!(
+            initialization_path.contains("if scenery_preset == Some(SceneryPreset::PhotoField) {"),
+            "the photo field must be built only for the PhotoField preset"
+        );
+        for forbidden in [
+            "build_photo_field_gpu(",
+            "create_photo_postprocess_pipeline(",
+            "photo_field_bind_group_layout(",
+            "create_proxy_depth_target(",
+            "create_shadow_mask_target(",
+            "panorama_mip_chain(",
+            "create_panorama(",
+            "bake_proxy_geometry(",
+        ] {
+            assert!(
+                !frame_path.contains(forbidden),
+                "frame path must never construct a photo field resource: {forbidden}"
+            );
+        }
+
+        // The two resolution-dependent photo targets track the surface in the
+        // resize path only.
+        let resize_body = source
+            .split_once("pub fn resize(&mut self, width: u32, height: u32)")
+            .expect("the resize path must exist")
+            .1
+            .split_once("pub fn reconfigure_surface")
+            .expect("resize body must precede reconfigure_surface")
+            .0;
+        assert!(
+            resize_body.contains("photo.resize("),
+            "resize must rebuild the photo targets and the group-6 bind group"
+        );
+        assert!(
+            !frame_path.contains("photo.resize("),
+            "frame path must never resize a photo target"
+        );
+    }
+
+    #[test]
+    fn the_photo_field_makes_the_scene_depth_sampleable() {
+        // `fs_postprocess_photo` reads the scene depth 1:1 to decide where the
+        // aircraft covers the panorama, so a PhotoField renderer must build its
+        // depth target with TEXTURE_BINDING even under the V1 policy.
+        let source = include_str!("gpu.rs");
+        let initialization = source
+            .split_once("let depth_usage = if initialization_policy.uses_temporal_resources()")
+            .expect("the initialization depth usage must exist")
+            .1
+            .split_once("DepthTargetUsage::V1AttachmentOnly")
+            .expect("the initialization depth usage must keep the V1 fallback")
+            .0;
+        assert!(
+            initialization.contains("scenery_preset == Some(SceneryPreset::PhotoField)"),
+            "the PhotoField preset must request a sampleable scene depth"
+        );
+
+        let resize_body = source
+            .split_once("pub fn resize(&mut self, width: u32, height: u32)")
+            .expect("the resize path must exist")
+            .1
+            .split_once("pub fn reconfigure_surface")
+            .expect("resize body must precede reconfigure_surface")
+            .0;
+        assert!(
+            resize_body.contains("self.temporal_gpu.is_some() || self.photo_field.is_some()"),
+            "resize must keep the photo field's scene depth sampleable"
+        );
+    }
+
+    #[test]
+    fn the_photo_depth_proxy_pass_attaches_no_colour_target() {
+        // This is the structural guarantee that the invisible photographic
+        // stand-ins cannot write a pixel anywhere: their pipeline has no
+        // fragment stage AND their pass declares an empty colour attachment list.
+        let frame_path = gpu_frame_path(include_str!("gpu.rs"));
+        let (_, after_label) = frame_path
+            .split_once("label: Some(\"PF1 photo depth-proxy pass\"),")
+            .expect("the photo depth-proxy pass must be recorded");
+        assert!(
+            after_label
+                .trim_start()
+                .starts_with("color_attachments: &[],"),
+            "the depth-proxy pass must attach no colour target at all"
+        );
+        // The shadow mask pass is the only photo pass with a colour target, and
+        // it writes the presentation-only mask, never the HDR scene target.
+        let (_, after_mask_label) = frame_path
+            .split_once("label: Some(\"PF1 photo shadow mask pass\"),")
+            .expect("the photo shadow mask pass must be recorded");
+        assert!(
+            after_mask_label.contains("view: &photo.mask_view"),
+            "the mask pass must render into the photo shadow mask target"
+        );
+        assert!(
+            !after_mask_label
+                .split_once("timestamp_writes")
+                .expect("the mask pass descriptor must end")
+                .0
+                .contains("hdr_target"),
+            "the mask pass must never touch the HDR scene target"
+        );
+    }
+
+    #[test]
+    fn the_photo_field_adds_no_pass_to_the_frozen_schedule() {
+        // PF1 is presentation-only down to the pass list: no `PassId` variant,
+        // no render-graph edit, so the frozen order and resource-class counts
+        // stay exactly as the existing graph tests assert them.
+        let graph = include_str!("render_graph.rs");
+        assert!(
+            !graph.to_ascii_lowercase().contains("photo"),
+            "PF1 must not add a PassId or touch the frozen render graph"
+        );
+
+        let frame_path = gpu_frame_path(include_str!("gpu.rs"));
+        let (scene_region, _) = frame_path
+            .split_once("if pass_order.contains(&PassId::TemporalResolve) {")
+            .expect("the frame path must still schedule TemporalResolve");
+        for label in [
+            "label: Some(\"PF1 photo depth-proxy pass\"),",
+            "label: Some(\"PF1 photo shadow mask pass\"),",
+        ] {
+            assert!(
+                scene_region.contains(label),
+                "both photo passes must be recorded inside the Scene closure, \
+                 so they are attributed to the Scene pass: {label}"
+            );
+            // No scheduled pass means no timestamp writes of their own.
+            let (_, after) = scene_region.split_once(label).expect("label present");
+            assert!(
+                after.contains("timestamp_writes: None,"),
+                "the extra photo passes must not consume scheduled timestamp writes"
+            );
+        }
+    }
+
+    #[test]
+    fn the_photo_field_guards_only_the_sky_and_the_terrain() {
+        let source = include_str!("gpu.rs");
+        let (_, after_scene) = source
+            .split_once("let pass_id = PassId::Scene;")
+            .expect("the Scene pass must exist");
+        let (scene_closure, _) = after_scene
+            .split_once("if pass_order.contains(&PassId::TemporalResolve) {")
+            .expect("the Scene closure must end before the TemporalResolve block");
+
+        // Exactly two guarded regions, so nothing else in the pass can be
+        // skipped when a Photo Field is active.
+        assert_eq!(scene_closure.matches("if !photo_field_active {").count(), 2);
+
+        let sky_region = scene_closure
+            .split_once("// --- Sky pass (background) ---")
+            .expect("the sky marker must exist")
+            .1
+            .split_once("// --- Scene geometry ---")
+            .expect("the sky region must end at the scene geometry marker")
+            .0;
+        assert!(sky_region.contains("if !photo_field_active {"));
+        assert!(sky_region.contains("render_pass.set_pipeline(&self.sky_pipeline);"));
+        assert!(sky_region.contains("render_pass.draw(0..3, 0..1);"));
+
+        let terrain_region = scene_closure
+            .split_once("// G3A: terrain chunks use the dedicated terrain pipeline")
+            .expect("the terrain marker must exist")
+            .1
+            .split_once("// G2A: Scenery")
+            .expect("the terrain region must end at the scenery marker")
+            .0;
+        assert!(terrain_region.contains("if !photo_field_active {"));
+        assert!(terrain_region.contains("render_pass.set_pipeline(&self.terrain_pipeline);"));
+        assert!(
+            terrain_region.contains("set_bind_group(4, &self.terrain_material.bind_group, &[]);")
+        );
+        assert!(terrain_region.contains("for chunk in &self.terrain_chunks {"));
+        // The identity object bind every later draw relies on stays OUTSIDE the
+        // terrain guard, so the Full3D command stream is unchanged.
+        let identity_at = terrain_region
+            .find("render_pass.set_bind_group(1, &self.identity_object_bind_group, &[]);")
+            .expect("the identity object bind must precede the terrain draws");
+        let guard_at = terrain_region
+            .find("if !photo_field_active {")
+            .expect("the terrain guard must exist");
+        assert!(identity_at < guard_at);
+
+        // Scenery, vegetation, aircraft, articulated surfaces and debug
+        // overlays are recorded unconditionally.
+        let tail = scene_closure
+            .split_once("// G2A: Scenery")
+            .expect("the scenery marker must exist")
+            .1;
+        assert!(
+            !tail.contains("if !photo_field_active {"),
+            "nothing after the terrain draws may be skipped by the photo field"
+        );
+    }
+
+    #[test]
+    fn full_3d_never_binds_group_six_or_records_a_photo_pass() {
+        let frame_path = gpu_frame_path(include_str!("gpu.rs"));
+
+        // Group 6 is bound in exactly two places — the shadow mask pass and the
+        // photo composite — and both live behind a guard a Full3D renderer
+        // never enters.
+        assert_eq!(frame_path.matches("set_bind_group(6,").count(), 2);
+        let (before_scene_guard, after_scene_guard) = frame_path
+            .split_once("if let Some(photo) = self.photo_field.as_ref() {")
+            .expect("the photo passes must be guarded by the optional photo field");
+        for needle in [
+            "\"PF1 photo depth-proxy pass\"",
+            "\"PF1 photo shadow mask pass\"",
+            "set_bind_group(6,",
+        ] {
+            assert!(
+                !before_scene_guard.contains(needle),
+                "{needle} must never be recorded outside the photo field guard"
+            );
+            assert!(
+                after_scene_guard.contains(needle),
+                "{needle} must be recorded inside the photo field guard"
+            );
+        }
+
+        // The Full3D postprocess still binds group 5 and nothing else.
+        let (before_photo_post, after_photo_post) = frame_path
+            .split_once("if let Some(photo) = photo {")
+            .expect("the photo composite binds must be guarded");
+        assert!(before_photo_post.contains("postprocess_pass.set_bind_group(5, bind_group, &[]);"));
+        assert!(!before_photo_post.contains("postprocess_pass.set_bind_group(0,"));
+        assert!(!before_photo_post.contains("postprocess_pass.set_bind_group(6,"));
+        assert!(
+            after_photo_post
+                .contains("postprocess_pass.set_bind_group(0, &self.camera_bind_group, &[]);")
+        );
+        assert!(
+            after_photo_post
+                .contains("postprocess_pass.set_bind_group(6, &photo.bind_group, &[]);")
+        );
+
+        // A Full3D capture builds no photo pipeline either.
+        let capture_call = frame_path
+            .split_once("create_capture_frame_resources(")
+            .expect("the capture path must exist")
+            .1
+            .split_once(".transpose()?")
+            .expect("the capture call must end")
+            .0;
+        assert!(
+            capture_call.contains("self.photo_field"),
+            "the capture photo pipeline must be derived from the optional photo field"
+        );
+        assert!(
+            capture_call.contains(".map(|photo| PhotoPostprocessLayouts {"),
+            "the capture photo pipeline must be derived from the optional photo field"
+        );
     }
 }
 
