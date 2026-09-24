@@ -25,11 +25,11 @@
     "throttle": 0.0,
     "start_on_ground": true
   },
-  "warmup": 10,
+  "warmup": 30,
   "capture": {
     "filename": "ffv1_hero_2160p.png",
     "format": "png",
-    "frame": 10
+    "frame": 30
   },
   "tags": ["ffv1", "hero", "flying-field", "pilot-view", "sanity-4k"]
 }

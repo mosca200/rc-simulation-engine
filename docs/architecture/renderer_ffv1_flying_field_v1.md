@@ -99,6 +99,25 @@ deterministico; FPS/percentili/1% low/VRAM/draw-call totali NON esistono nel
 repository e sono registrati `null` con motivazione in
 `docs/validation/ffv1_flying_field/ffv1_evidence.json`.
 
+### Chiusura del campionamento GPU
+
+Le capture originali al frame 10 non erano un campione stabile: in run ripetuti
+il scene pass FFV1 oscillava da circa 1.8 a 17 ms e anche i tre shadow pass
+oscillavano insieme, pur mantenendo identici i conteggi di vegetazione. Il
+BEFORE al frame 10 misurava circa 1.23 ms, ma al frame 30 scendeva a circa
+0.78 ms. Il comportamento è compatibile con un effetto di avvio del percorso di capture/GPU;
+attribuire il rapporto 9-14x alle sole aggiunte FFV1 era prematuro.
+
+Gli stessi manifest hero ora attendono il frame 30. Misure ripetute con questa
+relazione di warm-up, sullo stesso adapter RTX 3090, danno scene-pass mediani
+BEFORE/AFTER di circa 0.78/1.78 ms a 1080p, 1.22/2.61 ms a 1440p e
+2.25/4.90 ms a 4K. La GPU timestamp readback può indicare il frame corrente o
+quello precedente: ogni audit registra indice sorgente e age. La capture finale
+verifica entrambi, senza dedurre FPS dal solo scene pass. Non è stata cambiata
+la geometria o la shader architecture: la regressione estrema non si ripete
+dopo il warm-up. Il costo residuo non è attribuito a un singolo componente
+senza un'ablation separata; i tempi per pass sono riportati nell'evidence.
+
 ## 6. Validazione
 
 Gate progetto: `cargo fmt --all -- --check`, `cargo check --workspace
