@@ -142,15 +142,15 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/1920x1080/ffv1_hero_1080p/ffv1_hero_1080p.png",
-        "local_png_sha256": "e902cb36e65cbeceb9b584d5ffc7ce667a1dea99938845ef0f11f795ea7e36f4",
-        "image_sha256": "e902cb36e65cbeceb9b584d5ffc7ce667a1dea99938845ef0f11f795ea7e36f4",
-        "image_byte_size": 3418854,
+        "local_png_sha256": "1b85966b8cec6fc94852e47e001109c4569ad875bd957c1c207775639b333048",
+        "image_sha256": "1b85966b8cec6fc94852e47e001109c4569ad875bd957c1c207775639b333048",
+        "image_byte_size": 2652394,
         "framebuffer": [
           1920,
           1080
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
         "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
@@ -180,18 +180,18 @@
             "vegetation_present": true,
             "debug_mode": "final",
             "stats": {
-              "total": 570,
-              "visible": 174,
-              "culled_frustum": 396,
+              "total": 825,
+              "visible": 223,
+              "culled_frustum": 602,
               "culled_distance": 0,
               "lod_counts": [
-                27,
-                46,
-                101
+                5,
+                116,
+                102
               ],
-              "scene_draw_calls": 26,
-              "shadow_draw_calls": 42,
-              "uploaded_instance_bytes": 8352
+              "scene_draw_calls": 18,
+              "shadow_draw_calls": 24,
+              "uploaded_instance_bytes": 10704
             }
           },
           "image_pipeline": {
@@ -215,7 +215,7 @@
           },
           "profiling": {
             "presentation_frame_index": 30,
-            "cpu_frame_duration_ns": 18860000,
+            "cpu_frame_duration_ns": 18116200,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 29,
             "gpu_timing_frame_age": 1,
@@ -224,38 +224,38 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 11000,
-                "gpu_duration_ns": 157696.0
+                "cpu_duration_ns": 12400,
+                "gpu_duration_ns": 44032.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3700,
-                "gpu_duration_ns": 171008.0
+                "cpu_duration_ns": 3000,
+                "gpu_duration_ns": 46080.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3200,
-                "gpu_duration_ns": 158720.0
+                "cpu_duration_ns": 2500,
+                "gpu_duration_ns": 44032.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 13800,
-                "gpu_duration_ns": 2245632.0
+                "cpu_duration_ns": 17700,
+                "gpu_duration_ns": 1065984.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
                 "cpu_duration_ns": 1000,
-                "gpu_duration_ns": 28672.0
+                "gpu_duration_ns": 27648.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
                 "cpu_duration_ns": 600,
-                "gpu_duration_ns": 21504.0
+                "gpu_duration_ns": 19456.0
               }
             ]
           }
@@ -268,39 +268,39 @@
         "identical": false,
         "changed_pixels": 2073600,
         "changed_percent": 100.0,
-        "peak_channel_diff": 223,
+        "peak_channel_diff": 194,
         "mean_abs_diff_per_channel": [
-          55.156446,
-          64.56454,
-          44.756625
+          51.456274,
+          59.048382,
+          45.17402
         ],
-        "mean_abs_diff_overall": 54.82587,
+        "mean_abs_diff_overall": 51.892892,
         "mean_luminance_before": 0.287454,
-        "mean_luminance_after": 0.516425,
+        "mean_luminance_after": 0.502285,
         "horizontal_bands": {
           "rows_0_to_270": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 62.003158
+            "mean_abs_diff": 63.364014
           },
           "rows_270_to_540": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 51.709224
+            "mean_abs_diff": 56.200357
           },
           "rows_540_to_810": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.665232
+            "mean_abs_diff": 50.86893
           },
           "rows_810_to_1080": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 41.925867
+            "mean_abs_diff": 37.138266
           }
         }
       },
@@ -358,48 +358,48 @@
           "samples": [
             {
               "run_index": 0,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "previous_frame_sample",
               "gpu_timing_source_presentation_frame_index": 29,
               "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 2.245632
+              "scene_gpu_ms": 1.065984
             },
             {
               "run_index": 1,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
-              "git_dirty": false,
-              "presentation_frame_index": 30,
-              "gpu_timing_status": "current_frame_sample",
-              "gpu_timing_source_presentation_frame_index": 30,
-              "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 1.772544
-            },
-            {
-              "run_index": 2,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "previous_frame_sample",
               "gpu_timing_source_presentation_frame_index": 29,
               "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 2.249728
+              "scene_gpu_ms": 1.062912
             },
             {
-              "run_index": 3,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "run_index": 2,
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "current_frame_sample",
               "gpu_timing_source_presentation_frame_index": 30,
               "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 1.769472
+              "scene_gpu_ms": 1.067008
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 3.968
             }
           ],
-          "median_scene_gpu_ms": 2.009088,
-          "min_scene_gpu_ms": 1.769472,
-          "max_scene_gpu_ms": 2.249728
+          "median_scene_gpu_ms": 1.066496,
+          "min_scene_gpu_ms": 1.062912,
+          "max_scene_gpu_ms": 3.968
         }
       },
       "unavailable_metrics": {
@@ -554,15 +554,15 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/2560x1440/ffv1_hero_1440p/ffv1_hero_1440p.png",
-        "local_png_sha256": "2855d38f27f110bc1de623f0a2f664a7b27ea3f644207035f21c9e6838f35e43",
-        "image_sha256": "2855d38f27f110bc1de623f0a2f664a7b27ea3f644207035f21c9e6838f35e43",
-        "image_byte_size": 6175864,
+        "local_png_sha256": "8d3f8dd577dfef12ef7caf99baf41fcb56a7735534c1f92d90dba7eca7212605",
+        "image_sha256": "8d3f8dd577dfef12ef7caf99baf41fcb56a7735534c1f92d90dba7eca7212605",
+        "image_byte_size": 4887371,
         "framebuffer": [
           2560,
           1440
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
         "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
@@ -592,18 +592,18 @@
             "vegetation_present": true,
             "debug_mode": "final",
             "stats": {
-              "total": 570,
-              "visible": 174,
-              "culled_frustum": 396,
+              "total": 825,
+              "visible": 223,
+              "culled_frustum": 602,
               "culled_distance": 0,
               "lod_counts": [
-                27,
-                46,
-                101
+                5,
+                116,
+                102
               ],
-              "scene_draw_calls": 26,
-              "shadow_draw_calls": 42,
-              "uploaded_instance_bytes": 8352
+              "scene_draw_calls": 18,
+              "shadow_draw_calls": 24,
+              "uploaded_instance_bytes": 10704
             }
           },
           "image_pipeline": {
@@ -627,7 +627,7 @@
           },
           "profiling": {
             "presentation_frame_index": 30,
-            "cpu_frame_duration_ns": 21567800,
+            "cpu_frame_duration_ns": 20467700,
             "gpu_timing_status": "current_frame_sample",
             "gpu_timing_source_presentation_frame_index": 30,
             "gpu_timing_frame_age": 0,
@@ -636,38 +636,38 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 7100,
-                "gpu_duration_ns": 159744.0
+                "cpu_duration_ns": 8200,
+                "gpu_duration_ns": 44032.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3600,
-                "gpu_duration_ns": 171008.0
+                "cpu_duration_ns": 3300,
+                "gpu_duration_ns": 46080.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3100,
-                "gpu_duration_ns": 157696.0
+                "cpu_duration_ns": 2500,
+                "gpu_duration_ns": 43008.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 11400,
-                "gpu_duration_ns": 2610176.0
+                "cpu_duration_ns": 10300,
+                "gpu_duration_ns": 1785856.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 900,
+                "cpu_duration_ns": 1000,
                 "gpu_duration_ns": 52224.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 500,
-                "gpu_duration_ns": 35840.0
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 33792.0
               }
             ]
           }
@@ -678,41 +678,41 @@
         "height": 1440,
         "pixel_count": 3686400,
         "identical": false,
-        "changed_pixels": 3686399,
+        "changed_pixels": 3686400,
         "changed_percent": 100.0,
-        "peak_channel_diff": 218,
+        "peak_channel_diff": 203,
         "mean_abs_diff_per_channel": [
-          55.186682,
-          64.571604,
-          44.832228
+          51.501683,
+          59.092214,
+          45.235879
         ],
-        "mean_abs_diff_overall": 54.863505,
+        "mean_abs_diff_overall": 51.943259,
         "mean_luminance_before": 0.287779,
-        "mean_luminance_after": 0.516681,
+        "mean_luminance_after": 0.502709,
         "horizontal_bands": {
           "rows_0_to_360": {
             "pixel_count": 921600,
-            "changed_pixels": 921599,
-            "changed_percent": 99.9999,
-            "mean_abs_diff": 62.005011
+            "changed_pixels": 921600,
+            "changed_percent": 100.0,
+            "mean_abs_diff": 63.353925
           },
           "rows_360_to_720": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 51.691374
+            "mean_abs_diff": 56.210388
           },
           "rows_720_to_1080": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.675011
+            "mean_abs_diff": 50.892734
           },
           "rows_1080_to_1440": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 42.082622
+            "mean_abs_diff": 37.315987
           }
         }
       },
@@ -770,48 +770,48 @@
           "samples": [
             {
               "run_index": 0,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "current_frame_sample",
               "gpu_timing_source_presentation_frame_index": 30,
               "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 2.610176
+              "scene_gpu_ms": 1.785856
             },
             {
               "run_index": 1,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "current_frame_sample",
               "gpu_timing_source_presentation_frame_index": 30,
               "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 2.337792
+              "scene_gpu_ms": 1.777664
             },
             {
               "run_index": 2,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "previous_frame_sample",
               "gpu_timing_source_presentation_frame_index": 29,
               "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 3.129344
+              "scene_gpu_ms": 1.777664
             },
             {
               "run_index": 3,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "previous_frame_sample",
               "gpu_timing_source_presentation_frame_index": 29,
               "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 3.132416
+              "scene_gpu_ms": 1.77664
             }
           ],
-          "median_scene_gpu_ms": 2.86976,
-          "min_scene_gpu_ms": 2.337792,
-          "max_scene_gpu_ms": 3.132416
+          "median_scene_gpu_ms": 1.777664,
+          "min_scene_gpu_ms": 1.77664,
+          "max_scene_gpu_ms": 1.785856
         }
       },
       "unavailable_metrics": {
@@ -966,15 +966,15 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/3840x2160/ffv1_hero_2160p/ffv1_hero_2160p.png",
-        "local_png_sha256": "13e5af566bfac9fff9fbc29f5c54ab461f7497226a359a6e6f99d4da866ad593",
-        "image_sha256": "13e5af566bfac9fff9fbc29f5c54ab461f7497226a359a6e6f99d4da866ad593",
-        "image_byte_size": 14282189,
+        "local_png_sha256": "b3bcf1e47b074045a1057361ed1805d72f2d615a549ac42f81b6021d32f406f8",
+        "image_sha256": "b3bcf1e47b074045a1057361ed1805d72f2d615a549ac42f81b6021d32f406f8",
+        "image_byte_size": 11685632,
         "framebuffer": [
           3840,
           2160
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
         "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
@@ -1004,18 +1004,18 @@
             "vegetation_present": true,
             "debug_mode": "final",
             "stats": {
-              "total": 570,
-              "visible": 174,
-              "culled_frustum": 396,
+              "total": 825,
+              "visible": 223,
+              "culled_frustum": 602,
               "culled_distance": 0,
               "lod_counts": [
-                27,
-                46,
-                101
+                5,
+                116,
+                102
               ],
-              "scene_draw_calls": 26,
-              "shadow_draw_calls": 42,
-              "uploaded_instance_bytes": 8352
+              "scene_draw_calls": 18,
+              "shadow_draw_calls": 24,
+              "uploaded_instance_bytes": 10704
             }
           },
           "image_pipeline": {
@@ -1039,7 +1039,7 @@
           },
           "profiling": {
             "presentation_frame_index": 30,
-            "cpu_frame_duration_ns": 28607500,
+            "cpu_frame_duration_ns": 28179000,
             "gpu_timing_status": "previous_frame_sample",
             "gpu_timing_source_presentation_frame_index": 29,
             "gpu_timing_frame_age": 1,
@@ -1048,38 +1048,38 @@
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 9100,
-                "gpu_duration_ns": 145408.0
+                "cpu_duration_ns": 14700,
+                "gpu_duration_ns": 44032.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
                 "cpu_duration_ns": 3700,
-                "gpu_duration_ns": 154624.0
+                "gpu_duration_ns": 46080.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3700,
-                "gpu_duration_ns": 144384.0
+                "cpu_duration_ns": 2800,
+                "gpu_duration_ns": 43008.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 10600,
-                "gpu_duration_ns": 5054464.0
+                "cpu_duration_ns": 19800,
+                "gpu_duration_ns": 3833856.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 900,
-                "gpu_duration_ns": 119808.0
+                "cpu_duration_ns": 1800,
+                "gpu_duration_ns": 120832.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 500,
-                "gpu_duration_ns": 80896.0
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 77824.0
               }
             ]
           }
@@ -1090,41 +1090,41 @@
         "height": 2160,
         "pixel_count": 8294400,
         "identical": false,
-        "changed_pixels": 8294397,
+        "changed_pixels": 8294399,
         "changed_percent": 100.0,
-        "peak_channel_diff": 230,
+        "peak_channel_diff": 209,
         "mean_abs_diff_per_channel": [
-          55.302315,
-          64.60601,
-          44.985035
+          51.643839,
+          59.188272,
+          45.402282
         ],
-        "mean_abs_diff_overall": 54.964453,
+        "mean_abs_diff_overall": 52.078131,
         "mean_luminance_before": 0.288541,
-        "mean_luminance_after": 0.517595,
+        "mean_luminance_after": 0.50381,
         "horizontal_bands": {
           "rows_0_to_540": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 62.00505
+            "mean_abs_diff": 63.361001
           },
           "rows_540_to_1080": {
             "pixel_count": 2073600,
-            "changed_pixels": 2073597,
-            "changed_percent": 99.9999,
-            "mean_abs_diff": 51.749606
+            "changed_pixels": 2073599,
+            "changed_percent": 100.0,
+            "mean_abs_diff": 56.309776
           },
           "rows_1080_to_1620": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.666218
+            "mean_abs_diff": 50.918887
           },
           "rows_1620_to_2160": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 42.43694
+            "mean_abs_diff": 37.72286
           }
         }
       },
@@ -1182,48 +1182,48 @@
           "samples": [
             {
               "run_index": 0,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "previous_frame_sample",
               "gpu_timing_source_presentation_frame_index": 29,
               "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 5.054464
+              "scene_gpu_ms": 3.833856
             },
             {
               "run_index": 1,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "current_frame_sample",
               "gpu_timing_source_presentation_frame_index": 30,
               "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 4.625408
+              "scene_gpu_ms": 3.47648
             },
             {
               "run_index": 2,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
-              "git_dirty": false,
-              "presentation_frame_index": 30,
-              "gpu_timing_status": "previous_frame_sample",
-              "gpu_timing_source_presentation_frame_index": 29,
-              "gpu_timing_frame_age": 1,
-              "scene_gpu_ms": 5.487616
-            },
-            {
-              "run_index": 3,
-              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
               "git_dirty": false,
               "presentation_frame_index": 30,
               "gpu_timing_status": "current_frame_sample",
               "gpu_timing_source_presentation_frame_index": 30,
               "gpu_timing_frame_age": 0,
-              "scene_gpu_ms": 4.635648
+              "scene_gpu_ms": 3.51744
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "ba0296f23d8676872bf493254e20c120f3242efb",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 3.530752
             }
           ],
-          "median_scene_gpu_ms": 4.845056,
-          "min_scene_gpu_ms": 4.625408,
-          "max_scene_gpu_ms": 5.487616
+          "median_scene_gpu_ms": 3.524096,
+          "min_scene_gpu_ms": 3.47648,
+          "max_scene_gpu_ms": 3.833856
         }
       },
       "unavailable_metrics": {
