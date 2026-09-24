@@ -70,20 +70,20 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_photo/1920x1080/pf1_hero_1080p/pf1_hero_1080p_1920x1080.png",
-        "local_png_sha256": "ddfe0998fc6e4676389ad82a82558be15835bf459dd6dd2c726ec73976b0645f",
-        "image_sha256": "ddfe0998fc6e4676389ad82a82558be15835bf459dd6dd2c726ec73976b0645f",
-        "image_byte_size": 4496320,
+        "local_png_sha256": "0b5ce3830735f5f1d002b944d597b547d2ad8db5da9edd0083ec46fd0e60e51c",
+        "image_sha256": "0b5ce3830735f5f1d002b944d597b547d2ad8db5da9edd0083ec46fd0e60e51c",
+        "image_byte_size": 4496317,
         "framebuffer": [
           1920,
           1080
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 17787600,
+        "cpu_frame_duration_ns": 18010800,
         "gpu_timing_status": "current_frame_sample",
         "gpu_timing_source_presentation_frame_index": 30,
         "gpu_timing_frame_age": 0,
@@ -91,37 +91,37 @@
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 7600,
-            "gpu_duration_ns": 5120.0
+            "cpu_duration_ns": 4700,
+            "gpu_duration_ns": 4096.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2300,
+            "cpu_duration_ns": 2400,
             "gpu_duration_ns": 4096.0
           },
           {
             "pass_id": "shadow_far",
             "label": "G3E far cascade shadow depth pass",
-            "cpu_duration_ns": 1900,
+            "cpu_duration_ns": 2000,
             "gpu_duration_ns": 4096.0
           },
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 7300,
+            "cpu_duration_ns": 5800,
             "gpu_duration_ns": 15360.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 1300,
-            "gpu_duration_ns": 24576.0
+            "cpu_duration_ns": 500,
+            "gpu_duration_ns": 25600.0
           },
           {
             "pass_id": "postprocess",
             "label": "G3B HDR postprocess pass",
-            "cpu_duration_ns": 800,
+            "cpu_duration_ns": 600,
             "gpu_duration_ns": 35840.0
           }
         ]
@@ -131,20 +131,20 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_full3d/1920x1080/pf1_baseline_full3d_1080p/pf1_baseline_full3d_1080p_1920x1080.png",
-        "local_png_sha256": "7e8f1248eaa82aace58a68e97fabad82ccba45299c590bf5c7316f845e4b5b4a",
-        "image_sha256": "7e8f1248eaa82aace58a68e97fabad82ccba45299c590bf5c7316f845e4b5b4a",
-        "image_byte_size": 2730731,
+        "local_png_sha256": "996935c61cf5cc137f2aa9cbc563d814a8ccd245890c1b5b6b90b6cc1adb9ed6",
+        "image_sha256": "996935c61cf5cc137f2aa9cbc563d814a8ccd245890c1b5b6b90b6cc1adb9ed6",
+        "image_byte_size": 2730734,
         "framebuffer": [
           1920,
           1080
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 18523100,
+        "cpu_frame_duration_ns": 18490200,
         "gpu_timing_status": "previous_frame_sample",
         "gpu_timing_source_presentation_frame_index": 29,
         "gpu_timing_frame_age": 1,
@@ -152,31 +152,31 @@
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 5700,
-            "gpu_duration_ns": 32768.0
+            "cpu_duration_ns": 8700,
+            "gpu_duration_ns": 33792.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2400,
+            "cpu_duration_ns": 2900,
             "gpu_duration_ns": 40960.0
           },
           {
             "pass_id": "shadow_far",
             "label": "G3E far cascade shadow depth pass",
-            "cpu_duration_ns": 2000,
-            "gpu_duration_ns": 34816.0
+            "cpu_duration_ns": 2100,
+            "gpu_duration_ns": 33792.0
           },
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 8900,
-            "gpu_duration_ns": 1526784.0
+            "cpu_duration_ns": 13400,
+            "gpu_duration_ns": 1538048.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 900,
+            "cpu_duration_ns": 1000,
             "gpu_duration_ns": 25600.0
           },
           {
@@ -187,7 +187,7 @@
           }
         ]
       },
-      "scene_plus_postprocess_gpu_delta_ns": -1494016.0,
+      "scene_plus_postprocess_gpu_delta_ns": -1505280.0,
       "delta_note": "single-sample per-pass GPU timestamps from one deterministic capture frame each; they absorb first-use costs and the GPU readback may report the previous frame (see gpu_timing_frame_age). Not a cost curve; repeat runs before asserting a regression."
     },
     {
@@ -201,20 +201,20 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_photo/2560x1440/pf1_hero_1440p/pf1_hero_1440p_2560x1440.png",
-        "local_png_sha256": "d7ec6e56348fd76ed8ea42e621c5a879743f61da334a1fc61bcc15a55340fc6a",
-        "image_sha256": "d7ec6e56348fd76ed8ea42e621c5a879743f61da334a1fc61bcc15a55340fc6a",
-        "image_byte_size": 7409063,
+        "local_png_sha256": "b1f0919f3bc6db44f0a3ed16124514b0e343ac54c22afed0fd79c0317788b48f",
+        "image_sha256": "b1f0919f3bc6db44f0a3ed16124514b0e343ac54c22afed0fd79c0317788b48f",
+        "image_byte_size": 7409524,
         "framebuffer": [
           2560,
           1440
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 19343900,
+        "cpu_frame_duration_ns": 19508700,
         "gpu_timing_status": "current_frame_sample",
         "gpu_timing_source_presentation_frame_index": 30,
         "gpu_timing_frame_age": 0,
@@ -222,13 +222,13 @@
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 5000,
+            "cpu_duration_ns": 7900,
             "gpu_duration_ns": 5120.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2700,
+            "cpu_duration_ns": 2400,
             "gpu_duration_ns": 3072.0
           },
           {
@@ -240,20 +240,20 @@
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 5700,
-            "gpu_duration_ns": 17408.0
+            "cpu_duration_ns": 7100,
+            "gpu_duration_ns": 18432.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 600,
+            "cpu_duration_ns": 800,
             "gpu_duration_ns": 43008.0
           },
           {
             "pass_id": "postprocess",
             "label": "G3B HDR postprocess pass",
-            "cpu_duration_ns": 600,
-            "gpu_duration_ns": 48128.0
+            "cpu_duration_ns": 900,
+            "gpu_duration_ns": 49152.0
           }
         ]
       },
@@ -262,63 +262,63 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_full3d/2560x1440/pf1_baseline_full3d_1440p/pf1_baseline_full3d_1440p_2560x1440.png",
-        "local_png_sha256": "9b9da6b2743b3a871f38f696f5d6ff070799618c8bf04dd5ce0e916e4e5f19ee",
-        "image_sha256": "9b9da6b2743b3a871f38f696f5d6ff070799618c8bf04dd5ce0e916e4e5f19ee",
-        "image_byte_size": 4990031,
+        "local_png_sha256": "013b4ec65fef4d22b42e79183d81acbe96e1030facd426c811d18b60334b3c1b",
+        "image_sha256": "013b4ec65fef4d22b42e79183d81acbe96e1030facd426c811d18b60334b3c1b",
+        "image_byte_size": 4990143,
         "framebuffer": [
           2560,
           1440
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 20900700,
-        "gpu_timing_status": "current_frame_sample",
-        "gpu_timing_source_presentation_frame_index": 30,
-        "gpu_timing_frame_age": 0,
+        "cpu_frame_duration_ns": 21207000,
+        "gpu_timing_status": "previous_frame_sample",
+        "gpu_timing_source_presentation_frame_index": 29,
+        "gpu_timing_frame_age": 1,
         "passes": [
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 11300,
+            "cpu_duration_ns": 9600,
             "gpu_duration_ns": 33792.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2800,
+            "cpu_duration_ns": 3000,
             "gpu_duration_ns": 39936.0
           },
           {
             "pass_id": "shadow_far",
             "label": "G3E far cascade shadow depth pass",
-            "cpu_duration_ns": 2700,
-            "gpu_duration_ns": 33792.0
+            "cpu_duration_ns": 2100,
+            "gpu_duration_ns": 34816.0
           },
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 15300,
-            "gpu_duration_ns": 1799168.0
+            "cpu_duration_ns": 13700,
+            "gpu_duration_ns": 2277376.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 1100,
-            "gpu_duration_ns": 49152.0
+            "cpu_duration_ns": 1300,
+            "gpu_duration_ns": 50176.0
           },
           {
             "pass_id": "postprocess",
             "label": "G3B HDR postprocess pass",
             "cpu_duration_ns": 500,
-            "gpu_duration_ns": 30720.0
+            "gpu_duration_ns": 31744.0
           }
         ]
       },
-      "scene_plus_postprocess_gpu_delta_ns": -1764352.0,
+      "scene_plus_postprocess_gpu_delta_ns": -2241536.0,
       "delta_note": "single-sample per-pass GPU timestamps from one deterministic capture frame each; they absorb first-use costs and the GPU readback may report the previous frame (see gpu_timing_frame_age). Not a cost curve; repeat runs before asserting a regression."
     },
     {
@@ -332,20 +332,20 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_photo/3840x2160/pf1_hero_2160p/pf1_hero_2160p_3840x2160.png",
-        "local_png_sha256": "c8b2492a44a0c424bfe2029d3082a441feb0fcb580f16a75680e3a65f007c321",
-        "image_sha256": "c8b2492a44a0c424bfe2029d3082a441feb0fcb580f16a75680e3a65f007c321",
-        "image_byte_size": 14343945,
+        "local_png_sha256": "bee291d11a559905273b59927e4e1476ce4f8e6ccb1a8c511ca8cda925004716",
+        "image_sha256": "bee291d11a559905273b59927e4e1476ce4f8e6ccb1a8c511ca8cda925004716",
+        "image_byte_size": 14344330,
         "framebuffer": [
           3840,
           2160
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 23837300,
+        "cpu_frame_duration_ns": 24068700,
         "gpu_timing_status": "current_frame_sample",
         "gpu_timing_source_presentation_frame_index": 30,
         "gpu_timing_frame_age": 0,
@@ -353,37 +353,37 @@
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 4600,
+            "cpu_duration_ns": 7600,
             "gpu_duration_ns": 4096.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2400,
-            "gpu_duration_ns": 4096.0
+            "cpu_duration_ns": 3000,
+            "gpu_duration_ns": 3072.0
           },
           {
             "pass_id": "shadow_far",
             "label": "G3E far cascade shadow depth pass",
-            "cpu_duration_ns": 1900,
+            "cpu_duration_ns": 2300,
             "gpu_duration_ns": 4096.0
           },
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 5000,
-            "gpu_duration_ns": 27648.0
+            "cpu_duration_ns": 7800,
+            "gpu_duration_ns": 28672.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 1000,
+            "cpu_duration_ns": 800,
             "gpu_duration_ns": 96256.0
           },
           {
             "pass_id": "postprocess",
             "label": "G3B HDR postprocess pass",
-            "cpu_duration_ns": 600,
+            "cpu_duration_ns": 800,
             "gpu_duration_ns": 104448.0
           }
         ]
@@ -393,63 +393,63 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/pf1_full3d/3840x2160/pf1_baseline_full3d_2160p/pf1_baseline_full3d_2160p_3840x2160.png",
-        "local_png_sha256": "25d4cc7cd2dc23f33504c28a003d5c4d1f5922e8b4ad4d4aab7688bf877152b3",
-        "image_sha256": "25d4cc7cd2dc23f33504c28a003d5c4d1f5922e8b4ad4d4aab7688bf877152b3",
-        "image_byte_size": 11698599,
+        "local_png_sha256": "327fac1f85ef33c7137e2a03666b2862e25c8ffec7bc7a9e01f7b7829f1071af",
+        "image_sha256": "327fac1f85ef33c7137e2a03666b2862e25c8ffec7bc7a9e01f7b7829f1071af",
+        "image_byte_size": 11700605,
         "framebuffer": [
           3840,
           2160
         ],
         "presentation_frame_index": 30,
-        "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-        "git_dirty": true,
+        "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
-        "cpu_frame_duration_ns": 26927700,
-        "gpu_timing_status": "previous_frame_sample",
-        "gpu_timing_source_presentation_frame_index": 29,
-        "gpu_timing_frame_age": 1,
+        "cpu_frame_duration_ns": 26879700,
+        "gpu_timing_status": "current_frame_sample",
+        "gpu_timing_source_presentation_frame_index": 30,
+        "gpu_timing_frame_age": 0,
         "passes": [
           {
             "pass_id": "shadow_near",
             "label": "G3E near cascade shadow depth pass",
-            "cpu_duration_ns": 9500,
-            "gpu_duration_ns": 34816.0
+            "cpu_duration_ns": 6500,
+            "gpu_duration_ns": 29696.0
           },
           {
             "pass_id": "shadow_mid",
             "label": "G3E mid cascade shadow depth pass",
-            "cpu_duration_ns": 2600,
-            "gpu_duration_ns": 39936.0
+            "cpu_duration_ns": 2400,
+            "gpu_duration_ns": 35840.0
           },
           {
             "pass_id": "shadow_far",
             "label": "G3E far cascade shadow depth pass",
-            "cpu_duration_ns": 2100,
-            "gpu_duration_ns": 34816.0
+            "cpu_duration_ns": 1900,
+            "gpu_duration_ns": 30720.0
           },
           {
             "pass_id": "scene",
             "label": "G1C scene pass",
-            "cpu_duration_ns": 12800,
-            "gpu_duration_ns": 4253696.0
+            "cpu_duration_ns": 12100,
+            "gpu_duration_ns": 3552256.0
           },
           {
             "pass_id": "temporal_resolve",
             "label": "RV2 temporal resolve pass",
-            "cpu_duration_ns": 900,
-            "gpu_duration_ns": 110592.0
+            "cpu_duration_ns": 800,
+            "gpu_duration_ns": 118784.0
           },
           {
             "pass_id": "postprocess",
             "label": "G3B HDR postprocess pass",
             "cpu_duration_ns": 600,
-            "gpu_duration_ns": 69632.0
+            "gpu_duration_ns": 71680.0
           }
         ]
       },
-      "scene_plus_postprocess_gpu_delta_ns": -4191232.0,
+      "scene_plus_postprocess_gpu_delta_ns": -3490816.0,
       "delta_note": "single-sample per-pass GPU timestamps from one deterministic capture frame each; they absorb first-use costs and the GPU readback may report the previous frame (see gpu_timing_frame_age). Not a cost curve; repeat runs before asserting a regression."
     }
   ],
@@ -484,12 +484,12 @@
         1080
       ],
       "presentation_frame_index": 30,
-      "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-      "git_dirty": true,
+      "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+      "git_dirty": false,
       "runner_success": true,
       "capture_evidence_valid": true,
       "visual_audit_valid": true,
-      "cpu_frame_duration_ns": 17829600,
+      "cpu_frame_duration_ns": 27030400,
       "gpu_timing_status": "current_frame_sample",
       "gpu_timing_source_presentation_frame_index": 30,
       "gpu_timing_frame_age": 0,
@@ -498,37 +498,37 @@
           "pass_id": "shadow_near",
           "label": "G3E near cascade shadow depth pass",
           "cpu_duration_ns": 7900,
-          "gpu_duration_ns": 5120.0
+          "gpu_duration_ns": 36864.0
         },
         {
           "pass_id": "shadow_mid",
           "label": "G3E mid cascade shadow depth pass",
-          "cpu_duration_ns": 2200,
-          "gpu_duration_ns": 4096.0
+          "cpu_duration_ns": 2700,
+          "gpu_duration_ns": 15360.0
         },
         {
           "pass_id": "shadow_far",
           "label": "G3E far cascade shadow depth pass",
           "cpu_duration_ns": 1900,
-          "gpu_duration_ns": 3072.0
+          "gpu_duration_ns": 16384.0
         },
         {
           "pass_id": "scene",
           "label": "G1C scene pass",
-          "cpu_duration_ns": 7100,
-          "gpu_duration_ns": 15360.0
+          "cpu_duration_ns": 7200,
+          "gpu_duration_ns": 138240.0
         },
         {
           "pass_id": "temporal_resolve",
           "label": "RV2 temporal resolve pass",
           "cpu_duration_ns": 700,
-          "gpu_duration_ns": 24576.0
+          "gpu_duration_ns": 107520.0
         },
         {
           "pass_id": "postprocess",
           "label": "G3B HDR postprocess pass",
-          "cpu_duration_ns": 1200,
-          "gpu_duration_ns": 34816.0
+          "cpu_duration_ns": 700,
+          "gpu_duration_ns": 1235968.0
         }
       ]
     },
@@ -550,20 +550,20 @@
       "committed_png": null,
       "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
       "local_png": "tmp/pf1_occlusion/far/pf1_occlusion_far/pf1_occlusion_far_1920x1080.png",
-      "local_png_sha256": "d5ae3b62f8c18274709be599ff214a35390eba37c26fa0663b0425149f745712",
-      "image_sha256": "d5ae3b62f8c18274709be599ff214a35390eba37c26fa0663b0425149f745712",
-      "image_byte_size": 4476550,
+      "local_png_sha256": "a8270fbb66c0a83b580510cecc9c4f237b242a99636f8c78f067def31c9b9ccd",
+      "image_sha256": "a8270fbb66c0a83b580510cecc9c4f237b242a99636f8c78f067def31c9b9ccd",
+      "image_byte_size": 4473844,
       "framebuffer": [
         1920,
         1080
       ],
       "presentation_frame_index": 180,
-      "git_commit_sha": "86552e1ba4f87477290fd18291dd355c5ef9abac",
-      "git_dirty": true,
+      "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+      "git_dirty": false,
       "runner_success": true,
       "capture_evidence_valid": true,
       "visual_audit_valid": true,
-      "cpu_frame_duration_ns": 17900200,
+      "cpu_frame_duration_ns": 19437300,
       "gpu_timing_status": "current_frame_sample",
       "gpu_timing_source_presentation_frame_index": 180,
       "gpu_timing_frame_age": 0,
@@ -571,38 +571,38 @@
         {
           "pass_id": "shadow_near",
           "label": "G3E near cascade shadow depth pass",
-          "cpu_duration_ns": 7800,
-          "gpu_duration_ns": 5120.0
+          "cpu_duration_ns": 6100,
+          "gpu_duration_ns": 16384.0
         },
         {
           "pass_id": "shadow_mid",
           "label": "G3E mid cascade shadow depth pass",
           "cpu_duration_ns": 2300,
-          "gpu_duration_ns": 4096.0
+          "gpu_duration_ns": 12288.0
         },
         {
           "pass_id": "shadow_far",
           "label": "G3E far cascade shadow depth pass",
-          "cpu_duration_ns": 2200,
-          "gpu_duration_ns": 4096.0
+          "cpu_duration_ns": 2000,
+          "gpu_duration_ns": 12288.0
         },
         {
           "pass_id": "scene",
           "label": "G1C scene pass",
-          "cpu_duration_ns": 6700,
-          "gpu_duration_ns": 14336.0
+          "cpu_duration_ns": 6100,
+          "gpu_duration_ns": 69632.0
         },
         {
           "pass_id": "temporal_resolve",
           "label": "RV2 temporal resolve pass",
-          "cpu_duration_ns": 900,
-          "gpu_duration_ns": 24576.0
+          "cpu_duration_ns": 600,
+          "gpu_duration_ns": 79872.0
         },
         {
           "pass_id": "postprocess",
           "label": "G3B HDR postprocess pass",
-          "cpu_duration_ns": 800,
-          "gpu_duration_ns": 34816.0
+          "cpu_duration_ns": 700,
+          "gpu_duration_ns": 313344.0
         }
       ]
     }
