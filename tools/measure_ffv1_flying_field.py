@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import statistics
 import sys
 
 import numpy as np
@@ -155,6 +156,51 @@ def compare_pngs(before: pathlib.Path, after: pathlib.Path) -> dict:
     }
 
 
+def repeated_scene_timings(side: str, resolution: str, scene_id: str) -> dict:
+    """Read four clean, independent capture runs of the authoritative manifest."""
+    roots = [REPO_ROOT / "tmp" / f"ffv1_{side}" / resolution / scene_id]
+    roots.extend(
+        REPO_ROOT / "tmp" / "ffv1_perf_final" / side / resolution
+        / f"run{index}" / scene_id
+        for index in range(1, 4)
+    )
+    samples = []
+    for run_index, root in enumerate(roots):
+        audit = json.loads((root / "runtime_visual_audit.json").read_text(encoding="utf-8"))
+        evidence = json.loads((root / "capture_evidence.json").read_text(encoding="utf-8"))
+        run = json.loads((root / "run.json").read_text(encoding="utf-8"))
+        if evidence["source"]["dirty"] or not run["verdict"]["runner_success"]:
+            raise ValueError(f"unclean or failed timing sample: {root}")
+        profiling = audit["profiling"]
+        scene = next(p for p in profiling["passes"] if p["pass_id"] == "scene")
+        samples.append({
+            "run_index": run_index,
+            "git_commit_sha": evidence["source"]["commit_sha"],
+            "git_dirty": evidence["source"]["dirty"],
+            "presentation_frame_index": profiling["presentation_frame_index"],
+            "gpu_timing_status": profiling["gpu_timing_status"],
+            "gpu_timing_source_presentation_frame_index": profiling[
+                "gpu_timing_source_presentation_frame_index"
+            ],
+            "gpu_timing_frame_age": profiling["gpu_timing_frame_age"],
+            "scene_gpu_ms": scene["gpu_duration_ns"] / 1_000_000,
+        })
+    if len({sample["git_commit_sha"] for sample in samples}) != 1:
+        raise ValueError(f"mixed commits in {side} timing samples at {resolution}")
+    values = [sample["scene_gpu_ms"] for sample in samples]
+    return {
+        "method": (
+            "four independent process launches of the authoritative frame-30 "
+            "manifest; run 0 is the hero capture, runs 1-3 are repeats; "
+            "GPU timestamps may represent frame 30 or the preceding frame"
+        ),
+        "samples": samples,
+        "median_scene_gpu_ms": round(statistics.median(values), 6),
+        "min_scene_gpu_ms": round(min(values), 6),
+        "max_scene_gpu_ms": round(max(values), 6),
+    }
+
+
 def main() -> int:
     resolutions = []
     for resolution, scene_id in RESOLUTIONS:
@@ -168,6 +214,10 @@ def main() -> int:
                 "before": before,
                 "after": after,
                 "pixel_comparison": compare_pngs(before["png"], after["png"]),
+                "repeated_scene_timings": {
+                    "before": repeated_scene_timings("before", resolution, scene_id),
+                    "after": repeated_scene_timings("after", resolution, scene_id),
+                },
                 "unavailable_metrics": {
                     key: {"value": None, "reason": reason}
                     for key, reason in UNAVAILABLE.items()
@@ -182,9 +232,9 @@ def main() -> int:
         "title": "Flying Field visual vertical slice v1 - BEFORE/AFTER evidence",
         "method": (
             "rv2-vis0-benchmark-runner 1.3.0 executed the authoritative hero "
-            "manifest at three resolutions against the base-SHA binary "
-            "(tmp/base_binary/rcsim-app.exe, built at 224bad6) and the slice "
-            "binary; this script compares the verified PNGs and folds the "
+            "manifest at three resolutions against release binaries built "
+            "from clean base 224bad6 and FFV1 capture-commit checkouts; "
+            "this script compares the verified PNGs and folds the "
             "runtime receipts and RuntimeVisualAudit 1.0.0 facts into one "
             "document. No metric is estimated."
         ),

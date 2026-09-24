@@ -2,7 +2,7 @@
   "schema_version": 1,
   "slice": "FFV1",
   "title": "Flying Field visual vertical slice v1 - BEFORE/AFTER evidence",
-  "method": "rv2-vis0-benchmark-runner 1.3.0 executed the authoritative hero manifest at three resolutions against the base-SHA binary (tmp/base_binary/rcsim-app.exe, built at 224bad6) and the slice binary; this script compares the verified PNGs and folds the runtime receipts and RuntimeVisualAudit 1.0.0 facts into one document. No metric is estimated.",
+  "method": "rv2-vis0-benchmark-runner 1.3.0 executed the authoritative hero manifest at three resolutions against release binaries built from clean base 224bad6 and FFV1 capture-commit checkouts; this script compares the verified PNGs and folds the runtime receipts and RuntimeVisualAudit 1.0.0 facts into one document. No metric is estimated.",
   "hardware_note": "GPU identity comes from RuntimeVisualAudit.device (adapter_name, backend, driver); the evidence schema carries no VRAM field.",
   "verdict": {
     "visual_pass": null,
@@ -18,22 +18,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_before/1920x1080/ffv1_hero_1080p/ffv1_hero_1080p.png",
-        "local_png_sha256": "ce9aae7d1ba1c74974f968d09cb92c284142a8fcaec01bfe4e606a6cb9452bda",
-        "image_sha256": "ce9aae7d1ba1c74974f968d09cb92c284142a8fcaec01bfe4e606a6cb9452bda",
-        "image_byte_size": 2551376,
+        "local_png_sha256": "e182f55d8e8d83a19f7dc601a589c34e2cb3b7f7a5ab7eb58c35a6ec993d72e4",
+        "image_sha256": "e182f55d8e8d83a19f7dc601a589c34e2cb3b7f7a5ab7eb58c35a6ec993d72e4",
+        "image_byte_size": 2549921,
         "framebuffer": [
           1920,
           1080
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "b03c46aa3115818af69c3c00847ad35d863d8d7d",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 1920,
             "framebuffer_height": 1080,
             "renderer_version": "v2"
@@ -90,47 +90,47 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 18818800,
-            "gpu_timing_status": "previous_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 9,
-            "gpu_timing_frame_age": 1,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 17309200,
+            "gpu_timing_status": "current_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 30,
+            "gpu_timing_frame_age": 0,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 8700,
+                "cpu_duration_ns": 8800,
                 "gpu_duration_ns": 139264.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3800,
-                "gpu_duration_ns": 144384.0
+                "cpu_duration_ns": 3700,
+                "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3200,
-                "gpu_duration_ns": 133120.0
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 134144.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 9600,
+                "cpu_duration_ns": 9300,
                 "gpu_duration_ns": 775168.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 800,
+                "cpu_duration_ns": 900,
                 "gpu_duration_ns": 28672.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 600,
+                "cpu_duration_ns": 500,
                 "gpu_duration_ns": 19456.0
               }
             ]
@@ -142,22 +142,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/1920x1080/ffv1_hero_1080p/ffv1_hero_1080p.png",
-        "local_png_sha256": "e4631db3a68fa55ccb9f90e934fc3d5bd5a1f9a40f06436eea16f95a058a5fce",
-        "image_sha256": "e4631db3a68fa55ccb9f90e934fc3d5bd5a1f9a40f06436eea16f95a058a5fce",
-        "image_byte_size": 3419808,
+        "local_png_sha256": "e902cb36e65cbeceb9b584d5ffc7ce667a1dea99938845ef0f11f795ea7e36f4",
+        "image_sha256": "e902cb36e65cbeceb9b584d5ffc7ce667a1dea99938845ef0f11f795ea7e36f4",
+        "image_byte_size": 3418854,
         "framebuffer": [
           1920,
           1080
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "9584c67498cb83415fdc4097b2d59904ff5cc7a6",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 1920,
             "framebuffer_height": 1080,
             "renderer_version": "v2"
@@ -214,48 +214,48 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 64860900,
-            "gpu_timing_status": "current_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 10,
-            "gpu_timing_frame_age": 0,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 18860000,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 29,
+            "gpu_timing_frame_age": 1,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 7200,
-                "gpu_duration_ns": 1978368.0
+                "cpu_duration_ns": 11000,
+                "gpu_duration_ns": 157696.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3400,
-                "gpu_duration_ns": 790528.0
+                "cpu_duration_ns": 3700,
+                "gpu_duration_ns": 171008.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3000,
-                "gpu_duration_ns": 1661952.0
+                "cpu_duration_ns": 3200,
+                "gpu_duration_ns": 158720.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 8700,
-                "gpu_duration_ns": 10835968.0
+                "cpu_duration_ns": 13800,
+                "gpu_duration_ns": 2245632.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 800,
-                "gpu_duration_ns": 345088.0
+                "cpu_duration_ns": 1000,
+                "gpu_duration_ns": 28672.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
                 "cpu_duration_ns": 600,
-                "gpu_duration_ns": 281600.0
+                "gpu_duration_ns": 21504.0
               }
             ]
           }
@@ -270,38 +270,136 @@
         "changed_percent": 100.0,
         "peak_channel_diff": 223,
         "mean_abs_diff_per_channel": [
-          55.157191,
-          64.566032,
-          44.759741
+          55.156446,
+          64.56454,
+          44.756625
         ],
-        "mean_abs_diff_overall": 54.827655,
-        "mean_luminance_before": 0.287456,
-        "mean_luminance_after": 0.516419,
+        "mean_abs_diff_overall": 54.82587,
+        "mean_luminance_before": 0.287454,
+        "mean_luminance_after": 0.516425,
         "horizontal_bands": {
           "rows_0_to_270": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 62.004192
+            "mean_abs_diff": 62.003158
           },
           "rows_270_to_540": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 51.715723
+            "mean_abs_diff": 51.709224
           },
           "rows_540_to_810": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.664811
+            "mean_abs_diff": 63.665232
           },
           "rows_810_to_1080": {
             "pixel_count": 518400,
             "changed_pixels": 518400,
             "changed_percent": 100.0,
-            "mean_abs_diff": 41.925893
+            "mean_abs_diff": 41.925867
           }
+        }
+      },
+      "repeated_scene_timings": {
+        "before": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 0.775168
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 0.777216
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 0.775168
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 0.772096
+            }
+          ],
+          "median_scene_gpu_ms": 0.775168,
+          "min_scene_gpu_ms": 0.772096,
+          "max_scene_gpu_ms": 0.777216
+        },
+        "after": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 2.245632
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.772544
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 2.249728
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.769472
+            }
+          ],
+          "median_scene_gpu_ms": 2.009088,
+          "min_scene_gpu_ms": 1.769472,
+          "max_scene_gpu_ms": 2.249728
         }
       },
       "unavailable_metrics": {
@@ -332,22 +430,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_before/2560x1440/ffv1_hero_1440p/ffv1_hero_1440p.png",
-        "local_png_sha256": "fa6e9dc385eaedfa538a26b1e41534ba01a9357bf17568adb189abef6112beff",
-        "image_sha256": "fa6e9dc385eaedfa538a26b1e41534ba01a9357bf17568adb189abef6112beff",
-        "image_byte_size": 4651279,
+        "local_png_sha256": "1dba921ee76aaf4a24752ecaef816c2a41ca99e25cdf4ac04c113382c85a302f",
+        "image_sha256": "1dba921ee76aaf4a24752ecaef816c2a41ca99e25cdf4ac04c113382c85a302f",
+        "image_byte_size": 4649702,
         "framebuffer": [
           2560,
           1440
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "b03c46aa3115818af69c3c00847ad35d863d8d7d",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 2560,
             "framebuffer_height": 1440,
             "renderer_version": "v2"
@@ -404,48 +502,48 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 19265000,
-            "gpu_timing_status": "previous_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 9,
-            "gpu_timing_frame_age": 1,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 19395600,
+            "gpu_timing_status": "current_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 30,
+            "gpu_timing_frame_age": 0,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 7300,
+                "cpu_duration_ns": 8300,
                 "gpu_duration_ns": 140288.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 4100,
-                "gpu_duration_ns": 144384.0
+                "cpu_duration_ns": 4000,
+                "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3200,
-                "gpu_duration_ns": 132096.0
+                "cpu_duration_ns": 3400,
+                "gpu_duration_ns": 134144.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 9000,
-                "gpu_duration_ns": 1214464.0
+                "cpu_duration_ns": 13800,
+                "gpu_duration_ns": 1208320.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
                 "cpu_duration_ns": 900,
-                "gpu_duration_ns": 51200.0
+                "gpu_duration_ns": 52224.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 600,
-                "gpu_duration_ns": 33792.0
+                "cpu_duration_ns": 500,
+                "gpu_duration_ns": 32768.0
               }
             ]
           }
@@ -456,22 +554,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/2560x1440/ffv1_hero_1440p/ffv1_hero_1440p.png",
-        "local_png_sha256": "2c1ab95f49aef8a02e0cb2b8ebe38fca5dafb5a9ae1efe0bf5d682dc452ae100",
-        "image_sha256": "2c1ab95f49aef8a02e0cb2b8ebe38fca5dafb5a9ae1efe0bf5d682dc452ae100",
-        "image_byte_size": 6175284,
+        "local_png_sha256": "2855d38f27f110bc1de623f0a2f664a7b27ea3f644207035f21c9e6838f35e43",
+        "image_sha256": "2855d38f27f110bc1de623f0a2f664a7b27ea3f644207035f21c9e6838f35e43",
+        "image_byte_size": 6175864,
         "framebuffer": [
           2560,
           1440
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "9584c67498cb83415fdc4097b2d59904ff5cc7a6",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 2560,
             "framebuffer_height": 1440,
             "renderer_version": "v2"
@@ -528,48 +626,48 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 65743600,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 21567800,
             "gpu_timing_status": "current_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 10,
+            "gpu_timing_source_presentation_frame_index": 30,
             "gpu_timing_frame_age": 0,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 7200,
-                "gpu_duration_ns": 1685504.0
+                "cpu_duration_ns": 7100,
+                "gpu_duration_ns": 159744.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
                 "cpu_duration_ns": 3600,
-                "gpu_duration_ns": 539648.0
+                "gpu_duration_ns": 171008.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3200,
-                "gpu_duration_ns": 1277952.0
+                "cpu_duration_ns": 3100,
+                "gpu_duration_ns": 157696.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 9300,
-                "gpu_duration_ns": 10997760.0
+                "cpu_duration_ns": 11400,
+                "gpu_duration_ns": 2610176.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 800,
-                "gpu_duration_ns": 642048.0
+                "cpu_duration_ns": 900,
+                "gpu_duration_ns": 52224.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
                 "cpu_duration_ns": 500,
-                "gpu_duration_ns": 485376.0
+                "gpu_duration_ns": 35840.0
               }
             ]
           }
@@ -580,42 +678,140 @@
         "height": 1440,
         "pixel_count": 3686400,
         "identical": false,
-        "changed_pixels": 3686400,
+        "changed_pixels": 3686399,
         "changed_percent": 100.0,
         "peak_channel_diff": 218,
         "mean_abs_diff_per_channel": [
-          55.187767,
-          64.573432,
-          44.834139
+          55.186682,
+          64.571604,
+          44.832228
         ],
-        "mean_abs_diff_overall": 54.865113,
-        "mean_luminance_before": 0.287781,
+        "mean_abs_diff_overall": 54.863505,
+        "mean_luminance_before": 0.287779,
         "mean_luminance_after": 0.516681,
         "horizontal_bands": {
           "rows_0_to_360": {
             "pixel_count": 921600,
-            "changed_pixels": 921600,
-            "changed_percent": 100.0,
-            "mean_abs_diff": 62.005517
+            "changed_pixels": 921599,
+            "changed_percent": 99.9999,
+            "mean_abs_diff": 62.005011
           },
           "rows_360_to_720": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 51.697231
+            "mean_abs_diff": 51.691374
           },
           "rows_720_to_1080": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.675075
+            "mean_abs_diff": 63.675011
           },
           "rows_1080_to_1440": {
             "pixel_count": 921600,
             "changed_pixels": 921600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 42.082628
+            "mean_abs_diff": 42.082622
           }
+        }
+      },
+      "repeated_scene_timings": {
+        "before": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.20832
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.211392
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.20832
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 1.210368
+            }
+          ],
+          "median_scene_gpu_ms": 1.209344,
+          "min_scene_gpu_ms": 1.20832,
+          "max_scene_gpu_ms": 1.211392
+        },
+        "after": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.610176
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.337792
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 3.129344
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 3.132416
+            }
+          ],
+          "median_scene_gpu_ms": 2.86976,
+          "min_scene_gpu_ms": 2.337792,
+          "max_scene_gpu_ms": 3.132416
         }
       },
       "unavailable_metrics": {
@@ -646,22 +842,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_before/3840x2160/ffv1_hero_2160p/ffv1_hero_2160p.png",
-        "local_png_sha256": "b48f3e2f0f16ba9126f0bf8eb5f223cdea3983198f6f0ad5b03ca4f9130e0234",
-        "image_sha256": "b48f3e2f0f16ba9126f0bf8eb5f223cdea3983198f6f0ad5b03ca4f9130e0234",
-        "image_byte_size": 10986484,
+        "local_png_sha256": "04719704c256436f0c35d8af177d0391500e3e9f9bc8bce5e0795b89b3023b62",
+        "image_sha256": "04719704c256436f0c35d8af177d0391500e3e9f9bc8bce5e0795b89b3023b62",
+        "image_byte_size": 10983715,
         "framebuffer": [
           3840,
           2160
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "b03c46aa3115818af69c3c00847ad35d863d8d7d",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 3840,
             "framebuffer_height": 2160,
             "renderer_version": "v2"
@@ -718,48 +914,48 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 24502900,
-            "gpu_timing_status": "previous_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 9,
-            "gpu_timing_frame_age": 1,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 24601000,
+            "gpu_timing_status": "current_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 30,
+            "gpu_timing_frame_age": 0,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 6400,
-                "gpu_duration_ns": 139264.0
+                "cpu_duration_ns": 11100,
+                "gpu_duration_ns": 125952.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3900,
-                "gpu_duration_ns": 143360.0
+                "cpu_duration_ns": 3600,
+                "gpu_duration_ns": 130048.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
                 "cpu_duration_ns": 3200,
-                "gpu_duration_ns": 132096.0
+                "gpu_duration_ns": 120832.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 8900,
-                "gpu_duration_ns": 2447360.0
+                "cpu_duration_ns": 12800,
+                "gpu_duration_ns": 2256896.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 800,
-                "gpu_duration_ns": 122880.0
+                "cpu_duration_ns": 900,
+                "gpu_duration_ns": 119808.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
-                "cpu_duration_ns": 500,
-                "gpu_duration_ns": 73728.0
+                "cpu_duration_ns": 600,
+                "gpu_duration_ns": 72704.0
               }
             ]
           }
@@ -770,22 +966,22 @@
         "committed_png": null,
         "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
         "local_png": "tmp/ffv1_after/3840x2160/ffv1_hero_2160p/ffv1_hero_2160p.png",
-        "local_png_sha256": "149cfd59c1256e504ec78a22f23f88cdc10e45ff68eb2e6921addd81e324ea89",
-        "image_sha256": "149cfd59c1256e504ec78a22f23f88cdc10e45ff68eb2e6921addd81e324ea89",
-        "image_byte_size": 14278715,
+        "local_png_sha256": "13e5af566bfac9fff9fbc29f5c54ab461f7497226a359a6e6f99d4da866ad593",
+        "image_sha256": "13e5af566bfac9fff9fbc29f5c54ab461f7497226a359a6e6f99d4da866ad593",
+        "image_byte_size": 14282189,
         "framebuffer": [
           3840,
           2160
         ],
-        "presentation_frame_index": 10,
-        "git_commit_sha": "9584c67498cb83415fdc4097b2d59904ff5cc7a6",
-        "git_dirty": true,
+        "presentation_frame_index": 30,
+        "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+        "git_dirty": false,
         "runner_success": true,
         "capture_evidence_valid": true,
         "visual_audit_valid": true,
         "audit": {
           "identity": {
-            "presentation_frame_index": 10,
+            "presentation_frame_index": 30,
             "framebuffer_width": 3840,
             "framebuffer_height": 2160,
             "renderer_version": "v2"
@@ -842,48 +1038,48 @@
             "filter_tap_count_unavailable_reason": "tap count is defined inside WGSL and has no Rust runtime source of truth"
           },
           "profiling": {
-            "presentation_frame_index": 10,
-            "cpu_frame_duration_ns": 28877300,
-            "gpu_timing_status": "current_frame_sample",
-            "gpu_timing_source_presentation_frame_index": 10,
-            "gpu_timing_frame_age": 0,
+            "presentation_frame_index": 30,
+            "cpu_frame_duration_ns": 28607500,
+            "gpu_timing_status": "previous_frame_sample",
+            "gpu_timing_source_presentation_frame_index": 29,
+            "gpu_timing_frame_age": 1,
             "gpu_timing_unavailable_reason": null,
             "passes": [
               {
                 "pass_id": "shadow_near",
                 "label": "G3E near cascade shadow depth pass",
-                "cpu_duration_ns": 6900,
-                "gpu_duration_ns": 160768.0
+                "cpu_duration_ns": 9100,
+                "gpu_duration_ns": 145408.0
               },
               {
                 "pass_id": "shadow_mid",
                 "label": "G3E mid cascade shadow depth pass",
-                "cpu_duration_ns": 3400,
-                "gpu_duration_ns": 171008.0
+                "cpu_duration_ns": 3700,
+                "gpu_duration_ns": 154624.0
               },
               {
                 "pass_id": "shadow_far",
                 "label": "G3E far cascade shadow depth pass",
-                "cpu_duration_ns": 3500,
-                "gpu_duration_ns": 159744.0
+                "cpu_duration_ns": 3700,
+                "gpu_duration_ns": 144384.0
               },
               {
                 "pass_id": "scene",
                 "label": "G1C scene pass",
-                "cpu_duration_ns": 8900,
-                "gpu_duration_ns": 5931008.0
+                "cpu_duration_ns": 10600,
+                "gpu_duration_ns": 5054464.0
               },
               {
                 "pass_id": "temporal_resolve",
                 "label": "RV2 temporal resolve pass",
-                "cpu_duration_ns": 1000,
-                "gpu_duration_ns": 122880.0
+                "cpu_duration_ns": 900,
+                "gpu_duration_ns": 119808.0
               },
               {
                 "pass_id": "postprocess",
                 "label": "G3B HDR postprocess pass",
                 "cpu_duration_ns": 500,
-                "gpu_duration_ns": 82944.0
+                "gpu_duration_ns": 80896.0
               }
             ]
           }
@@ -894,42 +1090,140 @@
         "height": 2160,
         "pixel_count": 8294400,
         "identical": false,
-        "changed_pixels": 8294398,
+        "changed_pixels": 8294397,
         "changed_percent": 100.0,
-        "peak_channel_diff": 246,
+        "peak_channel_diff": 230,
         "mean_abs_diff_per_channel": [
-          55.301177,
-          64.605471,
-          44.986052
+          55.302315,
+          64.60601,
+          44.985035
         ],
-        "mean_abs_diff_overall": 54.964233,
-        "mean_luminance_before": 0.288544,
-        "mean_luminance_after": 0.51759,
+        "mean_abs_diff_overall": 54.964453,
+        "mean_luminance_before": 0.288541,
+        "mean_luminance_after": 0.517595,
         "horizontal_bands": {
           "rows_0_to_540": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 62.003338
+            "mean_abs_diff": 62.00505
           },
           "rows_540_to_1080": {
             "pixel_count": 2073600,
-            "changed_pixels": 2073598,
+            "changed_pixels": 2073597,
             "changed_percent": 99.9999,
-            "mean_abs_diff": 51.750768
+            "mean_abs_diff": 51.749606
           },
           "rows_1080_to_1620": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 63.6659
+            "mean_abs_diff": 63.666218
           },
           "rows_1620_to_2160": {
             "pixel_count": 2073600,
             "changed_pixels": 2073600,
             "changed_percent": 100.0,
-            "mean_abs_diff": 42.436927
+            "mean_abs_diff": 42.43694
           }
+        }
+      },
+      "repeated_scene_timings": {
+        "before": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.256896
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.228224
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.251776
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "224bad6588465b6828ed1f7236d479c04788a6f4",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 2.262016
+            }
+          ],
+          "median_scene_gpu_ms": 2.254336,
+          "min_scene_gpu_ms": 2.228224,
+          "max_scene_gpu_ms": 2.262016
+        },
+        "after": {
+          "method": "four independent process launches of the authoritative frame-30 manifest; run 0 is the hero capture, runs 1-3 are repeats; GPU timestamps may represent frame 30 or the preceding frame",
+          "samples": [
+            {
+              "run_index": 0,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 5.054464
+            },
+            {
+              "run_index": 1,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 4.625408
+            },
+            {
+              "run_index": 2,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "previous_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 29,
+              "gpu_timing_frame_age": 1,
+              "scene_gpu_ms": 5.487616
+            },
+            {
+              "run_index": 3,
+              "git_commit_sha": "0e85127b56ba6b1bc2ebd306d253950769047f08",
+              "git_dirty": false,
+              "presentation_frame_index": 30,
+              "gpu_timing_status": "current_frame_sample",
+              "gpu_timing_source_presentation_frame_index": 30,
+              "gpu_timing_frame_age": 0,
+              "scene_gpu_ms": 4.635648
+            }
+          ],
+          "median_scene_gpu_ms": 4.845056,
+          "min_scene_gpu_ms": 4.625408,
+          "max_scene_gpu_ms": 5.487616
         }
       },
       "unavailable_metrics": {

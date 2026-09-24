@@ -108,15 +108,19 @@ BEFORE al frame 10 misurava circa 1.23 ms, ma al frame 30 scendeva a circa
 0.78 ms. Il comportamento è compatibile con un effetto di avvio del percorso di capture/GPU;
 attribuire il rapporto 9-14x alle sole aggiunte FFV1 era prematuro.
 
-Gli stessi manifest hero ora attendono il frame 30. Misure ripetute con questa
-relazione di warm-up, sullo stesso adapter RTX 3090, danno scene-pass mediani
-BEFORE/AFTER di circa 0.78/1.78 ms a 1080p, 1.22/2.61 ms a 1440p e
-2.25/4.90 ms a 4K. La GPU timestamp readback può indicare il frame corrente o
-quello precedente: ogni audit registra indice sorgente e age. La capture finale
-verifica entrambi, senza dedurre FPS dal solo scene pass. Non è stata cambiata
-la geometria o la shader architecture: la regressione estrema non si ripete
-dopo il warm-up. Il costo residuo non è attribuito a un singolo componente
-senza un'ablation separata; i tempi per pass sono riportati nell'evidence.
+Gli stessi manifest hero ora attendono il frame 30. Quattro processi indipendenti
+per lato e risoluzione, sullo stesso adapter RTX 3090 e da checkout puliti,
+danno scene-pass mediani BEFORE/AFTER di 0.775/2.009 ms a 1080p,
+1.209/2.870 ms a 1440p e 2.254/4.845 ms a 4K. L'evidence conserva tutti i
+campioni e min/max. La GPU timestamp readback può indicare il frame corrente o
+quello precedente: ogni audit registra indice sorgente e age. Nei run AFTER
+con timestamp del frame precedente il scene pass è circa 0.5 ms più alto a
+1080p e 0.8 ms più alto a 1440p; perciò la mediana aggregata non è una misura
+di un solo frame source. La capture finale verifica entrambi, senza dedurre FPS
+dal solo scene pass. Non è stata cambiata la geometria o la shader architecture:
+la regressione estrema non si ripete dopo il warm-up. Il costo residuo non è
+attribuito a un singolo componente senza un'ablation separata; i tempi per
+pass sono riportati nell'evidence.
 
 ## 6. Validazione
 
