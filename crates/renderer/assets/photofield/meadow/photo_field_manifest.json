@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "pf1-meadow",
+  "panorama": "meadow_panorama_8192x4096.jpg",
+  "depth_proxy": "photo_field_depth.glb",
+  "pilot_position_render_m": [
+    15.321,
+    1.6,
+    -12.856
+  ],
+  "panorama_yaw_deg": 0.0,
+  "panorama_pitch_deg": 0.0,
+  "sun_direction_render": [
+    -0.32032,
+    0.93318,
+    0.16299
+  ],
+  "sun_intensity": 2.6,
+  "sun_rgb": [
+    1.0,
+    0.95,
+    0.85
+  ],
+  "shadow_strength": 0.45
+}

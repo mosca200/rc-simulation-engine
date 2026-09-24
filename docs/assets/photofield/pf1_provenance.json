@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "slice": "PF1 - Photo Flying Field v1",
+  "asset_id": "pf1-meadow",
+  "provider": "Poly Haven",
+  "slug": "meadow",
+  "name": "Meadow",
+  "authors": {
+    "Sergej Majboroda": "All"
+  },
+  "license": "CC0",
+  "license_url": "https://polyhaven.com/license",
+  "license_note": "The Poly Haven /info payload carries no license field; CC0 is recorded from https://polyhaven.com/license, the same citation tools/env1_asset_pipeline/build_manifest.py uses.",
+  "attribution": "Powered by Poly Haven (https://polyhaven.com)",
+  "source_page": "https://polyhaven.com/a/meadow",
+  "acquisition": {
+    "acquired_utc": "2026-09-24T21:08:23Z",
+    "acquisition_date": "2026-09-24",
+    "user_agent": "rc-simulation-engine/PF1 (CC0 asset provenance; repo mosca200/rc-simulation-engine)",
+    "info_url": "https://api.polyhaven.com/info/meadow",
+    "files_url": "https://api.polyhaven.com/files/meadow",
+    "info_payload_sha256": "cb4ed7e6c84c54afe37eaa6b6452ef8eb2ff9041d971146b18185aa83136e718",
+    "files_payload_sha256": "9ed16ec6a30362d87b11df527d205a05073819131554eba1c8ebf5f0637a3681",
+    "files_hash": "59878ce1dc49871a6ff5bf05db9c51b0fa113c76",
+    "asset_name": "Meadow",
+    "authors": {
+      "Sergej Majboroda": "All"
+    },
+    "source_dimensions": [
+      16384,
+      8192
+    ],
+    "source_dimensions_note": "the provider's largest published resolution for this asset; PF1 acquires 8192x4096 and never resamples it",
+    "acquired_dimensions": [
+      8192,
+      4096
+    ],
+    "source_files": [
+      {
+        "role": "source_hdr",
+        "file_name": "meadow_8k.hdr",
+        "purpose": "scene-referred Radiance RGBE source: the panorama derivative and every calibration measurement are derived from this file",
+        "api_path": [
+          "hdri",
+          "8k",
+          "hdr"
+        ],
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/8k/meadow_8k.hdr",
+        "api_size": 108457266,
+        "api_md5": "c1e25ad9fb1aba9ebc8babb952292727",
+        "local_size": 108457266,
+        "local_md5": "c1e25ad9fb1aba9ebc8babb952292727",
+        "local_sha256": "9d947c59de8464a04fd22ecef8ed548750e2bbb07072f44ef61b0fbb2d738c9d",
+        "size_verified": true,
+        "md5_verified": true
+      },
+      {
+        "role": "look_reference_tonemapped_jpg",
+        "file_name": "meadow_tonemapped.jpg",
+        "purpose": "the provider's own photographic rendition: look reference and exposure-fit evidence only, never a runtime input",
+        "api_path": [
+          "tonemapped"
+        ],
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/extra/Tonemapped%20JPG/meadow.jpg",
+        "api_size": 57575185,
+        "api_md5": "9508d4679483dfc17466ff4c9ada44d9",
+        "local_size": 57575185,
+        "local_md5": "9508d4679483dfc17466ff4c9ada44d9",
+        "local_sha256": "8b9765e45ffc2106f4181a491244fd7113078cd26dcc615cacc11fb347724ee7",
+        "size_verified": true,
+        "md5_verified": true
+      },
+      {
+        "role": "decode_probe_hdr",
+        "file_name": "meadow_1k.hdr",
+        "purpose": "small Radiance source used by the test suite to exercise the RGBE decoder without touching the 108 MB 8k file",
+        "api_path": [
+          "hdri",
+          "1k",
+          "hdr"
+        ],
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/meadow_1k.hdr",
+        "api_size": 1819485,
+        "api_md5": "955f6b479ce79e67c0e224d3cc409ec6",
+        "local_size": 1819485,
+        "local_md5": "955f6b479ce79e67c0e224d3cc409ec6",
+        "local_sha256": "6c4539c54b988cd76803c09151aad70638920bf049346d155a76b838baac56a2",
+        "size_verified": true,
+        "md5_verified": true
+      }
+    ]
+  },
+  "processing": {
+    "command": [
+      "python",
+      "-X",
+      "utf8",
+      "tools/photo_field_pipeline/process_photo_field_panorama.py"
+    ],
+    "source": {
+      "role": "source_hdr",
+      "file_name": "meadow_8k.hdr",
+      "sha256": "9d947c59de8464a04fd22ecef8ed548750e2bbb07072f44ef61b0fbb2d738c9d",
+      "dimensions": [
+        8192,
+        4096
+      ],
+      "format": "Radiance RGBE (32-bit_rle_rgbe)"
+    },
+    "recipe": "display_linear = khronos_pbr_neutral(radiance * 1.0); srgb_bytes = round(linear_to_srgb(display_linear) * 255); JPEG quality 92, subsampling 0. No resize, no other processing.",
+    "tonemap": "khronos_pbr_neutral, a statement-by-statement port of crates/renderer/src/shader.wgsl (the same curve the renderer applies to the 3D aircraft; the photographic background bypasses the runtime tonemapper, so it is applied here instead)",
+    "colour_space": "sRGB (IEC 61966-2-1) via linear_to_srgb, matching crates/renderer/src/texture.rs::linear_to_srgb_f64",
+    "exposure_scale": 1.0,
+    "exposure_ev": 0.0,
+    "quantisation": "round-half-to-even of (sRGB * 255), numpy.rint",
+    "jpeg": {
+      "quality": 92,
+      "subsampling": 0,
+      "progressive": false,
+      "optimize": false
+    },
+    "runtime_derivative": {
+      "path": "crates/renderer/assets/photofield/meadow/meadow_panorama_8192x4096.jpg",
+      "file_name": "meadow_panorama_8192x4096.jpg",
+      "format": "jpeg",
+      "sha256": "5e845d5526d7861e9d91967803774b6990ed5538fd76102ace94b8a2d40e6a19",
+      "byte_size": 15038711,
+      "dimensions": [
+        8192,
+        4096
+      ],
+      "bit_depth": 8,
+      "channels": 3
+    },
+    "reproducibility_check": "python -X utf8 tools/photo_field_pipeline/process_photo_field_panorama.py --check",
+    "environment": {
+      "python": "3.12.10",
+      "python_implementation": "CPython",
+      "platform": "Windows-11-10.0.26200-SP0",
+      "numpy": "2.3.5",
+      "pillow": "12.3.0",
+      "note": "The derivative's bytes depend on the JPEG encoder behind Pillow (libjpeg-turbo); the --check mode of process_photo_field_panorama.py is the authority on whether this machine reproduces them."
+    }
+  },
+  "depth_proxy": {
+    "path": "crates/renderer/assets/photofield/meadow/photo_field_depth.glb",
+    "file_name": "photo_field_depth.glb",
+    "format": "glTF 2.0 binary (GLB)",
+    "sha256": "5987632ffb2297e1136a14a9ca381ff4ab3efb1e344e37a95096e239ba989508",
+    "byte_size": 30720,
+    "triangle_count": 724,
+    "vertex_count": 1385,
+    "node_count": 9,
+    "mesh_count": 9,
+    "node_names": [
+      "pf1_ground",
+      "pf1_building_brick_garage",
+      "pf1_house_brick",
+      "pf1_house_green",
+      "pf1_tree_trunk_0",
+      "pf1_tree_trunk_1",
+      "pf1_tree_trunk_2",
+      "pf1_tree_trunk_3",
+      "pf1_tree_ring"
+    ],
+    "command": [
+      "python",
+      "-X",
+      "utf8",
+      "tools/photo_field_pipeline/author_photo_field_proxies.py"
+    ],
+    "reproducibility_check": "python -X utf8 tools/photo_field_pipeline/author_photo_field_proxies.py --check"
+  },
+  "runtime_manifest": {
+    "path": "crates/renderer/assets/photofield/meadow/photo_field_manifest.json",
+    "sha256": "bea435af46323dfbca92e8a5e276fb908356029ce91698d9a7b33bee1cba0a1c",
+    "byte_size": 458,
+    "consumed_by": "crates/renderer/src/photo_field.rs (PhotoFieldManifest)",
+    "commands": {
+      "fetch": [
+        "python",
+        "-X",
+        "utf8",
+        "tools/photo_field_pipeline/fetch_photo_field_sources.py"
+      ],
+      "process": [
+        "python",
+        "-X",
+        "utf8",
+        "tools/photo_field_pipeline/process_photo_field_panorama.py"
+      ],
+      "author": [
+        "python",
+        "-X",
+        "utf8",
+        "tools/photo_field_pipeline/author_photo_field_proxies.py"
+      ],
+      "build": [
+        "python",
+        "-X",
+        "utf8",
+        "tools/photo_field_pipeline/build_photo_field_manifest.py"
+      ]
+    }
+  },
+  "calibration": {
+    "equirect_convention": "u = fract(azimuth / 2pi) with azimuth = atan2(dir.z, dir.x); v = 0.5 - elevation / pi with elevation = asin(dir.y). Row 0 of the committed panorama is the +90 deg zenith, the last row the nadir, and the u = 0 column is the render +X axis. This is exactly crates/renderer/src/photo_field.rs::equirect_uv_from_direction with panorama_yaw_deg = panorama_pitch_deg = 0.",
+    "pilot_eye": {
+      "position_render_m": [
+        15.321,
+        1.6,
+        -12.856
+      ],
+      "distance_from_spawn_m": 20.0,
+      "azimuth_from_eye_to_spawn_deg": 139.999660833957,
+      "camera_height_m": 1.6,
+      "reason": "The aircraft always spawns at the render-world origin, so the surveyed photographic eye is placed 20 m from the spawn along azimuth 140 deg: eye = -20 * (cos(140 deg), 0, sin(140 deg)) = (15.321, 0, -12.856), with y = 1.6 m the assumed camera height. Azimuth 140 deg keeps the aircraft line-of-sight 12 deg clear of the photographed near tree trunk at 152 deg (whose proxy would otherwise hide the parked aircraft) while staying on the brick garage, whose measured span is 131.75-169.94 deg. From that eye the spawn - and therefore the parked aircraft - lies at 20 m, just IN FRONT of the 25.1 m garage proxy, and INSIDE the 30 m tree-ring proxy, so the mandatory occlusion test (aircraft nearer vs farther than a photographed obstacle) is expressible with the real aircraft."
+    },
+    "sun": {
+      "longitude_deg": 153.027,
+      "elevation_deg": 68.936,
+      "direction_render": [
+        -0.32032,
+        0.93318,
+        0.16299
+      ],
+      "direction_render_exact_f64": [
+        -0.32031399655691883,
+        0.9331795433185072,
+        0.16301804667458317
+      ],
+      "direction_render_pinned_deviation": 2.8046674583170894e-05,
+      "convention": "u = fract(azimuth / 2pi) with azimuth = atan2(dir.z, dir.x); v = 0.5 - elevation / pi with elevation = asin(dir.y). Row 0 of the committed panorama is the +90 deg zenith, the last row the nadir, and the u = 0 column is the render +X axis. This is exactly crates/renderer/src/photo_field.rs::equirect_uv_from_direction with panorama_yaw_deg = panorama_pitch_deg = 0.",
+      "convention_note": "The prototype analysis emitted its direction as [cos(el)*sin(lon), sin(el), cos(el)*cos(lon)], which corresponds to azimuth = atan2(x, z) and is therefore NOT the render convention: under azimuth = atan2(z, x) the same longitude/elevation is [cos(el)*cos(lon), sin(el), cos(el)*sin(lon)]. PF1 commits the render form. The f64 evaluation is [-0.320314, 0.93318, 0.163018]; the committed literal [-0.32032, 0.93318, 0.16299] is a five-decimal evaluation of the same formula. They agree to 3e-5 (about 0.001 deg of azimuth) and both map onto the solar texel inside the 1e-5 tolerance photo_field.rs uses: the exact evaluation to ~1e-12, the literal to ~7e-6.",
+      "derived_by": "Connected-component isolation of the brightest region of meadow_8k.hdr (lum_max = 39.4461). The PF1 calibration quotes the 0.8 * lum_max isolation, which puts the solar disc at panorama longitude 153.027 deg at elevation 68.936 deg. The prototype run recorded in tmp/pf1_sun.json isolated at 0.9 * lum_max and selected a compact 29-pixel component at 152.722 / 68.903 deg, so the two thresholds agree to 0.3 deg (about 7 texels at 8k), and FFV1's independent offline analysis of this same asset recorded 'sun ~69 deg elevation'.",
+      "cross_check_0p9_threshold": {
+        "longitude_deg": 152.72222865998236,
+        "elevation_deg": 68.9027490562396,
+        "component_area_px": 29,
+        "source": "tmp/pf1_sun.json"
+      },
+      "disc_mean_radiance_rgb": [
+        50.86206817626953,
+        34.16379165649414,
+        27.10344886779785
+      ],
+      "disc_peak_radiance_rgb": [
+        54.0,
+        36.25,
+        28.5
+      ],
+      "near_sun_sky_mean": 2.1031928062438965,
+      "sun_intensity": 2.6,
+      "sun_rgb": [
+        1.0,
+        0.95,
+        0.85
+      ],
+      "shadow_strength": 0.45,
+      "lighting_note": "sun_intensity, sun_rgb and shadow_strength are presentation constants chosen so the tonemapped aircraft reads as lit by this photograph; they are not measurements of it"
+    },
+    "radiance": {
+      "source": "meadow_8k.hdr",
+      "luminance_definition": "Rec.709: 0.2126 R + 0.7152 G + 0.0722 B",
+      "lum_max": 39.44605255126953,
+      "sky_upper_hemisphere_mean": 1.250892996788025,
+      "zenith_top_1_64_mean": 3.151242971420288,
+      "ground_lower_45_percent_mean": 0.16443490982055664,
+      "mean_rgb": [
+        0.7370936520201212,
+        0.718630185213442,
+        0.699419742712962
+      ],
+      "horizon_row_8k": 1910,
+      "cross_check": "FFV1's independent offline analysis of this asset recorded 'sun ~69 deg elevation, sky mean 1.26'; this measurement gives 68.936 deg and 1.2509. The test suite re-measures the 1k probe and requires the upper-half mean inside [1.15, 1.35]."
+    },
+    "exposure_calibration": {
+      "decision": "exposure_scale = 1.0 (exposure_ev = 0.0), identical to the renderer's pinned postprocess exposure, so the photographic background and the tonemapped aircraft share one curve",
+      "exposure_scale": 1.0,
+      "exposure_ev": 0.0,
+      "prototype_fit_evidence": {
+        "source": "tmp/pf1_exposure_fit.log and tmp/pf1_exposure_fit.json",
+        "reference": "the provider's own tonemapped JPG (meadow_tonemapped.jpg), used as a look reference only and never as a runtime input",
+        "mae_srgb_at_pinned_scale": 0.07849,
+        "rmse_srgb_at_pinned_scale": 0.09621,
+        "refined_scale": 1.1790625,
+        "refined_exposure_ev": 0.23764019503538478,
+        "refined_mae_srgb": 0.07181839109904041,
+        "correlation_subsampled": 0.9720202616649115,
+        "caveat": "The prototype fit in tmp/pf1_exposure_fit.py evaluated WGSL `select(0.04, x - 6.25 * x * x, x < 0.08)` with its two branches swapped (it used the constant 0.04 for x < 0.08 and x - 6.25*x*x otherwise), so these residuals characterise the prototype curve, not the shipped one. photo_field_assets.khronos_pbr_neutral is a verbatim port of crates/renderer/src/shader.wgsl. The k = 1.0 decision does not depend on the fit: it is pinned to the renderer's exposure_ev = 0.0 so that the photographic background and the tonemapped aircraft share one curve."
+      }
+    },
+    "brick_garage": {
+      "node": "pf1_building_brick_garage",
+      "angular_box_azimuth_deg": [
+        131.748046875,
+        169.9365234375
+      ],
+      "angular_box_elevation_deg": [
+        -3.6474609375,
+        7.5146484375
+      ],
+      "centroid_azimuth_deg": 150.87425614540803,
+      "centroid_elevation_deg": 1.8927557457427326,
+      "segment_area_px": 118048,
+      "segmented_by": "colour segmentation of the provider's tonemapped JPG (warm red brick: r > 1.22 g, g > 0.92 b) plus connected-component labelling; the largest component is the garage",
+      "camera_height_m": 1.6,
+      "derived_distance_m": 25.09948052371277,
+      "derived_height_m": 4.910937761359057,
+      "derived_width_arc_m": 16.72917153508443,
+      "derived_width_chord_m": 16.42122832694011,
+      "proxy_depth_m": 6.0,
+      "derivation": "A single panorama gives angles, not metres, so exactly one real-world assumption is made: the camera height (1.6 m). With a flat ground plane, the building's base at elevation -3.6474609375 deg is at distance 1.6 / tan(3.647461 deg), its top at 7.5146484375 deg then gives height distance * tan(top) + camera height, and its azimuth span gives the tangential width as the arc length at that distance."
+    },
+    "manually_estimated_obstacles": [
+      {
+        "node": "pf1_house_brick",
+        "azimuth_deg": 268.0,
+        "distance_m": 15.0,
+        "width_m": 10.0,
+        "depth_m": 7.0,
+        "height_m": 4.5,
+        "evidence": "visual estimate from the perspective crops of the provider's tonemapped JPG (tmp/pf1_preview/crop_*.jpg); not measurable from a single panorama"
+      },
+      {
+        "node": "pf1_house_green",
+        "azimuth_deg": 286.0,
+        "distance_m": 32.0,
+        "width_m": 12.0,
+        "depth_m": 8.0,
+        "height_m": 5.5,
+        "evidence": "visual estimate from the perspective crops of the provider's tonemapped JPG (tmp/pf1_preview/crop_*.jpg); not measurable from a single panorama"
+      },
+      {
+        "node": "pf1_tree_trunk_0",
+        "azimuth_deg": 152.0,
+        "distance_m": 5.0,
+        "width_m": 0.7,
+        "depth_m": 0.7,
+        "height_m": 22.0,
+        "evidence": "visual estimate of a near tree trunk from the perspective crops; trunk radius ~0.35 m gives the 0.7 m cross-section"
+      },
+      {
+        "node": "pf1_tree_trunk_1",
+        "azimuth_deg": 270.0,
+        "distance_m": 7.0,
+        "width_m": 0.7,
+        "depth_m": 0.7,
+        "height_m": 22.0,
+        "evidence": "visual estimate of a near tree trunk from the perspective crops; trunk radius ~0.35 m gives the 0.7 m cross-section"
+      },
+      {
+        "node": "pf1_tree_trunk_2",
+        "azimuth_deg": 285.0,
+        "distance_m": 9.0,
+        "width_m": 0.7,
+        "depth_m": 0.7,
+        "height_m": 22.0,
+        "evidence": "visual estimate of a near tree trunk from the perspective crops; trunk radius ~0.35 m gives the 0.7 m cross-section"
+      },
+      {
+        "node": "pf1_tree_trunk_3",
+        "azimuth_deg": 300.0,
+        "distance_m": 6.0,
+        "width_m": 0.7,
+        "depth_m": 0.7,
+        "height_m": 22.0,
+        "evidence": "visual estimate of a near tree trunk from the perspective crops; trunk radius ~0.35 m gives the 0.7 m cross-section"
+      }
+    ],
+    "depth_proxy_geometry": {
+      "frame": "render world space, y-up, ground plane at y = 0",
+      "origin_of_placement": [
+        15.321,
+        1.6,
+        -12.856
+      ],
+      "placement_rule": "world = eye + distance * (cos(azimuth), 0, sin(azimuth)), with azimuth the render-space azimuth the panorama samples at",
+      "ground": {
+        "node": "pf1_ground",
+        "radius_m": 250.0,
+        "segments": 64,
+        "centre": [
+          15.321,
+          0.0,
+          -12.856
+        ],
+        "y": 0.0
+      },
+      "tree_ring": {
+        "node": "pf1_tree_ring",
+        "box_count": 48,
+        "radius_m": 30.0,
+        "jitter_m": 3.0,
+        "jitter_generator": "a 64-bit integer LCG (Knuth MMIX constants) seeded with 1; the standard library `random` module is deliberately not used anywhere in this package",
+        "width_m": 7.0,
+        "depth_m": 5.0,
+        "height_m": 40.0
+      },
+      "boxes": "closed 12-triangle boxes, 24 vertices, outward-facing winding",
+      "node_transforms": "every node carries an explicit identity TRS because the geometry is authored in render world space: the repository's production GLB loader reads baked vertex positions and does not apply node transforms (documented in tools/aircraft_asset_pipeline/blender_export_glb.py), while crates/renderer/src/glb.rs's scene-graph path composes them. An identity transform makes both readings agree.",
+      "materials": "none: the runtime uses these meshes depth-only, and glb.rs falls back to generated normals for a primitive that carries none",
+      "triangle_budget": 4000
+    },
+    "physically_derived": [
+      "sun_direction_render [-0.32032, 0.93318, 0.16299] from the measured solar longitude 153.027 deg / elevation 68.936 deg under the documented equirect convention",
+      "brick garage distance 25.0995 m = 1.6 m / tan(3.647461 deg), from the segmented base elevation and the assumed camera height",
+      "brick garage height 4.9109 m = 25.0995 * tan(7.514648 deg) + 1.6 m, from the segmented top elevation",
+      "brick garage width 16.7292 m = arc length at that distance over the segmented azimuth span 38.188477 deg (straight chord 16.4212 m)",
+      "brick garage azimuth 150.87426 deg = centroid of the 118048-pixel segmented component",
+      "exposure scale 1.0 = exp2(0.0), pinned to the renderer's postprocess exposure rather than fitted",
+      "radiance means sky 1.2509, zenith 3.1512, ground 0.1644, lum_max 39.4461: measured from meadow_8k.hdr",
+      "the panorama derivative's bytes: a deterministic function of the verified source, the ported tone mapper and the named encoder"
+    ],
+    "manually_calibrated": [
+      "pilot_position_render_m [15.321, 1.6, -12.856]: The aircraft always spawns at the render-world origin, so the surveyed photographic eye is placed 20 m from the spawn along azimuth 140 deg: eye = -20 * (cos(140 deg), 0, sin(140 deg)) = (15.321, 0, -12.856), with y = 1.6 m the assumed camera height. Azimuth 140 deg keeps the aircraft line-of-sight 12 deg clear of the photographed near tree trunk at 152 deg (whose proxy would otherwise hide the parked aircraft) while staying on the brick garage, whose measured span is 131.75-169.94 deg. From that eye the spawn - and therefore the parked aircraft - lies at 20 m, just IN FRONT of the 25.1 m garage proxy, and INSIDE the 30 m tree-ring proxy, so the mandatory occlusion test (aircraft nearer vs farther than a photographed obstacle) is expressible with the real aircraft.",
+      "camera height 1.6 m: the single real-world assumption every metric garage dimension scales with",
+      "brick garage depth 6.0 m: a radial extent is not measurable from one panorama",
+      "pf1_house_brick at azimuth 268 deg / 15 m, 10 x 7 x 4.5 m, and pf1_house_green at azimuth 286 deg / 32 m, 12 x 8 x 5.5 m: visual estimates from the perspective crops",
+      "four near trunks at (152 deg, 5 m), (270 deg, 7 m), (285 deg, 9 m), (300 deg, 6 m), 0.7 x 0.7 x 22.0 m: visual estimates from the perspective crops",
+      "the distant tree line: 48 boxes on a 30.0 m ring with +/- 3.0 m deterministic jitter (LCG seed 1), 7.0 x 5.0 x 40.0 m",
+      "the ground disc: 250.0 m radius, 64 segments, centred under the photographic eye",
+      "sun_intensity 2.6, sun_rgb [1.0, 0.95, 0.85], shadow_strength 0.45: presentation constants matched to the photograph by eye",
+      "panorama_yaw_deg 0.0 and panorama_pitch_deg 0.0: the panorama is used exactly as photographed",
+      "JPEG quality 92 with subsampling 0: an encoding choice, not a measurement"
+    ]
+  },
+  "not_applied": [
+    "ai_depth_estimation",
+    "photogrammetry",
+    "virtual_texturing",
+    "texture_streaming",
+    "resampling",
+    "saturation_or_contrast_boost",
+    "colour_lut"
+  ]
+}
