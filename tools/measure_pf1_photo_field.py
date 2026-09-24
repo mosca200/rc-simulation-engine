@@ -210,12 +210,38 @@ def main() -> int:
             )
             continue
         run = load_run(occlusion_root, case, scene_id)
+        manifest = json.loads(
+            (OUT_DIR / f"{scene_id}.json").read_text(encoding="utf-8")
+        )
+        aircraft = manifest["aircraft"]
+        if aircraft.get("start_on_ground"):
+            position = [0.0, 0.0, 0.0]
+            position_note = (
+                "the parked aircraft sits at the render-world spawn origin; the "
+                "receipt/audit carry no pose, and none is needed for a ground start"
+            )
+        else:
+            position = None
+            position_note = (
+                "the runtime exposes no aircraft pose in the receipt or audit; the "
+                "deterministic flight specification below is the recorded authority "
+                "for where the aircraft is at the captured presentation frame"
+            )
         occlusion.append(
             {
                 "case": case,
                 "scene_id": scene_id,
                 "description": description,
                 "captured": True,
+                "aircraft_position_render_m": position,
+                "aircraft_position_note": position_note,
+                "aircraft_flight_spec": {
+                    "throttle": aircraft.get("throttle"),
+                    "start_on_ground": aircraft.get("start_on_ground"),
+                    "altitude_m": aircraft.get("altitude_m"),
+                    "airspeed_mps": aircraft.get("airspeed_mps"),
+                    "capture_frame": manifest["capture"]["frame"],
+                },
                 **summarise(run),
             }
         )

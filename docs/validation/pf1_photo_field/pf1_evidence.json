@@ -459,6 +459,19 @@
       "scene_id": "pf1_occlusion_near",
       "description": "aircraft nearer to the pilot than the proxy",
       "captured": true,
+      "aircraft_position_render_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aircraft_position_note": "the parked aircraft sits at the render-world spawn origin; the receipt/audit carry no pose, and none is needed for a ground start",
+      "aircraft_flight_spec": {
+        "throttle": 0.0,
+        "start_on_ground": true,
+        "altitude_m": null,
+        "airspeed_mps": null,
+        "capture_frame": 30
+      },
       "png": "C:\\Users\\andre\\OneDrive\\Desktop\\sim rc ufficiale\\.worktrees\\visual-photo-field-v1\\tmp\\pf1_occlusion\\near\\pf1_occlusion_near\\pf1_occlusion_near_1920x1080.png",
       "committed_png": null,
       "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
@@ -524,6 +537,15 @@
       "scene_id": "pf1_occlusion_far",
       "description": "aircraft farther from the pilot than the proxy",
       "captured": true,
+      "aircraft_position_render_m": null,
+      "aircraft_position_note": "the runtime exposes no aircraft pose in the receipt or audit; the deterministic flight specification below is the recorded authority for where the aircraft is at the captured presentation frame",
+      "aircraft_flight_spec": {
+        "throttle": 0.8,
+        "start_on_ground": false,
+        "altitude_m": 8.0,
+        "airspeed_mps": 30.0,
+        "capture_frame": 180
+      },
       "png": "C:\\Users\\andre\\OneDrive\\Desktop\\sim rc ufficiale\\.worktrees\\visual-photo-field-v1\\tmp\\pf1_occlusion\\far\\pf1_occlusion_far\\pf1_occlusion_far_1920x1080.png",
       "committed_png": null,
       "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
