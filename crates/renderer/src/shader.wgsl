@@ -1342,14 +1342,17 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     var composed = (albedo.rgb * w_maint
         + albedo_worn.rgb * w_worn
         + albedo_dry.rgb * w_dry) / w_sum;
+    // Keep the scanned turf as the common base, so region masks vary the
+    // surface without producing isolated pale yellow-green islands.
+    composed = mix(albedo.rgb, composed, 0.30);
     // Regional tone. The maintained scan (sparse_grass) photographs as dry
     // warm turf (linear R/G ~ 1.4); the Wikimedia RC-field reference and the
     // Poly Haven meadow backplates both show a maintained mown field at
     // linear R/G ~ 0.5-1.1, i.e. clearly green. The maintained regions
     // therefore carry a documented mown-grass white-balance, worn traffic
     // stays grassy-but-paler, and the vegetation edge dries out toward soil.
-    let tint_maint = vec3<f32>(0.70, 1.35, 0.78);
-    let tint_worn = vec3<f32>(0.80, 1.12, 0.78);
+    let tint_maint = vec3<f32>(0.66, 1.10, 0.74);
+    let tint_worn = vec3<f32>(0.72, 0.96, 0.72);
     let tint_dry = vec3<f32>(0.55, 0.52, 0.40);
     let region_tint = (tint_maint * (region.x + region.z)
         + tint_worn * region.y
@@ -1359,13 +1362,13 @@ fn terrain_surface(input: VertexOutput) -> TerrainSurface {
     // so the ground never reads as one repeated texture.
     let health = field_fbm(input.world_position.xz * 0.022);
     let health_tint = vec3<f32>(
-        1.05 - 0.10 * health,
-        0.93 + 0.14 * health,
         1.00 - 0.05 * health,
+        0.96 + 0.06 * health,
+        1.00 - 0.03 * health,
     );
     // Mown laps modulate the maintained regions only.
     let mow = field_mow_stripe(input.world_position.xz);
-    let mow_gain = 1.0 + (mow - 0.5) * (region.x * 0.14 + region.z * 0.07);
+    let mow_gain = 1.0 + (mow - 0.5) * (region.x * 0.08 + region.z * 0.04);
     composed = composed * region_tint * health_tint * mow_gain;
     albedo = vec4<f32>(composed, albedo.a);
 
@@ -1641,6 +1644,10 @@ fn fs_sky_v2(input: SkyVertexOutput) -> @location(0) vec4<f32> {
         clamp(elevation / PI + 0.5, 0.0, 1.0),
     );
     var color = textureSample(sky_view_lut, atmosphere_sampler, sky_uv).rgb;
+    // A mild clear-air blue towards the zenith restores the visible tonal
+    // gradient while preserving the physical LUT's hazy horizon and sun.
+    let zenith_weight = smoothstep(0.0, 0.6, max(view_dir.y, 0.0));
+    color = color * mix(vec3<f32>(1.0), vec3<f32>(0.90, 0.97, 1.07), zenith_weight);
 
     // Solar disk: the same direction, angular radius and radiance as the PBR
     // direct term, attenuated by the physical transmittance at the observer.

@@ -89,6 +89,23 @@ sistema di virtual texturing; terreno ancora fuori dal pass ombre.
 Gap residuo documentato: le corone ad alpha-card erodono ancora a 150-230 m;
 il tier raccomandato è un impostor/billboard LOD3 (fuori scope per il brief).
 
+### Final visual polish (2026-09-24)
+
+The source `tree_small_02` keeps its complete leaf mass in an evaluated
+Geometry Nodes curve. The earlier bake used only eight standalone prototype
+leaf meshes, leaving the field edge skeletal. The final FFV1 bake rasterizes
+the evaluated summer crown and uses four, three, and two crossed cards for
+LOD0, LOD1, and LOD2. The source bark remains decimated and is toned darker.
+The renderer now uses those three foliage LODs for broadleaf A.
+
+The runway-facing boundary belt is closer and denser, with small broadleaf
+crowns filling its base. Distant bare variants are confined to occasional
+off-axis placements. Ground-cover cards are smaller and much sparser. Terrain
+region tints and markers are quieter, with a mild zenith sky balance. This
+pass supersedes the earlier leaf-atlas and LOD0-only broadleaf description
+above; the provenance and reproduction command are in
+`tools/vegetation_processing/PROVENANCE.md`.
+
 ## 5. Performance
 
 Misurata con il runner VIS0 esistente (nessun framework nuovo): hero scene a

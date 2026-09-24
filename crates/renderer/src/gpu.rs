@@ -2931,15 +2931,11 @@ impl WgpuRenderer {
                                     }
                                     let mesh = &vegetation.meshes[vegetation_mesh_index(
                                         asset,
-                                        // FFV1 crown-preserving LOD: the source
-                                        // leaf-card sets are already sparse, and
-                                        // decimating them (LOD1/LOD2 ratios)
-                                        // dissolves the crown into bare branches
-                                        // at exactly the distances where the tree
-                                        // line must read as a foliage mass. Bark
-                                        // keeps its decimated LOD; the crown keeps
-                                        // the LOD0 card set at every distance.
-                                        if is_foliage { 0 } else { lod },
+                                        // Broadleaf A now has source-derived
+                                        // crossed-card crowns at each LOD. Other
+                                        // assets retain the FFV1 LOD0 foliage
+                                        // guard until their crowns are rebaked.
+                                        if is_foliage && asset != 2 { 0 } else { lod },
                                         part,
                                     )];
                                     let material = &self.materials[mesh.material_index];

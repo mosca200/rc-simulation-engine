@@ -343,14 +343,14 @@ const NEAR_SATELLITE_DISTANCE_M: f32 = 24.0;
 /// Minimum centre spacing in the near zone (m).
 const NEAR_MIN_SPACING_M: f32 = 7.5;
 /// Boundary belt ring (m).
-const BOUNDARY_INNER_RADIUS_M: f32 = 160.0;
-const BOUNDARY_OUTER_RADIUS_M: f32 = 230.0;
+const BOUNDARY_INNER_RADIUS_M: f32 = 135.0;
+const BOUNDARY_OUTER_RADIUS_M: f32 = 205.0;
 /// Boundary angular slots. FFV1: raised from 16 so the belt reads as a
 /// semi-continuous foliage mass with occasional apertures, not as a dashed
 /// ring of isolated trees.
 const BOUNDARY_SLOT_COUNT: usize = 24;
 /// Probability a boundary slot is left empty (aperture).
-const BOUNDARY_APERTURE_PROBABILITY: f32 = 0.14;
+const BOUNDARY_APERTURE_PROBABILITY: f32 = 0.05;
 /// Minimum centre spacing in the boundary belt (m). FFV1: below typical crown
 /// radius so neighbouring crowns overlap into a mass.
 const BOUNDARY_MIN_SPACING_M: f32 = 3.2;
@@ -361,31 +361,27 @@ const NEAR_SCALE_MAX: f32 = 1.25;
 const BOUNDARY_SCALE_MIN: f32 = 0.70;
 const BOUNDARY_SCALE_MAX: f32 = 1.35;
 
-/// FFV1 under-storey belt: leafy green mass beneath and between the boundary
-/// trees. The Poly Haven tree scans are sparse twig skeletons, so the belt's
-/// green read comes from grass-cluster cards (asset 5) scaled to bush size:
-/// a hedgerow of blade cards at the tree-line base, which is exactly how a
-/// maintained Central-European field boundary reads.
-const UNDERSTOREY_COUNT: usize = 160;
-const UNDERSTOREY_INNER_RADIUS_M: f32 = 148.0;
-const UNDERSTOREY_OUTER_RADIUS_M: f32 = 205.0;
-const UNDERSTOREY_MIN_SPACING_M: f32 = 2.5;
-const UNDERSTOREY_SCALE_MIN: f32 = 1.20;
-const UNDERSTOREY_SCALE_MAX: f32 = 2.60;
+/// FFV1 under-storey belt: small broadleaf crowns fill the boundary base.
+const UNDERSTOREY_COUNT: usize = 360;
+const UNDERSTOREY_INNER_RADIUS_M: f32 = 125.0;
+const UNDERSTOREY_OUTER_RADIUS_M: f32 = 185.0;
+const UNDERSTOREY_MIN_SPACING_M: f32 = 2.0;
+const UNDERSTOREY_SCALE_MIN: f32 = 0.80;
+const UNDERSTOREY_SCALE_MAX: f32 = 1.25;
 
 /// FFV1 ground-cover belt: candidate draws for the distance-graded grass
 /// cluster scatter around the operational field centre. Density falls off in
 /// two bands (full inside 25 m, reduced to 60 m, none beyond) so near-ground
 /// credibility lives where the pilot camera actually looks and the terrain
 /// material carries the far field.
-const GROUND_COVER_CANDIDATES: usize = 760;
+const GROUND_COVER_CANDIDATES: usize = 80;
 const GROUND_COVER_NEAR_M: f32 = 25.0;
 const GROUND_COVER_MID_M: f32 = 60.0;
 const GROUND_COVER_ELLIPSE_X_M: f32 = 70.0;
 const GROUND_COVER_ELLIPSE_Z_M: f32 = 140.0;
 const GROUND_COVER_MIN_SPACING_M: f32 = 0.9;
-const GROUND_COVER_SCALE_MIN: f32 = 0.45;
-const GROUND_COVER_SCALE_MAX: f32 = 1.10;
+const GROUND_COVER_SCALE_MIN: f32 = 0.25;
+const GROUND_COVER_SCALE_MAX: f32 = 0.45;
 
 /// Total-instance budget guard: enough for credible depth, never a forest.
 /// FFV1: widened for the mass-forming boundary belt, the under-storey and the
@@ -396,9 +392,9 @@ const TARGET_MAX_INSTANCES: usize = 1600;
 #[must_use]
 fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
     match zone {
-        // Near field: broadleaf field trees dominate, conifers interspersed.
+        // Late-spring field edge: leafy broadleaf crowns dominate.
         0 => {
-            if rng.unit() < 0.66 {
+            if rng.unit() < 0.97 {
                 VegetationSpecies::Deciduous
             } else {
                 VegetationSpecies::Conifer
@@ -406,13 +402,13 @@ fn species_for_zone(zone: u8, rng: &mut DeterministicRng) -> VegetationSpecies {
         }
         // FFV1 ground-cover belt: grass clusters only.
         2 => VegetationSpecies::Grass,
-        // Boundary: conifers lead, deciduous fill in — an unequal, natural
-        // mix rather than a strict species ring.
+        // The boundary reads as one green deciduous mass, with occasional
+        // conifers for silhouette variation.
         _ => {
-            if rng.unit() < 0.52 {
-                VegetationSpecies::Conifer
-            } else {
+            if rng.unit() < 0.98 {
                 VegetationSpecies::Deciduous
+            } else {
+                VegetationSpecies::Conifer
             }
         }
     }
@@ -426,7 +422,7 @@ fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
     match species {
         // Assets 2..3 (broadleaf_a / broadleaf_b).
         VegetationSpecies::Deciduous => {
-            if variant_roll < 0.5 {
+            if variant_roll < 0.98 {
                 2
             } else {
                 3
@@ -449,6 +445,12 @@ fn asset_index_for(species: VegetationSpecies, variant_roll: f32) -> usize {
             }
         }
     }
+}
+
+/// The source broadleaf is a small tree; scale its crown to the field-edge
+/// height while keeping the separate under-storey instances shrub sized.
+fn field_tree_scale(asset_index: usize, scale: f32) -> f32 {
+    if asset_index == 2 { scale * 2.1 } else { scale }
 }
 
 /// Deterministic FlyingField vegetation layout.
@@ -497,13 +499,15 @@ pub fn flying_field_layout(
             }
             near_accepted.push([x, z]);
             accepted_in_cluster += 1;
-            let species = species_for_zone(0, &mut rng);
-            let asset_index =
-                asset_index_for(species, rng.unit()).min(assets.len().saturating_sub(1));
+            // Preserve the placement stream while using the leafy source
+            // throughout the close pilot-facing clumps.
+            let _ = species_for_zone(0, &mut rng);
+            let _ = rng.unit();
+            let asset_index = 2.min(assets.len().saturating_sub(1));
             instances.push(VegetationInstance {
                 position: [x, ground_y, z],
                 yaw_rad: rng.range(0.0, std::f32::consts::TAU),
-                scale: rng.range(NEAR_SCALE_MIN, NEAR_SCALE_MAX),
+                scale: field_tree_scale(asset_index, rng.range(NEAR_SCALE_MIN, NEAR_SCALE_MAX)),
                 asset_index,
                 tint: [
                     rng.range(0.94, 1.04),
@@ -540,13 +544,16 @@ pub fn flying_field_layout(
             }
             near_accepted.push([x, z]);
             accepted_satellite += 1;
-            let species = species_for_zone(0, &mut rng);
-            let asset_index =
-                asset_index_for(species, rng.unit()).min(assets.len().saturating_sub(1));
+            let _ = species_for_zone(0, &mut rng);
+            let _ = rng.unit();
+            let asset_index = 2.min(assets.len().saturating_sub(1));
             instances.push(VegetationInstance {
                 position: [x, ground_y, z],
                 yaw_rad: rng.range(0.0, std::f32::consts::TAU),
-                scale: rng.range(NEAR_SCALE_MIN * 0.82, NEAR_SCALE_MAX * 0.92),
+                scale: field_tree_scale(
+                    asset_index,
+                    rng.range(NEAR_SCALE_MIN * 0.82, NEAR_SCALE_MAX * 0.92),
+                ),
                 asset_index,
                 tint: [
                     rng.range(0.94, 1.04),
@@ -566,17 +573,17 @@ pub fn flying_field_layout(
         if rng.unit() < BOUNDARY_APERTURE_PROBABILITY {
             continue;
         }
-        let cos_anchor = anchor.cos();
-        let member_count = if cos_anchor < -0.25 {
-            16 + (rng.unit() * 12.0) as usize // dense opposite the flightline
-        } else if cos_anchor > 0.10 {
-            7 + (rng.unit() * 6.0) as usize // sparse toward flightline
+        let far_side = anchor.sin();
+        let member_count = if far_side > 0.25 {
+            28 + (rng.unit() * 14.0) as usize // dense beyond the runway
+        } else if far_side < -0.10 {
+            12 + (rng.unit() * 8.0) as usize // more open behind the pilot
         } else {
-            12 + (rng.unit() * 9.0) as usize
+            20 + (rng.unit() * 10.0) as usize
         };
         let cluster_radius =
             rng.range(BOUNDARY_INNER_RADIUS_M + 6.0, BOUNDARY_OUTER_RADIUS_M - 6.0);
-        let spread_rad = 0.085 * (0.7 + 0.6 * rng.unit());
+        let spread_rad = 0.14 * (0.7 + 0.6 * rng.unit());
         for _ in 0..member_count {
             let angle = anchor + rng.range(-1.0, 1.0) * spread_rad;
             let radius = (cluster_radius + rng.range(-1.0, 1.0) * 7.0)
@@ -594,12 +601,20 @@ pub fn flying_field_layout(
             }
             boundary_accepted.push([x, z]);
             let species = species_for_zone(1, &mut rng);
-            let asset_index =
-                asset_index_for(species, rng.unit()).min(assets.len().saturating_sub(1));
+            let variant = asset_index_for(species, rng.unit());
+            let asset_index = if z > 0.0 && x.abs() < 145.0 {
+                2 // the runway-facing edge is a continuous summer canopy
+            } else {
+                variant
+            }
+            .min(assets.len().saturating_sub(1));
             instances.push(VegetationInstance {
                 position: [x, ground_y, z],
                 yaw_rad: rng.range(0.0, std::f32::consts::TAU),
-                scale: rng.range(BOUNDARY_SCALE_MIN, BOUNDARY_SCALE_MAX),
+                scale: field_tree_scale(
+                    asset_index,
+                    rng.range(BOUNDARY_SCALE_MIN, BOUNDARY_SCALE_MAX),
+                ),
                 asset_index,
                 tint: [
                     rng.range(0.92, 1.02),
@@ -634,9 +649,9 @@ pub fn flying_field_layout(
             continue;
         }
         understorey_accepted.push([x, z]);
-        // Broadleaf assets only: a shrub-scale conifer reads as a sapling
-        // mistake, a shrub-scale broadleaf reads as undergrowth.
-        let asset_index = if rng.unit() < 0.5 { 2 } else { 3 }.min(assets.len() - 1);
+        // The full source-derived broadleaf crown shrunk to under-storey
+        // scale fills the base without exposing pale sapling trunks.
+        let asset_index = 2.min(assets.len() - 1);
         instances.push(VegetationInstance {
             position: [x, ground_y, z],
             yaw_rad: rng.range(0.0, std::f32::consts::TAU),
@@ -1295,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn both_species_are_present_within_target_ranges() {
+    fn summer_broadleaf_dominates_while_other_species_remain() {
         let world = test_world(DEFAULT_VEGETATION_SEED);
         let deciduous = world
             .instances()
@@ -1307,14 +1322,23 @@ mod tests {
                 )
             })
             .count();
-        let conifer = world.instances().len() - deciduous;
+        let conifer = world
+            .instances()
+            .iter()
+            .filter(|i| {
+                matches!(
+                    world.assets().assets()[i.asset_index].species,
+                    VegetationSpecies::Conifer
+                )
+            })
+            .count();
         assert!(
-            deciduous > world.instances().len() / 5,
+            deciduous > world.instances().len() / 2,
             "deciduous underrepresented"
         );
         assert!(
-            conifer > world.instances().len() / 8,
-            "conifer underrepresented"
+            conifer > 0,
+            "conifer variants should survive off the runway-facing edge"
         );
     }
 
@@ -1330,7 +1354,7 @@ mod tests {
             // FFV1: the band now includes the under-storey belt, which starts
             // slightly inside the tree ring so the line has a filled base.
             assert!(
-                (145.0..=235.0).contains(&radius),
+                (120.0..=210.0).contains(&radius),
                 "boundary tree at radius {radius}"
             );
         }

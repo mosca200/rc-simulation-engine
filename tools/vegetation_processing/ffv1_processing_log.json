@@ -1,9 +1,9 @@
 [
   "FFV1 broadleaf_a re-bake (tree_small_02, CC0)",
-  "  leaf atlas 1024: coverage(alpha>0.45) = 0.524",
+  "  evaluated source crown atlas: C:\\Users\\andre\\OneDrive\\Desktop\\sim rc ufficiale\\.worktrees\\visual-flying-field-v1\\tools\\vegetation_processing\\textures\\ffv1_broadleaf_a\\ffv1_broadleaf_a_crown_rgba_1k.png",
   "  source objects: bark=1 foliage=8",
   "  source tris: bark=28293 foliage=2260",
-  "  lod0: bark=4243 foliage=18080 total=22323",
-  "  lod1: bark=1697 foliage=9040 total=10737",
-  "  lod2: bark=565 foliage=1023 total=1588"
+  "  lod0: bark=4243 foliage=4 total=4247",
+  "  lod1: bark=1697 foliage=3 total=1700",
+  "  lod2: bark=565 foliage=2 total=567"
 ]

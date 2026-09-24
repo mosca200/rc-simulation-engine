@@ -120,9 +120,9 @@ download URLs and API-verified size/MD5/SHA-256 are recorded in
 
 | Runtime asset | Source (Poly Haven, CC0) | Notes |
 |---|---|---|
-| field_broadleaf_a_lod{0,1,2}.glb | tree_small_02 | 1k leaf atlas, linear-light area filter, whiteness-gated coverage, background-filled RGB, scan vertex colours stripped, oriented crown copies at leaf-cluster card scale |
+| field_broadleaf_a_lod{0,1,2}.glb | tree_small_02 | Evaluated Geometry Nodes summer crown rasterized to a transparent 1k texture, then baked onto 4/3/2 crossed cards; source bark is decimated and its overly pale color is darkened |
 | field_grass_a_lod{0,1,2}.glb | grass_medium_01 | baked but NOT placed (flower heads read as pink sheets at tuft scale) |
-| field_grass_b_lod{0,1,2}.glb | grass_medium_02 | ground-cover belt + hedgerow under-storey |
+| field_grass_b_lod{0,1,2}.glb | grass_medium_02 | small, sparse ground-cover belt; broadleaf_a crowns now form the shrub under-storey |
 
 Ground materials acquired through the generalized ENV1 pipeline
 (`tools/env1_asset_pipeline`, `--slug`): `grass_path_3` (ENV1-GND-02, 1.0 m
@@ -130,5 +130,8 @@ span) and `forest_ground_04` (ENV1-GND-03, 3.15 m span), 4k sources reduced to
 committed 2k runtime maps; provenance in
 `docs/assets/env1/env1_open_assets.json`.
 
-Known residual gap: alpha-card crowns still erode at 150-230 m; a billboard
-impostor LOD3 tier is the recommended follow-up.
+The source tree stores its complete leaf mass in an evaluated Geometry Nodes
+curve. Its eight standalone leaf meshes are only prototypes, which explains
+the earlier sparse/brown branch silhouettes. The FFV1 crown card is baked from
+the evaluated leaves with Blender 5.2; `generate_ffv1_trees.py` reproduces the
+three committed GLBs from the recorded CC0 source.

@@ -1,36 +1,32 @@
 """
 FFV1: Flying Field broadleaf re-bake (Poly Haven tree_small_02, CC0).
 
-The PV1-R3 bake decimated the leaf-card set with the same ratios as the bark
-(0.12 / 0.04 / 0.015) and point-sampled the 2k leaf maps into a 512 atlas, so
-the committed crowns carried a few hundred eroded cards: at tree-line distance
-the trees read as bare branch skeletons (the FFV1 visual gate failure).
+The Poly Haven source stores its complete leafy tree in a Geometry Nodes curve.
+The earlier FFV1 bake joined only the eight small leaf prototype meshes and
+missed the evaluated crown; those prototypes cannot fill the tree line even
+when duplicated. This field-specific bake renders the evaluated source leaves
+to a transparent green crown card and embeds crossed cards in the existing
+three GLBs. Bark still comes from the CC0 source meshes.
 
-This bake fixes both, for the broadleaf_a asset only:
+For the broadleaf_a asset only:
 
-* the leaf atlas is composited at 1024 with a 2x2 AREA (box) filter in linear
-  light for RGB and a plain box average for alpha, so leaf-edge coverage
-  survives minification instead of aliasing away;
-* the LOD0 crown is DENSIFIED: the joined source card set plus two transformed
-  copies (a yawed/scaled copy and a mirrored copy) so overlapping card
-  orientations form a closed crown silhouette;
-* LOD1 keeps the undensified card set and LOD2 a reduced one; the renderer's
-  crown-preserving LOD policy draws the LOD0 crown at every distance, so the
-  decimated foliage of LOD1/2 is only a memory/LOD-switch artifact;
+* the evaluated source canopy supplies the card silhouette, rather than the
+  source's undistributed prototype leaf meshes;
+* LOD0/1/2 use four/three/two crossed cards, all from the same source render;
 * bark keeps a decimation policy (0.15 / 0.06 / 0.02).
 
 Geometry and textures both come from the Poly Haven CC0 source (see
-PROVENANCE.md and ffv1_tree_source_receipt.json). Run with:
+PROVENANCE.md). Run with:
 
     "<blender>" --background --python tools/vegetation_processing/generate_ffv1_trees.py
 """
 import bpy
 import json
 import os
-import random
 import sys
 
 import numpy as np
+from mathutils import Vector
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -229,6 +225,9 @@ def composite_bark_atlas():
     diff_path = os.path.join(TEX_DIR, "tree_small_02_branch_diff_2k.png")
     dw, dh, diff = read_png_linear_rgb(diff_path)
     down = box_downsample_rgba(diff, dw, dh, BARK_ATLAS)
+    # The source's pale branches became near-white lines at pilot distance.
+    # A deeper warm-brown bark keeps the trunk legible without leading the view.
+    down[..., :3] *= np.array([0.46, 0.39, 0.32], dtype=np.float32)
     down[..., 3] = 1.0
     out = os.path.join(ATLAS_DIR, "ffv1_broadleaf_a_branch_rgba_1k.png")
     write_atlas(out, down)
@@ -310,6 +309,7 @@ def export_glb(path, bark, foliage):
     bpy.ops.object.select_all(action='DESELECT')
     for obj in [bark, foliage]:
         if obj:
+            obj.hide_render = False
             obj.select_set(True)
     bpy.context.view_layer.objects.active = bark or foliage
     bpy.ops.export_scene.gltf(
@@ -321,13 +321,90 @@ def export_glb(path, bark, foliage):
     )
 
 
+def render_crown_atlas():
+    """Rasterize the evaluated CC0 Geometry Nodes leaves, excluding bark."""
+    tree = bpy.data.objects['tree_small_02_geometry_nodes']
+    for obj in bpy.data.objects:
+        obj.hide_render = obj != tree
+
+    camera_data = bpy.data.cameras.new('ffv1_crown_camera')
+    camera = bpy.data.objects.new('ffv1_crown_camera', camera_data)
+    bpy.context.scene.collection.objects.link(camera)
+    camera.location = (0.0, -12.0, 3.0)
+    camera.rotation_euler = (Vector((0.0, 0.0, 3.0)) - camera.location).to_track_quat('-Z', 'Y').to_euler()
+    camera_data.type = 'ORTHO'
+    camera_data.ortho_scale = 3.6
+
+    sun_data = bpy.data.lights.new('ffv1_crown_sun', 'SUN')
+    sun_data.energy = 1.6
+    sun = bpy.data.objects.new('ffv1_crown_sun', sun_data)
+    bpy.context.scene.collection.objects.link(sun)
+    sun.rotation_euler = (0.5, -0.5, -0.5)
+
+    for material in bpy.data.materials:
+        nodes = material.node_tree.nodes
+        links = material.node_tree.links
+        nodes.clear()
+        output = nodes.new('ShaderNodeOutputMaterial')
+        if 'leaves' in material.name:
+            shader = nodes.new('ShaderNodeBsdfPrincipled')
+            shader.inputs['Base Color'].default_value = (0.13, 0.35, 0.10, 1.0)
+            shader.inputs['Roughness'].default_value = 0.9
+        else:
+            shader = nodes.new('ShaderNodeBsdfTransparent')
+        links.new(shader.outputs['BSDF'], output.inputs['Surface'])
+
+    scene = bpy.context.scene
+    scene.camera = camera
+    scene.render.engine = 'BLENDER_EEVEE'
+    scene.render.resolution_x = 1024
+    scene.render.resolution_y = 1024
+    scene.render.resolution_percentage = 100
+    scene.render.film_transparent = True
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.image_settings.color_mode = 'RGBA'
+    scene.world.color = (0.3, 0.3, 0.3)
+    path = os.path.join(ATLAS_DIR, 'ffv1_broadleaf_a_crown_rgba_1k.png')
+    scene.render.filepath = path
+    bpy.ops.render.render(write_still=True)
+    log(f'  evaluated source crown atlas: {path}')
+    return path
+
+
+def crown_cards(name, material, card_count):
+    """Small field-specific crossed-card crown, centred on the source canopy."""
+    import math
+    vertices, faces, uvs = [], [], []
+    for index in range(card_count):
+        angle = math.pi * index / card_count
+        dx, dy = math.cos(angle) * 1.8, math.sin(angle) * 1.8
+        base = len(vertices)
+        vertices.extend([
+            (-dx, -dy, 1.2), (dx, dy, 1.2),
+            (dx, dy, 4.8), (-dx, -dy, 4.8),
+        ])
+        faces.append((base, base + 1, base + 2, base + 3))
+        uvs.extend([(0, 0), (1, 0), (1, 1), (0, 1)])
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    uv_layer = mesh.uv_layers.new(name='UVMap')
+    for polygon in mesh.polygons:
+        for corner, loop_index in enumerate(polygon.loop_indices):
+            uv_layer.data[loop_index].uv = uvs[polygon.index * 4 + corner]
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.data.materials.append(material)
+    return obj
+
+
 def main():
     log("FFV1 broadleaf_a re-bake (tree_small_02, CC0)")
-    leaf_atlas = composite_leaf_atlas()
     bark_atlas = composite_bark_atlas()
 
     clear_scene()
     bpy.ops.wm.open_mainfile(filepath=os.path.join(SOURCE_DIR, "tree_small_02_1k.blend"))
+    crown_atlas = render_crown_atlas()
     link_all()
 
     meshes = [o for o in bpy.data.objects if o.type == 'MESH']
@@ -348,66 +425,30 @@ def main():
     log(f"  source tris: bark={source_bark_tris} foliage={source_foliage_tris}")
 
     bark_material = make_material("ffv1_bark", bark_atlas, False)
-    foliage_material = make_material("ffv1_foliage", leaf_atlas, True)
+    foliage_material = make_material("ffv1_foliage", crown_atlas, True)
 
     pivot = crown_pivot(foliage) if foliage else None
 
     lods = [
-        # (lod name, bark ratio, foliage copies, foliage decimate)
-        ("lod0", 0.15, 8, 1.0),
-        ("lod1", 0.06, 4, 1.0),
-        ("lod2", 0.02, 1, 0.35),
+        # (lod name, bark ratio, crossed crown cards)
+        ("lod0", 0.15, 4),
+        ("lod1", 0.06, 3),
+        ("lod2", 0.02, 2),
     ]
-    # The source foliage cards are single leaves (~10 cm): sub-pixel at the
-    # 150-230 m tree line, where mipmapped alpha discards them and the crown
-    # collapses to bare branches. Scaling the card set about the crown pivot
-    # turns single leaves into leaf clusters (~30 cm), which is the card size
-    # real-time crowns use, so the silhouette keeps its leaf mass at distance.
-    FOLIAGE_CARD_SCALE = 2.2
-    scatter = random.Random(42)
-    from mathutils import Vector
-    for lod, bark_ratio, copies, foliage_ratio in lods:
+    for lod, bark_ratio, cards in lods:
         bark_lod = decimate(
             duplicate_transformed(bark, f"bark_{lod}", (0.0, 0.0, 0.0), 1.0, Vector((0, 0, 0)), pivot)
             if pivot is not None
             else bark,
             bark_ratio,
         )
-        foliage_pieces = []
-        for index in range(copies):
-            if index == 0:
-                euler, offset = (0.0, 0.0, 0.0), Vector((0, 0, 0))
-                scale = FOLIAGE_CARD_SCALE
-            else:
-                euler = (
-                    scatter.uniform(-0.9, 0.9),
-                    scatter.uniform(-0.9, 0.9),
-                    scatter.uniform(0.0, 6.283),
-                )
-                scale = FOLIAGE_CARD_SCALE * scatter.uniform(0.55, 0.95)
-                offset = Vector(
-                    (
-                        scatter.uniform(-0.6, 0.6),
-                        scatter.uniform(-0.6, 0.6),
-                        scatter.uniform(-0.4, 0.5),
-                    )
-                )
-            piece = duplicate_transformed(
-                foliage, f"foliage_{lod}_{index}", euler, scale, offset, pivot
-            )
-            foliage_pieces.append(piece)
-        foliage_lod = join_meshes(foliage_pieces, f"foliage_{lod}")
-        if foliage_ratio < 1.0:
-            foliage_lod = decimate(foliage_lod, foliage_ratio)
+        foliage_lod = crown_cards(f"foliage_{lod}", foliage_material, cards)
 
         if bark_lod:
             bark_lod.data.materials.clear()
             bark_lod.data.materials.append(bark_material)
             strip_vertex_colors(bark_lod)
-        if foliage_lod:
-            foliage_lod.data.materials.clear()
-            foliage_lod.data.materials.append(foliage_material)
-            strip_vertex_colors(foliage_lod)
+        strip_vertex_colors(foliage_lod)
 
         bark_tris, foliage_tris = tris(bark_lod), tris(foliage_lod)
         log(f"  {lod}: bark={bark_tris} foliage={foliage_tris} total={bark_tris + foliage_tris}")

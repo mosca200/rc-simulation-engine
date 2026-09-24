@@ -119,8 +119,8 @@ const WINDSOCK_POLE_HEIGHT_M: f32 = 6.0;
 const WINDSOCK_SOCK_LENGTH_M: f32 = 2.2;
 
 /// Presentation colors. High-contrast but never emissive.
-const FENCE_WHITE: [f32; 4] = [0.86, 0.86, 0.84, 1.0];
-const PILOT_ORANGE: [f32; 4] = [0.85, 0.25, 0.10, 1.0];
+const FENCE_WHITE: [f32; 4] = [0.62, 0.62, 0.59, 1.0];
+const PILOT_ORANGE: [f32; 4] = [0.62, 0.22, 0.12, 1.0];
 const WINDSOCK_ORANGE: [f32; 4] = [0.92, 0.44, 0.08, 1.0];
 const WINDSOCK_WHITE: [f32; 4] = [0.94, 0.94, 0.92, 1.0];
 
@@ -129,7 +129,7 @@ const WINDSOCK_WHITE: [f32; 4] = [0.94, 0.94, 0.92, 1.0];
 /// RC infrastructure instead of debug markers, while staying visible.
 const RUNWAY_POLE_HEIGHT_M: f32 = 1.5;
 const RUNWAY_POLE_RADIUS_M: f32 = 0.035;
-const RUNWAY_POLE_ORANGE: [f32; 4] = [0.72, 0.30, 0.14, 1.0];
+const RUNWAY_POLE_ORANGE: [f32; 4] = [0.56, 0.27, 0.15, 1.0];
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
