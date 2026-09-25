@@ -74,12 +74,18 @@ def checked_capture_pose(run: dict) -> list[float]:
 
 def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> dict:
     distance = math.dist(position, eye)
+    horizontal_distance = math.hypot(position[0] - eye[0], position[2] - eye[2])
+    sightline_height = (eye[1] + PROXY_DISTANCE_M / horizontal_distance
+                        * (position[1] - eye[1])) if horizontal_distance else None
     if case == "near":
         expectation = "visible_in_front"
         verified = distance < PROXY_DISTANCE_M - PROXY_RADIAL_TOLERANCE_M
     else:
         expectation = "hidden_behind_proxy"
-        verified = distance > PROXY_DISTANCE_M + PROXY_RADIAL_TOLERANCE_M
+        verified = (distance > PROXY_DISTANCE_M + PROXY_RADIAL_TOLERANCE_M
+                    and position[1] > 0
+                    and sightline_height is not None
+                    and 0 < sightline_height < 40.0)
     if not verified:
         raise ValueError(f"{case} aircraft at {distance:.3f} m is not {expectation} "
                          f"of {PROXY_ID} at {PROXY_DISTANCE_M} m")
@@ -90,6 +96,7 @@ def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> di
         "proxy_radial_tolerance_m": PROXY_RADIAL_TOLERANCE_M,
         "aircraft_position_render_m": position,
         "aircraft_distance_from_pilot_m": distance,
+        "proxy_sightline_height_render_m": sightline_height,
         "expected_visibility": expectation,
         "radial_order_verified": verified,
     }
@@ -341,7 +348,7 @@ def main() -> int:
         "resolutions": resolutions,
         "occlusion": occlusion,
         "occlusion_validation": {
-            "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. This verifies radial order; visual visibility remains for review.",
+            "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. FAR also requires the aircraft above ground and its ray from the pilot to cross the proxy radius between ground and the 40 m proxy top. This verifies geometric order and height; visual visibility remains for review.",
             "proxy": {
                 "id": PROXY_ID,
                 "representative_distance_from_pilot_m": PROXY_DISTANCE_M,
@@ -353,7 +360,8 @@ def main() -> int:
                     key: entry[key] for key in (
                         "pilot_position_render_m", "aircraft_position_render_m",
                         "aircraft_distance_from_pilot_m", "expected_visibility",
-                        "radial_order_verified", "scene_id", "presentation_frame_index",
+                        "radial_order_verified", "proxy_sightline_height_render_m",
+                        "scene_id", "presentation_frame_index",
                         "framebuffer", "git_commit_sha", "git_dirty", "local_png",
                         "local_png_sha256", "capture_pose_sha256", "gpu_timing_status",
                         "gpu_timing_source_presentation_frame_index", "gpu_timing_frame_age",

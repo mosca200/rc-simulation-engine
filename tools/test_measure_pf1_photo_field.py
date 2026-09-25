@@ -43,9 +43,11 @@ class OcclusionEvidenceTests(unittest.TestCase):
     def test_near_and_far_require_conservative_distance_order(self):
         eye = [0.0, 0.0, 0.0]
         self.assertTrue(occlusion_geometry("near", [20.0, 0.0, 0.0], eye)["radial_order_verified"])
-        self.assertTrue(occlusion_geometry("far", [40.0, 0.0, 0.0], eye)["radial_order_verified"])
+        self.assertTrue(occlusion_geometry("far", [40.0, 5.0, 0.0], eye)["radial_order_verified"])
         with self.assertRaises(ValueError):
             occlusion_geometry("far", [34.0, 0.0, 0.0], eye)
+        with self.assertRaises(ValueError):
+            occlusion_geometry("far", [40.0, -2.0, 0.0], eye)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "schema_version": "1.1.0",
   "scene_id": "pf1_occlusion_far",
-  "description": "PF1 occlusion test case B: the Acro Electric 01 flown for 180 presentation frames so that, for ANY spawn heading, it is at least 70 m from the fixed photographic eye and therefore FARTHER than the 30 m tree-ring proxy while still far below its 53 deg top elevation, so the photographed tree line must hide it.",
+  "description": "PF1 occlusion test case B: the Acro Electric 01 flown beyond the 30 m tree-ring proxy. The captured render pose, rather than this flight setup, establishes its actual distance and sightline height.",
   "renderer": {
     "version": "v2",
     "terrain_debug": "final",
@@ -24,7 +24,7 @@
     "model": "models/acro_electric_01/model.json",
     "throttle": 0.8,
     "start_on_ground": false,
-    "altitude_m": 8.0,
+    "altitude_m": 20.0,
     "airspeed_mps": 30.0
   },
   "warmup": 180,
