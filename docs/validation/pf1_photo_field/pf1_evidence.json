@@ -459,12 +459,25 @@
       "scene_id": "pf1_occlusion_near",
       "description": "aircraft nearer to the pilot than the proxy",
       "captured": true,
-      "aircraft_position_render_m": [
-        0.0,
-        0.0,
-        0.0
+      "pilot_position_render_m": [
+        15.321,
+        1.6,
+        -12.856
       ],
-      "aircraft_position_note": "the parked aircraft sits at the render-world spawn origin; the receipt/audit carry no pose, and none is needed for a ground start",
+      "proxy_id": "pf1_tree_ring",
+      "proxy_representative_distance_from_pilot_m": 30.0,
+      "proxy_radial_tolerance_m": 5.5,
+      "aircraft_position_render_m": [
+        1.7419807e-10,
+        -5.6298613e-05,
+        2.7162829e-05
+      ],
+      "aircraft_distance_from_pilot_m": 20.064163465362576,
+      "proxy_ray_intersection": null,
+      "expected_visibility": "visible_in_front",
+      "radial_order_verified": true,
+      "aircraft_position_source": "runtime_capture_pose.json: render frame submitted for this PNG; frame, extent and image SHA256 verified against the runtime receipt",
+      "capture_pose_sha256": "7e9949870ac4ad2de7388a212437e13ce625fd89bc799431fb8583ab9f27f0fd",
       "aircraft_flight_spec": {
         "throttle": 0.0,
         "start_on_ground": true,
@@ -476,20 +489,20 @@
       "committed_png": null,
       "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
       "local_png": "tmp/pf1_occlusion/near/pf1_occlusion_near/pf1_occlusion_near_1920x1080.png",
-      "local_png_sha256": "0b5ce3830735f5f1d002b944d597b547d2ad8db5da9edd0083ec46fd0e60e51c",
-      "image_sha256": "0b5ce3830735f5f1d002b944d597b547d2ad8db5da9edd0083ec46fd0e60e51c",
-      "image_byte_size": 4496317,
+      "local_png_sha256": "ea83ac49bb47fddde851f3758bccb5e5eeafb210bd5211e733af117c305b06c3",
+      "image_sha256": "ea83ac49bb47fddde851f3758bccb5e5eeafb210bd5211e733af117c305b06c3",
+      "image_byte_size": 4496377,
       "framebuffer": [
         1920,
         1080
       ],
       "presentation_frame_index": 30,
-      "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+      "git_commit_sha": "48c46e1c91f2e1b4f29a76a8d5bc24bad977cd02",
       "git_dirty": false,
       "runner_success": true,
       "capture_evidence_valid": true,
       "visual_audit_valid": true,
-      "cpu_frame_duration_ns": 27030400,
+      "cpu_frame_duration_ns": 18177900,
       "gpu_timing_status": "current_frame_sample",
       "gpu_timing_source_presentation_frame_index": 30,
       "gpu_timing_frame_age": 0,
@@ -497,38 +510,38 @@
         {
           "pass_id": "shadow_near",
           "label": "G3E near cascade shadow depth pass",
-          "cpu_duration_ns": 7900,
-          "gpu_duration_ns": 36864.0
+          "cpu_duration_ns": 7000,
+          "gpu_duration_ns": 4096.0
         },
         {
           "pass_id": "shadow_mid",
           "label": "G3E mid cascade shadow depth pass",
-          "cpu_duration_ns": 2700,
-          "gpu_duration_ns": 15360.0
+          "cpu_duration_ns": 2300,
+          "gpu_duration_ns": 4096.0
         },
         {
           "pass_id": "shadow_far",
           "label": "G3E far cascade shadow depth pass",
-          "cpu_duration_ns": 1900,
-          "gpu_duration_ns": 16384.0
+          "cpu_duration_ns": 2000,
+          "gpu_duration_ns": 4096.0
         },
         {
           "pass_id": "scene",
           "label": "G1C scene pass",
-          "cpu_duration_ns": 7200,
-          "gpu_duration_ns": 138240.0
+          "cpu_duration_ns": 6100,
+          "gpu_duration_ns": 15360.0
         },
         {
           "pass_id": "temporal_resolve",
           "label": "RV2 temporal resolve pass",
           "cpu_duration_ns": 700,
-          "gpu_duration_ns": 107520.0
+          "gpu_duration_ns": 24576.0
         },
         {
           "pass_id": "postprocess",
           "label": "G3B HDR postprocess pass",
-          "cpu_duration_ns": 700,
-          "gpu_duration_ns": 1235968.0
+          "cpu_duration_ns": 900,
+          "gpu_duration_ns": 34816.0
         }
       ]
     },
@@ -537,74 +550,178 @@
       "scene_id": "pf1_occlusion_far",
       "description": "aircraft farther from the pilot than the proxy",
       "captured": true,
-      "aircraft_position_render_m": null,
-      "aircraft_position_note": "the runtime exposes no aircraft pose in the receipt or audit; the deterministic flight specification below is the recorded authority for where the aircraft is at the captured presentation frame",
+      "pilot_position_render_m": [
+        15.321,
+        1.6,
+        -12.856
+      ],
+      "proxy_id": "pf1_tree_ring",
+      "proxy_representative_distance_from_pilot_m": 30.0,
+      "proxy_radial_tolerance_m": 5.5,
+      "aircraft_position_render_m": [
+        -0.052442517,
+        3.538998,
+        -61.153305
+      ],
+      "aircraft_distance_from_pilot_m": 50.72210680098504,
+      "proxy_ray_intersection": {
+        "box_index": 33,
+        "box_azimuth_deg": 247.50000000000003,
+        "box_center_radius_m": 30.283230378838617,
+        "ray_entry_horizontal_distance_m": 27.882789814283676,
+        "ray_entry_height_render_m": 2.666679298045647
+      },
+      "expected_visibility": "hidden_behind_proxy",
+      "radial_order_verified": true,
+      "aircraft_position_source": "runtime_capture_pose.json: render frame submitted for this PNG; frame, extent and image SHA256 verified against the runtime receipt",
+      "capture_pose_sha256": "50e87cebaec8e8ce34e106ff560bc4631b86403afbdb51fd673127d646ede497",
       "aircraft_flight_spec": {
         "throttle": 0.8,
         "start_on_ground": false,
-        "altitude_m": 8.0,
-        "airspeed_mps": 30.0,
-        "capture_frame": 180
+        "altitude_m": 20.0,
+        "airspeed_mps": 60.0,
+        "capture_frame": 120
       },
       "png": "C:\\Users\\andre\\OneDrive\\Desktop\\sim rc ufficiale\\.worktrees\\visual-photo-field-v1\\tmp\\pf1_occlusion\\far\\pf1_occlusion_far\\pf1_occlusion_far_1920x1080.png",
       "committed_png": null,
       "committed_png_note": "candidate capture: not committed per project rule; hashes and the receipt/audit are the committed evidence",
       "local_png": "tmp/pf1_occlusion/far/pf1_occlusion_far/pf1_occlusion_far_1920x1080.png",
-      "local_png_sha256": "a8270fbb66c0a83b580510cecc9c4f237b242a99636f8c78f067def31c9b9ccd",
-      "image_sha256": "a8270fbb66c0a83b580510cecc9c4f237b242a99636f8c78f067def31c9b9ccd",
-      "image_byte_size": 4473844,
+      "local_png_sha256": "acfc27cf675f8d377e870ea0724325a599ed886302e4a4ce2d9d76fa1fd1dbc0",
+      "image_sha256": "acfc27cf675f8d377e870ea0724325a599ed886302e4a4ce2d9d76fa1fd1dbc0",
+      "image_byte_size": 4713941,
       "framebuffer": [
         1920,
         1080
       ],
-      "presentation_frame_index": 180,
-      "git_commit_sha": "1f1546b2dd0d9fbf75231e0e0c0177b21ca60cb5",
+      "presentation_frame_index": 120,
+      "git_commit_sha": "48c46e1c91f2e1b4f29a76a8d5bc24bad977cd02",
       "git_dirty": false,
       "runner_success": true,
       "capture_evidence_valid": true,
       "visual_audit_valid": true,
-      "cpu_frame_duration_ns": 19437300,
+      "cpu_frame_duration_ns": 17891000,
       "gpu_timing_status": "current_frame_sample",
-      "gpu_timing_source_presentation_frame_index": 180,
+      "gpu_timing_source_presentation_frame_index": 120,
       "gpu_timing_frame_age": 0,
       "passes": [
         {
           "pass_id": "shadow_near",
           "label": "G3E near cascade shadow depth pass",
-          "cpu_duration_ns": 6100,
-          "gpu_duration_ns": 16384.0
+          "cpu_duration_ns": 6300,
+          "gpu_duration_ns": 5120.0
         },
         {
           "pass_id": "shadow_mid",
           "label": "G3E mid cascade shadow depth pass",
-          "cpu_duration_ns": 2300,
-          "gpu_duration_ns": 12288.0
+          "cpu_duration_ns": 2400,
+          "gpu_duration_ns": 3072.0
         },
         {
           "pass_id": "shadow_far",
           "label": "G3E far cascade shadow depth pass",
           "cpu_duration_ns": 2000,
-          "gpu_duration_ns": 12288.0
+          "gpu_duration_ns": 4096.0
         },
         {
           "pass_id": "scene",
           "label": "G1C scene pass",
-          "cpu_duration_ns": 6100,
-          "gpu_duration_ns": 69632.0
+          "cpu_duration_ns": 6000,
+          "gpu_duration_ns": 15360.0
         },
         {
           "pass_id": "temporal_resolve",
           "label": "RV2 temporal resolve pass",
           "cpu_duration_ns": 600,
-          "gpu_duration_ns": 79872.0
+          "gpu_duration_ns": 24576.0
         },
         {
           "pass_id": "postprocess",
           "label": "G3B HDR postprocess pass",
-          "cpu_duration_ns": 700,
-          "gpu_duration_ns": 313344.0
+          "cpu_duration_ns": 600,
+          "gpu_duration_ns": 35840.0
         }
       ]
     }
-  ]
+  ],
+  "occlusion_validation": {
+    "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. FAR also requires the aircraft above ground and an explicit eye-to-aircraft ray intersection with one of the 48 authored tree-ring boxes below its 40 m top. This verifies geometric occlusion; visual visibility remains for review.",
+    "proxy": {
+      "id": "pf1_tree_ring",
+      "representative_distance_from_pilot_m": 30.0,
+      "radial_tolerance_m": 5.5,
+      "source": "docs/assets/photofield/pf1_provenance.json: calibration.depth_proxy_geometry.tree_ring"
+    },
+    "near_case": {
+      "pilot_position_render_m": [
+        15.321,
+        1.6,
+        -12.856
+      ],
+      "proxy_id": "pf1_tree_ring",
+      "proxy_representative_distance_from_pilot_m": 30.0,
+      "aircraft_position_render_m": [
+        1.7419807e-10,
+        -5.6298613e-05,
+        2.7162829e-05
+      ],
+      "aircraft_position_source": "runtime_capture_pose.json: render frame submitted for this PNG; frame, extent and image SHA256 verified against the runtime receipt",
+      "aircraft_distance_from_pilot_m": 20.064163465362576,
+      "expected_visibility": "visible_in_front",
+      "radial_order_verified": true,
+      "proxy_ray_intersection": null,
+      "scene_id": "pf1_occlusion_near",
+      "presentation_frame_index": 30,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "git_commit_sha": "48c46e1c91f2e1b4f29a76a8d5bc24bad977cd02",
+      "git_dirty": false,
+      "local_png": "tmp/pf1_occlusion/near/pf1_occlusion_near/pf1_occlusion_near_1920x1080.png",
+      "local_png_sha256": "ea83ac49bb47fddde851f3758bccb5e5eeafb210bd5211e733af117c305b06c3",
+      "capture_pose_sha256": "7e9949870ac4ad2de7388a212437e13ce625fd89bc799431fb8583ab9f27f0fd",
+      "gpu_timing_status": "current_frame_sample",
+      "gpu_timing_source_presentation_frame_index": 30,
+      "gpu_timing_frame_age": 0
+    },
+    "far_case": {
+      "pilot_position_render_m": [
+        15.321,
+        1.6,
+        -12.856
+      ],
+      "proxy_id": "pf1_tree_ring",
+      "proxy_representative_distance_from_pilot_m": 30.0,
+      "aircraft_position_render_m": [
+        -0.052442517,
+        3.538998,
+        -61.153305
+      ],
+      "aircraft_position_source": "runtime_capture_pose.json: render frame submitted for this PNG; frame, extent and image SHA256 verified against the runtime receipt",
+      "aircraft_distance_from_pilot_m": 50.72210680098504,
+      "expected_visibility": "hidden_behind_proxy",
+      "radial_order_verified": true,
+      "proxy_ray_intersection": {
+        "box_index": 33,
+        "box_azimuth_deg": 247.50000000000003,
+        "box_center_radius_m": 30.283230378838617,
+        "ray_entry_horizontal_distance_m": 27.882789814283676,
+        "ray_entry_height_render_m": 2.666679298045647
+      },
+      "scene_id": "pf1_occlusion_far",
+      "presentation_frame_index": 120,
+      "framebuffer": [
+        1920,
+        1080
+      ],
+      "git_commit_sha": "48c46e1c91f2e1b4f29a76a8d5bc24bad977cd02",
+      "git_dirty": false,
+      "local_png": "tmp/pf1_occlusion/far/pf1_occlusion_far/pf1_occlusion_far_1920x1080.png",
+      "local_png_sha256": "acfc27cf675f8d377e870ea0724325a599ed886302e4a4ce2d9d76fa1fd1dbc0",
+      "capture_pose_sha256": "50e87cebaec8e8ce34e106ff560bc4631b86403afbdb51fd673127d646ede497",
+      "gpu_timing_status": "current_frame_sample",
+      "gpu_timing_source_presentation_frame_index": 120,
+      "gpu_timing_frame_age": 0
+    }
+  }
 }

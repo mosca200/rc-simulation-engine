@@ -395,7 +395,9 @@ def main() -> int:
             **{
                 f"{entry['case']}_case": {
                     key: entry[key] for key in (
-                        "pilot_position_render_m", "aircraft_position_render_m",
+                        "pilot_position_render_m", "proxy_id",
+                        "proxy_representative_distance_from_pilot_m",
+                        "aircraft_position_render_m", "aircraft_position_source",
                         "aircraft_distance_from_pilot_m", "expected_visibility",
                         "radial_order_verified", "proxy_ray_intersection",
                         "scene_id", "presentation_frame_index",

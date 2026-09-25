@@ -202,5 +202,6 @@ extent, and PNG SHA256. The strict RuntimeCaptureReceipt 1.0.0 contract is uncha
 PNG before recording the NEAR and FAR aircraft positions and pilot distances in
 `pf1_evidence.json`. Both cases use `pf1_tree_ring`, with a representative 30 m
 radius and a conservative 5.5 m radial tolerance (3 m jitter plus 2.5 m half
-depth). The numerical check establishes depth order; visual review remains
-separate and `visual_pass` remains `null`.
+depth). The numerical check establishes depth order and intersects the FAR
+eye-to-aircraft ray with an authored ring box; visual review remains separate
+and `visual_pass` remains `null`.
