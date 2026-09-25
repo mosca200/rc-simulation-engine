@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import sys
 
@@ -40,6 +41,58 @@ OCCLUSION_CASES = (
     ("near", "pf1_occlusion_near", "aircraft nearer to the pilot than the proxy"),
     ("far", "pf1_occlusion_far", "aircraft farther from the pilot than the proxy"),
 )
+
+PROXY_ID = "pf1_tree_ring"
+PROXY_DISTANCE_M = 30.0
+PROXY_RADIAL_TOLERANCE_M = 3.0 + 5.0 / 2.0
+
+
+def checked_capture_pose(run: dict) -> list[float]:
+    """Require the render pose recorded alongside the exact captured PNG."""
+    receipt = run["receipt"]
+    if sha256_file(run["png"]) != receipt["image_sha256"]:
+        raise ValueError("capture PNG does not match runtime receipt")
+    path = run["png"].parent / "runtime_capture_pose.json"
+    pose = json.loads(path.read_text(encoding="utf-8"))
+    expected = {
+        "schema_version": "1.0.0",
+        "presentation_frame_index": receipt["presentation_frame_index"],
+        "framebuffer_width": receipt["framebuffer_width"],
+        "framebuffer_height": receipt["framebuffer_height"],
+        "image_sha256": receipt["image_sha256"],
+    }
+    for key, value in expected.items():
+        if pose.get(key) != value:
+            raise ValueError(f"{path}: {key} does not match capture receipt")
+    position = pose.get("aircraft_position_render_m")
+    if (not isinstance(position, list) or len(position) != 3
+            or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   or not math.isfinite(v) for v in position)):
+        raise ValueError(f"{path}: missing or invalid capture-frame aircraft position")
+    return position
+
+
+def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> dict:
+    distance = math.dist(position, eye)
+    if case == "near":
+        expectation = "visible_in_front"
+        verified = distance < PROXY_DISTANCE_M - PROXY_RADIAL_TOLERANCE_M
+    else:
+        expectation = "hidden_behind_proxy"
+        verified = distance > PROXY_DISTANCE_M + PROXY_RADIAL_TOLERANCE_M
+    if not verified:
+        raise ValueError(f"{case} aircraft at {distance:.3f} m is not {expectation} "
+                         f"of {PROXY_ID} at {PROXY_DISTANCE_M} m")
+    return {
+        "pilot_position_render_m": eye,
+        "proxy_id": PROXY_ID,
+        "proxy_representative_distance_from_pilot_m": PROXY_DISTANCE_M,
+        "proxy_radial_tolerance_m": PROXY_RADIAL_TOLERANCE_M,
+        "aircraft_position_render_m": position,
+        "aircraft_distance_from_pilot_m": distance,
+        "expected_visibility": expectation,
+        "radial_order_verified": verified,
+    }
 
 UNAVAILABLE = {
     "gpu_frame_duration_ns": (
@@ -204,37 +257,25 @@ def main() -> int:
     for case, scene_id, description in OCCLUSION_CASES:
         base = occlusion_root / case
         if not base.is_dir():
-            occlusion.append(
-                {"case": case, "scene_id": scene_id, "description": description,
-                 "captured": False, "note": "run tree absent"}
-            )
-            continue
+            raise FileNotFoundError(f"required occlusion capture absent: {base}")
         run = load_run(occlusion_root, case, scene_id)
         manifest = json.loads(
             (OUT_DIR / f"{scene_id}.json").read_text(encoding="utf-8")
         )
         aircraft = manifest["aircraft"]
-        if aircraft.get("start_on_ground"):
-            position = [0.0, 0.0, 0.0]
-            position_note = (
-                "the parked aircraft sits at the render-world spawn origin; the "
-                "receipt/audit carry no pose, and none is needed for a ground start"
-            )
-        else:
-            position = None
-            position_note = (
-                "the runtime exposes no aircraft pose in the receipt or audit; the "
-                "deterministic flight specification below is the recorded authority "
-                "for where the aircraft is at the captured presentation frame"
-            )
+        eye = manifest["camera"]["pilot_position_render_m"]
+        position = checked_capture_pose(run)
+        geometry = occlusion_geometry(case, position, eye)
+        pose_path = run["png"].parent / "runtime_capture_pose.json"
         occlusion.append(
             {
                 "case": case,
                 "scene_id": scene_id,
                 "description": description,
                 "captured": True,
-                "aircraft_position_render_m": position,
-                "aircraft_position_note": position_note,
+                **geometry,
+                "aircraft_position_source": "runtime_capture_pose.json: render frame submitted for this PNG; frame, extent and image SHA256 verified against the runtime receipt",
+                "capture_pose_sha256": sha256_file(pose_path),
                 "aircraft_flight_spec": {
                     "throttle": aircraft.get("throttle"),
                     "start_on_ground": aircraft.get("start_on_ground"),
@@ -256,6 +297,11 @@ def main() -> int:
         REPO_ROOT / "crates/renderer/assets/photofield/meadow/photo_field_depth.glb"
     )
     provenance_path = REPO_ROOT / "docs/assets/photofield/pf1_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    ring = provenance["calibration"]["depth_proxy_geometry"]["tree_ring"]
+    if (ring["node"] != PROXY_ID or ring["radius_m"] != PROXY_DISTANCE_M
+            or ring["jitter_m"] + ring["depth_m"] / 2 != PROXY_RADIAL_TOLERANCE_M):
+        raise ValueError("occlusion proxy does not match committed provenance")
 
     document = {
         "schema_version": 1,
@@ -294,6 +340,27 @@ def main() -> int:
         },
         "resolutions": resolutions,
         "occlusion": occlusion,
+        "occlusion_validation": {
+            "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. This verifies radial order; visual visibility remains for review.",
+            "proxy": {
+                "id": PROXY_ID,
+                "representative_distance_from_pilot_m": PROXY_DISTANCE_M,
+                "radial_tolerance_m": PROXY_RADIAL_TOLERANCE_M,
+                "source": "docs/assets/photofield/pf1_provenance.json: calibration.depth_proxy_geometry.tree_ring",
+            },
+            **{
+                f"{entry['case']}_case": {
+                    key: entry[key] for key in (
+                        "pilot_position_render_m", "aircraft_position_render_m",
+                        "aircraft_distance_from_pilot_m", "expected_visibility",
+                        "radial_order_verified", "scene_id", "presentation_frame_index",
+                        "framebuffer", "git_commit_sha", "git_dirty", "local_png",
+                        "local_png_sha256", "capture_pose_sha256", "gpu_timing_status",
+                        "gpu_timing_source_presentation_frame_index", "gpu_timing_frame_age",
+                    )
+                } for entry in occlusion
+            },
+        },
     }
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

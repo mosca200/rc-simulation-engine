@@ -191,3 +191,16 @@ committate (regola di progetto): `committed_png: null` + path `tmp/` + SHA-256.
 non disponibili nel repository (VRAM, FPS/percentili, draw-call totali) registrate
 `null` con motivazione, mai stimate; i `gpu_duration_ns` restano single-sample e
 va dichiarato.
+
+### PF1 occlusion evidence closure
+
+For each capture with a runtime receipt, the app also writes
+`runtime_capture_pose.json` beside it. This separate sidecar records the aircraft
+render position submitted for the captured frame, the frame number, framebuffer
+extent, and PNG SHA256. The strict RuntimeCaptureReceipt 1.0.0 contract is unchanged.
+`tools/measure_pf1_photo_field.py` verifies those values against the receipt and
+PNG before recording the NEAR and FAR aircraft positions and pilot distances in
+`pf1_evidence.json`. Both cases use `pf1_tree_ring`, with a representative 30 m
+radius and a conservative 5.5 m radial tolerance (3 m jitter plus 2.5 m half
+depth). The numerical check establishes depth order; visual review remains
+separate and `visual_pass` remains `null`.

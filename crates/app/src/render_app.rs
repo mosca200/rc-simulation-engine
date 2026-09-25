@@ -147,6 +147,21 @@ struct RuntimeCaptureReceipt {
     image_byte_size: u64,
 }
 
+/// Capture-frame render pose, kept separate from the frozen receipt 1.0.0 contract.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RuntimeCapturePose {
+    schema_version: &'static str,
+    presentation_frame_index: u64,
+    framebuffer_width: u32,
+    framebuffer_height: u32,
+    image_sha256: String,
+    aircraft_position_render_m: [f32; 3],
+}
+
+fn capture_pose_path(receipt_path: &Path) -> PathBuf {
+    receipt_path.with_file_name("runtime_capture_pose.json")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RenderResolution {
     width: u32,
@@ -1225,6 +1240,7 @@ fn prepare_capture_outputs(capture: Option<&CaptureConfig>) -> Result<(), Render
     let mut paths = vec![capture.image_path.clone()];
     if let Some(receipt_path) = capture.receipt_path.as_ref() {
         paths.push(receipt_path.clone());
+        paths.push(capture_pose_path(receipt_path));
     }
     let temporary_paths = paths
         .iter()
@@ -1367,6 +1383,7 @@ fn persist_capture_artifacts(
     capture: &CaptureConfig,
     presentation_frame_index: u64,
     frame: &CapturedFrame,
+    aircraft_position_render_m: [f32; 3],
 ) -> Result<RuntimeCaptureReceipt, RenderRuntimeError> {
     let expected_len = u64::from(frame.width)
         .checked_mul(u64::from(frame.height))
@@ -1405,6 +1422,22 @@ fn persist_capture_artifacts(
     } else {
         None
     };
+    let pose_bytes = if capture.receipt_path.is_some() {
+        let pose = RuntimeCapturePose {
+            schema_version: "1.0.0",
+            presentation_frame_index,
+            framebuffer_width: frame.width,
+            framebuffer_height: frame.height,
+            image_sha256: receipt.image_sha256.clone(),
+            aircraft_position_render_m,
+        };
+        let mut bytes = serde_json::to_vec_pretty(&pose)
+            .map_err(RenderRuntimeError::CaptureReceiptSerialization)?;
+        bytes.push(b'\n');
+        Some(bytes)
+    } else {
+        None
+    };
 
     write_capture_file(&capture.image_path, &png_bytes)?;
     if let (Some(receipt_path), Some(receipt_bytes)) =
@@ -1412,6 +1445,14 @@ fn persist_capture_artifacts(
         && let Err(error) = write_receipt_file(receipt_path, receipt_bytes)
     {
         let _ = remove_file_if_present(&capture.image_path);
+        return Err(error);
+    }
+    if let (Some(receipt_path), Some(pose_bytes)) =
+        (capture.receipt_path.as_ref(), pose_bytes.as_deref())
+        && let Err(error) = write_receipt_file(&capture_pose_path(receipt_path), pose_bytes)
+    {
+        let _ = remove_file_if_present(&capture.image_path);
+        let _ = remove_file_if_present(receipt_path);
         return Err(error);
     }
     Ok(receipt)
@@ -2199,8 +2240,13 @@ impl RenderApplication {
                     let artifact_result = self.capture.as_ref().map_or_else(
                         || Err(RenderRuntimeError::InvalidCapturedFrame),
                         |capture| {
-                            persist_capture_artifacts(capture, pending_frame.index, &captured)
-                                .map(|_| ())
+                            persist_capture_artifacts(
+                                capture,
+                                pending_frame.index,
+                                &captured,
+                                frame.aircraft_pose().translation_render_m(),
+                            )
+                            .map(|_| ())
                         },
                     );
                     if let Err(error) = artifact_result {
@@ -3333,7 +3379,7 @@ mod tests {
             rgba8: vec![255, 0, 0, 255, 0, 255, 0, 255],
         };
         prepare_capture_outputs(Some(&capture)).unwrap();
-        let receipt = persist_capture_artifacts(&capture, 7, &frame).unwrap();
+        let receipt = persist_capture_artifacts(&capture, 7, &frame, [1.0, 2.0, 3.0]).unwrap();
         let image_bytes = fs::read(&image_path).unwrap();
         let receipt_value: serde_json::Value =
             serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
@@ -3348,6 +3394,14 @@ mod tests {
         assert_eq!(receipt_value["framebuffer_height"], 1);
         assert_eq!(receipt_value["image_sha256"], sha256_hex(&image_bytes));
         assert_eq!(receipt_value["image_byte_size"], image_bytes.len() as u64);
+        let pose_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(capture_pose_path(&receipt_path)).unwrap()).unwrap();
+        assert_eq!(pose_value["presentation_frame_index"], 7);
+        assert_eq!(pose_value["image_sha256"], sha256_hex(&image_bytes));
+        assert_eq!(
+            pose_value["aircraft_position_render_m"],
+            serde_json::json!([1.0, 2.0, 3.0])
+        );
         let decoded = image::load_from_memory_with_format(&image_bytes, image::ImageFormat::Png)
             .unwrap()
             .to_rgba8();
@@ -3355,6 +3409,7 @@ mod tests {
         assert_eq!(decoded.as_raw(), &frame.rgba8);
 
         fs::remove_file(image_path).unwrap();
+        fs::remove_file(capture_pose_path(&receipt_path)).unwrap();
         fs::remove_file(receipt_path).unwrap();
         fs::remove_dir(directory).unwrap();
     }
@@ -3380,7 +3435,7 @@ mod tests {
         prepare_capture_outputs(Some(&capture)).unwrap();
 
         assert!(matches!(
-            persist_capture_artifacts(&capture, 0, &frame),
+            persist_capture_artifacts(&capture, 0, &frame, [0.0; 3]),
             Err(RenderRuntimeError::InvalidCapturedFrame)
         ));
         assert!(!image_path.exists());
