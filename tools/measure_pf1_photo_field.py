@@ -28,6 +28,14 @@ import pathlib
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from tools.photo_field_pipeline.photo_field_assets import (
+    DeterministicLcg, PILOT_EYE_RENDER_M, TREE_RING_COUNT,
+    TREE_RING_DEPTH_M, TREE_RING_HEIGHT_M, TREE_RING_JITTER_M,
+    TREE_RING_JITTER_SEED, TREE_RING_RADIUS_M, TREE_RING_WIDTH_M,
+)
+
 OUT_DIR = REPO_ROOT / "docs" / "validation" / "pf1_photo_field"
 EVIDENCE = OUT_DIR / "pf1_evidence.json"
 
@@ -43,8 +51,8 @@ OCCLUSION_CASES = (
 )
 
 PROXY_ID = "pf1_tree_ring"
-PROXY_DISTANCE_M = 30.0
-PROXY_RADIAL_TOLERANCE_M = 3.0 + 5.0 / 2.0
+PROXY_DISTANCE_M = TREE_RING_RADIUS_M
+PROXY_RADIAL_TOLERANCE_M = TREE_RING_JITTER_M + TREE_RING_DEPTH_M / 2
 
 
 def checked_capture_pose(run: dict) -> list[float]:
@@ -72,20 +80,49 @@ def checked_capture_pose(run: dict) -> list[float]:
     return position
 
 
-def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> dict:
-    distance = math.dist(position, eye)
+def tree_ring_ray_hit(position: list[float], eye: list[float]) -> dict | None:
+    """Intersect the eye-to-aircraft ray with the authored ring boxes."""
     horizontal_distance = math.hypot(position[0] - eye[0], position[2] - eye[2])
-    sightline_height = (eye[1] + PROXY_DISTANCE_M / horizontal_distance
-                        * (position[1] - eye[1])) if horizontal_distance else None
+    if horizontal_distance == 0:
+        return None
+    direction = ((position[0] - eye[0]) / horizontal_distance,
+                 (position[2] - eye[2]) / horizontal_distance)
+    jitter = DeterministicLcg(TREE_RING_JITTER_SEED)
+    for index in range(TREE_RING_COUNT):
+        azimuth = 2 * math.pi * index / TREE_RING_COUNT
+        radius = TREE_RING_RADIUS_M + TREE_RING_JITTER_M * jitter.next_symmetric()
+        radial = (math.cos(azimuth), math.sin(azimuth))
+        cos_delta = direction[0] * radial[0] + direction[1] * radial[1]
+        if cos_delta <= 0:
+            continue
+        entry = (radius - TREE_RING_DEPTH_M / 2) / cos_delta
+        tangent = abs(entry * (direction[1] * radial[0] - direction[0] * radial[1]))
+        if entry >= horizontal_distance or tangent > TREE_RING_WIDTH_M / 2:
+            continue
+        height = eye[1] + entry / horizontal_distance * (position[1] - eye[1])
+        if 0 < height < TREE_RING_HEIGHT_M:
+            return {
+                "box_index": index,
+                "box_azimuth_deg": math.degrees(azimuth),
+                "box_center_radius_m": radius,
+                "ray_entry_horizontal_distance_m": entry,
+                "ray_entry_height_render_m": height,
+            }
+    return None
+
+
+def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> dict:
+    if eye != list(PILOT_EYE_RENDER_M):
+        raise ValueError("occlusion pilot eye differs from authored proxy eye")
+    distance = math.dist(position, eye)
+    ray_hit = tree_ring_ray_hit(position, eye) if case == "far" else None
     if case == "near":
         expectation = "visible_in_front"
         verified = distance < PROXY_DISTANCE_M - PROXY_RADIAL_TOLERANCE_M
     else:
         expectation = "hidden_behind_proxy"
         verified = (distance > PROXY_DISTANCE_M + PROXY_RADIAL_TOLERANCE_M
-                    and position[1] > 0
-                    and sightline_height is not None
-                    and 0 < sightline_height < 40.0)
+                    and position[1] > 0 and ray_hit is not None)
     if not verified:
         raise ValueError(f"{case} aircraft at {distance:.3f} m is not {expectation} "
                          f"of {PROXY_ID} at {PROXY_DISTANCE_M} m")
@@ -96,7 +133,7 @@ def occlusion_geometry(case: str, position: list[float], eye: list[float]) -> di
         "proxy_radial_tolerance_m": PROXY_RADIAL_TOLERANCE_M,
         "aircraft_position_render_m": position,
         "aircraft_distance_from_pilot_m": distance,
-        "proxy_sightline_height_render_m": sightline_height,
+        "proxy_ray_intersection": ray_hit,
         "expected_visibility": expectation,
         "radial_order_verified": verified,
     }
@@ -348,7 +385,7 @@ def main() -> int:
         "resolutions": resolutions,
         "occlusion": occlusion,
         "occlusion_validation": {
-            "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. FAR also requires the aircraft above ground and its ray from the pilot to cross the proxy radius between ground and the 40 m proxy top. This verifies geometric order and height; visual visibility remains for review.",
+            "method": "Capture-frame render poses are recorded by the runtime and bound to each PNG by frame, framebuffer and SHA256. Distances are Euclidean render-world metres from the fixed pilot eye. The tree-ring proxy's 30 m radius and +/-3 m jitter plus 2.5 m radial half-depth give conservative near/far thresholds of 24.5 m and 35.5 m. FAR also requires the aircraft above ground and an explicit eye-to-aircraft ray intersection with one of the 48 authored tree-ring boxes below its 40 m top. This verifies geometric occlusion; visual visibility remains for review.",
             "proxy": {
                 "id": PROXY_ID,
                 "representative_distance_from_pilot_m": PROXY_DISTANCE_M,
@@ -360,7 +397,7 @@ def main() -> int:
                     key: entry[key] for key in (
                         "pilot_position_render_m", "aircraft_position_render_m",
                         "aircraft_distance_from_pilot_m", "expected_visibility",
-                        "radial_order_verified", "proxy_sightline_height_render_m",
+                        "radial_order_verified", "proxy_ray_intersection",
                         "scene_id", "presentation_frame_index",
                         "framebuffer", "git_commit_sha", "git_dirty", "local_png",
                         "local_png_sha256", "capture_pose_sha256", "gpu_timing_status",

@@ -25,13 +25,13 @@
     "throttle": 0.8,
     "start_on_ground": false,
     "altitude_m": 20.0,
-    "airspeed_mps": 30.0
+    "airspeed_mps": 60.0
   },
-  "warmup": 180,
+  "warmup": 120,
   "capture": {
     "filename": "pf1_occlusion_far_1920x1080.png",
     "format": "png",
-    "frame": 180
+    "frame": 120
   },
   "tags": ["pf1", "occlusion", "far", "photo-field"]
 }

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from tools.measure_pf1_photo_field import checked_capture_pose, occlusion_geometry
+from tools.photo_field_pipeline.photo_field_assets import PILOT_EYE_RENDER_M
 
 
 class OcclusionEvidenceTests(unittest.TestCase):
@@ -41,13 +42,13 @@ class OcclusionEvidenceTests(unittest.TestCase):
                 checked_capture_pose(run)
 
     def test_near_and_far_require_conservative_distance_order(self):
-        eye = [0.0, 0.0, 0.0]
-        self.assertTrue(occlusion_geometry("near", [20.0, 0.0, 0.0], eye)["radial_order_verified"])
-        self.assertTrue(occlusion_geometry("far", [40.0, 5.0, 0.0], eye)["radial_order_verified"])
+        eye = list(PILOT_EYE_RENDER_M)
+        self.assertTrue(occlusion_geometry("near", [0.0, 0.0, 0.0], eye)["radial_order_verified"])
+        self.assertTrue(occlusion_geometry("far", [eye[0] + 40.0, 5.0, eye[2]], eye)["radial_order_verified"])
         with self.assertRaises(ValueError):
-            occlusion_geometry("far", [34.0, 0.0, 0.0], eye)
+            occlusion_geometry("far", [eye[0] + 34.0, 5.0, eye[2]], eye)
         with self.assertRaises(ValueError):
-            occlusion_geometry("far", [40.0, -2.0, 0.0], eye)
+            occlusion_geometry("far", [eye[0] + 40.0, -2.0, eye[2]], eye)
 
 
 if __name__ == "__main__":
